@@ -64,3 +64,6 @@
 [submodule "dsg_updater"]
 	path = dsg_updater
 	url = git@github.com:toyat522/dsg_updater.git
+[submodule "agentic_navigation"]
+	path = agentic_navigation
+	url = git@github.com:harelb/agentic_navigation.git

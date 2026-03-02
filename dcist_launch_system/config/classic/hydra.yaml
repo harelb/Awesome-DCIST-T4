@@ -53,8 +53,7 @@ active_window:
       num_threads: 8
     object_image_output_path: $<env ADT4_OUTPUT_DIR>/images
     save_object_images: true
-    save_all_frames: false
-    image_selection_criteria: LARGEST_BBOX
+    image_selection_criteria: ALL
   khronos_sinks:
     - type: ActiveWindowVisualizer
   sinks:
@@ -66,6 +65,11 @@ active_window:
   map_window: {type: temporal, window_sec: 3.0}
 frontend:
   type: GraphBuilder
+  agent_extractor:
+    enabled: true
+    image_output_path: $<env ADT4_OUTPUT_DIR>/agents
+    min_translation_m: 1.0
+    min_rotation_deg: 30.0
   enable_mesh_objects: false
   serialize_dsg_mesh: false
   clear_object_meshes: true
