@@ -50,6 +50,8 @@ active_window:
     min_object_reconstruction_observations: 10
     object_reconstruction_resolution: -0.05
     visualizer_classification: false
+    save_object_images: true
+    object_image_output_path: $<env ADT4_OUTPUT_DIR>/images
     projective_integrator:
       num_threads: 8
   khronos_sinks:
@@ -62,6 +64,9 @@ active_window:
       num_slices: 1
 frontend:
   type: GraphBuilder
+  agent_extractor:
+    enabled: true
+    image_output_path: $<env ADT4_OUTPUT_DIR>/agents
   enable_mesh_objects: false
   serialize_dsg_mesh: false
   clear_object_meshes: true
