@@ -31,3 +31,47 @@ def test_parse_cam_to_velo_R_is_rotation():
     R, _ = parse_cam_to_velo(FIXTURES / 'calib_cam_to_velo.txt')
     assert abs(np.linalg.det(R) - 1.0) < 1e-3
     assert np.allclose(R @ R.T, np.eye(3), atol=1e-1)
+
+
+def test_parse_poses_count():
+    from kitti360_to_mcap import parse_poses
+    poses = parse_poses(FIXTURES / 'poses.txt')
+    assert len(poses) == 3
+
+
+def test_parse_poses_shape():
+    from kitti360_to_mcap import parse_poses
+    poses = parse_poses(FIXTURES / 'poses.txt')
+    assert all(p.shape == (4, 4) for p in poses)
+
+
+def test_parse_poses_first_is_identity():
+    from kitti360_to_mcap import parse_poses
+    poses = parse_poses(FIXTURES / 'poses.txt')
+    assert np.allclose(poses[0], np.eye(4))
+
+
+def test_parse_poses_second_has_translation():
+    from kitti360_to_mcap import parse_poses
+    poses = parse_poses(FIXTURES / 'poses.txt')
+    assert abs(poses[1][0, 3] - 1.0) < 1e-9   # 1 m in x
+
+
+def test_parse_timestamps_count():
+    from kitti360_to_mcap import parse_timestamps
+    stamps = parse_timestamps(FIXTURES / 'timestamps.txt')
+    assert len(stamps) == 3
+
+
+def test_parse_timestamps_are_nanoseconds():
+    from kitti360_to_mcap import parse_timestamps
+    stamps = parse_timestamps(FIXTURES / 'timestamps.txt')
+    # 2013 timestamps should be > 1e18 ns (year 2000 = ~9.46e17)
+    assert all(s > 1_000_000_000_000_000_000 for s in stamps)
+
+
+def test_parse_timestamps_monotonic():
+    from kitti360_to_mcap import parse_timestamps
+    stamps = parse_timestamps(FIXTURES / 'timestamps.txt')
+    assert stamps[1] > stamps[0]
+    assert stamps[2] > stamps[1]
