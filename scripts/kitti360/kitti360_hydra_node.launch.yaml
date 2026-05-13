@@ -1,0 +1,29 @@
+---
+launch:
+  - node:
+      pkg: hydra_ros
+      exec: hydra_ros_node
+      name: hydra
+      param:
+        - {name: use_sim_time, value: 'true'}
+      remap:
+        - {from: ~/input/camera/rgb/image_raw, to: /kitti360/rgb/image_raw}
+        - {from: ~/input/camera/depth_registered/image_rect, to: /kitti360/depth/depth_registered}
+        - {from: ~/input/camera/rgb/camera_info, to: /kitti360/rgb/camera_info}
+      args: >
+        --config-utilities-file $(env ADT4_WS)/src/awesome_dcist_t4/scripts/kitti360/kitti360_ros_input.yaml
+        --config-utilities-file $(env ADT4_WS)/src/awesome_dcist_t4/scripts/kitti360/kitti360_hydra.yaml
+        --config-utilities-yaml "{robot_id: 0, odom_frame: world, robot_frame: cam0, map_frame: map}"
+        --config-utilities-yaml "{log_path: $(env ADT4_OUTPUT_DIR)/hydra, output: {use_timestamp: false, overwrite: true}}"
+        --config-utilities-yaml "{glog_level: 0, glog_verbosity: 0}"
+
+  - node:
+      pkg: hydra_visualizer
+      exec: hydra_visualizer_node
+      name: hydra_visualizer
+      param:
+        - {name: use_sim_time, value: 'true'}
+      remap:
+        - {from: ~/dsg, to: /hydra/backend/dsg}
+      args: >
+        --config-utilities-yaml "{glog_level: 0, glog_verbosity: 1}"
