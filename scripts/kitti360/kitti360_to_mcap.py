@@ -23,17 +23,27 @@ def parse_cam_to_velo(calib_path: Path) -> tuple:
     """
     Parse calib_cam_to_velo.txt.
 
-    Returns R (3, 3), T (3,) such that P_velo = R @ P_cam + T
-    (i.e. transforms a point from cam0 frame into velodyne frame).
+    Returns R (3, 3), T (3,) such that P_velo = R @ P_cam + T.
+
+    Handles two formats:
+    - Labeled: "R: v11 v12 ..." / "T: v1 v2 v3" lines (test fixtures)
+    - Plain 3×4 matrix: 12 values on one line ([R|t] concatenated rows)
     """
-    data: dict = {}
-    with open(calib_path) as f:
-        for line in f:
+    text = calib_path.read_text().strip()
+    if 'R:' in text or 'T:' in text:
+        data: dict = {}
+        for line in text.splitlines():
             if ':' in line:
                 key, vals = line.split(':', 1)
                 data[key.strip()] = [float(v) for v in vals.split()]
-    R = np.array(data['R'], dtype=np.float64).reshape(3, 3)
-    T = np.array(data['T'], dtype=np.float64)
+        R = np.array(data['R'], dtype=np.float64).reshape(3, 3)
+        T = np.array(data['T'], dtype=np.float64)
+    else:
+        # Plain 12-value 3×4 [R|t] matrix (KITTI-360 actual format)
+        vals = [float(v) for v in text.split()]
+        mat = np.array(vals, dtype=np.float64).reshape(3, 4)
+        R = mat[:, :3]
+        T = mat[:, 3]
     return R, T
 
 
