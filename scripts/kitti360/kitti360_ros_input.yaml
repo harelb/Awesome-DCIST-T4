@@ -1,0 +1,14 @@
+---
+input:
+  type: RosInput
+  inputs:
+    camera:
+      receiver:
+        type: RGBDImageReceiver
+        queue_size: 30
+      sensor:
+        type: camera_info
+        min_range: 0.5
+        max_range: 50.0
+        extrinsics:
+          type: ros
