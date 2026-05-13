@@ -169,3 +169,89 @@ def test_make_tf_msg_frame_ids():
     assert tf.child_frame_id == 'cam0'
     assert abs(tf.transform.translation.x - 1.0) < 1e-9
     assert abs(tf.transform.translation.z - 3.0) < 1e-9
+
+
+import tempfile
+import cv2
+
+
+def _make_fake_drive(tmp_path: Path, n_frames: int = 3) -> Path:
+    """Create a minimal KITTI-360-like directory structure for testing."""
+    drive = '2013_05_28_drive_0000_sync'
+    root = tmp_path / 'kitti360'
+
+    # Calibration
+    cal_dir = root / 'calibration'
+    cal_dir.mkdir(parents=True)
+    import shutil
+    shutil.copy(FIXTURES / 'perspective.txt', cal_dir / 'perspective.txt')
+    shutil.copy(FIXTURES / 'calib_cam_to_velo.txt', cal_dir / 'calib_cam_to_velo.txt')
+
+    # Poses
+    pose_dir = root / 'data_poses' / drive
+    pose_dir.mkdir(parents=True)
+    shutil.copy(FIXTURES / 'poses.txt', pose_dir / 'poses.txt')
+
+    # Timestamps and images
+    img_dir = root / 'data_2d_raw' / drive / 'image_00' / 'data_rect'
+    img_dir.mkdir(parents=True)
+    ts_dir = root / 'data_2d_raw' / drive / 'image_00'
+    shutil.copy(FIXTURES / 'timestamps.txt', ts_dir / 'timestamps.txt')
+    for i in range(n_frames):
+        img = np.zeros((376, 1408, 3), dtype=np.uint8)
+        cv2.imwrite(str(img_dir / f'{i:010d}.png'), img)
+
+    # LiDAR
+    lidar_dir = root / 'data_3d_raw' / drive / 'velodyne_points' / 'data'
+    lidar_dir.mkdir(parents=True)
+    for i in range(n_frames):
+        pts = np.array([[10.0, 0.0, 0.0, 0.5],
+                        [5.0, 0.0, 0.0, 0.3]], dtype=np.float32)
+        pts.tofile(lidar_dir / f'{i:010d}.bin')
+
+    return root
+
+
+def test_write_mcap_creates_file(tmp_path):
+    from kitti360_to_mcap import write_mcap
+    root = _make_fake_drive(tmp_path)
+    out = tmp_path / 'out.mcap'
+    write_mcap(root=root, sequence=0, output=out)
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
+def test_write_mcap_contains_expected_topics(tmp_path):
+    from kitti360_to_mcap import write_mcap
+    from rosbags.rosbag2 import Reader
+    root = _make_fake_drive(tmp_path)
+    out = tmp_path / 'out.mcap'
+    write_mcap(root=root, sequence=0, output=out)
+
+    with Reader(out) as reader:
+        topics = {c.topic for c in reader.connections}
+
+    assert '/kitti360/rgb/image_raw' in topics
+    assert '/kitti360/depth/depth_registered' in topics
+    assert '/kitti360/rgb/camera_info' in topics
+    assert '/tf' in topics
+    assert '/tf_static' in topics
+
+
+def test_write_mcap_message_count(tmp_path):
+    from kitti360_to_mcap import write_mcap
+    from rosbags.rosbag2 import Reader
+    root = _make_fake_drive(tmp_path, n_frames=3)
+    out = tmp_path / 'out.mcap'
+    write_mcap(root=root, sequence=0, output=out)
+
+    with Reader(out) as reader:
+        counts = {}
+        for conn, _, _ in reader.messages():
+            counts[conn.topic] = counts.get(conn.topic, 0) + 1
+
+    assert counts['/kitti360/rgb/image_raw'] == 3
+    assert counts['/kitti360/depth/depth_registered'] == 3
+    assert counts['/kitti360/rgb/camera_info'] == 3
+    assert counts['/tf'] == 3
+    assert counts['/tf_static'] == 1   # static TF written once

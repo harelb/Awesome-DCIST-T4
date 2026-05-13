@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
 from scipy.spatial.transform import Rotation
+import cv2
 
 
 def parse_perspective(calib_path: Path) -> np.ndarray:
@@ -201,3 +202,104 @@ def make_tf_msg(typestore, R: np.ndarray, t: np.ndarray,
             )
         ]
     )
+
+
+def write_mcap(root: Path, sequence: int, output: Path) -> None:
+    """
+    Convert one KITTI-360 drive to a ROS2 MCAP bag.
+
+    Args:
+        root:     path to KITTI-360 root (contains calibration/, data_2d_raw/, etc.)
+        sequence: drive index, e.g. 0 for drive_0000
+        output:   path to write the .mcap file
+    """
+    from rosbags.rosbag2 import Writer
+    from rosbags.typesys import Stores, get_typestore
+
+    drive = f'2013_05_28_drive_{sequence:04d}_sync'
+    typestore = get_typestore(Stores.ROS2_HUMBLE)
+
+    # --- calibration ---
+    P_rect = parse_perspective(root / 'calibration' / 'perspective.txt')
+    R_ctv, T_ctv = parse_cam_to_velo(root / 'calibration' / 'calib_cam_to_velo.txt')
+
+    # --- poses + timestamps ---
+    poses = parse_poses(root / 'data_poses' / drive / 'poses.txt')
+    stamps = parse_timestamps(
+        root / 'data_2d_raw' / drive / 'image_00' / 'timestamps.txt'
+    )
+
+    img_dir = root / 'data_2d_raw' / drive / 'image_00' / 'data_rect'
+    lidar_dir = root / 'data_3d_raw' / drive / 'velodyne_points' / 'data'
+
+    img_files = sorted(img_dir.glob('*.png'))
+    bin_files = sorted(lidar_dir.glob('*.bin'))
+    n = min(len(img_files), len(bin_files), len(poses), len(stamps))
+    if n == 0:
+        raise ValueError(f'No matching frames found in {root}')
+
+    # Infer image size from first frame
+    sample = cv2.imread(str(img_files[0]))
+    img_h, img_w = sample.shape[:2]
+
+    with Writer(output, version=9) as writer:
+        conn_rgb = writer.add_connection(
+            '/kitti360/rgb/image_raw', 'sensor_msgs/msg/Image', typestore=typestore
+        )
+        conn_depth = writer.add_connection(
+            '/kitti360/depth/depth_registered', 'sensor_msgs/msg/Image', typestore=typestore
+        )
+        conn_info = writer.add_connection(
+            '/kitti360/rgb/camera_info', 'sensor_msgs/msg/CameraInfo', typestore=typestore
+        )
+        conn_tf = writer.add_connection(
+            '/tf', 'tf2_msgs/msg/TFMessage', typestore=typestore
+        )
+        conn_tf_static = writer.add_connection(
+            '/tf_static', 'tf2_msgs/msg/TFMessage', typestore=typestore
+        )
+
+        # Static TF: velodyne → cam0
+        static_tf = make_tf_msg(typestore, R_ctv, T_ctv, 'velodyne', 'cam0', stamps[0])
+        writer.write(
+            conn_tf_static, stamps[0],
+            typestore.serialize_cdr(static_tf, 'tf2_msgs/msg/TFMessage')
+        )
+
+        for i in range(n):
+            t_ns = stamps[i]
+            pose = poses[i]   # T_world_cam0
+
+            # Dynamic TF: world → cam0
+            R_wc = pose[:3, :3]
+            t_wc = pose[:3, 3]
+            tf_msg = make_tf_msg(typestore, R_wc, t_wc, 'world', 'cam0', t_ns)
+            writer.write(
+                conn_tf, t_ns,
+                typestore.serialize_cdr(tf_msg, 'tf2_msgs/msg/TFMessage')
+            )
+
+            # RGB image
+            bgr = cv2.imread(str(img_files[i]))
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb_msg = make_image_msg(typestore, rgb, 'rgb8', 'cam0', t_ns)
+            writer.write(
+                conn_rgb, t_ns,
+                typestore.serialize_cdr(rgb_msg, 'sensor_msgs/msg/Image')
+            )
+
+            # Depth from LiDAR projection
+            pts = np.fromfile(bin_files[i], dtype=np.float32).reshape(-1, 4)
+            depth = project_lidar_to_depth(pts, R_ctv, T_ctv, P_rect, img_h, img_w)
+            depth_msg = make_image_msg(typestore, depth, '32FC1', 'cam0', t_ns)
+            writer.write(
+                conn_depth, t_ns,
+                typestore.serialize_cdr(depth_msg, 'sensor_msgs/msg/Image')
+            )
+
+            # Camera info
+            info_msg = make_camera_info_msg(typestore, P_rect, img_h, img_w, 'cam0', t_ns)
+            writer.write(
+                conn_info, t_ns,
+                typestore.serialize_cdr(info_msg, 'sensor_msgs/msg/CameraInfo')
+            )
