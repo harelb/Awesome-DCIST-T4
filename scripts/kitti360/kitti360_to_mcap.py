@@ -37,23 +37,41 @@ def parse_cam_to_velo(calib_path: Path) -> tuple:
     return R, T
 
 
-def parse_poses(poses_path: Path) -> list:
+def parse_poses(poses_path: Path) -> dict:
     """
-    Parse poses.txt. Each line is 16 whitespace-separated floats (4×4 row-major).
-    Also accepts 12-value lines (3×4), padded to 4×4.
-    Returns list of (4, 4) float64 arrays — T_world_cam0.
+    Parse poses.txt.
+
+    Handles two formats:
+    - 13 values: frame_idx r11 r12 r13 t1 r21 r22 r23 t2 r31 r32 r33 t3  (KITTI-360 actual)
+    - 16 values: 4×4 row-major matrix, no frame index (test fixtures)
+    - 12 values: 3×4 row-major matrix, no frame index (padded to 4×4)
+
+    Returns dict mapping frame_idx (int) → (4, 4) float64 T_world_cam0.
+    For formats without a frame index, sequential keys starting at 0 are used.
     """
-    poses = []
+    poses: dict = {}
+    seq_idx = 0
     with open(poses_path) as f:
         for line in f:
             vals = [float(v) for v in line.strip().split()]
-            if len(vals) == 16:
-                poses.append(np.array(vals, dtype=np.float64).reshape(4, 4))
+            if not vals:
+                continue
+            if len(vals) == 13:
+                # KITTI-360 actual format: frame_idx + 3×4 matrix
+                frame_idx = int(vals[0])
+                mat = np.array(vals[1:], dtype=np.float64).reshape(3, 4)
+                T = np.eye(4, dtype=np.float64)
+                T[:3, :] = mat
+                poses[frame_idx] = T
+            elif len(vals) == 16:
+                poses[seq_idx] = np.array(vals, dtype=np.float64).reshape(4, 4)
+                seq_idx += 1
             elif len(vals) == 12:
                 mat = np.array(vals, dtype=np.float64).reshape(3, 4)
                 T = np.eye(4, dtype=np.float64)
                 T[:3, :] = mat
-                poses.append(T)
+                poses[seq_idx] = T
+                seq_idx += 1
     return poses
 
 
@@ -61,14 +79,27 @@ def parse_timestamps(ts_path: Path) -> list:
     """
     Parse timestamps.txt (one ISO 8601 timestamp per line).
     Returns list of integer nanosecond timestamps (int).
+
+    Handles nanosecond precision (9 decimal places) and timestamps without
+    timezone info (treated as UTC).
     """
     stamps = []
     with open(ts_path) as f:
         for line in f:
             line = line.strip()
-            if line:
-                dt = datetime.fromisoformat(line)
-                stamps.append(int(dt.timestamp() * 1e9))
+            if not line:
+                continue
+            if '.' in line:
+                main, frac = line.rsplit('.', 1)
+                # frac may include timezone suffix like '+00:00' after the digits
+                frac_digits = ''.join(c for c in frac if c.isdigit())
+                frac_ns = int(frac_digits[:9].ljust(9, '0'))
+            else:
+                main = line
+                frac_ns = 0
+            dt = datetime.fromisoformat(main).replace(tzinfo=timezone.utc)
+            sec = int(dt.timestamp())
+            stamps.append(sec * 1_000_000_000 + frac_ns)
     return stamps
 
 
@@ -225,7 +256,8 @@ def write_mcap(root: Path, sequence: int, output: Path) -> None:
     R_ctv, T_ctv = parse_cam_to_velo(root / 'calibration' / 'calib_cam_to_velo.txt')
 
     # --- poses + timestamps ---
-    poses = parse_poses(root / 'data_poses' / drive / 'poses.txt')
+    # Poses live at root/{drive}/poses.txt in KITTI-360 (not root/data_poses/)
+    poses = parse_poses(root / drive / 'poses.txt')
     stamps = parse_timestamps(
         root / 'data_2d_raw' / drive / 'image_00' / 'timestamps.txt'
     )
@@ -235,13 +267,14 @@ def write_mcap(root: Path, sequence: int, output: Path) -> None:
 
     img_files = sorted(img_dir.glob('*.png'))
     bin_files = sorted(lidar_dir.glob('*.bin'))
-    n = min(len(img_files), len(bin_files), len(poses), len(stamps))
+    n = min(len(img_files), len(bin_files), len(stamps))
     if n == 0:
         raise ValueError(f'No matching frames found in {root}')
 
     # Infer image size from first frame
     sample = cv2.imread(str(img_files[0]))
     img_h, img_w = sample.shape[:2]
+    n_written = 0
 
     with Writer(output, version=9) as writer:
         conn_rgb = writer.add_connection(
@@ -268,8 +301,12 @@ def write_mcap(root: Path, sequence: int, output: Path) -> None:
         )
 
         for i in range(n):
+            frame_idx = int(img_files[i].stem)
+            if frame_idx not in poses:
+                continue   # skip frames without a pose (sparse pose files)
+
             t_ns = stamps[i]
-            pose = poses[i]   # T_world_cam0
+            pose = poses[frame_idx]   # T_world_cam0
 
             # Dynamic TF: world → cam0
             R_wc = pose[:3, :3]
@@ -305,6 +342,12 @@ def write_mcap(root: Path, sequence: int, output: Path) -> None:
                 typestore.serialize_cdr(info_msg, 'sensor_msgs/msg/CameraInfo')
             )
 
+            n_written += 1
+            if n_written % 500 == 0:
+                print(f'  {n_written} frames written ({100*i//n}%)', flush=True)
+
+    return n_written
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -319,8 +362,8 @@ def main():
     args = parser.parse_args()
 
     print(f'Converting sequence {args.sequence:04d} from {args.kitti360_root}')
-    write_mcap(root=args.kitti360_root, sequence=args.sequence, output=args.output)
-    print(f'Written to {args.output}')
+    n = write_mcap(root=args.kitti360_root, sequence=args.sequence, output=args.output)
+    print(f'Written {n} frames to {args.output}')
 
 
 if __name__ == '__main__':

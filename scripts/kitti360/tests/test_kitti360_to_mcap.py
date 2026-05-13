@@ -42,7 +42,7 @@ def test_parse_poses_count():
 def test_parse_poses_shape():
     from kitti360_to_mcap import parse_poses
     poses = parse_poses(FIXTURES / 'poses.txt')
-    assert all(p.shape == (4, 4) for p in poses)
+    assert all(p.shape == (4, 4) for p in poses.values())
 
 
 def test_parse_poses_first_is_identity():
@@ -187,8 +187,8 @@ def _make_fake_drive(tmp_path: Path, n_frames: int = 3) -> Path:
     shutil.copy(FIXTURES / 'perspective.txt', cal_dir / 'perspective.txt')
     shutil.copy(FIXTURES / 'calib_cam_to_velo.txt', cal_dir / 'calib_cam_to_velo.txt')
 
-    # Poses
-    pose_dir = root / 'data_poses' / drive
+    # Poses — live at root/drive/poses.txt (KITTI-360 actual layout)
+    pose_dir = root / drive
     pose_dir.mkdir(parents=True)
     shutil.copy(FIXTURES / 'poses.txt', pose_dir / 'poses.txt')
 
