@@ -3,6 +3,7 @@
 
 from pathlib import Path
 from datetime import datetime, timezone
+import argparse
 import numpy as np
 from scipy.spatial.transform import Rotation
 import cv2
@@ -303,3 +304,24 @@ def write_mcap(root: Path, sequence: int, output: Path) -> None:
                 conn_info, t_ns,
                 typestore.serialize_cdr(info_msg, 'sensor_msgs/msg/CameraInfo')
             )
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Convert raw KITTI-360 data to a ROS2 MCAP bag.'
+    )
+    parser.add_argument('--kitti360-root', required=True, type=Path,
+                        help='Path to KITTI-360 root directory')
+    parser.add_argument('--sequence', required=True, type=int,
+                        help='Drive sequence index (e.g. 0 for drive_0000)')
+    parser.add_argument('--output', required=True, type=Path,
+                        help='Output .mcap file path')
+    args = parser.parse_args()
+
+    print(f'Converting sequence {args.sequence:04d} from {args.kitti360_root}')
+    write_mcap(root=args.kitti360_root, sequence=args.sequence, output=args.output)
+    print(f'Written to {args.output}')
+
+
+if __name__ == '__main__':
+    main()
