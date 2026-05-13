@@ -1,0 +1,43 @@
+---
+session_name: kitti360_hydra
+suppress_history: false
+options:
+  default-command: /bin/zsh
+windows:
+  - window_name: core
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 run rmw_zenoh_cpp rmw_zenohd
+      - python3 $ADT4_WS/src/awesome_dcist_t4/dcist_launch_system/scripts/show_environment.py
+
+  - window_name: hydra
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - >-
+        ros2 run hydra_ros hydra_ros_node
+        --ros-args
+        -p use_sim_time:=true
+        --remap ~/input/camera/rgb/image_raw:=/kitti360/rgb/image_raw
+        --remap ~/input/camera/depth_registered/image_rect:=/kitti360/depth/depth_registered
+        --remap ~/input/camera/rgb/camera_info:=/kitti360/rgb/camera_info
+        --
+        --config-utilities-file $ADT4_WS/src/awesome_dcist_t4/scripts/kitti360/kitti360_ros_input.yaml
+        --config-utilities-file $ADT4_WS/src/awesome_dcist_t4/scripts/kitti360/kitti360_hydra.yaml
+        --config-utilities-yaml "{robot_id: 0, odom_frame: world, robot_frame: cam0, map_frame: map}"
+        --config-utilities-yaml "{log_path: $ADT4_OUTPUT_DIR/hydra, output: {use_timestamp: false, overwrite: true}}"
+        --config-utilities-yaml "{glog_level: 0, glog_verbosity: 0}"
+      - >-
+        ros2 run hydra_visualizer hydra_visualizer_node
+        --ros-args
+        -p use_sim_time:=true
+        --remap ~/dsg:=/hydra/backend/dsg
+        --
+        --config-utilities-yaml "{glog_level: 0, glog_verbosity: 1}"
+
+  - window_name: playback
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 bag play $KITTI360_BAG --clock --delay 5
