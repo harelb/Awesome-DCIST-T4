@@ -75,3 +75,46 @@ def test_parse_timestamps_monotonic():
     stamps = parse_timestamps(FIXTURES / 'timestamps.txt')
     assert stamps[1] > stamps[0]
     assert stamps[2] > stamps[1]
+
+
+def _make_test_points() -> np.ndarray:
+    """Return (N, 4) velodyne points: a few points directly in front of cam0.
+
+    With the fixture calibration, velo +X maps to cam0 +Z (in front of camera).
+    [10, 0, 0] -> cam Z ~9.94, projects to u~701, v~175 (within 376x1408 image).
+    [5,  0, 0] -> cam Z ~4.97, projects to u~696, v~160 (within 376x1408 image).
+    """
+    return np.array([
+        [10.0, 0.0, 0.0, 0.5],
+        [ 5.0, 0.0, 0.0, 0.3],
+    ], dtype=np.float32)
+
+
+def test_project_lidar_to_depth_shape():
+    from kitti360_to_mcap import parse_perspective, parse_cam_to_velo, project_lidar_to_depth
+    P = parse_perspective(FIXTURES / 'perspective.txt')
+    R, T = parse_cam_to_velo(FIXTURES / 'calib_cam_to_velo.txt')
+    pts = _make_test_points()
+    depth = project_lidar_to_depth(pts, R, T, P, img_h=376, img_w=1408)
+    assert depth.shape == (376, 1408)
+    assert depth.dtype == np.float32
+
+
+def test_project_lidar_to_depth_nonnegative():
+    from kitti360_to_mcap import parse_perspective, parse_cam_to_velo, project_lidar_to_depth
+    P = parse_perspective(FIXTURES / 'perspective.txt')
+    R, T = parse_cam_to_velo(FIXTURES / 'calib_cam_to_velo.txt')
+    pts = _make_test_points()
+    depth = project_lidar_to_depth(pts, R, T, P, img_h=376, img_w=1408)
+    assert (depth >= 0).all()
+
+
+def test_project_lidar_to_depth_points_behind_camera_zeroed():
+    from kitti360_to_mcap import parse_perspective, parse_cam_to_velo, project_lidar_to_depth
+    P = parse_perspective(FIXTURES / 'perspective.txt')
+    R, T = parse_cam_to_velo(FIXTURES / 'calib_cam_to_velo.txt')
+    # With fixture calibration, velo -X maps to cam0 -Z (behind camera).
+    # [-10, 0, 0] -> cam Z ~ -9.96 (behind camera).
+    pts_behind = np.array([[-10.0, 0.0, 0.0, 0.5]], dtype=np.float32)
+    depth = project_lidar_to_depth(pts_behind, R, T, P, img_h=376, img_w=1408)
+    assert depth.max() == 0.0

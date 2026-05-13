@@ -67,3 +67,58 @@ def parse_timestamps(ts_path: Path) -> list:
                 dt = datetime.fromisoformat(line)
                 stamps.append(int(dt.timestamp() * 1e9))
     return stamps
+
+
+def project_lidar_to_depth(
+    pts_velo: np.ndarray,
+    R_cam_to_velo: np.ndarray,
+    T_cam_to_velo: np.ndarray,
+    P_rect: np.ndarray,
+    img_h: int,
+    img_w: int,
+) -> np.ndarray:
+    """
+    Project velodyne points into cam0 image plane to produce a depth image.
+
+    Args:
+        pts_velo:        (N, 4) float32 — velodyne points (x, y, z, intensity)
+        R_cam_to_velo:   (3, 3) — rotation from calib_cam_to_velo.txt
+        T_cam_to_velo:   (3,)   — translation from calib_cam_to_velo.txt
+        P_rect:          (3, 4) — camera projection matrix from perspective.txt
+        img_h, img_w:    output image dimensions
+
+    Returns:
+        depth: (img_h, img_w) float32, depth in metres; 0.0 where no point.
+
+    Convention: calib_cam_to_velo gives P_velo = R @ P_cam + T,
+    so the inverse (velo→cam0) is: P_cam = R.T @ (P_velo - T).
+    """
+    # velo → cam0
+    R_velo_to_cam = R_cam_to_velo.T
+    T_velo_to_cam = -R_velo_to_cam @ T_cam_to_velo
+
+    pts_xyz = pts_velo[:, :3].T.astype(np.float64)          # (3, N)
+    pts_cam = R_velo_to_cam @ pts_xyz + T_velo_to_cam[:, None]  # (3, N)
+
+    # Keep only points in front of camera
+    front = pts_cam[2, :] > 0
+    pts_cam = pts_cam[:, front]
+    if pts_cam.shape[1] == 0:
+        return np.zeros((img_h, img_w), dtype=np.float32)
+
+    # Project: [u*d, v*d, d] = P_rect @ [X, Y, Z, 1]^T
+    pts_h = np.vstack([pts_cam, np.ones((1, pts_cam.shape[1]))])  # (4, N)
+    proj = P_rect @ pts_h                                          # (3, N)
+    u = proj[0, :] / proj[2, :]
+    v = proj[1, :] / proj[2, :]
+    d = proj[2, :]
+
+    # Keep within image bounds
+    valid = (u >= 0) & (u < img_w) & (v >= 0) & (v < img_h)
+    u = u[valid].astype(np.int32)
+    v = v[valid].astype(np.int32)
+    d = d[valid]
+
+    depth = np.zeros((img_h, img_w), dtype=np.float32)
+    depth[v, u] = d.astype(np.float32)
+    return depth
