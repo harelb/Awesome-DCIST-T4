@@ -4,6 +4,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 
 def parse_perspective(calib_path: Path) -> np.ndarray:
@@ -122,3 +123,81 @@ def project_lidar_to_depth(
     depth = np.zeros((img_h, img_w), dtype=np.float32)
     depth[v, u] = d.astype(np.float32)
     return depth
+
+
+def _make_header(typestore, frame_id: str, t_ns: int):
+    Header = typestore.types['std_msgs/msg/Header']
+    Time = typestore.types['builtin_interfaces/msg/Time']
+    return Header(
+        stamp=Time(sec=int(t_ns // 1_000_000_000), nanosec=int(t_ns % 1_000_000_000)),
+        frame_id=frame_id,
+    )
+
+
+def make_image_msg(typestore, image: np.ndarray, encoding: str, frame_id: str, t_ns: int):
+    """Build a sensor_msgs/msg/Image. encoding: 'rgb8' or '32FC1'."""
+    Image = typestore.types['sensor_msgs/msg/Image']
+    if encoding == 'rgb8':
+        assert image.ndim == 3 and image.shape[2] == 3
+        h, w = image.shape[:2]
+        step = w * 3
+        data = np.ascontiguousarray(image, dtype=np.uint8).flatten()
+    elif encoding == '32FC1':
+        assert image.ndim == 2
+        h, w = image.shape
+        step = w * 4
+        data = np.ascontiguousarray(image, dtype=np.float32).view(np.uint8).flatten()
+    else:
+        raise ValueError(f'Unsupported encoding: {encoding}')
+    return Image(
+        header=_make_header(typestore, frame_id, t_ns),
+        height=h, width=w,
+        encoding=encoding,
+        is_bigendian=False,
+        step=step,
+        data=data,
+    )
+
+
+def make_camera_info_msg(typestore, P_rect: np.ndarray, h: int, w: int,
+                          frame_id: str, t_ns: int):
+    """Build a sensor_msgs/msg/CameraInfo from a 3×4 projection matrix."""
+    CameraInfo = typestore.types['sensor_msgs/msg/CameraInfo']
+    RegionOfInterest = typestore.types['sensor_msgs/msg/RegionOfInterest']
+    K = P_rect[:3, :3].flatten()
+    return CameraInfo(
+        header=_make_header(typestore, frame_id, t_ns),
+        height=h, width=w,
+        distortion_model='plumb_bob',
+        d=np.zeros(5, dtype=np.float64),
+        k=K.astype(np.float64),
+        r=np.eye(3, dtype=np.float64).flatten(),
+        p=P_rect.astype(np.float64).flatten(),
+        binning_x=0,
+        binning_y=0,
+        roi=RegionOfInterest(x_offset=0, y_offset=0, height=0, width=0, do_rectify=False),
+    )
+
+
+def make_tf_msg(typestore, R: np.ndarray, t: np.ndarray,
+                parent: str, child: str, t_ns: int):
+    """Build a tf2_msgs/msg/TFMessage with one TransformStamped."""
+    TFMessage = typestore.types['tf2_msgs/msg/TFMessage']
+    TransformStamped = typestore.types['geometry_msgs/msg/TransformStamped']
+    Transform = typestore.types['geometry_msgs/msg/Transform']
+    Vector3 = typestore.types['geometry_msgs/msg/Vector3']
+    Quaternion = typestore.types['geometry_msgs/msg/Quaternion']
+    q = Rotation.from_matrix(R).as_quat()   # [x, y, z, w]
+    return TFMessage(
+        transforms=[
+            TransformStamped(
+                header=_make_header(typestore, parent, t_ns),
+                child_frame_id=child,
+                transform=Transform(
+                    translation=Vector3(x=float(t[0]), y=float(t[1]), z=float(t[2])),
+                    rotation=Quaternion(x=float(q[0]), y=float(q[1]),
+                                        z=float(q[2]), w=float(q[3])),
+                ),
+            )
+        ]
+    )

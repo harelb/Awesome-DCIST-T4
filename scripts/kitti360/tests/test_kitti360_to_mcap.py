@@ -118,3 +118,54 @@ def test_project_lidar_to_depth_points_behind_camera_zeroed():
     pts_behind = np.array([[-10.0, 0.0, 0.0, 0.5]], dtype=np.float32)
     depth = project_lidar_to_depth(pts_behind, R, T, P, img_h=376, img_w=1408)
     assert depth.max() == 0.0
+
+
+def test_make_image_msg_rgb_shape():
+    from kitti360_to_mcap import make_image_msg
+    from rosbags.typesys import Stores, get_typestore
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+    img = np.zeros((10, 20, 3), dtype=np.uint8)
+    msg = make_image_msg(ts, img, 'rgb8', 'cam0', 1_000_000_000)
+    assert msg.height == 10
+    assert msg.width == 20
+    assert msg.encoding == 'rgb8'
+    assert msg.step == 60   # 20 * 3
+
+
+def test_make_image_msg_depth_encoding():
+    from kitti360_to_mcap import make_image_msg
+    from rosbags.typesys import Stores, get_typestore
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+    depth = np.zeros((10, 20), dtype=np.float32)
+    msg = make_image_msg(ts, depth, '32FC1', 'cam0', 1_000_000_000)
+    assert msg.encoding == '32FC1'
+    assert msg.step == 80   # 20 * 4
+
+
+def test_make_camera_info_msg_K_matches_P():
+    from kitti360_to_mcap import make_camera_info_msg, parse_perspective
+    from rosbags.typesys import Stores, get_typestore
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+    P = parse_perspective(FIXTURES / 'perspective.txt')
+    msg = make_camera_info_msg(ts, P, 376, 1408, 'cam0', 1_000_000_000)
+    assert msg.height == 376
+    assert msg.width == 1408
+    # K is upper-left 3x3 of P_rect
+    K_expected = P[:3, :3].flatten()
+    assert np.allclose(msg.k, K_expected)
+    assert len(msg.p) == 12
+
+
+def test_make_tf_msg_frame_ids():
+    from kitti360_to_mcap import make_tf_msg
+    from rosbags.typesys import Stores, get_typestore
+    ts = get_typestore(Stores.ROS2_HUMBLE)
+    R = np.eye(3)
+    t = np.array([1.0, 2.0, 3.0])
+    msg = make_tf_msg(ts, R, t, 'world', 'cam0', 1_000_000_000)
+    assert len(msg.transforms) == 1
+    tf = msg.transforms[0]
+    assert tf.header.frame_id == 'world'
+    assert tf.child_frame_id == 'cam0'
+    assert abs(tf.transform.translation.x - 1.0) < 1e-9
+    assert abs(tf.transform.translation.z - 3.0) < 1e-9
