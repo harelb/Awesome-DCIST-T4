@@ -204,7 +204,9 @@ def test_subkeyframe_attributes_roundtrip(tmp_path):
     attrs.timestamp = 42
 
     # layer 2, partition from the 's' prefix
-    G.add_node(2, dsg.NodeSymbol("s", 0).value, attrs, dsg.NodeSymbol("s", 0).category)
+    # partition is an INT (PythonPartitionId); NodeSymbol.category is a str, so
+    # pass ord("s"). Use the (layer_id:int, node_id, attrs, partition:int) overload.
+    G.add_node(2, dsg.NodeSymbol("s", 0), attrs, ord("s"))
 
     path = str(tmp_path / "g.json")
     G.save(path)

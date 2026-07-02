@@ -10,6 +10,8 @@
 
 **Scope note:** Phase 4 of the dense-agent-image-keyframes design. Depends on Phase 1 (agent orientation in the DSG/Neo4j), Phase 2 (module), Phase 3 (`SubKeyframeNodeAttributes` + node creation). Requires a live Neo4j at `neo4j://127.0.0.1:7687` (auth `neo4j/neo4j_pw`) for Task 3.
 
+> **PREREQUISITE (env):** the dcist venvs bundle their own spark_dsg copy; the colcon overlay is not on their PYTHONPATH, so `SubKeyframeNodeAttributes` is invisible to heracles' python until the venv is refreshed. Before running any Phase 4 heracles test, refresh the venv (`bash install/python_setup.bash`) or prepend the colcon `install/spark_dsg` python path + `LD_LIBRARY_PATH`. Verify with `python -c "import spark_dsg; spark_dsg.SubKeyframeNodeAttributes"`.
+
 ## Global Constraints
 
 - Do NOT source ROS before pytest (project memory `reference_python_envs`).
@@ -145,7 +147,9 @@ def subkeyframe_to_dict(subframe, anchor_pose):
         "rot_y": float(world_R[2]),
         "rot_z": float(world_R[3]),
         "image_folder": attrs.image_folder,
-        "timestamp_ns": int(attrs.timestamp),
+        # NOTE: the python binding exposes `timestamp` as datetime.timedelta
+        # (chrono caster), NOT an int. Convert to integer nanoseconds:
+        "timestamp_ns": round(attrs.timestamp.total_seconds() * 1e9),
     }
     return d
 ```
