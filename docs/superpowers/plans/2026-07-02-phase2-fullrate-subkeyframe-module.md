@@ -649,10 +649,15 @@ In `dcist_launch_system/config_generation/base_params/hydra.yaml`, add at top le
 sub_keyframe:
   enabled: true
   image_output_path: $<env ADT4_OUTPUT_DIR>/subkeyframes
+  sensor_name: camera            # matches the main input key; calib is read from this registered Camera
   gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
   receiver: {ns: "~/subkf", queue_size: 30}
   tf_lookup: {wait_duration_s: 0.1, buffer_size_s: 30.0, max_tries: 5}
 ```
+
+> Note: per-image `_meta.json` no longer stores a pose (dropped as stale); the
+> once-per-run `camera_calib.json` is written from the globally-registered
+> `Camera` named `sensor_name`.
 
 - [ ] **Step 2: Regenerate config**
 

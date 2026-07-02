@@ -154,11 +154,11 @@ In `heracles/heracles/tests/test_db.py`, first add an agent node inside `build_t
     agent_attrs.position = [4.0, 5.0, 6.0]
     agent_attrs.world_R_body = spark_dsg.Quaternion(0.5, 0.5, 0.5, 0.5)
     agent_attrs.image_folder = "agent_777"
-    G.add_node(
-        spark_dsg.DsgLayers.AGENTS,
-        spark_dsg.NodeSymbol("a", 0).value,
-        agent_attrs,
-    )
+    # Agents must live in a NON-ZERO partition keyed by the 'a' prefix
+    # (ord('a')==97). The string-layer add_node overload always inserts at
+    # partition 0, which _collect_keyframe_agents deliberately skips — so use
+    # the (layer_id:int, node_id, attrs, partition:int) overload explicitly.
+    G.add_node(2, spark_dsg.NodeSymbol("a", 0), agent_attrs, ord("a"))
 ```
 
 Then, inside the `populated_db` fixture, after the existing `add_edges_from_dsg(G, db)` call (still inside the `with tempfile.TemporaryDirectory()` block, before `yield db`), add:
