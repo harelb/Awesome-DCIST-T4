@@ -95,6 +95,13 @@ frontend:
       num_orientation_bins: 20
     sinks:
       - type: TraversabilityVisualizer
+sub_keyframe:
+  enabled: true
+  image_output_path: $<env ADT4_OUTPUT_DIR>/subkeyframes
+  sensor_name: camera
+  gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
+  tf_lookup: {wait_duration_s: 0.1, buffer_size_s: 30.0, max_tries: 5}
+  queue_max_size: 30
 backend:
   type: BackendModule
   enable_zmq_interface: false
