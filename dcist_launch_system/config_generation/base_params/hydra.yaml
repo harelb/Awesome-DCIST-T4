@@ -69,6 +69,7 @@ frontend:
   agent_extractor:
     enabled: true
     image_output_path: $<env ADT4_OUTPUT_DIR>/agents
+  subkeyframe_anchor_max_dist_m: 2.0
   enable_mesh_objects: false
   serialize_dsg_mesh: true
   clear_object_meshes: true
