@@ -65,20 +65,16 @@ time (the `dt` passed into `step()`), not simulated physics steps, so
 that `ros2 topic hz` reports the documented 50 Hz / 10 Hz regardless of
 how fast the Isaac render loop actually iterates.
 
-Known rate gap (documented, not fixed -- timeboxed 2026-07-04): under
-the full stack (sim_app.py + this bridge + a live `ros2 topic hz`
-subscriber), `/hilbert/odom` measured ~40-42 Hz instead of the 50 Hz
-this throttle targets. Isolated benchmarking ruled out this module as
-the cause: a tight loop running `robot.step()` + `world.step(render=
-True)` + `RosBridge.step()` together, with a real subscriber attached
-(robot_state_publisher), sustained ~145-160 Hz over a 20s window with
-no degradation over time -- i.e. comfortably above the 50 Hz gate, so
-the throttle logic above is doing its job internally. The ~40 Hz is
-therefore most likely `ros2 topic hz`/zenoh transport-level jitter
-external to this process (observed inter-arrival times were bursty:
-14-80 ms) rather than an under-publish bug here. 40 Hz is still well
-above what Hydra/the executor need from TF/odom for P1; not worth
-sinking more time into chasing the last 10 Hz of a CLI measurement.
+Rate-gate history (2026-07-04): the first version of this file reset
+the publish accumulators to 0.0 after each publish, which discarded up
+to one loop-dt of already-elapsed time per publish and quantized the
+effective period up to the next multiple of dt -- at the measured
+~156 Hz internal loop (dt~6.4ms) the 20ms TF gate crossed threshold
+every 4th frame (25.6ms), i.e. ~39 Hz, exactly matching the ~40-42 Hz
+`ros2 topic hz /hilbert/odom` observation. That observation was
+initially misattributed to transport jitter; review caught the real
+cause. The gates now carry the remainder (see `step()`), restoring a
+true ~50 Hz / ~10 Hz cadence.
 """
 from __future__ import annotations
 
@@ -243,10 +239,23 @@ class RosBridge:
             if publish_joints:
                 bridge.publish_joint_states(stamp)
 
+        # Carry the remainder instead of resetting to 0: with a loop dt
+        # much smaller than the publish period (measured dt~6.4ms vs the
+        # 20ms TF period), resetting discarded up to one dt of already-
+        # elapsed time per publish, quantizing the effective period up
+        # to the next multiple of dt (4 frames x 6.4ms = 25.6ms ->
+        # ~39 Hz instead of 50 Hz -- the bug behind the "~40 Hz" odom
+        # rate first (mis)attributed to transport jitter). Clamp the
+        # carried remainder to at most one period as a burst guard:
+        # after a long stalled frame (sim_app caps dt at 0.25s) we
+        # publish once and resume the normal cadence rather than
+        # machine-gunning catch-up publishes on subsequent frames.
         if publish_tf:
-            self._tf_accum = 0.0
+            self._tf_accum = min(self._tf_accum - self._tf_period, self._tf_period)
         if publish_joints:
-            self._joint_accum = 0.0
+            self._joint_accum = min(
+                self._joint_accum - self._joint_period, self._joint_period
+            )
 
     def shutdown(self) -> None:
         self.node.destroy_node()
