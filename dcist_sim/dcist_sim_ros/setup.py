@@ -21,6 +21,8 @@ setup(
     license="MIT",
     tests_require=["pytest"],
     entry_points={
-        "console_scripts": [],
+        "console_scripts": [
+            "auto_approver = dcist_sim_ros.auto_approver:main",
+        ],
     },
 )
