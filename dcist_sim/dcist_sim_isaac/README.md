@@ -110,6 +110,83 @@ via the USD API directly (`pxr.UsdLux.DistantLight.Define` +
 `SimulationApp` MUST be constructed before importing any other
 `isaacsim.*` / `omni.*` module (they only exist after kit boots).
 
+## ROS2 (rclpy) inside Isaac (Task 7)
+
+This machine's ROS distro is **Jazzy** (`/opt/ros/jazzy`), whose rclpy
+is Python 3.12 — the same minor version as the Isaac venv, so no
+cross-python-version workaround is needed. Recipe, verified 2026-07-04:
+
+```bash
+source /opt/ros/jazzy/setup.zsh        # NOT setup.bash -- see gotcha below
+source ~/dcist_ws/install/setup.zsh    # dcist_sim_msgs (Task 9+)
+source ~/environments/dcist/isaac_sim/bin/activate
+export OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y
+python -m dcist_sim_isaac.sim_app --scenario ... --headless
+```
+
+Constructing `isaacsim.SimulationApp` first and then `import rclpy;
+rclpy.init()` in the same process works with **zero symbol conflicts**
+— no need for Isaac's bundled "internal ROS2 libraries" toggle or its
+ROS2 bridge extension. Plain rclpy, `spin_once(timeout_sec=0)` from the
+main loop, is simpler and was preferred per the task brief. See
+`ros_bridge.py`'s module docstring for the full verification steps and
+for the joint-name-prefix finding (Step 4 of the Task 7 brief), which
+corrected a misreading in that brief.
+
+**Gotcha: `setup.bash` fails under zsh.** This machine's default shell
+is zsh. `source /opt/ros/jazzy/setup.bash` errors with
+`no such file or directory: <cwd>/setup.sh` because the script relies
+on bash's `$BASH_SOURCE` to find its own directory, which zsh doesn't
+set, and it silently falls back to resolving paths against `$PWD`
+instead. Always source the `.zsh` variant of ROS setup scripts on this
+machine (`setup.bash` works fine under an actual bash shell, e.g.
+`bash -lc '...'`, if that's ever more convenient than zsh).
+
+**Gotcha: this machine's RMW is `rmw_zenoh_cpp`,** which needs a
+router for cross-process discovery: `ros2 run rmw_zenoh_cpp rmw_zenohd`
+(run once, long-lived, before starting `sim_app.py` in one terminal and
+a verification/ROS-tooling process in another). Without it, nodes in
+different processes may still discover each other via multicast
+scouting for single messages but won't reliably do so for continuous
+topics — expect flaky discovery/timeouts otherwise.
+
+## Spot asset (Task 7)
+
+Isaac 6.0's assets root (from `isaacsim.storage.native.get_assets_root_path()`)
+is a CDN URL:
+`https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0`.
+Both
+`Isaac/Robots/BostonDynamics/spot/spot_with_arm.usd` and
+`Isaac/Robots/BostonDynamics/spot/spot.usd` exist there (checked via
+`omni.client.stat`, 2026-07-06) — `spot_with_arm.usd` is used, no
+`spot.usd` fallback needed, no arm gap.
+
+Prim layout of `spot_with_arm.usd` once referenced at `/World/{name}`
+(dumped by spawning it once and walking `Usd.PrimRange`):
+
+- Root `/World/{name}` carries `UsdPhysics.ArticulationRootAPI`.
+- Body link: `{name}/base`.
+- Arm chain: `base` --(arm0_sh0)--> `arm0_link_sh0` --(arm0_sh1)-->
+  `arm0_link_sh1` --(arm0_el0)--> `arm0_link_el0` --(arm0_el1)-->
+  `arm0_link_el1` --(arm0_wr0)--> `arm0_link_wr0` --(arm0_wr1)-->
+  `arm0_link_wr1` --(arm0_f1x)--> `arm0_link_fngr` (the gripper/finger
+  link — there is no separate "hand" frame in this asset; Task 9's
+  `gripper_world_pose()` uses this prim).
+- Leg links: `{fl,fr,hl,hr}_hip` / `{fl,fr,hl,hr}_uleg` /
+  `{fl,fr,hl,hr}_lleg`, joints `*_hx` (hip_x, off `base`), `*_hy`
+  (hip_y), `*_kn` (knee).
+
+Kinematic tier (`spot_robot.py`): every `RigidBodyAPI` prim under the
+robot is marked `kinematicEnabled=True`, and only the root prim's xform
+is written each `step()`; USD's normal parent-child composition carries
+the (unmodified, authored) child poses along, giving a static standing
+pose for free. This produces one `[Error] PhysicsUSD: CreateJoint -
+cannot create a joint between static bodies` per revolute joint at
+spawn time (PhysX refuses to wire a joint between two kinematic-marked
+links) — verified harmless: a non-root child link (`fl_hip`) tracks the
+root's world-pose delta 1:1 after `set_cmd_vel()` + repeated `step()`
+despite these errors.
+
 ## Layout
 
 - `dcist_sim_isaac/scenario.py` — pure-python YAML scenario loader
@@ -118,8 +195,24 @@ via the USD API directly (`pxr.UsdLux.DistantLight.Define` +
   authored; resolve relative ones with `Scenario.resolve_path()`.
 - `dcist_sim_isaac/sim_app.py` — CLI entrypoint
   (`python -m dcist_sim_isaac.sim_app --scenario <yaml> [--headless] [--smoke]`).
-- `dcist_sim_isaac/stage.py` — Task 5 stub: World + default ground plane
-  + distant light; references the scenario's environment USD if the file
-  exists, else warns and continues. Tasks 7-9 grow this (robots,
-  sensors, objects).
+  ROS (rclpy) is only required without `--smoke`; the smoke test never
+  touches rclpy so it keeps working with nothing ROS-related sourced.
+- `dcist_sim_isaac/stage.py` — World + default ground plane + distant
+  light + scenario environment USD (if present) + all `RobotSpec`s
+  (via `spot_robot.SpotSimRobot`) + all `ObjectSpec`s (referenced,
+  posed, and given a USD semantic label via
+  `isaacsim.core.utils.semantics.add_labels` for Task 9's registry /
+  GT output). Returns a `SimStage(world, robots)`.
+- `dcist_sim_isaac/spot_robot.py` — `SpotSimRobot`: kinematic-tier Spot
+  (velocity or target-SE2 control, matching `FakeSpot`'s kinematics),
+  `.base_pose`, `.gripper_world_pose()`. See its module docstring and
+  the "Spot asset" section above.
+- `dcist_sim_isaac/ros_bridge.py` — `RosBridge`: one `dcist_sim` rclpy
+  node for the whole process; per-robot `/{name}/sim/cmd_vel` +
+  `/{name}/sim/target_pose` subs, TF + `/{name}/odom` (50 Hz) +
+  `/{name}/joint_states` (10 Hz) pubs. See its module docstring for the
+  rclpy-in-Isaac and joint-name-prefix findings.
+- `scripts/verify_robot_motion.py` — plain-rclpy script (run outside
+  Isaac, ROS sourced) that drives a running sim via `cmd_vel` and
+  `target_pose` and asserts the resulting TF displacement/convergence.
 - `test/test_scenario.py` — loader tests (plain python3).
