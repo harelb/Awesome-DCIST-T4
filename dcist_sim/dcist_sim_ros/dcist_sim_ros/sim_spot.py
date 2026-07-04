@@ -72,7 +72,7 @@ class SimCommandClient:
             gc = sc.gripper_command
             if gc.HasField("claw_gripper_command"):
                 open_cmd = _is_gripper_open_command(gc.claw_gripper_command)
-                if open_cmd and self.sim_spot._holding_object_id:
+                if open_cmd and self.sim_spot._get_holding():
                     self.sim_spot._request_place()
         # arm_command (stow/carry/gaze): absorbed; Isaac tier-A arm is kinematic.
         return 0  # cmd_id
@@ -94,7 +94,7 @@ class SimManipulationClient:
     def manipulation_api_command(self, manipulation_api_request):
         success, object_id = self.sim_spot._request_grasp()
         if success:
-            self.sim_spot._holding_object_id = object_id
+            self.sim_spot._set_holding(object_id)
             self._last_state = manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED
         else:
             self._last_state = manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
@@ -135,7 +135,7 @@ class SimStateClient:
         )
         ks = robot_state_pb2.KinematicState(transforms_snapshot=snapshot)
         ms = robot_state_pb2.ManipulatorState(
-            is_gripper_holding_item=self.sim_spot._holding_object_id is not None,
+            is_gripper_holding_item=self.sim_spot._get_holding() is not None,
             carry_state=3,
         )
         return robot_state_pb2.RobotState(kinematic_state=ks, manipulator_state=ms)
@@ -201,6 +201,26 @@ class SimSpot:
         self._grasp_client = node.create_client(GraspObject, "sim/grasp_object")
         self._place_client = node.create_client(PlaceObject, "sim/place_object")
 
+    # --- holding-state accessors ---
+    # All reads/writes of _holding_object_id go through these so the lock is
+    # actually load-bearing: the executor's action thread (SimCommandClient /
+    # SimManipulationClient / _request_place) and any executor-callback thread
+    # reading robot state (SimStateClient) may race on it under a
+    # MultiThreadedExecutor. Cheap and future-proof.
+    def _get_holding(self):
+        with self._holding_lock:
+            return self._holding_object_id
+
+    def _set_holding(self, object_id):
+        with self._holding_lock:
+            self._holding_object_id = object_id
+
+    # --- state ---
+    def get_state(self):
+        # navigation_utils.navigate_to_absolute_pose and LeaseManager call
+        # spot.get_state() on the top-level interface (mirrors spot.py:91-92).
+        return self.state_client.get_robot_state()
+
     # --- motion ---
     def get_pose(self):
         return self._get_pose_fn()
@@ -247,9 +267,13 @@ class SimSpot:
         resp = self._call_blocking(
             self._place_client, PlaceObject.Request(robot_name=self.robot_name)
         )
-        with self._holding_lock:
-            self._holding_object_id = None
-        return resp is not None and resp.success
+        success = resp is not None and resp.success
+        if success:
+            # Only detach on confirmed success: on timeout (resp is None) or a
+            # sim-side failure the object is still in the gripper, and clearing
+            # here would desync SimSpot from the sim's actual holding state.
+            self._set_holding(None)
+        return success
 
     # --- images ---
     def get_image(self, view="hand_color_image", show=False):
