@@ -100,7 +100,7 @@ PYTHONPATH=dcist_sim/dcist_sim_isaac \
   pipe asset, even though nothing is simulated as soft-body)
 - 20-frame capture: **9.1s total, 0.46s/frame**
 - GPU memory: **11.1GB** used (of 24.5GB) during/after rendering
-- YOLOE (spark_env, `yoloe-26m-seg.pt`, CPU-bound in this run): **5.6s**
+- YOLOE (spark_env, `yoloe-26m-seg.pt`, cuda available): **5.6s**
   wall-clock for 20 frames including model load
 - SAM3 (sam3 venv, `facebook/sam3.1`, cuda): **20.6s** wall-clock for
   model load + 20 frames x 5 prompts each. Note: this GPU had ~9GB
