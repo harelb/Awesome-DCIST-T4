@@ -51,7 +51,7 @@ def main():
     ros_bridge = None
     if not args.smoke:
         from dcist_sim_isaac.ros_bridge import RosBridge
-        ros_bridge = RosBridge(robots)
+        ros_bridge = RosBridge(robots, stage.registry, stage.grasp_radius)
 
     frames = 60 if args.smoke else None
     n = 0

@@ -88,6 +88,23 @@ camera.py) and the three-hop
 `{name}_zed_camera_link -> ... -> {name}_zed_left_camera_optical_frame`
 chain (normally published internally by the real zed-ros2-wrapper,
 which our sim launch does not run).
+
+Task 9 (magic-attach grasp backend): adds per-robot
+`/{name}/sim/grasp_object`, `/{name}/sim/place_object`,
+`/{name}/sim/teleport` services and one global `/sim/reset_scenario`
+service, all backed by a single shared `grasp.GraspBackend` (constructed
+here from the `ObjectRegistry` + `grasp_radius` `stage.build_stage()`
+returns on its `SimStage`). `GraspBackend.step()` (re-pinning every held
+object to its gripper) runs once per `RosBridge.step()` call,
+unconditionally -- not rate-gated like TF/joints/camera, since a
+one-frame-stale carried object would visibly lag behind a fast-moving
+gripper. Also publishes a `/sim/status` `std_msgs/String` JSON debug
+topic (`{object_id: held_by_or_null}`) at ~1 Hz for the Task 12 e2e
+harness. Service *names* the ROS side (`SimSpot`,
+`dcist_sim_ros/sim_spot.py`) calls are relative (`sim/grasp_object`,
+`sim/place_object`) resolved against that node's own `{robot_name}`
+namespace -- they land on the same absolute topic (`/{name}/sim/...`)
+this bridge advertises.
 """
 from __future__ import annotations
 
@@ -99,9 +116,13 @@ import rclpy
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import CameraInfo, Image, JointState
+from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
+from dcist_sim_msgs.srv import GraspObject, PlaceObject, ResetScenario, Teleport
+
 from dcist_sim_isaac import camera as camera_contract
+from dcist_sim_isaac import grasp as grasp_backend
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +171,12 @@ def _yaw_to_quat_xyzw(yaw: float):
 
 
 class _RobotBridge:
-    """Per-robot ROS wiring: cmd_vel/target_pose subs, tf/odom/joint pubs."""
+    """Per-robot ROS wiring: cmd_vel/target_pose subs, tf/odom/joint pubs,
+    and (Task 9) grasp/place/teleport services."""
 
-    def __init__(self, node, robot):
+    def __init__(self, node, robot, backend):
         self.robot = robot
+        self._backend = backend
         name = robot.spec.name
 
         self.odom_frame = f"{name}/odom"
@@ -184,6 +207,38 @@ class _RobotBridge:
             CameraInfo, f"{camera_ns}/depth/camera_info", 10
         )
         self._publish_static_camera_tf(node, name)
+
+        # -- Task 9: grasp/place/teleport services --------------------
+        node.create_service(GraspObject, f"/{name}/sim/grasp_object", self._on_grasp)
+        node.create_service(PlaceObject, f"/{name}/sim/place_object", self._on_place)
+        node.create_service(Teleport, f"/{name}/sim/teleport", self._on_teleport)
+
+    def _on_grasp(self, request, response):
+        success, object_id, message = self._backend.grasp(request.robot_name)
+        response.success = success
+        response.object_id = object_id
+        response.message = message
+        return response
+
+    def _on_place(self, request, response):
+        success, message = self._backend.place(request.robot_name)
+        response.success = success
+        response.message = message
+        return response
+
+    def _on_teleport(self, request, response):
+        q = request.pose.orientation
+        yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        )
+        response.success = self._backend.teleport(
+            request.robot_name,
+            request.pose.position.x,
+            request.pose.position.y,
+            request.pose.position.z,
+            yaw,
+        )
+        return response
 
     def _publish_static_camera_tf(self, node, name: str) -> None:
         """One-shot static TF for the hops nothing else in the sim (or,
@@ -331,34 +386,63 @@ class _RobotBridge:
         return True
 
 
+STATUS_HZ = 1.0
+
+
 class RosBridge:
     """Owns the single `dcist_sim` rclpy node for the whole sim process."""
 
-    def __init__(self, robots):
+    def __init__(self, robots, registry, grasp_radius=grasp_backend.DEFAULT_GRASP_RADIUS):
         rclpy.init(args=[])
         self.node = rclpy.create_node("dcist_sim")
-        self._bridges = [_RobotBridge(self.node, r) for r in robots]
+
+        # Task 9: one shared backend for every robot's grasp/place/
+        # teleport services plus the global reset service.
+        self.grasp_backend = grasp_backend.GraspBackend(robots, registry, grasp_radius)
+        self._bridges = [_RobotBridge(self.node, r, self.grasp_backend) for r in robots]
+
+        self.node.create_service(
+            ResetScenario, "/sim/reset_scenario", self._on_reset_scenario
+        )
+        self._status_pub = self.node.create_publisher(String, "/sim/status", 10)
 
         self._tf_period = 1.0 / TF_HZ
         self._joint_period = 1.0 / JOINT_HZ
         self._camera_period = 1.0 / camera_contract.CAMERA_HZ
+        self._status_period = 1.0 / STATUS_HZ
         self._tf_accum = self._tf_period  # publish immediately on first step()
         self._joint_accum = self._joint_period
         self._camera_accum = self._camera_period
+        self._status_accum = self._status_period
 
         logger.info("dcist_sim ROS bridge up for robots: %s",
                     [r.spec.name for r in robots])
 
+    def _on_reset_scenario(self, request, response):
+        response.success = self.grasp_backend.reset()
+        return response
+
     def step(self, dt: float) -> None:
         rclpy.spin_once(self.node, timeout_sec=0)
+
+        # Task 9: re-pin every held object to its gripper every frame,
+        # unconditionally (not rate-gated -- see module docstring).
+        self.grasp_backend.step(dt)
 
         self._tf_accum += dt
         self._joint_accum += dt
         self._camera_accum += dt
+        self._status_accum += dt
 
         publish_tf = self._tf_accum >= self._tf_period
         publish_joints = self._joint_accum >= self._joint_period
         publish_camera = self._camera_accum >= self._camera_period
+        publish_status = self._status_accum >= self._status_period
+        if publish_status:
+            self._status_pub.publish(String(data=self.grasp_backend.status_json()))
+            self._status_accum = min(
+                self._status_accum - self._status_period, self._status_period
+            )
         if not (publish_tf or publish_joints or publish_camera):
             return
 

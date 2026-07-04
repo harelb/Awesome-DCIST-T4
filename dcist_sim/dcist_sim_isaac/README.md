@@ -265,30 +265,82 @@ much else to segment).
 - `dcist_sim_isaac/stage.py` — World + default ground plane + distant
   light + scenario environment USD (if present) + all `RobotSpec`s
   (via `spot_robot.SpotSimRobot`) + all `ObjectSpec`s (referenced,
-  posed, and given a USD semantic label via
-  `isaacsim.core.utils.semantics.add_labels` for Task 9's registry /
-  GT output). Returns a `SimStage(world, robots)`.
+  posed, given a USD semantic label via
+  `isaacsim.core.utils.semantics.add_labels`, marked kinematic
+  (`_mark_kinematic`, Task 9), and registered in a `grasp.ObjectRegistry`).
+  Returns a `SimStage(world, robots, registry, grasp_radius)`.
 - `dcist_sim_isaac/spot_robot.py` — `SpotSimRobot`: kinematic-tier Spot
   (velocity or target-SE2 control, matching `FakeSpot`'s kinematics),
-  `.base_pose`, `.gripper_world_pose()`. See its module docstring and
+  `.base_pose`, `.gripper_world_pose()`, `.teleport()` (Task 9: instant
+  pose set, resets to velocity mode with zero cmd_vel so a stale
+  target_pose can't slew it away again). See its module docstring and
   the "Spot asset" section above.
 - `dcist_sim_isaac/ros_bridge.py` — `RosBridge`: one `dcist_sim` rclpy
   node for the whole process; per-robot `/{name}/sim/cmd_vel` +
   `/{name}/sim/target_pose` subs, TF + `/{name}/odom` (50 Hz) +
   `/{name}/joint_states` (10 Hz) + ZED camera topics (15 Hz, Task 8)
-  pubs, plus one-shot static TF for the camera mount chain. See its
-  module docstring for the rclpy-in-Isaac, joint-name-prefix, and
-  camera-TF findings.
+  pubs, plus one-shot static TF for the camera mount chain, plus (Task
+  9) per-robot grasp/place/teleport services + global reset service +
+  `/sim/status` debug publisher (1 Hz). See its module docstring for the
+  rclpy-in-Isaac, joint-name-prefix, camera-TF, and grasp-backend-wiring
+  findings.
 - `dcist_sim_isaac/camera.py` (Task 8) — `SimZedCamera`: mounts an
   Isaac `Camera` sensor at the composed ZED extrinsic and exposes
   `get_frame()`; module-level constants for the full ZED contract
   (encodings/resolution/K/frame names/static TF chain), each labeled
   BAG-MEASURED or DERIVED. See its module docstring for the full
   provenance and the "ZED-shaped camera publishing" section above.
+- `dcist_sim_isaac/grasp.py` (Task 9) — magic-attach grasp backend:
+  `select_grasp_target` (pure selection logic, unit-tested with plain
+  python3), `ObjectRegistry` (live per-object Isaac state), and
+  `GraspBackend` (grasp/place/teleport/reset orchestration + the
+  per-frame kinematic-attach re-pin). See its module docstring for the
+  full kinematic-attach math and the place-drop-offset decision.
 - `scripts/verify_robot_motion.py` — plain-rclpy script (run outside
   Isaac, ROS sourced) that drives a running sim via `cmd_vel` and
   `target_pose` and asserts the resulting TF displacement/convergence.
 - `scripts/verify_cameras.py` (Task 8) — plain-rclpy script asserting
   all 4 camera topics' rate/stamp-equality/frame_id/encoding/depth
   sanity/camera_info K.
-- `test/test_scenario.py` — loader tests (plain python3).
+- `test/test_scenario.py` — loader tests (plain python3), incl. Task 9's
+  `grasp_radius` default/override.
+- `test/test_grasp_logic.py` (Task 9) — TDD tests for
+  `select_grasp_target` (plain python3, no Isaac import).
+
+## Magic-attach grasp backend (Task 9)
+
+`grasping: magic` (the only mode implemented in P1) never touches PhysX
+grasp/contact dynamics. `GraspBackend.grasp()` selects the nearest
+graspable, unheld object within `grasp_radius` (scenario YAML top-level
+`grasp_radius:`, default 1.5 m) of the robot's gripper
+(`SpotSimRobot.gripper_world_pose()`), then rigidly re-poses that object
+to the gripper every frame ("kinematic attach", not a physics weld): the
+object's pose relative to the gripper is captured once at grasp time (in
+the gripper's local frame, both position and orientation), and replayed
+every `RosBridge.step()` against the gripper's *current* world pose --
+so the carried object translates and rotates with the gripper exactly
+like a rigidly-mounted prop, not just a position clamp. `place()`
+detaches at a fixed drop below the gripper (`gripper.z - 0.3`, clamped
+>= 0 -- no raycast-to-ground; Task 10's environment/terrain isn't in
+scope here). `reset()` (the global `/sim/reset_scenario` service)
+teleports every robot back to its scenario spawn pose and restores every
+object's pose + clears all holding state.
+
+Services (per `dcist_sim_msgs`, Task 1): `/{name}/sim/grasp_object`,
+`/{name}/sim/place_object`, `/{name}/sim/teleport` (per-robot), and
+`/sim/reset_scenario` (global). `/sim/status` (`std_msgs/String`, JSON
+`{object_id: held_by_or_null}`) publishes at ~1 Hz as a debug topic for
+the Task 12 e2e harness.
+
+**Objects are made kinematic at spawn** (`stage.py`'s `_mark_kinematic`):
+every object prim gets `UsdPhysics.RigidBodyAPI` (applied fresh if the
+source USD didn't already author one) with `kinematicEnabled=True`, so
+PhysX never applies gravity/contacts to it -- consistent with never
+relying on physics to move a magic-attach target. This produces the same
+kind of harmless `[Error] PhysicsUSD: CreateJoint - cannot create a
+joint between static bodies` PhysX noise as robot spawning (see "Spot
+asset" above) if an object's source USD ever authors joints -- not
+observed with the P1 placeholder asset used for manual verification
+(`assets/objects/cement_bag/cement_bag_1k.usdc`, since the scenario
+`objects/duffel_bag.usd` referenced by `field_smoke.yaml` doesn't exist
+until Task 10).

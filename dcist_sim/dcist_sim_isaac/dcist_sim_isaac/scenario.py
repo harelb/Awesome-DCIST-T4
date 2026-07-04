@@ -14,6 +14,13 @@ import yaml
 LOCOMOTIONS = {"kinematic", "policy"}
 GRASPING_MODES = {"magic", "physics"}
 
+# Task 9: optional top-level scenario key controlling magic-grasp
+# selection radius (grasp.py's `select_grasp_target`). Kept as a literal
+# here (not imported from grasp.py) so this module's "stdlib+pyyaml
+# only, no Isaac/ROS" contract never depends on another module's import
+# graph -- keep both defaults in sync if this value ever changes.
+DEFAULT_GRASP_RADIUS = 1.5
+
 
 @dataclass
 class RobotSpec:
@@ -43,6 +50,10 @@ class Scenario:
     environment_usd: str
     robots: list = field(default_factory=list)
     objects: list = field(default_factory=list)
+    # Task 9: magic-grasp selection radius (meters), optional in the
+    # YAML (top-level `grasp_radius:` key), defaulting to
+    # DEFAULT_GRASP_RADIUS.
+    grasp_radius: float = DEFAULT_GRASP_RADIUS
     # Directory the scenario YAML lives in. Asset paths (environment_usd,
     # ObjectSpec.usd) are stored exactly as authored (relative to this
     # directory, matching the spec's `interfaces` contract) rather than
@@ -132,9 +143,12 @@ def load_scenario(path) -> Scenario:
             )
         )
 
+    grasp_radius = float(data.get("grasp_radius", DEFAULT_GRASP_RADIUS))
+
     return Scenario(
         environment_usd=environment_usd,
         robots=robots,
         objects=objects,
+        grasp_radius=grasp_radius,
         base_dir=base_dir,
     )

@@ -39,6 +39,20 @@ def test_rejects_unknown_locomotion(tmp_path):
         load_scenario(p)
 
 
+def test_grasp_radius_defaults_to_1_5(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML)
+    s = load_scenario(p)
+    assert s.grasp_radius == 1.5
+
+
+def test_grasp_radius_override(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML.replace("environment:\n", "grasp_radius: 2.5\nenvironment:\n"))
+    s = load_scenario(p)
+    assert s.grasp_radius == 2.5
+
+
 def test_rejects_duplicate_object_ids(tmp_path):
     # NOTE: appended directly (not via textwrap.dedent) so the new list
     # item stays nested under the existing `objects:` key at the correct

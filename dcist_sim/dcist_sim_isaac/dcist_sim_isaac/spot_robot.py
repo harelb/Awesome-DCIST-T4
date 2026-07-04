@@ -164,6 +164,21 @@ class SpotSimRobot:
         self._mode = "target"
         self.target_pose = (x, y, yaw)
 
+    def teleport(self, x: float, y: float, z: float, yaw: float) -> None:
+        """Instantaneously set the robot's pose (Task 9 `Teleport` service
+        and `ResetScenario`'s robot-restore step). Unlike `set_target_pose`,
+        this writes `base_pose` immediately rather than slewing towards it,
+        and resets to velocity mode with zero cmd_vel/target_pose so a
+        stale in-flight target from before the teleport can't immediately
+        slew the robot away again on the next `step()`.
+        """
+        self._mode = "velocity"
+        self.cmd_vel_linear[:] = 0.0
+        self.cmd_vel_angular[:] = 0.0
+        self.target_pose = None
+        self.base_pose[:] = (x, y, z, yaw)
+        self._write_pose_to_stage()
+
     # -- simulation step -----------------------------------------------------
 
     def step(self, dt: float) -> None:
