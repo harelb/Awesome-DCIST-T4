@@ -1,0 +1,13 @@
+# Isaac Sim 6.0 pin for dcist_sim_isaac.
+#
+# Install route: pip, into a dedicated venv (NOT the ROS2/colcon python).
+#
+#   python3 -m venv ~/environments/dcist/isaac_sim
+#   source ~/environments/dcist/isaac_sim/bin/activate
+#   pip install -r dcist_sim/dcist_sim_isaac/requirements-isaac.txt \
+#       --extra-index-url https://pypi.nvidia.com
+#
+# See dcist_sim_isaac/README.md for python-version rationale, GPU/driver
+# info, and the isaacsim 5.x -> 6.0 API renames used by stage.py.
+
+isaacsim[all,extscache]==6.0.1.0

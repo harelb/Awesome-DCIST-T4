@@ -1,0 +1,12 @@
+environment:
+  usd: assets/environments/field_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.52, yaw: 0.0}
+    locomotion: kinematic
+    grasping: magic
+objects:
+  - id: bag_0
+    usd: objects/duffel_bag.usd
+    label: bag
+    pose: {x: 5.0, y: 2.0, z: 0.1, yaw: 0.0}
