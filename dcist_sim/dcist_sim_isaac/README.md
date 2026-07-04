@@ -187,6 +187,71 @@ links) — verified harmless: a non-root child link (`fl_hip`) tracks the
 root's world-pose delta 1:1 after `set_cmd_vel()` + repeated `step()`
 despite these errors.
 
+## ZED-shaped camera publishing (Task 8)
+
+Every `SpotSimRobot` now mounts one Isaac `Camera` sensor (RGB +
+`distance_to_image_plane` depth) as a child prim of its root, at the
+composed `body -> optical` extrinsic (see `camera.py`'s module
+docstring for the full derivation). It publishes, at 15 Hz with
+byte-identical RGB/depth stamps per frame:
+
+- `/{name}/{name}_zed/rgb/image_rect_color` (`bgra8`)
+- `/{name}/{name}_zed/rgb/camera_info`
+- `/{name}/{name}_zed/depth/depth_registered` (`32FC1`, meters)
+- `/{name}/{name}_zed/depth/camera_info`
+
+**Contract pinning:** found a real Spot bag on this machine instead of
+deriving the contract from configs blind (see `camera.py`'s module
+docstring for the full BAG-MEASURED vs. DERIVED breakdown):
+`/home/harel/data/west_point_2026/bravo_map_1_wed_afternoon_experiment_2_euclid/recorded_data/recorded_data_0.mcap`
+(95 GB, robot "euclid"). Read via `rosbag2_py.SequentialReader` directly
+-- this machine's `ros2 bag info`/`ros2 topic echo` don't support
+`--storage mcap` the way the task brief's CLI recipe assumed. The bag's
+actual resolution (640x360) corrected the brief's ~960x540 guess.
+
+**Static TF gap found and filled:** the task brief assumed
+`{name}/body -> {name}/frontleft` comes from the URDF (Task 7's
+joint_states). It does not -- `spot_tools_ros/urdf/spot_macro.xacro`
+has no `frontleft`/`head` links at all; on real hardware this hop is
+static, published by the physical Spot driver's own onboard camera-frame
+calibration, not the URDF. `ros_bridge.py` now publishes this static
+transform itself (hardcoded from the bag), plus the three-hop
+`{name}_zed_camera_link -> ... -> {name}_zed_left_camera_optical_frame`
+chain that the real zed-ros2-wrapper normally publishes internally
+(our sim launch doesn't run that wrapper). **Task 11's launch wiring
+should keep `launch_calibration_publisher:=true`** (unmodified
+`platforms/topaz/calibration.yaml`, publishing `frontleft ->
+{name}_zed_camera_link`) alongside this sim -- verified end-to-end with
+`ros2 run tf2_ros tf2_echo hilbert/odom hilbert_zed_left_camera_optical_frame`.
+
+**Isaac Camera API gotcha:** `Camera.get_current_frame()`'s RGBA image
+is under the dict key `"rgb"`, not `"rgba"` (confirmed against the
+installed 6.0.1.0 `isaacsim.sensors.camera.Camera` -- its own
+`get_rgba()` reads `self._custom_annotators["rgb"]` internally). Using
+the more obvious `"rgba"` key silently returns `None` forever with no
+error. `SimZedCamera.get_frame()` documents this.
+
+**VRAM cost per camera (RTX 3090 Ti, 640x360, rgb + distance_to_image_plane
+annotators):** measured directly by snapshotting
+`nvidia-smi --query-compute-apps` for the sim's own PID immediately
+before vs. after `camera.initialize()` (same process, same scenario,
+60 rendered frames to warm up) -- **+184 MiB per camera**. This is the
+number to budget per additional robot for multi-robot runs (on top of
+Task 7's ~1.2-1.6 GB base Isaac footprint for a trivial stage).
+
+**Optional Step 5 (semantic_inference smoke) succeeded:** launched
+`ros2 launch dcist_launch_system master.launch.yaml conf_name:=default
+robot_name:=hilbert sim_time:=false launch_semantic_inference:=true`
+directly against the running sim (no `launch_zed`/real ZED driver
+needed -- the node's own namespace + remaps already resolve to
+`/hilbert/hilbert_zed/...`, matching our topics exactly). After a
+~140s one-time TensorRT engine (re)build (cached engine was from a
+different TensorRT version), `/hilbert/hilbert_zed/semantic/image_raw`
+and `/hilbert/semantic_overlay/image_raw` both published at ~15 Hz with
+scene-plausible segmentation (ground plane segmented as floor; the
+scene has no environment/object USD yet -- Task 10 -- so there isn't
+much else to segment).
+
 ## Layout
 
 - `dcist_sim_isaac/scenario.py` — pure-python YAML scenario loader
@@ -210,9 +275,20 @@ despite these errors.
 - `dcist_sim_isaac/ros_bridge.py` — `RosBridge`: one `dcist_sim` rclpy
   node for the whole process; per-robot `/{name}/sim/cmd_vel` +
   `/{name}/sim/target_pose` subs, TF + `/{name}/odom` (50 Hz) +
-  `/{name}/joint_states` (10 Hz) pubs. See its module docstring for the
-  rclpy-in-Isaac and joint-name-prefix findings.
+  `/{name}/joint_states` (10 Hz) + ZED camera topics (15 Hz, Task 8)
+  pubs, plus one-shot static TF for the camera mount chain. See its
+  module docstring for the rclpy-in-Isaac, joint-name-prefix, and
+  camera-TF findings.
+- `dcist_sim_isaac/camera.py` (Task 8) — `SimZedCamera`: mounts an
+  Isaac `Camera` sensor at the composed ZED extrinsic and exposes
+  `get_frame()`; module-level constants for the full ZED contract
+  (encodings/resolution/K/frame names/static TF chain), each labeled
+  BAG-MEASURED or DERIVED. See its module docstring for the full
+  provenance and the "ZED-shaped camera publishing" section above.
 - `scripts/verify_robot_motion.py` — plain-rclpy script (run outside
   Isaac, ROS sourced) that drives a running sim via `cmd_vel` and
   `target_pose` and asserts the resulting TF displacement/convergence.
+- `scripts/verify_cameras.py` (Task 8) — plain-rclpy script asserting
+  all 4 camera topics' rate/stamp-equality/frame_id/encoding/depth
+  sanity/camera_info K.
 - `test/test_scenario.py` — loader tests (plain python3).

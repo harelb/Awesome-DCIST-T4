@@ -107,4 +107,11 @@ def build_stage(scenario) -> SimStage:
     _spawn_objects(scenario)
 
     world.reset()
+
+    # Camera.initialize() (Task 8) needs a valid physics sim view, which
+    # only exists after world.reset() -- see spot_robot.py's comment at
+    # the SimZedCamera construction site.
+    for robot in robots:
+        robot.camera.initialize()
+
     return SimStage(world=world, robots=robots)

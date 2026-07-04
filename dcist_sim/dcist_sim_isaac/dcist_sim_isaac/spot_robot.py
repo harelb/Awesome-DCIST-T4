@@ -137,6 +137,16 @@ class SpotSimRobot:
         self.base_pose = np.array([spec.x, spec.y, spec.z, spec.yaw], dtype=float)
         self._write_pose_to_stage()
 
+        # ZED-shaped camera (Task 8): a child prim of this robot's root,
+        # mounted at the composed body->optical extrinsic -- see
+        # camera.py's module docstring for where every number comes
+        # from. Constructing it here (prim + local pose only) is safe
+        # before world.reset(); `camera.initialize()` needs a valid
+        # physics sim view and is called by stage.build_stage() *after*
+        # world.reset() (Isaac Camera API requirement).
+        from dcist_sim_isaac.camera import SimZedCamera
+        self.camera = SimZedCamera(self)
+
         self._mode = "velocity"  # "velocity" | "target"
         self.cmd_vel_linear = np.zeros(3)
         self.cmd_vel_angular = np.zeros(3)

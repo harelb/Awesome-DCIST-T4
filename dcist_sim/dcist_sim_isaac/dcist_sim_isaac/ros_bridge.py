@@ -75,17 +75,33 @@ every 4th frame (25.6ms), i.e. ~39 Hz, exactly matching the ~40-42 Hz
 initially misattributed to transport jitter; review caught the real
 cause. The gates now carry the remainder (see `step()`), restoring a
 true ~50 Hz / ~10 Hz cadence.
+
+Task 8 (camera): adds a `/{name}/{name}_zed/{rgb,depth}/...` publish
+gate at `camera.CAMERA_HZ` (15 Hz), carrying the remainder the same way
+as the TF/joint gates above. Also publishes four **static** TF hops
+once at construction time via `tf2_ros.StaticTransformBroadcaster` --
+see `camera.py`'s module docstring for exactly which hops and why
+nothing else in the sim (or, for two of the four, the real launch
+config either) publishes them: `{name}/body -> {name}/frontleft`
+(NOT from the URDF, contra the task-8 brief's assumption -- see
+camera.py) and the three-hop
+`{name}_zed_camera_link -> ... -> {name}_zed_left_camera_optical_frame`
+chain (normally published internally by the real zed-ros2-wrapper,
+which our sim launch does not run).
 """
 from __future__ import annotations
 
 import logging
 import math
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import JointState
-from tf2_ros import TransformBroadcaster
+from sensor_msgs.msg import CameraInfo, Image, JointState
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+
+from dcist_sim_isaac import camera as camera_contract
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +171,71 @@ class _RobotBridge:
             PoseStamped, f"/{name}/sim/target_pose", self._on_target_pose, 10
         )
 
+        # -- Task 8: ZED-shaped camera topics ---------------------------
+        camera_ns = f"/{name}/{name}_zed"
+        self._rgb_frame_id = camera_contract.rgb_optical_frame(name)
+        self._depth_frame_id = camera_contract.depth_optical_frame(name)
+        self._rgb_pub = node.create_publisher(Image, f"{camera_ns}/rgb/image_rect_color", 10)
+        self._rgb_info_pub = node.create_publisher(CameraInfo, f"{camera_ns}/rgb/camera_info", 10)
+        self._depth_pub = node.create_publisher(
+            Image, f"{camera_ns}/depth/depth_registered", 10
+        )
+        self._depth_info_pub = node.create_publisher(
+            CameraInfo, f"{camera_ns}/depth/camera_info", 10
+        )
+        self._publish_static_camera_tf(node, name)
+
+    def _publish_static_camera_tf(self, node, name: str) -> None:
+        """One-shot static TF for the hops nothing else in the sim (or,
+        for two of them, the real launch either) publishes -- see
+        camera.py's module docstring for the full provenance of each.
+        """
+        broadcaster = StaticTransformBroadcaster(node)
+        stamp = node.get_clock().now().to_msg()
+        hops = [
+            (
+                self.body_frame, camera_contract.frontleft_frame(name),
+                camera_contract.BODY_TO_FRONTLEFT_XYZ,
+                camera_contract.BODY_TO_FRONTLEFT_QUAT_XYZW,
+            ),
+            (
+                camera_contract.zed_camera_link_frame(name),
+                camera_contract.zed_camera_center_frame(name),
+                camera_contract.ZED_LINK_TO_CENTER_XYZ,
+                camera_contract.ZED_LINK_TO_CENTER_QUAT_XYZW,
+            ),
+            (
+                camera_contract.zed_camera_center_frame(name),
+                camera_contract.zed_left_camera_frame(name),
+                camera_contract.CENTER_TO_LEFT_FRAME_XYZ,
+                camera_contract.CENTER_TO_LEFT_FRAME_QUAT_XYZW,
+            ),
+            (
+                camera_contract.zed_left_camera_frame(name),
+                camera_contract.rgb_optical_frame(name),
+                camera_contract.LEFT_FRAME_TO_OPTICAL_XYZ,
+                camera_contract.LEFT_FRAME_TO_OPTICAL_QUAT_XYZW,
+            ),
+        ]
+        transforms = []
+        for parent, child, xyz, quat_xyzw in hops:
+            tf_msg = TransformStamped()
+            tf_msg.header.stamp = stamp
+            tf_msg.header.frame_id = parent
+            tf_msg.child_frame_id = child
+            tf_msg.transform.translation.x = xyz[0]
+            tf_msg.transform.translation.y = xyz[1]
+            tf_msg.transform.translation.z = xyz[2]
+            tf_msg.transform.rotation.x = quat_xyzw[0]
+            tf_msg.transform.rotation.y = quat_xyzw[1]
+            tf_msg.transform.rotation.z = quat_xyzw[2]
+            tf_msg.transform.rotation.w = quat_xyzw[3]
+            transforms.append(tf_msg)
+        broadcaster.sendTransform(transforms)
+        # Keep a reference so the broadcaster (and its latched publisher)
+        # isn't garbage-collected once this method returns.
+        self._static_tf_broadcaster = broadcaster
+
     def _on_cmd_vel(self, msg: Twist) -> None:
         self.robot.set_cmd_vel(msg.linear.x, msg.linear.y, msg.angular.z)
 
@@ -204,6 +285,51 @@ class _RobotBridge:
         msg.position = self._joint_positions
         self._joint_pub.publish(msg)
 
+    def publish_camera(self, stamp) -> bool:
+        """Publish one RGB+depth+camera_info frame pair with identical stamps.
+
+        Returns False (nothing published) if the renderer hasn't produced
+        a frame yet -- see `SimZedCamera.get_frame()`'s docstring. The
+        caller (`RosBridge.step()`) still advances the rate-gate
+        accumulator either way; a handful of skipped frames during
+        render warm-up doesn't move the long-window Hz average that
+        `verify_cameras.py` checks.
+        """
+        frame = self.robot.camera.get_frame()
+        if frame is None:
+            return False
+        rgba, depth = frame
+
+        bgra = np.ascontiguousarray(camera_contract.rgba_to_bgra(rgba))
+        rgb_msg = Image()
+        rgb_msg.header.stamp = stamp
+        rgb_msg.header.frame_id = self._rgb_frame_id
+        rgb_msg.height, rgb_msg.width = bgra.shape[0], bgra.shape[1]
+        rgb_msg.encoding = camera_contract.RGB_ENCODING
+        rgb_msg.is_bigendian = 0
+        rgb_msg.step = rgb_msg.width * 4
+        rgb_msg.data = bgra.tobytes()
+        self._rgb_pub.publish(rgb_msg)
+
+        depth_f32 = np.ascontiguousarray(depth, dtype=np.float32)
+        depth_msg = Image()
+        depth_msg.header.stamp = stamp
+        depth_msg.header.frame_id = self._depth_frame_id
+        depth_msg.height, depth_msg.width = depth_f32.shape[0], depth_f32.shape[1]
+        depth_msg.encoding = camera_contract.DEPTH_ENCODING
+        depth_msg.is_bigendian = 0
+        depth_msg.step = depth_msg.width * 4
+        depth_msg.data = depth_f32.tobytes()
+        self._depth_pub.publish(depth_msg)
+
+        self._rgb_info_pub.publish(
+            camera_contract.make_camera_info_msg(self._rgb_frame_id, stamp)
+        )
+        self._depth_info_pub.publish(
+            camera_contract.make_camera_info_msg(self._depth_frame_id, stamp)
+        )
+        return True
+
 
 class RosBridge:
     """Owns the single `dcist_sim` rclpy node for the whole sim process."""
@@ -215,8 +341,10 @@ class RosBridge:
 
         self._tf_period = 1.0 / TF_HZ
         self._joint_period = 1.0 / JOINT_HZ
+        self._camera_period = 1.0 / camera_contract.CAMERA_HZ
         self._tf_accum = self._tf_period  # publish immediately on first step()
         self._joint_accum = self._joint_period
+        self._camera_accum = self._camera_period
 
         logger.info("dcist_sim ROS bridge up for robots: %s",
                     [r.spec.name for r in robots])
@@ -226,10 +354,12 @@ class RosBridge:
 
         self._tf_accum += dt
         self._joint_accum += dt
+        self._camera_accum += dt
 
         publish_tf = self._tf_accum >= self._tf_period
         publish_joints = self._joint_accum >= self._joint_period
-        if not (publish_tf or publish_joints):
+        publish_camera = self._camera_accum >= self._camera_period
+        if not (publish_tf or publish_joints or publish_camera):
             return
 
         stamp = self.node.get_clock().now().to_msg()
@@ -238,6 +368,8 @@ class RosBridge:
                 bridge.publish_tf_and_odom(stamp)
             if publish_joints:
                 bridge.publish_joint_states(stamp)
+            if publish_camera:
+                bridge.publish_camera(stamp)
 
         # Carry the remainder instead of resetting to 0: with a loop dt
         # much smaller than the publish period (measured dt~6.4ms vs the
@@ -249,12 +381,19 @@ class RosBridge:
         # carried remainder to at most one period as a burst guard:
         # after a long stalled frame (sim_app caps dt at 0.25s) we
         # publish once and resume the normal cadence rather than
-        # machine-gunning catch-up publishes on subsequent frames.
+        # machine-gunning catch-up publishes on subsequent frames. The
+        # camera gate carries the remainder the same way (Task 8),
+        # advancing even on frames where `publish_camera()` returned
+        # False (render not warmed up yet) -- see its docstring.
         if publish_tf:
             self._tf_accum = min(self._tf_accum - self._tf_period, self._tf_period)
         if publish_joints:
             self._joint_accum = min(
                 self._joint_accum - self._joint_period, self._joint_period
+            )
+        if publish_camera:
+            self._camera_accum = min(
+                self._camera_accum - self._camera_period, self._camera_period
             )
 
     def shutdown(self) -> None:
