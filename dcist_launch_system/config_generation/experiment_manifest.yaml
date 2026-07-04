@@ -4,11 +4,14 @@ launch_configs:
   # core groupings
   main: [core, status]
   map: [main, hydra, roman]
+  # like `map`, but hydra consumes ROMAN intra-session loop closures (drift reduction)
+  map_lc: [main, hydra_lc, roman]
   relocalize: [main, hydra_multi, roman]
   # development groupings
   map_old: [main, hydra_old, roman]
   no_relocalize: [main, transform_publishers]
   bag_map: [map, rviz]
+  bag_map_lc: [map_lc, rviz]
   bag_relocalize: [relocalize, rviz, relocalize_viz]
   # planning and base station
   plan_prior: [main, prior_dsg, planning]
@@ -27,6 +30,7 @@ important_variants:
   - phoenix-default
   - phoenix_relocalize-relocalize
   - spot-default
+  - spot_bag_lc-default
   - spot_relocalize-relocalize
 # Experiments define which sets of parameters will be used with which sets of launch files
 experiments:
@@ -50,6 +54,9 @@ experiments:
     config: [default]
   spot_bag:
     launch_config: [bag_map, spot_bag]
+    config: [default]
+  spot_bag_lc:
+    launch_config: [bag_map_lc, spot_bag]
     config: [default]
   spot_bag_relocalize:
     launch_config: [bag_relocalize, spot_bag]

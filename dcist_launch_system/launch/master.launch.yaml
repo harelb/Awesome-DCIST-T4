@@ -82,6 +82,10 @@ launch:
 
   # Hydra
   - arg: {name: launch_hydra, default: 'false'}
+  # Topic feeding hydra's external loop-closure subscriber. Default self-remap = no-op
+  # (subscriber stays on its private topic that nobody publishes). Intra-session ROMAN
+  # loop closures are enabled by pointing this at roman/roman_lc/pose_graph_update.
+  - arg: {name: hydra_external_lc_topic, default: '~/external_loop_closures'}
   - node:
       if: $(var launch_hydra)
       pkg: hydra_ros
@@ -94,6 +98,7 @@ launch:
         - {from: ~/input/camera/rgb/image_raw, to: $(var camera)/rgb/image_rect_color}
         - {from: ~/input/camera/rgb/camera_info, to: $(var camera)/rgb/camera_info}
         - {from: ~/input/camera/semantic/image_raw, to: $(var camera)/semantic/image_raw}
+        - {from: ~/external_loop_closures, to: $(var hydra_external_lc_topic)}
         - {from: ~/status, to: ros_system_monitor/hydra/status}
       args: >-
         --config-utilities-var robot_name=$(var robot_name)
