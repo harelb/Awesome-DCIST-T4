@@ -48,7 +48,8 @@ this specific Rivermark build under Isaac 6.0.1.0. Fell back to the
 brief's sanctioned alternative: flat ground + PBR material + scattered
 objects.
 
-Total downloaded size: ~9.5MB, committed directly (no gitignore needed).
+Total downloaded size: ~9.8MB (`du -sb dcist_sim/scenarios/assets/` =
+9,790,285 bytes), committed directly (no gitignore needed).
 
 ## 2. Render pipeline
 
@@ -144,6 +145,71 @@ Both detectors ran with the exact same 20 PNGs, no preprocessing.
 produced zero detections in every frame — there are none in this scene,
 so this is the expected null result, not a miss.
 
+**Note on threshold conservatism**: production `spot_executor`'s detector
+(`spot_tools/spot_tools/src/spot_skills/detection_utils.py:92`) calls
+`self.yolo_model(model_input)` with no explicit `conf=`, i.e. it runs at
+ultralytics' library default (~0.25), stricter than this gate's `conf=0.15`
+— so the NO-GO verdict above is, if anything, conservative in YOLOE's
+favor, not harsh.
+
+### Per-image hit table (reproducible)
+
+Raw detector outputs are committed at
+`dcist_sim/docs/render_gate_data/{yoloe,sam3}_results.json` (regenerated
+from the original 20 render_gate.py PNGs — no new renders — via the exact
+commands in §2 above, run against the same weights/classes/thresholds).
+`dcist_sim/dcist_sim_isaac/dcist_sim_isaac/scripts/score_gate.py` reduces
+those two JSON files to the table below and to the headline aggregates;
+it is pure-Python (no torch/ultralytics needed to re-score) and its "hit"
+definition is: *at least one detection in that frame's JSON output whose
+label equals the target class name, at the confidence threshold already
+baked into the results file (YOLOE 0.15, SAM3 0.4)* — a presence/absence
+check per (frame, class), not a bounding-box/IoU check. Re-running it
+reproduces the §3 aggregates (14/20, 0/20, 0/20 YOLOE; 14/20, 8/20, 17/20
+SAM3) **exactly**:
+
+```bash
+python3 dcist_sim/dcist_sim_isaac/dcist_sim_isaac/scripts/score_gate.py \
+  --yoloe dcist_sim/docs/render_gate_data/yoloe_results.json \
+  --sam3 dcist_sim/docs/render_gate_data/sam3_results.json
+```
+
+| # | file | YOLOE cone | YOLOE bag | YOLOE pipe | SAM3 cone | SAM3 bag | SAM3 pipe |
+|---|---|---|---|---|---|---|---|
+| 0 | frame_00_midday_az000_d2.5.png | hit | - | - | hit | - | hit |
+| 1 | frame_01_midday_az000_d4.5.png | hit | - | - | hit | hit | hit |
+| 2 | frame_02_midday_az072_d2.5.png | - | - | - | - | hit | hit |
+| 3 | frame_03_midday_az072_d4.5.png | hit | - | - | hit | - | hit |
+| 4 | frame_04_midday_az144_d2.5.png | - | - | - | - | - | hit |
+| 5 | frame_05_midday_az144_d4.5.png | hit | - | - | hit | - | hit |
+| 6 | frame_06_midday_az216_d2.5.png | - | - | - | - | hit | hit |
+| 7 | frame_07_midday_az216_d4.5.png | hit | - | - | hit | - | hit |
+| 8 | frame_08_midday_az288_d2.5.png | hit (+ mislabeled 2nd box, see below) | - | - | hit | - | hit |
+| 9 | frame_09_midday_az288_d4.5.png | hit | - | - | hit | hit | hit |
+| 10 | frame_10_lowsun_az000_d2.5.png | hit | - | - | hit | - | hit |
+| 11 | frame_11_lowsun_az000_d4.5.png | hit | - | - | hit | - | - |
+| 12 | frame_12_lowsun_az072_d2.5.png | - | - | - | - | hit | hit |
+| 13 | frame_13_lowsun_az072_d4.5.png | hit | - | - | hit | - | hit |
+| 14 | frame_14_lowsun_az144_d2.5.png | - | - | - | - | hit | hit |
+| 15 | frame_15_lowsun_az144_d4.5.png | hit | - | - | hit | - | hit |
+| 16 | frame_16_lowsun_az216_d2.5.png | - | - | - | - | hit | - |
+| 17 | frame_17_lowsun_az216_d4.5.png | hit | - | - | hit | - | - |
+| 18 | frame_18_lowsun_az288_d2.5.png | hit | - | - | hit | - | hit |
+| 19 | frame_19_lowsun_az288_d4.5.png | hit | - | - | hit | hit | hit |
+
+Totals match §3 exactly: YOLOE cone 14/20, bag 0/20, pipe 0/20; SAM3 cone
+14/20, bag 8/20, pipe 17/20.
+
+**Disclosure**: in `frame_08_midday_az288_d2.5.png` (the source frame for
+the "YOLOE cone hit" overlay below), YOLOE emits a correct `cone 0.83` box
+on the actual cone **and a second box labeled `cone 0.20` sitting on the
+pipe** — i.e. YOLOE mislabeled the pipe as a low-confidence cone rather
+than recognizing it as a pipe. This is scored as one "cone" hit and zero
+"pipe" hits for that frame (see the hit definition above), and it further
+supports the vocabulary/classification-head-confusion hypothesis in §4:
+YOLOE isn't failing to notice the pipe, it's actively mis-classifying it
+under a different class in this scene.
+
 ### Per-frame detail
 
 All three objects are scattered within a ~2.5m cluster near the scene
@@ -185,7 +251,10 @@ photoreal ground texture, no compression/lighting artifacts:
 ![raw midday](render_gate_images/01_raw_midday_az000.jpg)
 
 Raw scene under the "low sun" condition (after adding the ambient dome
-light fix) — all three objects still legible, natural dusk-like look:
+light fix) — cone and pipe still legible with a natural dusk-like look;
+the bag is mostly cropped out of frame at the bottom-right corner
+(visible only as a small dark silhouette), not fully legible in this
+particular view:
 
 ![raw lowsun](render_gate_images/02_raw_lowsun_az288.jpg)
 
@@ -205,8 +274,13 @@ same source image):
 
 ![yoloe miss](render_gate_images/05_yoloe_overlay_miss.jpg)
 
-YOLOE correctly finding the cone (0.9+ confidence typical) in a
-different frame — cone is the one class YOLOE handles reliably here:
+YOLOE correctly finding the cone in a different frame
+(`frame_08_midday_az288_d2.5.png`, conf 0.83) — cone is the one class
+YOLOE handles reliably here. **Note**: this frame also contains a second
+box, on the pipe, mislabeled `cone 0.20` (visible at right, above the
+0.15 scoring threshold) — see the disclosure in §3 above; this is
+evidence for classification-head/vocabulary confusion, not a second true
+cone:
 
 ![yoloe cone hit](render_gate_images/06_yoloe_overlay_cone_hit.jpg)
 

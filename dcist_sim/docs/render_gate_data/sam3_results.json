@@ -1,0 +1,262 @@
+[
+  {
+    "file": "frame_00_midday_az000_d2.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.96484375
+      },
+      {
+        "label": "pipe",
+        "score": 0.91015625
+      }
+    ]
+  },
+  {
+    "file": "frame_01_midday_az000_d4.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.6328125
+      },
+      {
+        "label": "cone",
+        "score": 0.94921875
+      },
+      {
+        "label": "pipe",
+        "score": 0.69140625
+      }
+    ]
+  },
+  {
+    "file": "frame_02_midday_az072_d2.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.6875
+      },
+      {
+        "label": "pipe",
+        "score": 0.88671875
+      }
+    ]
+  },
+  {
+    "file": "frame_03_midday_az072_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.96875
+      },
+      {
+        "label": "pipe",
+        "score": 0.78125
+      }
+    ]
+  },
+  {
+    "file": "frame_04_midday_az144_d2.5.png",
+    "detections": [
+      {
+        "label": "pipe",
+        "score": 0.71875
+      }
+    ]
+  },
+  {
+    "file": "frame_05_midday_az144_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.97265625
+      },
+      {
+        "label": "pipe",
+        "score": 0.62109375
+      }
+    ]
+  },
+  {
+    "file": "frame_06_midday_az216_d2.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.482421875
+      },
+      {
+        "label": "pipe",
+        "score": 0.88671875
+      }
+    ]
+  },
+  {
+    "file": "frame_07_midday_az216_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.9609375
+      },
+      {
+        "label": "pipe",
+        "score": 0.640625
+      }
+    ]
+  },
+  {
+    "file": "frame_08_midday_az288_d2.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.443359375
+      },
+      {
+        "label": "cone",
+        "score": 0.953125
+      },
+      {
+        "label": "pipe",
+        "score": 0.6953125
+      }
+    ]
+  },
+  {
+    "file": "frame_09_midday_az288_d4.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.60546875
+      },
+      {
+        "label": "cone",
+        "score": 0.95703125
+      },
+      {
+        "label": "pipe",
+        "score": 0.58203125
+      }
+    ]
+  },
+  {
+    "file": "frame_10_lowsun_az000_d2.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.96875
+      },
+      {
+        "label": "pipe",
+        "score": 0.671875
+      }
+    ]
+  },
+  {
+    "file": "frame_11_lowsun_az000_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.94921875
+      }
+    ]
+  },
+  {
+    "file": "frame_12_lowsun_az072_d2.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.60546875
+      },
+      {
+        "label": "pipe",
+        "score": 0.9375
+      }
+    ]
+  },
+  {
+    "file": "frame_13_lowsun_az072_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.96484375
+      },
+      {
+        "label": "pipe",
+        "score": 0.6796875
+      }
+    ]
+  },
+  {
+    "file": "frame_14_lowsun_az144_d2.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.6640625
+      },
+      {
+        "label": "pipe",
+        "score": 0.7734375
+      }
+    ]
+  },
+  {
+    "file": "frame_15_lowsun_az144_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.97265625
+      },
+      {
+        "label": "pipe",
+        "score": 0.59375
+      }
+    ]
+  },
+  {
+    "file": "frame_16_lowsun_az216_d2.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.62890625
+      }
+    ]
+  },
+  {
+    "file": "frame_17_lowsun_az216_d4.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.96484375
+      }
+    ]
+  },
+  {
+    "file": "frame_18_lowsun_az288_d2.5.png",
+    "detections": [
+      {
+        "label": "cone",
+        "score": 0.9609375
+      },
+      {
+        "label": "pipe",
+        "score": 0.7265625
+      }
+    ]
+  },
+  {
+    "file": "frame_19_lowsun_az288_d4.5.png",
+    "detections": [
+      {
+        "label": "bag",
+        "score": 0.703125
+      },
+      {
+        "label": "cone",
+        "score": 0.953125
+      },
+      {
+        "label": "pipe",
+        "score": 0.65234375
+      }
+    ]
+  }
+]
