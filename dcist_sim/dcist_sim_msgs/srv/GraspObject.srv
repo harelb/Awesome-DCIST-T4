@@ -1,0 +1,6 @@
+# Ask the sim to attach the nearest graspable object to this robot's gripper.
+string robot_name
+---
+bool success
+string object_id      # scenario object id that was attached ("" on failure)
+string message
