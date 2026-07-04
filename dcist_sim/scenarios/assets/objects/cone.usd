@@ -1,0 +1,13 @@
+#usda 1.0
+(
+    defaultPrim = "cone"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "cone" (
+    prepend references = @https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/Environments/Simple_Warehouse/Props/S_TrafficCone.usd@
+)
+{
+}
+

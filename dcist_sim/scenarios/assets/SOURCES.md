@@ -2,7 +2,9 @@
 
 Provenance and license for every non-code asset used by
 `dcist_sim_isaac/scripts/render_gate.py` (Task 6, the SAM3/YOLOE
-render-quality gate). Two categories:
+render-quality gate) and by `field_a.usd` / the `objects/*.usd` wrappers
+(Task 10, the Phase-1 outdoor scenario `field_smoke.yaml` loads in
+production via `stage.py`). Two categories:
 
 ## 1. NVIDIA Isaac Sim Nucleus assets (NOT stored in this repo)
 
@@ -28,6 +30,21 @@ beyond the `OMNI_KIT_ACCEPT_EULA=YES` env var already documented in
   License: NVIDIA Omniverse asset license — see
   `{ASSET_ROOT}/Isaac/Environments/environment-supplement-LICENSE.txt`.
 
+  **Task 10**: `objects/cone.usd` and `objects/pipe.usd` are thin wrapper
+  USDs (authored by `dcist_sim_isaac/scripts/build_field_a_assets.py`)
+  that `prepend references` these same two fixed CDN URLs directly (no
+  local copy) — `field_smoke.yaml`'s `cone_0`/`pipe_0` point at the
+  wrappers, not at `render_gate.py`'s hardcoded strings, so this is the
+  one place the CDN URL/version now needs updating if `{ASSET_ROOT}` ever
+  moves. `objects/pipe.usd` also bakes the same 4x graspable-size scale-up
+  render_gate.py applied, plus a small (-0.0025m) z-offset so the
+  *wrapper's* local origin sits exactly on the ground (probed directly:
+  the raw tube.usd's bbox z-min at scale 1 is 0.000625m) — `field_smoke.yaml`
+  can place `pipe_0` at `z: 0` and get correct grounding, unlike
+  render_gate.py's own unwrapped placement (`z=0.04`), which — checked
+  during Task 10 — actually left the pipe floating ~4cm above its ground
+  quad (0.000625*4 + 0.04 vs. the quad's z=0, not exactly compensating).
+
 - **Investigated and rejected**: the full photoreal outdoor demo scene
   `Isaac/Environments/Outdoor/Rivermark/rivermark.usd` (river + grass +
   trees) — the obvious first choice per the task brief's Step 1 wording
@@ -46,8 +63,9 @@ beyond the `OMNI_KIT_ACCEPT_EULA=YES` env var already documented in
 
 ## 2. Poly Haven (https://polyhaven.com) — CC0 / public domain
 
-Downloaded and committed to this repo; total ~9.5MB, well under the 50MB
-gitignore threshold in the task brief.
+Downloaded and committed to this repo; total ~18MB (`du -sb
+dcist_sim/scenarios/assets/` — see the Task 10 report for the exact
+figure), well under the 50MB gitignore threshold in the task brief.
 
 - **`objects/cement_bag/`** — "Cement Bag" model by PierreB3D, CC0.
   https://polyhaven.com/a/cement_bag . Downloaded the 1k `.usdc` + diffuse/
@@ -71,6 +89,16 @@ gitignore threshold in the task brief.
   place. **This repo's copy is already patched** — nothing to redo on
   checkout; only relevant if re-downloading fresh (see below).
 
+  **Task 10**: `objects/duffel_bag.usd` is a thin wrapper (`prepend
+  references = @./cement_bag/cement_bag_1k.usdc@`, identity transform —
+  the mesh is already grounded at its own local origin) that
+  `field_smoke.yaml`'s `bag_0` actually points at. "duffel_bag" is the
+  wrapper's filename, not a claim about the mesh underneath — see the
+  compromise note above; the wrapper exists so every scenario object
+  class has a uniform `objects/<name>.usd` path, and so any future
+  per-class geometry fix (like the pipe's baked scale/offset, above) has
+  exactly one file to change without touching `field_smoke.yaml`.
+
 - **`materials/aerial_grass_rock/`** — "Aerial Grass Rock" texture, CC0.
   https://polyhaven.com/a/aerial_grass_rock . Downloaded 2k JPG diffuse /
   normal(GL) / roughness maps via the Poly Haven API. Isaac ships no grass
@@ -82,7 +110,45 @@ gitignore threshold in the task brief.
   material from these three texture maps directly (no separate Nucleus
   material reference). This is the credible fallback the brief calls out
   ("ground plane with a high-res grass/dirt PBR material") once Rivermark
-  proved unusable.
+  proved unusable. **Task 10** reuses the identical three texture files
+  (no new download) at field scale (60x60m, tiling 15 to keep the same
+  ~3.33m/tile texel density) in `environments/field_a.usd`'s own
+  `build_ground()` (`build_field_a_assets.py`).
+
+- **`objects/boulder_01/`** — "Boulder 01" model by Rico Cilliers
+  (photogrammetry-scanned; Poly Haven's "Verdant Trail" collection), CC0.
+  https://polyhaven.com/a/boulder_01 . Downloaded the 1k `.usdc` (4.68MB —
+  this one has real geometry, not just a shader graph, unlike the tiny
+  cone/pipe/bag wrapper files) + diffuse (jpg) / roughness / normal(GL)
+  textures (exr) via `https://api.polyhaven.com/files/boulder_01`, 8.3MB
+  total. **New for Task 10** — `render_gate.py`/Task 6 never used a rock
+  asset; `field_a.usd` references this single downloaded rock 10 times at
+  varied position/rotation/scale (`build_ground`'s sibling
+  `build_rocks()`) for the brief's "scattered rocks ... for visual
+  texture" ask, kept outside the robot/object working corridor near
+  spawn. Texture paths inside the downloaded `.usdc` were already
+  relative (`./textures/...`) — no patch needed, unlike cement_bag above.
+
+## Task 10 generated files
+
+`environments/field_a.usd` and `objects/{duffel_bag,cone,pipe}.usd` are
+all **generated, not hand-authored** — `dcist_sim_isaac/scripts/
+build_field_a_assets.py` (plain `pxr` USD authoring, no `isaacsim`/kit
+import or `SimulationApp` boot needed; run inside the Isaac venv) writes
+all four in one pass, idempotently:
+
+```bash
+source ~/environments/dcist/isaac_sim/bin/activate
+cd ~/dcist_ws/src/awesome_dcist_t4
+python3 dcist_sim/dcist_sim_isaac/dcist_sim_isaac/scripts/build_field_a_assets.py
+```
+
+All four are saved as plain-text `#usda` content despite the `.usd`
+extension (matches `field_smoke.yaml`'s existing asset paths; USD sniffs
+format by header magic bytes, not extension) — diff-friendly, safe to
+regenerate and re-review rather than treat as an opaque binary. Re-run
+after editing the script's `ROCK_PLACEMENTS`, `FIELD_SIZE_M`,
+`GROUND_TILING`, or either object wrapper's baked transform.
 
 ## Re-download instructions
 
@@ -126,7 +192,25 @@ curl -L -o dcist_sim/scenarios/assets/materials/aerial_grass_rock/aerial_grass_r
   https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_nor_gl_2k.jpg
 curl -L -o dcist_sim/scenarios/assets/materials/aerial_grass_rock/aerial_grass_rock_rough_2k.jpg \
   https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/aerial_grass_rock/aerial_grass_rock_rough_2k.jpg
+
+# boulder_01 (rock, Task 10) -- texture paths already relative, no patch needed
+mkdir -p dcist_sim/scenarios/assets/objects/boulder_01/textures
+curl -L -o dcist_sim/scenarios/assets/objects/boulder_01/boulder_01_1k.usdc \
+  https://dl.polyhaven.org/file/ph-assets/Models/usd/1k/boulder_01/boulder_01_1k.usdc
+curl -L -o dcist_sim/scenarios/assets/objects/boulder_01/textures/boulder_01_diff_1k.jpg \
+  https://dl.polyhaven.org/file/ph-assets/Models/jpg/1k/boulder_01/boulder_01_diff_1k.jpg
+curl -L -o dcist_sim/scenarios/assets/objects/boulder_01/textures/boulder_01_rough_1k.exr \
+  https://dl.polyhaven.org/file/ph-assets/Models/exr/1k/boulder_01/boulder_01_rough_1k.exr
+curl -L -o dcist_sim/scenarios/assets/objects/boulder_01/textures/boulder_01_nor_gl_1k.exr \
+  https://dl.polyhaven.org/file/ph-assets/Models/exr/1k/boulder_01/boulder_01_nor_gl_1k.exr
 ```
 
 The Isaac Nucleus assets (cone, pipe) need no download — `render_gate.py`
-references them by URL every run; no re-download step applies to them.
+references them by URL every run; no re-download step applies to them
+(nor to `objects/cone.usd`/`objects/pipe.usd`, Task 10's wrappers around
+the same URLs).
+
+After re-downloading `objects/boulder_01/` (or any other referenced
+asset), re-run `build_field_a_assets.py` (previous section) to regenerate
+`field_a.usd` and the object wrappers — they aren't downloaded, so they
+don't need re-fetching, only the referenced content does.
