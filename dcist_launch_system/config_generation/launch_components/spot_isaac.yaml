@@ -4,11 +4,19 @@
 # all driven against Isaac Sim's ros_bridge (dcist_sim_isaac) over ROS2.
 #
 # The Isaac Sim process itself is NOT launched from this tmux window: it
-# lives in a separate Python environment (Isaac's bundled interpreter, not
-# ${ADT4_WS}/install) and must be started independently, outside tmux, e.g.:
-#   <isaac venv> dcist_sim/dcist_sim_isaac/scripts/run_sim.py \
+# lives in a separate Python environment (the Isaac Sim venv, not
+# ${ADT4_WS}/install) and must be started independently, outside tmux.
+# Source ROS first (the non---smoke path imports rclpy; use the .zsh
+# variants under zsh -- setup.bash breaks in zsh):
+#   source /opt/ros/jazzy/setup.zsh
+#   source ${ADT4_WS}/install/setup.zsh
+#   cd ${ADT4_WS}/src/awesome_dcist_t4
+#   OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
+#   PYTHONPATH=${ADT4_WS}/src/awesome_dcist_t4/dcist_sim/dcist_sim_isaac \
+#   ADT4_ROBOT_NAME=<robot_name> \
+#   ${ADT4_ENV}/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
 #       --scenario dcist_sim/scenarios/field_smoke.yaml --headless
-# See the runbook / running-adt4 skill for the exact invocation.
+# See dcist_sim/dcist_sim_isaac/README.md for details.
 #
 # No teleop pane here (unlike spot_sim.yaml) per the P1 plan.
 #
