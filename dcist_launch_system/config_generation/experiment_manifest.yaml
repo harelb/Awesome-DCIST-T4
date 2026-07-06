@@ -23,6 +23,7 @@ configs:
   prior_dsg: []
   relocalize: []
   apollo_relocalize: [relocalize]
+  isaac_sim: []
 # Variant names shown first in run-adt4 session selection
 important_variants:
   - base_station-default
@@ -100,3 +101,8 @@ experiments:
   spot_prior_dsg_heracles:
     launch_config: [plan_prior_heracles, spot_sim]
     config: [prior_dsg]
+
+  # Isaac Sim — full robot-side stack (live hydra+roman) against dcist_sim_isaac
+  spot_isaac:
+    launch_config: [map, spot_isaac]
+    config: [isaac_sim]
