@@ -16,7 +16,11 @@ import time
 
 from bosdyn.api import manipulation_api_pb2, robot_state_pb2
 from bosdyn.api.geometry_pb2 import FrameTreeSnapshot, SE3Pose
-from bosdyn.client.frame_helpers import BODY_FRAME_NAME, ODOM_FRAME_NAME
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    ODOM_FRAME_NAME,
+    VISION_FRAME_NAME,
+)
 from geometry_msgs.msg import PoseStamped, Twist
 
 from dcist_sim_msgs.srv import GraspObject, PlaceObject
@@ -121,14 +125,23 @@ class SimStateClient:
             position={"x": float(x), "y": float(y)},
             rotation={"w": math.cos(yaw / 2), "z": math.sin(yaw / 2)},
         )
-        edge_odom = FrameTreeSnapshot.ParentEdge(
+        # Frame tree: vision -> odom -> body. In sim there is no visual-odometry
+        # drift, so vision and odom coincide (identity edge). A real Spot's state
+        # snapshot always exposes the `vision` frame; grasp/place recovery motions
+        # (navigation_utils.navigate_to_relative_pose) look up vision_tform_body
+        # and crash on `None * SE2Pose` if it is absent -- so publish it here.
+        edge_vision = FrameTreeSnapshot.ParentEdge(
             parent_frame_name="", parent_tform_child=SE3Pose()
+        )
+        edge_odom = FrameTreeSnapshot.ParentEdge(
+            parent_frame_name=VISION_FRAME_NAME, parent_tform_child=SE3Pose()
         )
         edge_body = FrameTreeSnapshot.ParentEdge(
             parent_frame_name=ODOM_FRAME_NAME, parent_tform_child=pose
         )
         snapshot = FrameTreeSnapshot(
             child_to_parent_edge_map={
+                VISION_FRAME_NAME: edge_vision,
                 ODOM_FRAME_NAME: edge_odom,
                 BODY_FRAME_NAME: edge_body,
             }
