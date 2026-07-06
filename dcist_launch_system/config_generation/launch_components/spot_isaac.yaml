@@ -16,6 +16,10 @@
 #   ADT4_ROBOT_NAME=<robot_name> \
 #   ${ADT4_ENV}/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
 #       --scenario dcist_sim/scenarios/field_smoke.yaml --headless
+# NOTE: the sim reads which robots to spawn from the scenario YAML, not from
+# ADT4_ROBOT_NAME -- ADT4_ROBOT_NAME only selects the ROS-side namespace used
+# by this tmux window's panes below. It MUST name one of the scenario's
+# robots (sim_app.py logs a loud warning, but does not abort, on a mismatch).
 # See dcist_sim/dcist_sim_isaac/README.md for details.
 #
 # No teleop pane here (unlike spot_sim.yaml) per the P1 plan.

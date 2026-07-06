@@ -28,7 +28,7 @@ class RobotSpec:
     x: float
     y: float
     z: float
-    yaw: float
+    yaw: float  # radians (not degrees) -- rotation about world +Z
     locomotion: str
     grasping: str
 
@@ -41,7 +41,7 @@ class ObjectSpec:
     x: float
     y: float
     z: float
-    yaw: float
+    yaw: float  # radians (not degrees) -- rotation about world +Z
     graspable: bool = True
 
 

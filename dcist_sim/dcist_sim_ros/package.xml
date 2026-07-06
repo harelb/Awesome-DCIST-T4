@@ -13,7 +13,6 @@
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>cv_bridge</depend>
-  <depend>spot_tools</depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>

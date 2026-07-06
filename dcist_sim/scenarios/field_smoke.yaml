@@ -45,7 +45,9 @@ objects:
   - id: bag_0
     usd: assets/objects/duffel_bag.usd
     label: bag
-    pose: {x: 5.0, y: 0.6, z: 0.0, yaw: 30.0}
+    # yaw is RADIANS (scenario.py); 0.52 rad ~= 30 deg -- cosmetic prop
+    # orientation only, kept close to the original visual intent.
+    pose: {x: 5.0, y: 0.6, z: 0.0, yaw: 0.52}
   # Scattered off to either side of the bag, both still inside the same
   # forward camera cone as bag_0 (see header comment) and within the
   # empirically-verified detection range.
@@ -61,7 +63,9 @@ objects:
     # z=0 (see build_field_a_assets.py) -- z: 0.0 here sits it exactly on
     # the ground, unlike render_gate.py's original unwrapped placement
     # (z=0.04) which left the pipe floating ~4cm above its ground quad.
-    pose: {x: 5.6, y: -1.6, z: 0.0, yaw: 90.0}
+    # yaw is RADIANS (scenario.py); 1.57 rad ~= 90 deg -- cosmetic prop
+    # orientation only, kept close to the original visual intent.
+    pose: {x: 5.6, y: -1.6, z: 0.0, yaw: 1.57}
 # Task 9's magic-grasp selection radius (grasp.py's select_grasp_target),
 # meters from the gripper. Explicit here (equal to the loader default) so
 # the scenario documents its own grasp-reach assumption rather than relying

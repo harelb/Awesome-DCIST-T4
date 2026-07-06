@@ -1,8 +1,8 @@
 # dcist_sim
 
 Isaac Sim-based simulator for ADT4 field rehearsals. See
-`docs/superpowers/isaac-sim-simulator-design.md` (or the SDD task briefs
-under `.superpowers/sdd/`) for the full design.
+`docs/superpowers/specs/2026-07-04-isaac-sim-simulator-design.md` (or the
+SDD task briefs under `.superpowers/sdd/`) for the full design.
 
 ## Packages
 
@@ -24,8 +24,10 @@ under `.superpowers/sdd/`) for the full design.
 YAML scenario files consumed by `dcist_sim_isaac.scenario.load_scenario`.
 Each scenario specifies the environment USD, robot spawn poses +
 locomotion/grasping mode, and prop/object placements. `field_smoke.yaml`
-is a minimal scenario used for headless smoke-testing `sim_app.py`
-before real environment/robot assets exist.
+is the production Phase-1 scenario (the `field_a` outdoor environment plus
+three labeled graspable props) used for both headless smoke-testing
+`sim_app.py` and the full nav/pick/place `e2e_smoke.py` loop — see
+`docs/sim_runbook.md`.
 
 ## Running the simulator
 
@@ -37,3 +39,9 @@ cd ~/dcist_ws/src/awesome_dcist_t4
 PYTHONPATH=dcist_sim/dcist_sim_isaac:$PYTHONPATH \
   python -m dcist_sim_isaac.sim_app --scenario dcist_sim/scenarios/field_smoke.yaml --headless
 ```
+
+Scripts live in two homes by convention: package-internal Isaac scripts
+(imported as part of `dcist_sim_isaac`, run inside the Isaac venv) live
+under `dcist_sim_isaac/dcist_sim_isaac/scripts/`, while standalone
+plain-rclpy verify/harness scripts that drive a *running* sim from the
+ROS2 side (no Isaac import) live under `dcist_sim_isaac/scripts/`.

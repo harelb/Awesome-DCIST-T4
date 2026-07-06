@@ -48,6 +48,23 @@ live DSG topic (`~/dsg_in` → `hydra/backend/dsg`) and plans over it.
   ```
 - Shell: this machine's shell is **zsh** — always source the `.zsh` ROS setup
   variants, never `setup.bash` (it silently mis-resolves paths under zsh).
+- **Internet access is required on the FIRST sim launch** (and any time a new
+  asset is referenced): `spot_with_arm.usd` and some object assets stream
+  on demand from the NVIDIA Omniverse CDN (see `dcist_sim_isaac/README.md`'s
+  "Spot asset" section) rather than shipping locally. Subsequent launches on
+  the same machine hit the local Nucleus/asset cache and work offline.
+- **`ADT4_BOSDYN_IP` / `ADT4_BOSDYN_USERNAME` / `ADT4_BOSDYN_PASSWORD` must be
+  set to *some* value** (any placeholder works — the sim never dials a real
+  Spot) before launching the robot stack. `spot_executor_node.yaml` /
+  `spot_sensor_node.yaml` / `spot_twist_node.yaml` all resolve these via
+  `$(env ...)` substitution at launch time; an unset var makes the launch
+  file substitution itself fail before any node starts, not a runtime error
+  inside SimSpot.
+- **The Isaac Sim venv's python is 3.12** (`~/environments/dcist/isaac_sim`,
+  pinned by the `isaacsim==6.0.1.0` wheel — see
+  `dcist_sim_isaac/README.md`'s "Python version: 3.12" section), matching
+  this machine's system python and ROS2 Jazzy's rclpy, so there is no
+  cross-version workaround needed to import rclpy inside Isaac.
 
 ### Env vars
 

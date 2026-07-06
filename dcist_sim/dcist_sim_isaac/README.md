@@ -340,7 +340,6 @@ relying on physics to move a magic-attach target. This produces the same
 kind of harmless `[Error] PhysicsUSD: CreateJoint - cannot create a
 joint between static bodies` PhysX noise as robot spawning (see "Spot
 asset" above) if an object's source USD ever authors joints -- not
-observed with the P1 placeholder asset used for manual verification
-(`assets/objects/cement_bag/cement_bag_1k.usdc`, since the scenario
-`objects/duffel_bag.usd` referenced by `field_smoke.yaml` doesn't exist
-until Task 10).
+observed with the P1 assets built by Task 10 (`assets/objects/duffel_bag.usd`,
+`cone.usd`, `pipe.usd`, referenced by `field_smoke.yaml` and now present on
+disk under `dcist_sim/scenarios/assets/objects/`).

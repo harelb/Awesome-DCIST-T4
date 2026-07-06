@@ -148,15 +148,42 @@ def wait_until(pred, timeout, poll=0.5):
     return pred()
 
 
-def reset_scenario(node):
+def reset_scenario(node, timeout_s=10.0):
+    """Reset the sim scenario and confirm it actually landed before returning.
+
+    Returns True only once the service reports success AND a fresh
+    /sim/status + odom sample has arrived post-reset; False (service
+    unavailable, timed out, or reported failure) means callers must not
+    proceed -- the previous fixed `sleep(2.0)` let callers silently run
+    stages against stale pre-reset state on any of those failure modes.
+    """
     if not node.reset_cli.wait_for_service(timeout_sec=5.0):
-        node.get_logger().warn("reset_scenario service unavailable; skipping reset")
-        return
+        print("[e2e] FAIL: reset_scenario service unavailable")
+        return False
     fut = node.reset_cli.call_async(ResetScenario.Request())
-    end = time.time() + 10
+    end = time.time() + timeout_s
     while not fut.done() and time.time() < end:
         time.sleep(0.05)
-    time.sleep(2.0)  # let odom/status settle at spawn
+    if not fut.done():
+        print("[e2e] FAIL: reset_scenario timed out")
+        return False
+    result = fut.result()
+    if result is None or not result.success:
+        print(f"[e2e] FAIL: reset_scenario reported failure (result={result})")
+        return False
+
+    # Bounded poll for a fresh /sim/status + odom sample (post-reset TF is
+    # what odom is derived from) instead of a fixed sleep -- clear the
+    # cached values first so a stale pre-reset sample can't pass.
+    with node._lock:
+        node.status = None
+        node.odom = None
+    status_ok = wait_until(lambda: node.status is not None, timeout_s, poll=0.1)
+    odom_ok = wait_until(lambda: node.get_odom() is not None, timeout_s, poll=0.1)
+    if not status_ok or not odom_ok:
+        print("[e2e] FAIL: no fresh /sim/status or odom/TF within timeout after reset")
+        return False
+    return True
 
 
 def main():
@@ -189,7 +216,9 @@ def main():
             return 1
 
         # =============== STAGE A: navigation ===============
-        reset_scenario(node)
+        if not reset_scenario(node):
+            print("[e2e] FAIL: reset_scenario failed before Stage A")
+            return 1
         start = wait_until(lambda: node.get_odom(), 10)
         _objs, places = node.symbols()
         # goto the place farthest from the start pose -> guarantees > 3 m.
@@ -214,7 +243,9 @@ def main():
         )
 
         # =============== STAGE B: pick and place ===============
-        reset_scenario(node)
+        if not reset_scenario(node):
+            print("[e2e] FAIL: reset_scenario failed before Stage B")
+            return 1
         objs, places = node.symbols()
         # target the object nearest the known duffel spawn (5.0, 0.6) so the
         # grasp tends to attach the bag; any object satisfies assertion B.
@@ -252,7 +283,8 @@ def main():
             results["C_place"] = ok_c
             print(
                 f"[e2e] {'PASS' if ok_c else 'FAIL'} C: released={bool(released)}, "
-                f"carried {carried:.2f} m (need > {PLACE_CARRY_M})"
+                f"carried {carried:.2f} m (robot travel while holding; "
+                f"placement-at-goal not verified) (need > {PLACE_CARRY_M})"
             )
     finally:
         node.destroy_node()

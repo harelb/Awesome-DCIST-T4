@@ -4,6 +4,12 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 from bosdyn.api import manipulation_api_pb2
+from bosdyn.client.frame_helpers import (
+    BODY_FRAME_NAME,
+    ODOM_FRAME_NAME,
+    VISION_FRAME_NAME,
+    get_se2_a_tform_b,
+)
 from bosdyn.client.robot_command import RobotCommandBuilder
 
 import tf2_ros
@@ -87,6 +93,25 @@ def test_manipulation_failure_reports_failed(sim_spot):
         manipulation_api_feedback_request=MagicMock()
     )
     assert fb.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
+
+
+def test_get_robot_state_frame_tree_vision_to_body(sim_spot):
+    # Pins the place-recovery crash fix: navigate_to_relative_pose looks up
+    # vision_tform_body and crashes on `None * SE2Pose` if the vision frame
+    # is absent from the snapshot (see sim_spot.py:129-148).
+    state = sim_spot.state_client.get_robot_state()
+    edges = state.kinematic_state.transforms_snapshot.child_to_parent_edge_map
+    assert VISION_FRAME_NAME in edges
+    assert ODOM_FRAME_NAME in edges
+    assert BODY_FRAME_NAME in edges
+
+    vision_tform_body = get_se2_a_tform_b(
+        state.kinematic_state.transforms_snapshot, VISION_FRAME_NAME, BODY_FRAME_NAME
+    )
+    assert vision_tform_body is not None
+    assert vision_tform_body.x == pytest.approx(1.0)
+    assert vision_tform_body.y == pytest.approx(2.0)
+    assert vision_tform_body.angle == pytest.approx(0.5)
 
 
 def test_get_state_exposes_top_level_robot_state(sim_spot):

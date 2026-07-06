@@ -24,8 +24,35 @@ docstring for why the bridge itself needs no special handling once
 rclpy is importable).
 """
 import argparse
+import logging
+import os
 import sys
 import time
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_if_robot_name_mismatch(scenario):
+    """ADT4_ROBOT_NAME only selects the ROS-side namespace (see spot_isaac.yaml);
+    the scenario YAML is the source of truth for which robots actually spawn.
+    If the two disagree, the sim would come up fine but nothing on the
+    ADT4_ROBOT_NAME namespace would ever move -- warn loudly instead of
+    silently doing the wrong thing. Never abort: the scenario still wins.
+    """
+    robot_name = os.environ.get("ADT4_ROBOT_NAME")
+    if not robot_name:
+        return
+    scenario_names = [r.name for r in scenario.robots]
+    if robot_name not in scenario_names:
+        logger.warning(
+            "=" * 78 + "\n"
+            "ADT4_ROBOT_NAME=%r does not match any robot in the scenario "
+            "(scenario robots: %r). ADT4_ROBOT_NAME only selects the ROS-side "
+            "namespace; the scenario YAML is authoritative for which robots "
+            "spawn. The sim will run with %r, but nothing will publish on "
+            "the %r namespace.\n" + "=" * 78,
+            robot_name, scenario_names, scenario_names, robot_name,
+        )
 
 
 def main():
@@ -38,6 +65,7 @@ def main():
 
     from dcist_sim_isaac.scenario import load_scenario
     scenario = load_scenario(args.scenario)
+    _warn_if_robot_name_mismatch(scenario)
 
     # SimulationApp MUST be constructed before any other isaacsim/omni import.
     from isaacsim import SimulationApp
