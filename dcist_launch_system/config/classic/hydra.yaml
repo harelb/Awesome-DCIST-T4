@@ -77,6 +77,7 @@ frontend:
     layer_updates:
       OBJECTS:
         prefix: O
+        archive_missing: true
         matcher: {type: IoUNodeMatcher, min_same_iou: 0.2, min_cross_iou: 0.5}
   surface_places:
     type: place_2d
@@ -105,6 +106,12 @@ backend:
   min_dsg_separation_s: 1
   publish_mesh: true
   min_mesh_separation_s: 10
+  change_gate:
+    displacement_threshold_m: 0.10
+    node_delta_threshold: 25
+    max_interval_s: 2.0
+    min_separation_s: 0.5
+  enable_async_publish: true
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   update_functors:
