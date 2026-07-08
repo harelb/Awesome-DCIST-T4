@@ -119,7 +119,7 @@ backend:
     node_delta_threshold: 25
     max_interval_s: 2.0
     min_separation_s: 0.5
-  enable_async_publish: true
+  enable_async_publish: false
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   update_functors:
