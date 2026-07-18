@@ -7,6 +7,7 @@ Sim python environment. See dcist_sim_isaac/README.md for rationale.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 import yaml
@@ -53,6 +54,26 @@ class TourWaypoint:
     dwell_s: float = 0.0
 
 
+GT_MODES = {"live", "replay"}
+GT_MODALITIES = {"rgb", "semantic", "instance", "bbox2d", "bbox3d", "depth"}
+DEFAULT_GT_MODALITIES = ["rgb", "semantic", "instance", "bbox2d"]
+
+
+@dataclass
+class GtSemanticRule:
+    match: str            # regex, re.search()ed against stage prim paths
+    semantic_class: str   # YAML key is `class` (python keyword)
+
+
+@dataclass
+class GtSpec:
+    enabled: bool = False
+    mode: str = "live"    # live | replay (see gt_capture.py)
+    rate_hz: float = 2.0
+    modalities: list = field(default_factory=lambda: list(DEFAULT_GT_MODALITIES))
+    semantics: list = field(default_factory=list)
+
+
 @dataclass
 class Scenario:
     environment_usd: str
@@ -66,6 +87,7 @@ class Scenario:
     # drives, and the ~/adt4_output/<map_name>/ output directory name.
     tour: list = field(default_factory=list)
     map_name: str = ""
+    gt: GtSpec = field(default_factory=GtSpec)
     # Directory the scenario YAML lives in. Asset paths (environment_usd,
     # ObjectSpec.usd) are stored exactly as authored (relative to this
     # directory, matching the spec's `interfaces` contract) rather than
@@ -172,6 +194,44 @@ def load_scenario(path) -> Scenario:
             )
         )
 
+    gt = GtSpec()
+    gt_data = data.get("gt")
+    if gt_data is not None:
+        mode = gt_data.get("mode", "live")
+        if mode not in GT_MODES:
+            raise ValueError(
+                f"invalid gt mode '{mode}': must be one of {sorted(GT_MODES)}"
+            )
+        rate_hz = float(gt_data.get("rate_hz", 2.0))
+        if rate_hz <= 0:
+            raise ValueError("gt rate_hz must be > 0")
+        modalities = list(gt_data.get("modalities", DEFAULT_GT_MODALITIES))
+        for m in modalities:
+            if m not in GT_MODALITIES:
+                raise ValueError(
+                    f"unknown gt modality '{m}': must be from {sorted(GT_MODALITIES)}"
+                )
+        semantics = []
+        for i, s in enumerate(gt_data.get("semantics", [])):
+            context = f"gt.semantics[{i}]"
+            pattern = _require(s, "match", context)
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"invalid regex in {context}: {e}")
+            semantics.append(
+                GtSemanticRule(
+                    match=pattern, semantic_class=_require(s, "class", context)
+                )
+            )
+        gt = GtSpec(
+            enabled=bool(gt_data.get("enabled", True)),
+            mode=mode,
+            rate_hz=rate_hz,
+            modalities=modalities,
+            semantics=semantics,
+        )
+
     return Scenario(
         environment_usd=environment_usd,
         robots=robots,
@@ -179,5 +239,6 @@ def load_scenario(path) -> Scenario:
         grasp_radius=grasp_radius,
         tour=tour,
         map_name=str(data.get("map_name", "")),
+        gt=gt,
         base_dir=base_dir,
     )

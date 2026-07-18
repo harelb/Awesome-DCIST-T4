@@ -112,3 +112,52 @@ def test_tour_rejects_negative_dwell(tmp_path):
     p.write_text(YAML + "\ntour:\n  - {x: 4.0, y: 0.0, yaw: 0.0, dwell_s: -1.0}\n")
     with pytest.raises(ValueError, match="dwell_s"):
         load_scenario(p)
+
+
+GT_YAML = textwrap.dedent("""
+    gt:
+      rate_hz: 1.0
+      modalities: [rgb, semantic]
+      semantics:
+        - {match: ".*/SM_Pallet.*", class: pallet}
+""")
+
+
+def test_gt_defaults_disabled(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML)
+    s = load_scenario(p)
+    assert s.gt.enabled is False
+    assert s.gt.mode == "live"
+
+
+def test_gt_block_enables_and_parses(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + GT_YAML)
+    s = load_scenario(p)
+    assert s.gt.enabled is True
+    assert s.gt.rate_hz == 1.0
+    assert s.gt.modalities == ["rgb", "semantic"]
+    assert s.gt.semantics[0].match == ".*/SM_Pallet.*"
+    assert s.gt.semantics[0].semantic_class == "pallet"
+
+
+def test_gt_rejects_bad_mode(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "\ngt:\n  mode: teleport\n")
+    with pytest.raises(ValueError, match="mode"):
+        load_scenario(p)
+
+
+def test_gt_rejects_unknown_modality(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "\ngt:\n  modalities: [rgb, lidar]\n")
+    with pytest.raises(ValueError, match="modalit"):
+        load_scenario(p)
+
+
+def test_gt_rejects_bad_regex(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + '\ngt:\n  semantics:\n    - {match: "[", class: pallet}\n')
+    with pytest.raises(ValueError, match="regex"):
+        load_scenario(p)
