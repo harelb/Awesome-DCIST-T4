@@ -24,6 +24,7 @@ docstring for why the bridge itself needs no special handling once
 rclpy is importable).
 """
 import argparse
+import json
 import logging
 import os
 import sys
@@ -63,6 +64,9 @@ def main():
                         help="build the stage, step 60 frames, exit 0")
     parser.add_argument("--gt-out",
                         help="ground-truth output dir (default: <scenario dir>/gt_out)")
+    parser.add_argument("--gt-replay", metavar="TRAJECTORY_JSONL",
+                        help="replay a build_map trajectory.jsonl (teleport, "
+                             "no ROS) and capture GT along it, then exit")
     args = parser.parse_args()
 
     from dcist_sim_isaac.scenario import load_scenario
@@ -77,6 +81,51 @@ def main():
     stage = build_stage(scenario)
     world = stage.world
     robots = stage.robots
+
+    # GT replay: second pass over a recorded build_map trajectory --
+    # teleport-driven, no ROS bridge, capture-only (spec §3.4 fallback for
+    # scenes where live capture drags the sim rate). Kinematic locomotion is
+    # deterministic, so replayed poses reproduce the mapping run's views.
+    if args.gt_replay:
+        import omni.usd
+        from dcist_sim_isaac.gt_capture import GtCapture
+
+        if not scenario.gt.enabled:
+            logger.error("--gt-replay but scenario has no enabled gt section")
+            sim_app.close()
+            return 1
+        with open(args.gt_replay) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        if not rows:
+            logger.error("--gt-replay: %s is empty", args.gt_replay)
+            sim_app.close()
+            return 1
+        gt_out = args.gt_out or os.path.join(
+            os.path.dirname(os.path.abspath(args.gt_replay)), "gt")
+        gt = GtCapture(scenario.gt, gt_out)
+        usd_stage = omni.usd.get_context().get_stage()
+        logger.info("gt replay: labeled %d env prims, %d trajectory rows -> %s",
+                    gt.apply_semantics(usd_stage), len(rows), gt_out)
+        robot = robots[0]
+        gt.attach(robot.camera)  # camera already initialized by build_stage
+        spawn_z = scenario.robots[0].z
+        period = 1.0 / scenario.gt.rate_hz
+        next_t = rows[0]["t"]
+        captured = 0
+        for row in rows:
+            if row["t"] < next_t:
+                continue
+            robot.teleport(row["x"], row["y"], spawn_z, row["yaw"])
+            for _ in range(5):   # let the renderer settle post-teleport
+                world.step(render=True)
+            gt._next_t = 0.0     # rate is trajectory-time (next_t), not wall
+            if gt.maybe_capture(row["t"], (row["x"], row["y"], row["yaw"])):
+                captured += 1
+                next_t = row["t"] + period
+        gt.close()
+        logger.info("gt replay: captured %d frames", captured)
+        sim_app.close()
+        return 0
 
     ros_bridge = None
     if not args.smoke:
