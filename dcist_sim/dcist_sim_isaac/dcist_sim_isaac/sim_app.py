@@ -61,6 +61,8 @@ def main():
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--smoke", action="store_true",
                         help="build the stage, step 60 frames, exit 0")
+    parser.add_argument("--gt-out",
+                        help="ground-truth output dir (default: <scenario dir>/gt_out)")
     args = parser.parse_args()
 
     from dcist_sim_isaac.scenario import load_scenario
@@ -81,6 +83,24 @@ def main():
         from dcist_sim_isaac.ros_bridge import RosBridge
         ros_bridge = RosBridge(robots, stage.registry, stage.grasp_radius)
 
+    # Mapping-harness GT capture (live mode). Scenario objects already carry
+    # semantics from stage.py's add_labels; this stamps the env props and
+    # attaches Replicator annotators to the robot camera (initialized by
+    # build_stage after world.reset()).
+    gt = None
+    if not args.smoke and scenario.gt.enabled and scenario.gt.mode == "live":
+        import omni.usd
+        from dcist_sim_isaac.gt_capture import GtCapture
+
+        gt_out = args.gt_out or os.path.join(
+            os.path.dirname(os.path.abspath(args.scenario)), "gt_out")
+        gt = GtCapture(scenario.gt, gt_out)
+        usd_stage = omni.usd.get_context().get_stage()
+        n_labeled = gt.apply_semantics(usd_stage)
+        logger.info("gt_capture: labeled %d env prims, writing to %s",
+                    n_labeled, gt_out)
+        gt.attach(robots[0].camera)
+
     frames = 60 if args.smoke else None
     n = 0
     # Robot kinematics integrate against *wall-clock* dt (P1 runs wall
@@ -99,11 +119,24 @@ def main():
         world.step(render=True)
         if ros_bridge is not None:
             ros_bridge.step(dt)
+        if gt is not None:
+            try:
+                bx, by, _, byaw = robots[0].base_pose
+                gt.maybe_capture(
+                    time.monotonic(), (float(bx), float(by), float(byaw)))
+            except Exception:  # noqa: BLE001 -- GT must never kill the sim
+                logger.exception(
+                    "gt_capture failed; disabling GT for the rest of the run "
+                    "(map continues; spec §3.4)")
+                gt.close()
+                gt = None
 
         n += 1
         if frames is not None and n >= frames:
             break
 
+    if gt is not None:
+        gt.close()
     if ros_bridge is not None:
         ros_bridge.shutdown()
     sim_app.close()

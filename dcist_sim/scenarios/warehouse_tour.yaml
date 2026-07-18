@@ -45,9 +45,12 @@ tour:  # yaw radians; dwell lets the rate-gated perception frontend catch up
 gt:
   rate_hz: 2.0
   modalities: [rgb, semantic, instance, bbox2d]
-  semantics:  # prim families from probe_report_2026-07.md (full_warehouse prims.txt)
+  # full_warehouse SHIPS with native semantics (verified in GT output
+  # 2026-07-18: forklift, rack, crate, wall, floor, sign, barel[sic], ...),
+  # so rules here only fill gaps. A rule matching a natively-tagged prim
+  # produces a merged class string (observed: "rack,shelf" before the shelf
+  # rule was dropped) -- don't shadow native classes.
+  semantics:
     - {match: ".*SM_Palette.*", class: pallet}          # NOTE: "Palette" spelling
-    - {match: ".*SM_Rack(Shelf|Frame).*", class: shelf}
     - {match: ".*SM_CardBox.*", class: box}
     - {match: ".*SM_FireExtinguisher.*", class: fire_extinguisher}
-    - {match: ".*[Ff]orklift.*", class: forklift}       # name beyond truncated dump; verify in GT output
