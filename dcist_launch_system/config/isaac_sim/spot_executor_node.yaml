@@ -27,4 +27,4 @@
     spot_interface: sim
     sim_rgb_topic: /$(var robot_name)/$(var robot_name)_zed/rgb/image_rect_color
     detector_confidence: 0.02
-    detector_class_synonyms: "{'bag': 'cement bag', 'pipe': 'gray pipe', 'box': 'cement bag'}"
+    detector_class_synonyms: "{'bag': 'cement bag', 'pipe': 'gray pipe', 'box': 'cement bag', 'pallet': 'pallet', 'forklift': 'forklift', 'shelf': 'shelf', 'barrel': 'barrel', 'ladder': 'ladder', 'fire_extinguisher': 'fire extinguisher'}"

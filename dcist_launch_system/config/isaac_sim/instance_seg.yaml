@@ -28,5 +28,11 @@ model:
       - trash
       - clothes
       - ball
+      - pallet
+      - forklift
+      - shelf
+      - barrel
+      - ladder
+      - fire extinguisher
     confidence_threshold: 0.3
     min_segmentation_size: 0

@@ -25,3 +25,15 @@ label_names:
   - {label: 22, name: trash}
   - {label: 23, name: clothes}
   - {label: 24, name: ball}
+  # Warehouse-prop classes (isaac_sim mapping harness, 2026-07-18). Indices
+  # must match experiment_overrides/isaac_sim/instance_seg_overlay.yaml's
+  # positional text_prompt ("fire extinguisher" prompt -> fire_extinguisher
+  # name per the no-spaces convention). Only the isaac_sim experiment's
+  # instance_seg config emits these labels; other experiments never produce
+  # ids > 24, so appending here is backward-compatible.
+  - {label: 25, name: pallet}
+  - {label: 26, name: forklift}
+  - {label: 27, name: shelf}
+  - {label: 28, name: barrel}
+  - {label: 29, name: ladder}
+  - {label: 30, name: fire_extinguisher}

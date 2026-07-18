@@ -39,4 +39,10 @@
     # only reached for a class NOT pre-registered in ["","bag","cone","pipe"]).
     # With the synonym, `box` resolves to the already-registered `cement bag`, so
     # that append path is never taken. See task-12-report.md.
-    detector_class_synonyms: "{'bag': 'cement bag', 'pipe': 'gray pipe', 'box': 'cement bag'}"
+    # Warehouse-prop entries (2026-07-18 mapping harness): DSG labels from the
+    # extended instance_seg labelspace (25-30) mapped to their YOLOE prompts.
+    # Plain prompts are evidence-based (probe_report_2026-07.md hit table);
+    # fire_extinguisher's underscore label maps back to the two-word prompt.
+    # Every value is registered at detector init from this dict, so the
+    # detection_utils set_classes crash path stays untaken.
+    detector_class_synonyms: "{'bag': 'cement bag', 'pipe': 'gray pipe', 'box': 'cement bag', 'pallet': 'pallet', 'forklift': 'forklift', 'shelf': 'shelf', 'barrel': 'barrel', 'ladder': 'ladder', 'fire_extinguisher': 'fire extinguisher'}"
