@@ -368,3 +368,105 @@ Per-scenario adders (from Tasks 5/8): base Isaac footprint for a trivial stage
 ~1.2–1.6 GB; **+184 MiB per additional ZED camera** (budget per extra robot).
 semantic_inference/YOLOE do a one-time TensorRT engine (re)build (~140 s) if the
 cached engine is from a different TensorRT version.
+
+---
+
+## 11. Mapping harness — scenario → saved map + ground truth
+
+One command turns a scenario YAML into `~/adt4_output/<map_name>/` (same layout
+as real-robot maps) plus a Replicator GT bundle. Spec:
+`docs/superpowers/specs/2026-07-18-isaac-sim-mapping-harness-design.md`.
+
+### Pipeline
+
+1. **Probe a new environment** (once per scene; Isaac venv):
+   `PYTHONPATH=dcist_sim/dcist_sim_isaac python -m
+   dcist_sim_isaac.scripts.probe_environments --out <dir>` — loads each
+   candidate Nucleus scene in a subprocess with a hard timeout (hospital hangs
+   like Rivermark did), renders at robot height, dumps a prim tree per scene.
+   Then `probe_detect.py` (spark_env) runs YOLOE over the renders → per-class
+   hit table appended to `report.md`. 2026-07 results:
+   `dcist_sim/docs/probe_report_2026-07.md` (winner: full_warehouse).
+2. **Author the scenario**: wrapper USD via `build_env_wrapper.py --url <cdn>
+   --out dcist_sim/scenarios/assets/environments/<name>.usd`; scenario YAML
+   gets `map_name:`, `tour:` waypoints (`{x, y, yaw, dwell_s}` — author from
+   the probe renders; dwell lets the rate-gated perception catch up), and
+   `gt:` (modalities, rate, `semantics:` prim-path-regex→class rules from the
+   probe's `prims.txt`). NOTE: full_warehouse ships native semantics tags
+   (forklift/rack/crate/...) — rules only fill gaps; a rule matching a
+   natively-tagged prim yields a merged class like "rack,shelf".
+3. **Build the map** (spark_env venv, ROS + ws sourced, `PYTHONPATH` appended):
+
+   ```bash
+   PYTHONPATH=dcist_sim/dcist_sim_isaac \
+   ~/environments/dcist/spark_env/bin/python \
+       dcist_sim/dcist_sim_isaac/scripts/build_map.py \
+       --scenario dcist_sim/scenarios/warehouse_tour.yaml --orchestrate
+   ```
+
+   `--orchestrate` starts Isaac + the `spot_isaac-isaac_sim` run-adt4 session
+   (detached, socket `t4map`) and tears them down; `--attach` drives an
+   already-running stack and leaves hydra alive. Exit codes: 0 map verified;
+   2 map failed (tour skips > 30 % or sanity thresholds); 3 map OK but GT
+   missing. Small scenes: `--min-places N` lowers the places floor.
+4. **Outputs**: `dsg_with_mesh.json` + `mesh.ply` (hydra SHUTDOWN save — the
+   harness `pkill -INT`s hydra and collects; never trust dsg_saver alone),
+   `provenance.yaml` (scenario inline + git SHAs + tour stats),
+   `trajectory.jsonl` (10 Hz odom), `gt/` (frames + `manifest.jsonl`),
+   `raw/` (full run-adt4 output incl. `isaac.log`).
+5. **GT replay** (if live capture dragged the sim, or to re-capture with
+   different modalities): same scenario, no ROS:
+
+   ```bash
+   python -m dcist_sim_isaac.sim_app --scenario <yaml> --headless \
+       --gt-replay ~/adt4_output/<map>/trajectory.jsonl --gt-out <dir>
+   ```
+
+### Hard-won integration facts (each cost a failed run)
+
+- **Append `:$PYTHONPATH`**, never clobber (drops rclpy — §2 note applies to
+  the harness's Isaac subprocess too; build_map handles it).
+- **run-adt4 must start before waiting on any topic**: under rmw_zenoh the
+  router lives inside the session; waiting for `/sim/status` first deadlocks.
+- **The executor's action topic is remapped**: publish `ActionSequenceMsg` to
+  `/{robot}/omniplanner_node/compiled_plan_out`, not
+  `~/action_sequence_subscriber` (master.launch.yaml remap).
+- **Arrival tolerance must exceed the executor's `goal_tolerance` (1.0 m)**:
+  the follower stops up to that far from the goal; build_map defaults to
+  1.5 m.
+- **Replicator annotators need warm-up**: first `get_data()` calls return
+  empty payloads post-attach; gt_capture skips them (doesn't consume the
+  rate slot).
+- Detector classes for native props: labels 25-30 in
+  `labelspaces/instance_seg.yaml` + `experiment_overrides/isaac_sim/
+  instance_seg_overlay.yaml` (the composition APPENDS overlay list entries —
+  the overlay holds only the new classes) + executor synonyms. Regenerate via
+  `dcist_launch_system/scripts/generate_configs.sh`.
+
+### PDDL smoke against a mapping-harness scene (verified 2026-07-18)
+
+`scripts/warehouse_pddl_smoke.zsh` wraps the full acceptance flow (Isaac +
+stack + omniplanner + `e2e_smoke.py`) and exits 0 on A/B/C PASS. Facts it
+encodes (each one cost a failed run):
+
+- **Manual omniplanner launch needs env**: `ADT4_OUTPUT_DIR` (launch dies
+  without it) and `config=isaac_sim` (`omniplanner_plugins.yaml` resolves
+  `${config}` via `os.path.expandvars`). run-adt4 windows get both for free.
+- **e2e needs a warm-up drive**: hydra creates NO 2D places while the robot
+  is stationary (probed: 300 s → objects grow, places stay 0), and
+  `e2e_smoke` requires places>=2 up front. Drive the robot once (~6 m) before
+  running it; places appear within seconds of motion.
+- **A Follow path must END > `goal_tolerance` (1.0 m) from the robot**: the
+  follower checks the final pose first, so an out-and-back path ending near
+  the start returns success instantly without moving. One-way warm-up goals
+  only (e2e's `reset_scenario` teleports the robot home anyway).
+- **Publish + verify**: check `get_subscription_count() >= 1` before trusting
+  a publish (rmw_zenoh matching), and end helper scripts with `os._exit()` —
+  normal interpreter exit aborts (SIGABRT) in rmw_zenoh teardown when a spin
+  thread is alive.
+- **run-adt4 wipes its `-o` dir** at session start — never point your own
+  log redirects inside it.
+- One graph note: at least one graspable scenario object must sit in the
+  robot's spawn view (`warehouse_tour.yaml`'s cone_0) or the e2e prerequisite
+  (objects>=1) can't be met before motion; the cement-bag asset is NOT
+  detectable indoors (0 YOLOE hits at any conf in every warehouse probe).

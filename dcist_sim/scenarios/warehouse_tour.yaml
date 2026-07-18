@@ -23,11 +23,15 @@ objects:
     usd: assets/objects/duffel_bag.usd
     label: bag
     pose: {x: -1.5, y: 5.0, z: 0.0, yaw: 0.52}
-  # Open floor south of spawn; visible from wp5 at ~2.7 m.
+  # In the spawn view (robot spawns facing +Y), 4.4 m out: e2e_smoke's
+  # prerequisite needs >=1 DSG object while the robot is still stationary at
+  # spawn (the P1 field scenario placed all objects in the spawn view for
+  # exactly this reason), and cone is the reliably-detected class indoors.
+  # Also near dwelling wp0, so the mapping tour sees it early.
   - id: cone_0
     usd: assets/objects/cone.usd
     label: cone
-    pose: {x: 1.0, y: -2.5, z: 0.0, yaw: 0.0}
+    pose: {x: 1.2, y: 4.2, z: 0.0, yaw: 0.0}
   # Rack-aisle edge; visible from wp3/wp4 while driving the aisle.
   - id: pipe_0
     usd: assets/objects/pipe.usd
