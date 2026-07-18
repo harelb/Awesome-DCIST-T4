@@ -214,3 +214,29 @@ After re-downloading `objects/boulder_01/` (or any other referenced
 asset), re-run `build_field_a_assets.py` (previous section) to regenerate
 `field_a.usd` and the object wrappers — they aren't downloaded, so they
 don't need re-fetching, only the referenced content does.
+
+## Mapping harness (2026-07-18): warehouse environment wrapper
+
+- **`environments/warehouse_a.usd`** — thin wrapper (same pattern as
+  `objects/cone.usd`/`objects/pipe.usd` above: `prepend references` a fixed
+  Nucleus CDN URL, no local copy) around
+  `{ASSET_ROOT}/Isaac/Environments/Simple_Warehouse/full_warehouse.usd`,
+  chosen by the environment probe gate — see
+  `dcist_sim/docs/probe_report_2026-07.md` for the candidate matrix and
+  decision. License: NVIDIA Omniverse asset license (same as the cone/pipe
+  entry). **Generated, not hand-authored** — regenerate with:
+
+  ```bash
+  source ~/environments/dcist/isaac_sim/bin/activate
+  cd ~/dcist_ws/src/awesome_dcist_t4
+  PYTHONPATH=dcist_sim/dcist_sim_isaac \
+    python -m dcist_sim_isaac.scripts.build_env_wrapper \
+    --url "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0/Isaac/Environments/Simple_Warehouse/full_warehouse.usd" \
+    --out dcist_sim/scenarios/assets/environments/warehouse_a.usd
+  ```
+
+  (Authoring emits two harmless "Could not open asset" warnings: plain pxr
+  outside the Isaac app has no https resolver. The wrapper composes fine
+  inside Isaac, which is what `sim_app --smoke` verifies.) This is the second
+  place — after `objects/{cone,pipe}.usd` — that must change if
+  `{ASSET_ROOT}` ever moves.
