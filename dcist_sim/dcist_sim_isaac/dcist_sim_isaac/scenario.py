@@ -46,6 +46,14 @@ class ObjectSpec:
 
 
 @dataclass
+class TourWaypoint:
+    x: float
+    y: float
+    yaw: float  # radians (not degrees) -- rotation about world +Z
+    dwell_s: float = 0.0
+
+
+@dataclass
 class Scenario:
     environment_usd: str
     robots: list = field(default_factory=list)
@@ -54,6 +62,10 @@ class Scenario:
     # YAML (top-level `grasp_radius:` key), defaulting to
     # DEFAULT_GRASP_RADIUS.
     grasp_radius: float = DEFAULT_GRASP_RADIUS
+    # Mapping-harness v2 (2026-07-18 spec): coverage waypoints build_map.py
+    # drives, and the ~/adt4_output/<map_name>/ output directory name.
+    tour: list = field(default_factory=list)
+    map_name: str = ""
     # Directory the scenario YAML lives in. Asset paths (environment_usd,
     # ObjectSpec.usd) are stored exactly as authored (relative to this
     # directory, matching the spec's `interfaces` contract) rather than
@@ -145,10 +157,27 @@ def load_scenario(path) -> Scenario:
 
     grasp_radius = float(data.get("grasp_radius", DEFAULT_GRASP_RADIUS))
 
+    tour = []
+    for i, w in enumerate(data.get("tour", [])):
+        context = f"tour[{i}]"
+        dwell_s = float(w.get("dwell_s", 0.0))
+        if dwell_s < 0:
+            raise ValueError(f"negative dwell_s in {context}")
+        tour.append(
+            TourWaypoint(
+                x=float(_require(w, "x", context)),
+                y=float(_require(w, "y", context)),
+                yaw=float(_require(w, "yaw", context)),
+                dwell_s=dwell_s,
+            )
+        )
+
     return Scenario(
         environment_usd=environment_usd,
         robots=robots,
         objects=objects,
         grasp_radius=grasp_radius,
+        tour=tour,
+        map_name=str(data.get("map_name", "")),
         base_dir=base_dir,
     )

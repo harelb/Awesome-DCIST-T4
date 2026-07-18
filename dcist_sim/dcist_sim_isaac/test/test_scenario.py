@@ -71,3 +71,44 @@ def test_rejects_duplicate_object_ids(tmp_path):
     p.write_text(bad)
     with pytest.raises(ValueError, match="duplicate"):
         load_scenario(p)
+
+
+def test_tour_and_map_name_default_empty(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML)
+    s = load_scenario(p)
+    assert s.tour == []
+    assert s.map_name == ""
+
+
+def test_tour_parses_waypoints(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(
+        YAML
+        + textwrap.dedent("""
+            map_name: warehouse_sim_a
+            tour:
+              - {x: 4.0, y: 0.0, yaw: 0.0, dwell_s: 2.0}
+              - {x: 8.0, y: 3.5, yaw: 1.57}
+        """)
+    )
+    s = load_scenario(p)
+    assert s.map_name == "warehouse_sim_a"
+    assert len(s.tour) == 2
+    assert s.tour[0].dwell_s == 2.0
+    assert s.tour[1].dwell_s == 0.0  # default
+    assert s.tour[1].yaw == 1.57
+
+
+def test_tour_rejects_missing_coord(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "\ntour:\n  - {x: 4.0, yaw: 0.0}\n")
+    with pytest.raises(ValueError, match="tour"):
+        load_scenario(p)
+
+
+def test_tour_rejects_negative_dwell(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "\ntour:\n  - {x: 4.0, y: 0.0, yaw: 0.0, dwell_s: -1.0}\n")
+    with pytest.raises(ValueError, match="dwell_s"):
+        load_scenario(p)
