@@ -1,0 +1,33 @@
+# Mapping-harness regression fixture: field_smoke.yaml (see its header for
+# object-placement rationale) + a short tour + map_name + a minimal gt block,
+# used by build_map.py's known-good-scene regression (plan Task 10) and the
+# --gt-replay regression (plan Task 11). Kept deliberately small/fast.
+map_name: field_sim_check
+environment:
+  usd: assets/environments/field_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.52, yaw: 0.0}
+    locomotion: kinematic
+    grasping: magic
+objects:
+  - id: bag_0
+    usd: assets/objects/duffel_bag.usd
+    label: bag
+    pose: {x: 5.0, y: 0.6, z: 0.0, yaw: 0.52}
+  - id: cone_0
+    usd: assets/objects/cone.usd
+    label: cone
+    pose: {x: 4.0, y: 1.6, z: 0.0, yaw: 0.0}
+  - id: pipe_0
+    usd: assets/objects/pipe.usd
+    label: pipe
+    pose: {x: 5.6, y: -1.6, z: 0.0, yaw: 1.57}
+grasp_radius: 1.5
+tour:
+  - {x: 3.0, y: 0.0, yaw: 0.0, dwell_s: 2.0}
+  - {x: 5.0, y: 1.0, yaw: 0.5, dwell_s: 2.0}
+  - {x: 0.0, y: 0.0, yaw: 3.14}
+gt:
+  rate_hz: 1.0
+  modalities: [rgb, semantic]
