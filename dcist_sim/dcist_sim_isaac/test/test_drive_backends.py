@@ -1,8 +1,11 @@
 import math
+
+import numpy as np
 import pytest
 
 from dcist_sim_isaac.drive_backends import (
-    kinematic_target_step, kinematic_velocity_step, wrap_angle)
+    assemble_spot_obs, fallen, kinematic_target_step, kinematic_velocity_step,
+    sanitize_action, wrap_angle)
 
 
 def test_velocity_step_fakespot_parity():
@@ -35,3 +38,84 @@ def test_target_step_caps_speed():
     assert pose[0] == pytest.approx(1.0)        # capped at MAX 1.0 m/s
     pose = kinematic_target_step((0.9, 0, 0.52, 0), (1.0, 0.0, 0.0), dt=1.0)
     assert pose[0] == pytest.approx(1.0)        # doesn't overshoot
+
+
+# ---------------------------------------------------------------------------
+# Policy-backend pure helpers (Task 8). The obs-layout test is a deliberate
+# double-entry against policy_spike_report.md §3 -- if either drifts, one of
+# them breaks. All constants below are the report's documented values.
+# ---------------------------------------------------------------------------
+
+def test_assemble_spot_obs_layout():
+    # Distinct, non-overlapping fill per segment so a mis-placed slice can't
+    # accidentally pass (each block's values are unique to that block).
+    lin = np.array([1.0, 1.1, 1.2])
+    ang = np.array([2.0, 2.1, 2.2])
+    grav = np.array([3.0, 3.1, 3.2])
+    cmd = np.array([4.0, 4.1, 4.2])
+    joint_pos = np.arange(10.0, 22.0)          # 12 values 10..21
+    default_pos = np.full(12, 5.0)
+    joint_vel = np.arange(30.0, 42.0)          # 12 values 30..41
+    prev_action = np.arange(50.0, 62.0)        # 12 values 50..61
+
+    obs = assemble_spot_obs(lin, ang, grav, cmd, joint_pos, joint_vel,
+                            default_pos, prev_action)
+
+    assert obs.shape == (48,)
+    # §3 layout, slice by slice
+    np.testing.assert_allclose(obs[0:3], lin)
+    np.testing.assert_allclose(obs[3:6], ang)
+    np.testing.assert_allclose(obs[6:9], grav)
+    np.testing.assert_allclose(obs[9:12], cmd)
+    # joint position ERROR from default
+    np.testing.assert_allclose(obs[12:24], joint_pos - default_pos)
+    # joint velocity error from default_vel (all zeros) == joint_vel itself
+    np.testing.assert_allclose(obs[24:36], joint_vel)
+    # previous action
+    np.testing.assert_allclose(obs[36:48], prev_action)
+
+
+def test_fallen_upright_standing():
+    # identity quat (perfectly upright), nominal standing height -> not fallen
+    assert fallen((1.0, 0.0, 0.0, 0.0), 0.55) is False
+
+
+def test_fallen_tilted_over():
+    # 70 deg roll about body-x: quat (cos(0.61), sin(0.61), 0, 0). up_z =
+    # 1 - 2*sin(0.61)^2 ~= 0.34 < tilt_cos_min(0.5) -> fallen.
+    q = (math.cos(0.61), math.sin(0.61), 0.0, 0.0)
+    assert fallen(q, 0.55) is True
+
+
+def test_fallen_sunk_below_z():
+    # upright but base sunk to z=0.2 < z_min(0.3) -> fallen
+    assert fallen((1.0, 0.0, 0.0, 0.0), 0.2) is True
+
+
+def test_sanitize_action_passthrough():
+    prev = np.zeros(12)
+    action = np.arange(12.0)
+    out, tripped = sanitize_action(action, prev)
+    assert tripped is False
+    np.testing.assert_allclose(out, action)
+
+
+def test_sanitize_action_nan_falls_back():
+    prev = np.arange(12.0)
+    action = np.arange(12.0)
+    action[3] = float("nan")
+    out, tripped = sanitize_action(action, prev)
+    assert tripped is True
+    np.testing.assert_allclose(out, prev)       # previous action returned
+    # returned array must be a copy, not an alias of prev
+    out[0] = 999.0
+    assert prev[0] == 0.0
+
+
+def test_sanitize_action_inf_falls_back():
+    prev = np.ones(12)
+    action = np.zeros(12)
+    action[7] = float("inf")
+    out, tripped = sanitize_action(action, prev)
+    assert tripped is True
+    np.testing.assert_allclose(out, prev)

@@ -196,7 +196,19 @@ def build_stage(scenario) -> SimStage:
     import omni.usd
     from pxr import UsdLux
 
-    world = World()
+    # Task 8 (P4): physics-mode scenarios must run the World at the pretrained
+    # policy's native rate (500 Hz physics / 60 Hz render). At any other
+    # physics_dt the policy's decimation (counted in physics steps, not
+    # elapsed time) silently drifts off its 50 Hz training rate and the walk
+    # destabilises (policy_spike_report.md §6). Kinematic-only scenarios keep
+    # the bare `World()` (defaults) -- bit-for-bit pre-Task-8 behavior.
+    if scenario.physics_mode:
+        from dcist_sim_isaac.drive_backends import (
+            POLICY_PHYSICS_DT, POLICY_RENDERING_DT)
+        world = World(physics_dt=POLICY_PHYSICS_DT,
+                      rendering_dt=POLICY_RENDERING_DT)
+    else:
+        world = World()
     world.scene.add_default_ground_plane()
 
     # Distant light so the scene isn't pitch black for any future
@@ -233,9 +245,14 @@ def build_stage(scenario) -> SimStage:
 
     # Camera.initialize() (Task 8) needs a valid physics sim view, which
     # only exists after world.reset() -- see spot_robot.py's comment at
-    # the SimZedCamera construction site.
+    # the SimZedCamera construction site. Task 8 (P4): policy robots' drive
+    # backend is initialized here too (articulation view + physics handles +
+    # the walking policy's physics callback only exist post-reset); kinematic
+    # robots have drive_backend None and are unaffected.
     for robot in robots:
         robot.camera.initialize()
+        if robot.drive_backend is not None:
+            robot.drive_backend.initialize(world)
 
     # Costmap bake (Task 6): must run AFTER world.reset() -- the PhysX
     # scene query interface needs an initialized physics scene (see

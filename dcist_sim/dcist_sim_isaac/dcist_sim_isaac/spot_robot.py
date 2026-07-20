@@ -155,17 +155,41 @@ class SpotSimRobot:
         self.cmd_vel_angular = np.zeros(3)
         self.target_pose = None  # (x, y, yaw) in odom frame, set via set_target_pose
 
+        # Task 8 (P4): policy-driven locomotion. For `locomotion: policy`
+        # robots the base pose is owned by PhysX (driven by the pretrained
+        # walking policy), so we attach a `PolicyDriveBackend` and route
+        # step/teleport/commanding through it -- crucially step() then reads
+        # the pose FROM the articulation and NEVER calls _write_pose_to_stage()
+        # (that USD write would fight PhysX every frame -- Task 6 report). The
+        # backend is Isaac-free at construction; `stage.build_stage` calls
+        # `drive_backend.initialize(world)` after `world.reset()`, next to
+        # `camera.initialize()`. `locomotion: kinematic` keeps drive_backend
+        # None and every path below is bit-for-bit the pre-Task-8 behavior.
+        self.drive_backend = None
+        if spec.locomotion == "policy":
+            from dcist_sim_isaac.drive_backends import PolicyDriveBackend
+            self.drive_backend = PolicyDriveBackend(self.prim_path, spec)
+
     # -- setters called from ros_bridge.py's subscription callbacks --------
 
     def set_cmd_vel(self, vx: float, vy: float, wz: float) -> None:
         """A fresh cmd_vel always switches back to velocity mode (brief item 8)."""
         self._mode = "velocity"
+        if self.drive_backend is not None:
+            self.drive_backend.set_command(vx, vy, wz)
+            return
         self.cmd_vel_linear[:] = (vx, vy, 0.0)
         self.cmd_vel_angular[:] = (0.0, 0.0, wz)
 
     def set_target_pose(self, x: float, y: float, yaw: float) -> None:
         self._mode = "target"
         self.target_pose = (x, y, yaw)
+        if self.drive_backend is not None:
+            # Task 8: policy robots have no go-to-pose controller yet -- Task 9
+            # lands the planner that turns a target into cmd_vel. Until then,
+            # halt (zero command) so a set_target_pose call can't leave a stale
+            # velocity running. Documented velocity-halt fallback.
+            self.drive_backend.halt()
 
     def teleport(self, x: float, y: float, z: float, yaw: float) -> None:
         """Instantaneously set the robot's pose (Task 9 `Teleport` service
@@ -176,20 +200,45 @@ class SpotSimRobot:
         slew the robot away again on the next `step()`.
         """
         self._mode = "velocity"
+        self.target_pose = None
+        if self.drive_backend is not None:
+            # Policy robot: re-seat the PhysX articulation standing at (x,y,yaw)
+            # (default leg pose, zeroed velocities) rather than a kinematic USD
+            # write. z is owned by the backend's standing height, not the arg.
+            self.drive_backend.reset_standing(x, y, yaw)
+            self.base_pose[:] = self.drive_backend.base_pose_xyzyaw()
+            return
         self.cmd_vel_linear[:] = 0.0
         self.cmd_vel_angular[:] = 0.0
-        self.target_pose = None
         self.base_pose[:] = (x, y, z, yaw)
         self._write_pose_to_stage()
 
     # -- simulation step -----------------------------------------------------
 
     def step(self, dt: float) -> None:
+        if self.drive_backend is not None:
+            # Policy robot: PhysX + the policy's physics callback own the base
+            # pose. We must NOT write the USD xform here (it would fight PhysX
+            # every frame -- Task 6 report). Just run the (Task-9) planner hook
+            # and mirror the articulation's pose into base_pose for the ROS
+            # bridge's TF path.
+            self._step_physics(dt)
+            self.base_pose[:] = self.drive_backend.base_pose_xyzyaw()
+            return
         if self._mode == "velocity":
             self._step_velocity(dt)
         else:
             self._step_target(dt)
         self._write_pose_to_stage()
+
+    def _step_physics(self, dt: float) -> None:
+        """Per-frame hook for policy robots (Task 8 stub). Velocity commands
+        already flow to the policy the instant `set_cmd_vel` calls
+        `drive_backend.set_command`, and the policy runs on its own physics
+        callback, so there is nothing to do here yet. Task 9 fills this with
+        the go-to-target planner (target pose -> cmd_vel) and nav status.
+        """
+        return
 
     def _step_velocity(self, dt: float) -> None:
         self.base_pose[:] = kinematic_velocity_step(
