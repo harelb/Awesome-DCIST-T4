@@ -479,8 +479,9 @@ Phase 4 adds a **physics tier**: a robot with `locomotion: policy` (a PhysX
 walking-policy Spot, Tasks 8-10) and/or `grasping: physics` (the G1 IK-reach
 grasp backend, Tasks 12-13). This section is the delta from §2 (Phase-1
 kinematic bring-up), plus the physics-mode semantics and the **A1 acceptance
-status** (see 12.9 — A1 is currently BLOCKED on a perception defect, with the
-evidence + root cause recorded there).
+status** (see 12.9 — A nav PASSES and the physics object-localization defect is
+FIXED (12.7); B/C remain blocked on locomotion precision, evidence + root cause
+recorded there).
 
 Scenario: `dcist_sim/scenarios/field_smoke_physics.yaml` (robot
 `locomotion: policy`, `grasping: physics`; objects spawn DYNAMIC, a costmap is
@@ -604,36 +605,53 @@ colliders to the arm/finger links, then retune `CONTACT_PRESS_M` /
 `CONTACT_POLL_S` (see `.superpowers/sdd/task-14-report.md`). G1 is the shipped
 tier; do NOT use G2 on any default path.
 
-### 12.7 Physics-mode object localization — KNOWN DEFECT (blocks A1 B/C)
+### 12.7 Physics-mode object localization — FRAME DEFECT FOUND + FIXED (Task 15b)
 
-Under physics locomotion the DSG localizes scenario objects with a large,
-**systematic** error (measured ~**2.8 m** for the field_smoke duffel, and up to
-~11-13 m for a spurious node), consistent run-to-run and across viewpoints.
-Kinematic mode (Phase 1 / mapping harness) localizes accurately and e2e passes;
-only the physics tier is affected. Because the perceived object node is ~2.8 m
-off the real object, the rearrange executor navigates to the wrong standoff and
-the G1 grasp fires **out of reach** (executor log: `Detection is valid` ->
-`GRASP FAILED` / `MANIP_STATE_GRASP_FAILED`; grasp backend: nearest graspable
-> `reach_m`). Detection itself succeeds; navigation-to-the-node is what fails.
+**Symptom (Task 15):** under physics locomotion the DSG localized scenario
+objects with a large **systematic** error (~**2.8 m** for the field_smoke
+duffel), consistent run-to-run and across viewpoints; kinematic mode localized
+fine. This blocked the pick (executor `GRASP FAILED`, nearest graspable
+> `reach_m`).
 
-Ruled out during Task 15 (see task-15-report.md for the full log):
-- **Viewing baseline** — a deliberate head-on approach made localization *no
-  better* (still scattered 4-13 m).
-- **Body-tilt in the odom->body TF** — the dynamic TF publishes yaw-only while
-  the walking body rolls/pitches ~4-5 deg; publishing the true body quaternion
-  is *more correct* but changed the localization error by < 0.1 m (2.85 -> 2.81
-  m), so tilt is NOT the dominant term. (This correctness fix was prototyped and
-  reverted; it is a recommended-but-insufficient follow-up, not a Task-15
-  deliverable.)
+**Root cause (Task 15b, measured):** the ZED camera prim was mounted as a child
+of the robot ROOT prim `/World/{name}`. In the *kinematic* tier `step()`
+rewrites that root xform to the body pose every frame
+(`_write_pose_to_stage`), so a root-child camera tracks the body. In the
+*policy/physics* tier `step()` NEVER writes the root xform — PhysX owns the
+pose and moves the `base` LINK, while the top-level root prim stays **frozen at
+the spawn transform**. So the RENDERED camera viewpoint was pinned near spawn
+while the TF chain (`odom->body`, composed from the base link) placed the
+optical frame at the walking body. The two disagree by the full body
+displacement, back-projecting depth pixels to systematically wrong world
+coordinates — the error grows with distance travelled and is physics-only.
 
-Most likely remaining cause: an **image <-> TF timestamp coupling under
-`use_sim_time`/`/clock`** (the offset tracks the direction the robot drove), or
-a depth/extrinsic bias specific to the PhysX camera path. This is a Task-7/8
-(sim-time + camera integration) perception defect, outside Task 15's
-scenario/config/docs scope. Note the G1 grasp *mechanism* is sound: Task 13's
-`grasp_smoke.py` drives directly to ~0.7 m of `cone_0` (bypassing the DSG) and
-grasps + places successfully — it is only the DSG-position-driven navigation
-that the localization error breaks.
+GPU probe (field_smoke_physics, settled): the camera prim world pose equalled
+`root(full) o extrinsic` to **0.0000 m** while the root prim read bit-exactly
+`[0, 0, 0.55]` (spawn) and the `base` link had walked to its settled pose — the
+smoking gun.
+
+**Fix (policy robots only; kinematic tier bit-for-bit unchanged):**
+1. Mount the camera under the **`base` link** prim (`/World/{name}/base`) for
+   `locomotion: policy` (kinematic keeps the root mount). A base-link child
+   reproduces `base(full) o extrinsic` to 0.0000 m, i.e. the camera now tracks
+   the PhysX body. Gated on `spec.locomotion`.
+2. Publish the **full base-link quaternion** on `odom->body` for policy robots
+   (`PolicyDriveBackend.body_quat_wxyz`) — the base-link-mounted ZED rides the
+   body roll/pitch, so a yaw-only TF would reproject depth through a level frame
+   that disagrees with the tilted rendered viewpoint. Kinematic robots
+   (`drive_backend is None`) keep yaw-only, byte-identical.
+
+**Result:** physics object-localization error **2.8 m -> 0.01-0.13 m** (live
+DSG, field_smoke_physics: bag_0 nodes measured 0.01/0.09/0.13 m from GT), well
+under the 0.5 m bar. Frame consistency between the rendered camera and the TF
+chain is restored. Future debuggers: under PhysX only rigid-body/articulation
+LINK prims move; anything parented to the static top-level asset Xform is frozen
+at spawn — mount sensors on the driven link, not the reference Xform.
+
+The G1 grasp *mechanism* is sound (Task 13 `grasp_smoke.py` drives to ~0.7 m and
+grasps); with the frame fix the DSG object is now accurate enough to plan a
+correct standoff. The remaining A1 pick blocker is locomotion precision, not
+perception — see 12.9.
 
 ### 12.8 Scope cut
 
@@ -642,7 +660,7 @@ backend, hence no arm) FAILS CLEANLY: `PhysicsGraspBackend.grasp` returns
 `failed` "physics grasping requires locomotion: policy in this phase". Verified
 by unit test; not a crash.
 
-### 12.9 A1 acceptance status — BLOCKED (B/C), with evidence
+### 12.9 A1 acceptance status — A PASS; localization FIXED; B/C blocked on locomotion precision
 
 Reproduce (fresh GPU; Isaac + `spot_isaac -s` stack + omniplanner
 `sim_time:=true`, one warm-up drive so places>=2, then):
@@ -650,19 +668,36 @@ Reproduce (fresh GPU; Isaac + `spot_isaac -s` stack + omniplanner
 ~/environments/dcist/spark_env/bin/python \
     dcist_sim/dcist_sim_isaac/scripts/e2e_smoke.py --robot hilbert
 ```
-Latest run (field_smoke_physics, TF fix reverted — result identical either way):
+Latest runs (field_smoke_physics, with the 12.7 frame fix in place):
 ```
-[e2e] STAGE A: goto 't(1)' at (-0.28, 13.01) (start (0.07, 0.01))
-[e2e] PASS A: displacement 3.10 m (need > 3.0)
-[e2e] STAGE B: rearrange goal '(object-in-place o0 t7)' (obj@(6.67, 2.73) -> place@(-7.29, 8.49))
+[e2e] STAGE A: goto 't(1)' at (-1.48, 13.02) (start (0.01, -0.01))
+[e2e] PASS A: displacement 3.20 m (need > 3.0)
+[e2e] STAGE B: rearrange goal '(object-in-place o1 t7)' (obj@(5.91, 0.9) -> place@(-7.43, 8.84))
 [e2e] FAIL B: held object = None (within 120 s)
 [e2e] FAIL C: no object was held, cannot verify place
 [e2e] OVERALL: FAIL
 ```
-- **A (nav) PASSES** under physics — the policy walk + local planner drive the
-  base > 3 m reliably (3.10-3.21 m across runs).
-- **B (pick) / C (place) BLOCKED** by the 12.7 localization defect: the object
-  node is ~2.8 m off, the executor stops out of arm reach, and the grasp fails
-  cleanly (`GRASP FAILED`, never `succeeded`). No e2e threshold was weakened.
-  A1 cannot pass until the physics-mode perception mislocalization (12.7) is
-  fixed at the Task-7/8 layer.
+- **A (nav) PASSES** under physics — 3.20-3.25 m across runs.
+- **Object localization FIXED** (12.7): the live DSG now places the duffel
+  0.01-0.13 m from GT (was 2.8 m). This is the root cause that was blocking the
+  pick, now resolved and measured under the 0.5 m bar.
+- **B (pick) / C (place) still fail**, but NO LONGER on perception — the blocker
+  is now **locomotion precision**, a separate pre-existing issue (Task 8 walk
+  speed; §12.5 reach envelope):
+  1. The pretrained flat-terrain policy walks slowly and imprecisely (~0.1-0.4
+     m/s effective vs the 0.6 m/s command; base wobbles ±0.3-0.5 m holding
+     station). `e2e_smoke` STAGE A drives the base to a random far `t`-node
+     (10-40 m from the object); STAGE B then needs the robot to walk back and
+     pick within the frozen 120 s window — often not physically reachable at
+     policy speed (measured: robot still en route at timeout).
+  2. Even when the robot reaches the object waypoint, the base lands at the arm
+     **reach margin**: the rearrange sends the robot to the object node with ~no
+     standoff and `reach_m=0.984 m` is razor-thin — a ~0.9 m residual (stale
+     estimate) or the policy's stop wobble tips it out of reach (`GRASP FAILED`).
+  3. Occasional executor action-ordering (pick fires before arrival ->
+     `Detection is invalid` abort).
+
+  None of these are the camera/TF frame bug. Closing A1 fully needs
+  locomotion/approach work (faster/steadier walk, a proper pre-grasp standoff
+  inside `reach_m`, or a pick timeout matched to policy speed) — tracked as
+  follow-up, NOT a perception fix. No e2e threshold was weakened.
