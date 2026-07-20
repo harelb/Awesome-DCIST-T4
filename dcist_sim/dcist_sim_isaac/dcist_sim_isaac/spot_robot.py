@@ -166,15 +166,39 @@ class SpotSimRobot:
         # pose and step() reads it back via the drive backend.
         self._write_pose_to_stage()
 
-        # ZED-shaped camera (Task 8): a child prim of this robot's root,
-        # mounted at the composed body->optical extrinsic -- see
-        # camera.py's module docstring for where every number comes
-        # from. Constructing it here (prim + local pose only) is safe
-        # before world.reset(); `camera.initialize()` needs a valid
+        # ZED-shaped camera (Task 8): mounted at the composed body->optical
+        # extrinsic -- see camera.py's module docstring for where every
+        # number comes from. Constructing it here (prim + local pose only)
+        # is safe before world.reset(); `camera.initialize()` needs a valid
         # physics sim view and is called by stage.build_stage() *after*
         # world.reset() (Isaac Camera API requirement).
+        #
+        # MOUNT PARENT (Task 15b frame-consistency fix): the extrinsic is a
+        # body->optical transform, so the camera must be a child of whatever
+        # prim actually carries the *body* world pose each frame.
+        #  - Kinematic tier: `step()` writes `base_pose` to the ROOT prim's
+        #    xform (`_write_pose_to_stage`), so a root-child camera tracks the
+        #    body for free (the original Task-8 mount). Unchanged, bit-for-bit.
+        #  - Policy tier (physics): PhysX owns the pose and step() NEVER writes
+        #    the root xform -- it stays FROZEN at the spawn transform while the
+        #    articulation walks away. The body lives on the `base` LINK (the
+        #    same link Task 8 reads base state from, see drive_backends
+        #    BASE_LINK_NAME), which PhysX moves in world space. A root-child
+        #    camera therefore renders from a stale spawn viewpoint while the TF
+        #    chain (odom->body composed from the base link) says the camera is
+        #    at the walking body -- the two disagree by the full body
+        #    displacement, projecting depth pixels to systematically wrong
+        #    world coordinates (Task 15's ~2.8 m object-localization error,
+        #    measured & root-caused in task-15b-report.md). Mount the camera
+        #    under the `base` link so it tracks the PhysX body: verified a
+        #    base-link child reproduces `base(full) o extrinsic` to 0.0000 m.
         from dcist_sim_isaac.camera import SimZedCamera
-        self.camera = SimZedCamera(self)
+        from dcist_sim_isaac.drive_backends import BASE_LINK_NAME
+        if spec.locomotion == "policy":
+            cam_mount = f"{self.prim_path}/{BASE_LINK_NAME}"
+        else:
+            cam_mount = self.prim_path
+        self.camera = SimZedCamera(self, mount_prim_path=cam_mount)
 
         self._mode = "velocity"  # "velocity" | "target"
         self.cmd_vel_linear = np.zeros(3)

@@ -627,6 +627,19 @@ class PolicyDriveBackend:
         yaw = math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
         return float(pos[0]), float(pos[1]), float(pos[2]), yaw
 
+    def body_quat_wxyz(self):
+        """Full BODY-link world orientation, Isaac scalar-first (w, x, y, z).
+
+        Task 15b: the walking body rolls/pitches, and the base-link-mounted
+        ZED (see spot_robot.py) rides that full tilt -- so ros_bridge must
+        publish the FULL body quaternion on `odom->body` for policy robots
+        (kinematic robots keep the yaw-only quaternion, bit-for-bit) or the
+        depth reprojects through a level TF that disagrees with the tilted
+        rendered viewpoint. Returns the raw base-link quat; ros_bridge
+        converts wxyz->xyzw for the ROS message."""
+        _, quat = self._base.get_world_pose()            # BODY link, quat wxyz
+        return tuple(float(v) for v in quat)
+
     def is_fallen(self):
         pos, quat = self._base.get_world_pose()          # BODY link
         return fallen(tuple(float(v) for v in quat), float(pos[2]))

@@ -280,23 +280,30 @@ def body_to_optical_extrinsic():
 class SimZedCamera:
     """One Isaac RGB-D camera sensor, mounted at the ZED extrinsic.
 
-    Mounted as a child prim of the robot's root prim (`robot.prim_path`)
-    so that `SpotSimRobot._write_pose_to_stage()`'s per-step root-pose
-    writeback carries this camera along for free via USD parent-child
-    xform composition -- the same trick `spot_robot.py` already uses
-    for leg/arm links and the gripper (see its module docstring).
+    Mounted as a child prim of `mount_prim_path` (the prim that carries the
+    robot's *body* world pose each frame) so USD parent-child xform
+    composition carries the camera along for free. `spot_robot.py` selects
+    the mount per locomotion tier (Task 15b):
+      - kinematic: the robot ROOT prim (`robot.prim_path`), which
+        `SpotSimRobot._write_pose_to_stage()` rewrites to the body pose every
+        step -- the original Task-8 mount (default when `mount_prim_path` is
+        None). Same trick used for the leg/arm links and gripper.
+      - policy (physics): the `base` LINK prim, because the root prim is
+        never written under PhysX (it stays frozen at spawn) while the base
+        link is the one PhysX walks -- see spot_robot.py's mount comment.
     """
 
     PRIM_RELATIVE_PATH = "zed_camera"
 
-    def __init__(self, robot):
+    def __init__(self, robot, mount_prim_path=None):
         # Deferred imports: isaacsim.* only exists after SimulationApp
         # has booted (see dcist_sim_isaac/README.md).
         from isaacsim.sensors.camera import Camera
 
         self.robot = robot
         self.name = robot.spec.name
-        self.prim_path = f"{robot.prim_path}/{self.PRIM_RELATIVE_PATH}"
+        self.mount_prim_path = mount_prim_path or robot.prim_path
+        self.prim_path = f"{self.mount_prim_path}/{self.PRIM_RELATIVE_PATH}"
 
         self._camera = Camera(
             prim_path=self.prim_path,

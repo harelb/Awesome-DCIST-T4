@@ -364,7 +364,18 @@ class _RobotBridge:
 
     def publish_tf_and_odom(self, stamp) -> None:
         x, y, z, yaw = self.robot.base_pose
-        qx, qy, qz, qw = _yaw_to_quat_xyzw(yaw)
+        # Body orientation for odom->body (Task 15b). Policy (physics) robots
+        # publish the FULL base-link quaternion: the body rolls/pitches while
+        # walking and the base-link-mounted ZED (spot_robot.py) rides that
+        # tilt, so a yaw-only TF would reproject depth through a level frame
+        # that disagrees with the tilted rendered viewpoint. Kinematic robots
+        # have no drive_backend -> yaw-only, byte-identical to pre-15b.
+        # Isaac quats are scalar-first (w,x,y,z); ROS is scalar-last (x,y,z,w).
+        drive_backend = getattr(self.robot, "drive_backend", None)
+        if drive_backend is not None:
+            qw, qx, qy, qz = drive_backend.body_quat_wxyz()
+        else:
+            qx, qy, qz, qw = _yaw_to_quat_xyzw(yaw)
 
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
