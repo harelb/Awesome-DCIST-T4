@@ -1,4 +1,5 @@
 """SimSpot unit tests. Run from a ROS-sourced shell (needs bosdyn + dcist_sim_msgs)."""
+import itertools
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -14,6 +15,7 @@ from bosdyn.client.robot_command import RobotCommandBuilder
 
 import tf2_ros
 
+from dcist_sim_ros import sim_spot as sim_spot_module
 from dcist_sim_ros.sim_spot import SimCommandClient, SimManipulationClient, SimSpot
 from dcist_sim_ros.sim_spot_ros import SimSpotRos
 
@@ -197,6 +199,26 @@ def test_request_place_accepted_then_failed_keeps_holding(sim_spot):
     )
     assert sim_spot._request_place() is False
     assert sim_spot._get_holding() == "bag_0"
+
+
+def test_request_place_deadline_exceeded_returns_false(sim_spot, monkeypatch):
+    # A status that never resolves (perpetual "in_progress" -- e.g. a wedged
+    # physics servo) must not spin _request_place forever: its 60s deadline
+    # has to actually fire. Fake time.time() advancing in large 40s jumps so
+    # the deadline trips after one loop iteration without a real 60s wait;
+    # time.sleep() is stubbed out too so the (mocked) 0.1s pacing sleep
+    # between polls doesn't slow the test down either.
+    sim_spot._set_holding("bag_0")
+    sim_spot._call_blocking = MagicMock(return_value=MagicMock(success=True))
+    sim_spot._poll_grasp_status = MagicMock(return_value=("in_progress", "", ""))
+
+    fake_clock = itertools.count(0.0, 40.0)  # 0, 40, 80, 120, ... (never StopIterates)
+    monkeypatch.setattr(sim_spot_module.time, "time", lambda: next(fake_clock))
+    monkeypatch.setattr(sim_spot_module.time, "sleep", lambda seconds: None)
+
+    assert sim_spot._request_place() is False
+    assert sim_spot._get_holding() == "bag_0"  # never cleared -- no success poll ever seen
+    assert sim_spot._poll_grasp_status.call_count >= 1
 
 
 @pytest.fixture

@@ -494,6 +494,11 @@ class RosBridge:
             from dcist_sim_isaac.grasp_backends import PhysicsGraspBackend
 
             self.physics_grasp = PhysicsGraspBackend(physics_robots, registry)
+        # The `else` branch below is deliberately "anything that isn't
+        # physics is magic", not a defensive default: `scenario.py`'s loader
+        # validates `grasping in GRASPING_MODES == {"magic", "physics"}` at
+        # parse time (raises `ValueError` otherwise), so every `RobotSpec`
+        # reaching here already has one of exactly those two values.
         self._backend_for = {
             r.spec.name: (
                 self.physics_grasp if r.spec.grasping == "physics" else self.grasp_backend

@@ -122,7 +122,11 @@ class SimManipulationClient:
         # from pre-Task-11 behavior) and GraspStatus just mirrors that --
         # terminal state is always read back via
         # `manipulation_api_feedback_command`'s poll below, never cached
-        # here, so both tiers go through the exact same feedback path.
+        # here, so both tiers go through the exact same feedback path. The
+        # `(bool, str)` return value is intentionally discarded here (vs.
+        # pre-Task-11, which used it to set holding state directly) -- it's
+        # kept on `_request_grasp` only because a few call sites/tests still
+        # invoke it directly for its accepted/object_id shape.
         self.sim_spot._request_grasp()
         return self.CommandResponse()
 
