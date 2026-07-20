@@ -1,0 +1,37 @@
+# Task 13: physics-tier grasp smoke scenario. A copy of field_smoke.yaml with
+# the robot switched to `locomotion: policy` (PhysX walking policy, Task 8) +
+# `grasping: physics` (G1 IK-reach grasp, Task 13). Objects/poses are identical
+# to field_smoke.yaml -- they are within the arm's reach once the robot walks
+# adjacent (grasp_smoke.py drives to ~0.7 m of cone_0, well inside the
+# reach_m=0.984 arm reach measured from the base).
+#
+# `grasping: physics` (or `locomotion: policy`) makes this a PHYSICS-MODE
+# scenario (scenario.py `physics_mode`): the World runs at 500 Hz physics /
+# 60 Hz render (Task 6), objects spawn DYNAMIC (stage._make_dynamic) so the
+# grasp backend's set_kinematic(True/False) attach/detach is meaningful, and a
+# costmap is baked for the policy planner (Task 9).
+#
+# Spawn z=0.55 is the policy standing height (drive_backends.POLICY_STANDING_Z);
+# the robot drops onto its feet during the settle phase. See field_smoke.yaml's
+# header for the object-distance rationale (unchanged here).
+environment:
+  usd: assets/environments/field_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.55, yaw: 0.0}
+    locomotion: policy
+    grasping: physics
+objects:
+  - id: bag_0
+    usd: assets/objects/duffel_bag.usd
+    label: bag
+    pose: {x: 5.0, y: 0.6, z: 0.0, yaw: 0.52}
+  - id: cone_0
+    usd: assets/objects/cone.usd
+    label: cone
+    pose: {x: 4.0, y: 1.6, z: 0.0, yaw: 0.0}
+  - id: pipe_0
+    usd: assets/objects/pipe.usd
+    label: pipe
+    pose: {x: 5.6, y: -1.6, z: 0.0, yaw: 1.57}
+grasp_radius: 1.5
