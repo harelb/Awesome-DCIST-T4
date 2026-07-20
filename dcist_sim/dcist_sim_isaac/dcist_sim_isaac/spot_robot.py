@@ -47,6 +47,26 @@ MAX_TARGET_LINEAR_SPEED = 1.0  # m/s (task-7-brief.md Step 2)
 MAX_TARGET_ANGULAR_SPEED = 1.0  # rad/s (task-7-brief.md Step 2)
 
 
+def _terminal_recovery_reason(nan_tripped: bool, is_fallen: bool):
+    """Pure decision helper (Task 9 review fix): NaN-tripped and physically-
+    fallen are both terminal failures that `_step_physics` self-heals
+    IDENTICALLY (reset_standing at the current pose + cancel any in-flight
+    goal + nav_status='fallen' + force velocity mode) -- reset_standing
+    clears both `PolicyDriveBackend._nan_tripped` and the fallen tilt/height,
+    so a stray NaN action no longer bricks the robot until a teleport (spec
+    Sec8: halt, fail the goal, log -- log distinctly, self-heal the same
+    way). This only decides WHETHER recovery is needed and which log label
+    applies (NaN wins priority if, implausibly, both are true at once),
+    kept pure/Isaac-free so the dispatch order is unit-testable without a
+    running sim. Returns "nan", "fallen", or None (no recovery needed).
+    """
+    if nan_tripped:
+        return "nan"
+    if is_fallen:
+        return "fallen"
+    return None
+
+
 def _yaw_to_quat_wxyz(yaw: float) -> np.ndarray:
     # Isaac's isaacsim.core.prims.XFormPrim API is scalar-first (w, x, y, z)
     # -- verified via inspect.getdoc(XFormPrim.set_world_poses) on the
@@ -192,7 +212,6 @@ class SpotSimRobot:
         self._pending_goal = None
         self.nav_status = "idle"
         self._sim_t = 0.0
-        self._nan_logged = False
 
     # -- setters called from ros_bridge.py's subscription callbacks --------
 
@@ -256,7 +275,6 @@ class SpotSimRobot:
                 self._planner.cancel()
             self._pending_goal = None
             self.nav_status = "idle"
-            self._nan_logged = False
             return
         self.cmd_vel_linear[:] = 0.0
         self.cmd_vel_angular[:] = 0.0
@@ -303,55 +321,46 @@ class SpotSimRobot:
         `add_physics_callback` runs at). Order of concerns, most terminal
         first:
 
-          1. NaN-tripped policy action (`drive_backends.sanitize_action`
-             latches `PolicyDriveBackend._nan_tripped` forever once it fires,
-             cleared only by `reset_standing`/`initialize`): treat as a
-             terminal failure distinct from a fall -- halt (the backend
-             already zeroed `_cmd` internally when it tripped; `halt()` here
-             is belt-and-suspenders against a set_command race) and cancel
-             any in-flight goal, but do NOT auto-reset the robot's pose (a
-             fall gets auto-stood-up because it's a recoverable physical
-             event; a NaN action means the policy itself produced garbage,
-             which teleporting away would silently paper over). Folded into
-             the same `nav_status` value as a fall ("fallen") per the
-             produced vocabulary (idle|active|reached|blocked|stuck|fallen)
-             -- there is no 6th slot for it -- but logged distinctly (once,
-             not every frame) so it's diagnosable from the sim log.
-          2. Fell over (spec §8): fail the goal, auto-reset standing, log.
-          3. Target mode: arm any pending goal, run the planner, forward its
+          1. Terminal failure -- either a NaN-tripped policy action or a
+             physical fall (spec §8): both self-heal IDENTICALLY via
+             `_terminal_recovery_reason` (log distinctly per cause, then
+             `reset_standing` at the current pose, cancel any in-flight
+             planner goal, `nav_status = "fallen"`, force velocity mode).
+             NaN folds into fall recovery deliberately: `reset_standing`
+             already clears `PolicyDriveBackend._nan_tripped` (and
+             `_prev_action`) exactly as it clears a fall's tilt/height, so a
+             long tour self-heals from a stray NaN action the same way it
+             self-heals from a stumble, and a fresh cmd_vel/target_pose
+             afterwards isn't fighting a permanently-latched halt.
+          2. Target mode: arm any pending goal, run the planner, forward its
              (vx, vy, wz) to the drive backend (zeros on REACHED/BLOCKED/
              STUCK -- `LocalPlanner.update` returns `ZERO` for every
              non-ACTIVE status), publish `status` as `nav_status`.
-          4. Velocity mode: nothing to do -- `set_cmd_vel` already forwarded
+          3. Velocity mode: nothing to do -- `set_cmd_vel` already forwarded
              the command straight to `drive_backend.set_command`.
         """
         self._sim_t += dt
 
-        if self.drive_backend.nan_tripped():
-            if not self._nan_logged:
+        reason = _terminal_recovery_reason(
+            self.drive_backend.nan_tripped(), self.drive_backend.is_fallen())
+        if reason is not None:
+            if reason == "nan":
                 logger.error(
-                    "'%s' policy action NaN-tripped -- halting and failing "
-                    "the goal (nav_status='fallen'); pose held at last-good "
-                    "position, NOT auto-reset (see _step_physics docstring)",
+                    "'%s' policy action NaN-tripped -- self-healing via "
+                    "fall recovery (reset_standing clears the NaN latch too) "
+                    "and failing the goal (nav_status='fallen')",
                     self.spec.name,
                 )
-                self._nan_logged = True
-            self.drive_backend.halt()
-            if self._planner is not None:
-                self._planner.cancel()
-            self.nav_status = "fallen"
-            self._mode = "velocity"
-            return
-
-        if self.drive_backend.is_fallen():
-            logger.warning(
-                "'%s' FELL at (%.1f, %.1f) -- auto-reset standing",
-                self.spec.name, self.base_pose[0], self.base_pose[1],
-            )
+            else:
+                logger.warning(
+                    "'%s' FELL at (%.1f, %.1f) -- auto-reset standing",
+                    self.spec.name, self.base_pose[0], self.base_pose[1],
+                )
             x, y, _, yaw = self.drive_backend.base_pose_xyzyaw()
             self.drive_backend.reset_standing(x, y, yaw)
             if self._planner is not None:
                 self._planner.cancel()
+            self._pending_goal = None
             self.nav_status = "fallen"
             self._mode = "velocity"
             return
