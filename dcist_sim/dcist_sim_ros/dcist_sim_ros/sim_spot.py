@@ -9,6 +9,24 @@ motion and manipulation to the Isaac simulator over ROS2:
 Pose is read back from TF (odom->body), provided by SimSpotRos as get_pose_fn.
 is_fake is False on purpose: grasp_utils' fake shortcuts (forced 'bag' class,
 object_place early-return) must NOT trigger — the sim executes the real paths.
+
+Async grasp contract (Task 11): physics-tier grasping servos for real
+(seconds), and the sim's ROS service callbacks must return fast (they run
+serialized with stepping -- see ros_bridge.py's module docstring), so
+GraspObject/PlaceObject responses only mean "accepted" for physics robots;
+terminal state is polled via dcist_sim_msgs/GraspStatus {ns}/sim/grasp_status
+(`self._status_client`, created below). Magic-grasping robots keep their
+exact prior synchronous behavior end-to-end (the grasp/place *is* terminal by
+the time GraspObject/PlaceObject responds) -- GraspStatus for them just
+mirrors that already-terminal result, so `SimManipulationClient` and
+`_request_place` can poll uniformly across both tiers without caring which
+one they're talking to. `manipulation_api_command` fires the grasp and
+returns immediately (bosdyn's own contract: the command call is not supposed
+to block until terminal); `manipulation_api_feedback_command` does exactly
+one poll (<=1 s) per call, matching how spot_skills/grasp_utils.py's caller
+loop already re-invokes it repeatedly with its own deadline.
+`_request_place` polls internally (it has no external caller-side poll loop
+today) up to a 60 s deadline.
 """
 import math
 import threading
@@ -23,7 +41,7 @@ from bosdyn.client.frame_helpers import (
 )
 from geometry_msgs.msg import PoseStamped, Twist
 
-from dcist_sim_msgs.srv import GraspObject, PlaceObject
+from dcist_sim_msgs.srv import GraspObject, GraspStatus, PlaceObject
 from spot_executor.bad_proto_mock import FakeFeedbackWrapper
 from spot_executor.fake_spot import (
     FakeImageResponse,
@@ -86,27 +104,42 @@ class SimCommandClient:
 
 
 class SimManipulationClient:
-    """Implements the subset of bosdyn ManipulationApiClient used by grasp_utils."""
+    """Implements the subset of bosdyn ManipulationApiClient used by grasp_utils.
+
+    Task 11: start-then-poll, uniform across magic (terminal at once) and
+    physics (servos for seconds) backends -- see this module's docstring.
+    """
 
     def __init__(self, sim_spot):
         self.sim_spot = sim_spot
-        self._last_state = manipulation_api_pb2.MANIP_STATE_UNKNOWN
 
     class CommandResponse:
         manipulation_cmd_id = 0
 
     def manipulation_api_command(self, manipulation_api_request):
-        success, object_id = self.sim_spot._request_grasp()
-        if success:
-            self.sim_spot._set_holding(object_id)
-            self._last_state = manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED
-        else:
-            self._last_state = manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
+        # Starts the grasp; the response only means "accepted" for physics
+        # robots. Magic robots' sim answers terminally at once (unchanged
+        # from pre-Task-11 behavior) and GraspStatus just mirrors that --
+        # terminal state is always read back via
+        # `manipulation_api_feedback_command`'s poll below, never cached
+        # here, so both tiers go through the exact same feedback path.
+        self.sim_spot._request_grasp()
         return self.CommandResponse()
 
     def manipulation_api_feedback_command(self, manipulation_api_feedback_request):
+        # One poll per call (<=1 s) -- matches bosdyn's contract (the real
+        # feedback call doesn't block until terminal either) and how
+        # spot_skills/grasp_utils.py's caller already re-invokes this in its
+        # own loop with its own deadline.
+        state, _message, object_id = self.sim_spot._poll_grasp_status()
         resp = manipulation_api_pb2.ManipulationApiFeedbackResponse()
-        resp.current_state = self._last_state
+        if state == "succeeded":
+            self.sim_spot._set_holding(object_id)
+            resp.current_state = manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED
+        elif state == "failed":
+            resp.current_state = manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
+        else:  # "in_progress" (or "idle"/no-response -- see _poll_grasp_status)
+            resp.current_state = manipulation_api_pb2.MANIP_STATE_MOVING_TO_GRASP
         return resp
 
     def grasp_override_command(self, override_request):
@@ -213,6 +246,7 @@ class SimSpot:
         self.cmd_vel_pub = node.create_publisher(Twist, "sim/cmd_vel", 10)
         self._grasp_client = node.create_client(GraspObject, "sim/grasp_object")
         self._place_client = node.create_client(PlaceObject, "sim/place_object")
+        self._status_client = node.create_client(GraspStatus, "sim/grasp_status")
 
     # --- holding-state accessors ---
     # All reads/writes of _holding_object_id go through these so the lock is
@@ -269,6 +303,14 @@ class SimSpot:
         return future.result()
 
     def _request_grasp(self):
+        # Starts the grasp. For magic robots the response is already the
+        # terminal result (unchanged pre-Task-11 behavior); for physics
+        # robots it means only "accepted" (a bare acceptance flag, no
+        # object_id yet -- see grasp_backends.py). Either way, terminal
+        # state is what `_poll_grasp_status`/the feedback service reports,
+        # not this return value -- kept returning `(bool, str)` only
+        # because it's still used to decide whether a grasp was requested
+        # at all (e.g. by tests / direct callers), not to set holding state.
         resp = self._call_blocking(
             self._grasp_client, GraspObject.Request(robot_name=self.robot_name)
         )
@@ -276,17 +318,45 @@ class SimSpot:
             return False, ""
         return True, resp.object_id
 
+    def _poll_grasp_status(self, timeout_s=1.0):
+        """One blocking GraspStatus poll (<= `timeout_s`). Returns
+        `(state, message, object_id)` with `state` one of "idle" |
+        "in_progress" | "succeeded" | "failed". On a service timeout/
+        unavailability (`resp is None`) reports "in_progress" -- i.e. keep
+        polling against the caller's own deadline rather than declaring a
+        false-positive failure on a transient hiccup."""
+        resp = self._call_blocking(
+            self._status_client,
+            GraspStatus.Request(robot_name=self.robot_name),
+            timeout_s=timeout_s,
+        )
+        if resp is None:
+            return "in_progress", "", ""
+        return resp.state, resp.message, resp.object_id
+
     def _request_place(self):
         resp = self._call_blocking(
             self._place_client, PlaceObject.Request(robot_name=self.robot_name)
         )
-        success = resp is not None and resp.success
-        if success:
-            # Only detach on confirmed success: on timeout (resp is None) or a
-            # sim-side failure the object is still in the gripper, and clearing
-            # here would desync SimSpot from the sim's actual holding state.
-            self._set_holding(None)
-        return success
+        if resp is None or not resp.success:
+            return False
+        # Accepted (terminal already for magic, "started" for physics) --
+        # poll GraspStatus until terminal, uniformly across both tiers, up
+        # to a 60 s deadline (physics placing can take real time; magic
+        # resolves on the first poll since its result is already terminal).
+        deadline = time.time() + 60.0
+        while time.time() < deadline:
+            state, _message, _object_id = self._poll_grasp_status()
+            if state == "succeeded":
+                # Only detach on confirmed success: a failed/still-pending
+                # poll leaves the object in the gripper, and clearing here
+                # would desync SimSpot from the sim's actual holding state.
+                self._set_holding(None)
+                return True
+            if state == "failed":
+                return False
+            time.sleep(0.1)
+        return False
 
     # --- images ---
     def get_image(self, view="hand_color_image", show=False):

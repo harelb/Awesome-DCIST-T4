@@ -6,6 +6,7 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GraspObject.srv"
   "srv/PlaceObject.srv"
+  "srv/GraspStatus.srv"
   "srv/Teleport.srv"
   "srv/ResetScenario.srv"
   DEPENDENCIES geometry_msgs

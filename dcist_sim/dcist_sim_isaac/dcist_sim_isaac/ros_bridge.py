@@ -118,6 +118,26 @@ one. Service *names* the ROS side (`SimSpot`,
 `sim/place_object`) resolved against that node's own `{robot_name}`
 namespace -- they land on the same absolute topic (`/{name}/sim/...`)
 this bridge advertises.
+
+Task 11 (async grasp plumbing): physics grasping servos for real (seconds),
+but service callbacks here run serialized with stepping and must return fast
+(see Task 9's paragraph above) -- so `grasping: physics` robots can no longer
+answer `GraspObject`/`PlaceObject` synchronously. Per-robot dispatch: robots
+with `spec.grasping == "magic"` keep the exact Task 9 behavior (answered
+terminally at once) against the shared `grasp.GraspBackend`; `physics`
+robots are routed instead to `dcist_sim_isaac.grasp_backends.PhysicsGraspBackend`
+(a Task 13 placeholder as of this task -- see that module's docstring), whose
+`grasp`/`place` mean only "accepted" and whose terminal state is polled via a
+new per-robot `/{name}/sim/grasp_status` (`GraspStatus.srv`) service. The
+magic backend also gets a `GraspStatus` service so SimSpot's poll loop
+(`dcist_sim_ros/sim_spot.py`) is uniform across both tiers -- it just mirrors
+the last synchronous `grasp()`/`place()` result (`GraspBackend._last`,
+populated in those two methods, read by `GraspBackend.status()`). Note the
+shared `grasp.GraspBackend` is still constructed over *every* robot
+(`self.robots`), not just magic ones: `teleport()`/`reset()` are grasp-tier-
+agnostic (ResetScenario must restore physics robots' poses too), so those two
+service handlers keep going through it regardless of `spec.grasping`; only
+`grasp`/`place`/`grasp_status` are per-robot-dispatched.
 """
 from __future__ import annotations
 
@@ -133,7 +153,13 @@ from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
-from dcist_sim_msgs.srv import GraspObject, PlaceObject, ResetScenario, Teleport
+from dcist_sim_msgs.srv import (
+    GraspObject,
+    GraspStatus,
+    PlaceObject,
+    ResetScenario,
+    Teleport,
+)
 
 from dcist_sim_isaac import camera as camera_contract
 from dcist_sim_isaac import grasp as grasp_backend
@@ -188,9 +214,16 @@ class _RobotBridge:
     """Per-robot ROS wiring: cmd_vel/target_pose subs, tf/odom/joint pubs,
     and (Task 9) grasp/place/teleport services."""
 
-    def __init__(self, node, robot, backend):
+    def __init__(self, node, robot, backend, teleport_backend):
         self.robot = robot
+        # Task 11: `backend` is this robot's grasp/place/grasp_status target
+        # (magic-shared `GraspBackend` or a per-scenario `PhysicsGraspBackend`,
+        # picked by `RosBridge.__init__`'s `_backend_for` dispatch).
+        # `teleport_backend` is always the shared `GraspBackend` -- teleport/
+        # reset are grasp-tier-agnostic (see this file's Task 11 docstring
+        # paragraph), so it is never the physics stub.
         self._backend = backend
+        self._teleport_backend = teleport_backend
         name = robot.spec.name
 
         self.odom_frame = f"{name}/odom"
@@ -226,6 +259,13 @@ class _RobotBridge:
         node.create_service(GraspObject, f"/{name}/sim/grasp_object", self._on_grasp)
         node.create_service(PlaceObject, f"/{name}/sim/place_object", self._on_place)
         node.create_service(Teleport, f"/{name}/sim/teleport", self._on_teleport)
+        # Task 11: exists for every robot regardless of grasp tier -- magic
+        # robots' service mirrors the last synchronous grasp()/place() result
+        # so SimSpot's poll loop is uniform (see this file's Task 11 docstring
+        # paragraph).
+        node.create_service(
+            GraspStatus, f"/{name}/sim/grasp_status", self._on_grasp_status
+        )
 
     def _on_grasp(self, request, response):
         success, object_id, message = self._backend.grasp(request.robot_name)
@@ -240,12 +280,19 @@ class _RobotBridge:
         response.message = message
         return response
 
+    def _on_grasp_status(self, request, response):
+        state, message, object_id = self._backend.status(request.robot_name)
+        response.state = state
+        response.message = message
+        response.object_id = object_id
+        return response
+
     def _on_teleport(self, request, response):
         q = request.pose.orientation
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
-        response.success = self._backend.teleport(
+        response.success = self._teleport_backend.teleport(
             request.robot_name,
             request.pose.position.x,
             request.pose.position.y,
@@ -432,10 +479,33 @@ class RosBridge:
             from rosgraph_msgs.msg import Clock
             self._clock_pub = self.node.create_publisher(Clock, "/clock", 10)
 
-        # Task 9: one shared backend for every robot's grasp/place/
-        # teleport services plus the global reset service.
+        # Task 9: one shared backend for every robot's teleport/reset
+        # services (and, pre-Task-11, grasp/place too). Task 11: `grasp`/
+        # `place`/`grasp_status` are now dispatched per robot by
+        # `spec.grasping` -- `physics` robots route to a `PhysicsGraspBackend`
+        # (Task 13 placeholder until then; see grasp_backends.py) instead of
+        # this shared magic backend. `self.grasp_backend` still spans *every*
+        # robot (not just magic ones) because teleport/reset stay grasp-tier-
+        # agnostic (this file's Task 11 docstring paragraph).
         self.grasp_backend = grasp_backend.GraspBackend(robots, registry, grasp_radius)
-        self._bridges = [_RobotBridge(self.node, r, self.grasp_backend) for r in robots]
+        physics_robots = [r for r in robots if r.spec.grasping == "physics"]
+        self.physics_grasp = None
+        if physics_robots:
+            from dcist_sim_isaac.grasp_backends import PhysicsGraspBackend
+
+            self.physics_grasp = PhysicsGraspBackend(physics_robots, registry)
+        self._backend_for = {
+            r.spec.name: (
+                self.physics_grasp if r.spec.grasping == "physics" else self.grasp_backend
+            )
+            for r in robots
+        }
+        self._bridges = [
+            _RobotBridge(
+                self.node, r, self._backend_for[r.spec.name], self.grasp_backend
+            )
+            for r in robots
+        ]
 
         self.node.create_service(
             ResetScenario, "/sim/reset_scenario", self._on_reset_scenario
@@ -461,7 +531,16 @@ class RosBridge:
                     [r.spec.name for r in robots])
 
     def _on_reset_scenario(self, request, response):
-        response.success = self.grasp_backend.reset()
+        # `self.grasp_backend.reset()` already re-teleports *every* robot
+        # (magic and physics) since it's constructed over the full robot
+        # list -- see this file's Task 11 docstring paragraph. Also reset
+        # the physics backend itself (if any), so its own held-object
+        # bookkeeping (a no-op today; Task 13 gives it real state) doesn't
+        # survive a scenario reset.
+        success = self.grasp_backend.reset()
+        if self.physics_grasp is not None:
+            success = self.physics_grasp.reset() and success
+        response.success = success
         return response
 
     def step(self, dt: float) -> None:
@@ -481,8 +560,13 @@ class RosBridge:
         rclpy.spin_once(self.node, timeout_sec=0)
 
         # Task 9: re-pin every held object to its gripper every frame,
-        # unconditionally (not rate-gated -- see module docstring).
+        # unconditionally (not rate-gated -- see module docstring). Task 11:
+        # also step the physics backend (if any physics-grasping robots
+        # exist in this scenario) so its own per-frame bookkeeping runs --
+        # a no-op today (grasp_backends.py's Task 13 placeholder).
         self.grasp_backend.step(dt)
+        if self.physics_grasp is not None:
+            self.physics_grasp.step(dt)
 
         self._tf_accum += dt
         self._joint_accum += dt

@@ -245,6 +245,13 @@ class GraspBackend:
         self.grasp_radius = grasp_radius
         # robot_name -> (object_id, local_offset_pos[3], local_offset_quat[4])
         self._attached = {}
+        # robot_name -> {"state": ..., "message": ..., "object_id": ...} --
+        # Task 11: the last synchronous grasp/place result, polled uniformly
+        # with physics backends via `status()`/the new GraspStatus service.
+        # Magic grasping answers terminally at once (never "in_progress"), so
+        # this is always "succeeded" or "failed" once a robot has attempted a
+        # grasp/place; absent until then ("idle", see `status()`).
+        self._last = {}
 
     def grasp(self, robot_name):
         robot = self.robots.get(robot_name)
@@ -252,7 +259,11 @@ class GraspBackend:
             return False, "", f"unknown robot '{robot_name}'"
         if robot_name in self._attached:
             held = self._attached[robot_name][0]
-            return False, "", f"'{robot_name}' is already holding '{held}'"
+            message = f"'{robot_name}' is already holding '{held}'"
+            self._last[robot_name] = {
+                "state": "failed", "message": message, "object_id": "",
+            }
+            return False, "", message
 
         gripper_pos, gripper_quat = robot.gripper_world_pose()
         gripper_pos = tuple(float(v) for v in gripper_pos)
@@ -262,7 +273,11 @@ class GraspBackend:
             self.registry.selection_snapshot(), gripper_pos, self.grasp_radius
         )
         if target_id is None:
-            return False, "", "no graspable object within grasp_radius"
+            message = "no graspable object within grasp_radius"
+            self._last[robot_name] = {
+                "state": "failed", "message": message, "object_id": "",
+            }
+            return False, "", message
 
         obj_pos, obj_quat = self.registry.world_pose(target_id)
         offset_pos, offset_quat = _to_local_frame(
@@ -270,8 +285,12 @@ class GraspBackend:
         )
         self._attached[robot_name] = (target_id, offset_pos, offset_quat)
         self.registry.set_held_by(target_id, robot_name)
+        message = f"grasped '{target_id}'"
+        self._last[robot_name] = {
+            "state": "succeeded", "message": message, "object_id": target_id,
+        }
         logger.info("'%s' grasped '%s'", robot_name, target_id)
-        return True, target_id, f"grasped '{target_id}'"
+        return True, target_id, message
 
     def place(self, robot_name):
         robot = self.robots.get(robot_name)
@@ -279,7 +298,11 @@ class GraspBackend:
             return False, f"unknown robot '{robot_name}'"
         attached = self._attached.pop(robot_name, None)
         if attached is None:
-            return False, f"'{robot_name}' is not holding anything"
+            message = f"'{robot_name}' is not holding anything"
+            self._last[robot_name] = {
+                "state": "failed", "message": message, "object_id": "",
+            }
+            return False, message
         object_id = attached[0]
 
         gripper_pos, _ = robot.gripper_world_pose()
@@ -291,8 +314,23 @@ class GraspBackend:
             obj_quat,
         )
         self.registry.clear_held(object_id)
+        message = f"placed '{object_id}'"
+        self._last[robot_name] = {
+            "state": "succeeded", "message": message, "object_id": object_id,
+        }
         logger.info("'%s' placed '%s' at z=%.3f", robot_name, object_id, drop_z)
-        return True, f"placed '{object_id}'"
+        return True, message
+
+    def status(self, robot_name):
+        """Return `(state, message, object_id)` for the GraspStatus service --
+        the last synchronous grasp/place result for `robot_name`, or
+        `("idle", "", "")` if it has never attempted one. Magic grasping is
+        always terminal by the time this is polled (see `_last`'s docstring
+        in `__init__`), so `state` here is never "in_progress"."""
+        last = self._last.get(robot_name)
+        if last is None:
+            return "idle", "", ""
+        return last["state"], last["message"], last["object_id"]
 
     def teleport(self, robot_name, x, y, z, yaw):
         robot = self.robots.get(robot_name)
@@ -306,6 +344,7 @@ class GraspBackend:
             spec = robot.spec
             robot.teleport(spec.x, spec.y, spec.z, spec.yaw)
         self._attached.clear()
+        self._last.clear()
         self.registry.reset_all()
         return True
 

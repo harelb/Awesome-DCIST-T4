@@ -65,7 +65,10 @@ def test_gripper_open_no_place_when_not_holding(sim_spot):
     sim_spot._request_place.assert_not_called()
 
 
-def test_manipulation_success_updates_holding_state(sim_spot):
+def test_manipulation_command_starts_grasp(sim_spot):
+    # Task 11: manipulation_api_command only *starts* the grasp now --
+    # terminal state comes from polling (below), never from this call's
+    # return value.
     sim_spot._request_grasp = MagicMock(return_value=(True, "bag_0"))
     req = manipulation_api_pb2.ManipulationApiRequest(
         pick_object_in_image=manipulation_api_pb2.PickObjectInImage()
@@ -73,26 +76,57 @@ def test_manipulation_success_updates_holding_state(sim_spot):
     sim_spot.manipulation_api_client.manipulation_api_command(
         manipulation_api_request=req
     )
+    sim_spot._request_grasp.assert_called_once()
+    assert sim_spot._get_holding() is None  # not set until feedback polls succeeded
+
+
+def test_manipulation_feedback_succeeded_sets_holding(sim_spot):
+    sim_spot._poll_grasp_status = MagicMock(
+        return_value=("succeeded", "grasped 'bag_0'", "bag_0")
+    )
     fb = sim_spot.manipulation_api_client.manipulation_api_feedback_command(
         manipulation_api_feedback_request=MagicMock()
     )
     assert fb.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED
+    assert sim_spot._get_holding() == "bag_0"
     state = sim_spot.state_client.get_robot_state()
     assert state.manipulator_state.is_gripper_holding_item
 
 
-def test_manipulation_failure_reports_failed(sim_spot):
-    sim_spot._request_grasp = MagicMock(return_value=(False, ""))
-    req = manipulation_api_pb2.ManipulationApiRequest(
-        pick_object_in_image=manipulation_api_pb2.PickObjectInImage()
-    )
-    sim_spot.manipulation_api_client.manipulation_api_command(
-        manipulation_api_request=req
+def test_manipulation_feedback_failed_reports_failed(sim_spot):
+    sim_spot._poll_grasp_status = MagicMock(
+        return_value=("failed", "no graspable object within grasp_radius", "")
     )
     fb = sim_spot.manipulation_api_client.manipulation_api_feedback_command(
         manipulation_api_feedback_request=MagicMock()
     )
     assert fb.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_FAILED
+    assert sim_spot._get_holding() is None
+
+
+def test_manipulation_feedback_in_progress_maps_to_moving_to_grasp(sim_spot):
+    # Physics-tier non-terminal state (servoing) -- must not be reported as
+    # succeeded or failed while still in flight.
+    sim_spot._poll_grasp_status = MagicMock(return_value=("in_progress", "", ""))
+    fb = sim_spot.manipulation_api_client.manipulation_api_feedback_command(
+        manipulation_api_feedback_request=MagicMock()
+    )
+    assert fb.current_state == manipulation_api_pb2.MANIP_STATE_MOVING_TO_GRASP
+    assert sim_spot._get_holding() is None
+
+
+def test_poll_grasp_status_maps_service_response(sim_spot):
+    sim_spot._call_blocking = MagicMock(
+        return_value=MagicMock(
+            state="succeeded", message="grasped 'bag_0'", object_id="bag_0"
+        )
+    )
+    assert sim_spot._poll_grasp_status() == ("succeeded", "grasped 'bag_0'", "bag_0")
+
+
+def test_poll_grasp_status_timeout_reports_in_progress(sim_spot):
+    sim_spot._call_blocking = MagicMock(return_value=None)  # service timeout
+    assert sim_spot._poll_grasp_status() == ("in_progress", "", "")
 
 
 def test_get_robot_state_frame_tree_vision_to_body(sim_spot):
@@ -122,25 +156,47 @@ def test_get_state_exposes_top_level_robot_state(sim_spot):
     assert state.HasField("manipulator_state")
 
 
-def test_request_place_timeout_keeps_holding(sim_spot):
+def test_request_place_accept_timeout_keeps_holding(sim_spot):
+    # PlaceObject accept call itself times out -- never even starts polling.
     sim_spot._set_holding("bag_0")
     sim_spot._call_blocking = MagicMock(return_value=None)  # service timeout
     assert sim_spot._request_place() is False
     assert sim_spot._get_holding() == "bag_0"
 
 
-def test_request_place_failure_keeps_holding(sim_spot):
+def test_request_place_not_accepted_keeps_holding(sim_spot):
     sim_spot._set_holding("bag_0")
     sim_spot._call_blocking = MagicMock(return_value=MagicMock(success=False))
     assert sim_spot._request_place() is False
     assert sim_spot._get_holding() == "bag_0"
 
 
-def test_request_place_success_clears_holding(sim_spot):
+def test_request_place_accepted_then_succeeded_clears_holding(sim_spot):
+    # Task 11: accept (PlaceObject success=True) is only "started" -- the
+    # terminal result comes from polling GraspStatus. Exercise a
+    # non-terminal poll first to pin that the loop keeps going instead of
+    # stopping on the first non-terminal read.
     sim_spot._set_holding("bag_0")
     sim_spot._call_blocking = MagicMock(return_value=MagicMock(success=True))
+    sim_spot._poll_grasp_status = MagicMock(
+        side_effect=[
+            ("in_progress", "", ""),
+            ("succeeded", "placed 'bag_0'", "bag_0"),
+        ]
+    )
     assert sim_spot._request_place() is True
     assert sim_spot._get_holding() is None
+    assert sim_spot._poll_grasp_status.call_count == 2
+
+
+def test_request_place_accepted_then_failed_keeps_holding(sim_spot):
+    sim_spot._set_holding("bag_0")
+    sim_spot._call_blocking = MagicMock(return_value=MagicMock(success=True))
+    sim_spot._poll_grasp_status = MagicMock(
+        return_value=("failed", "dropped somewhere odd", "")
+    )
+    assert sim_spot._request_place() is False
+    assert sim_spot._get_holding() == "bag_0"
 
 
 @pytest.fixture
