@@ -21,7 +21,7 @@ import math
 import numpy as np
 
 from dcist_sim_isaac.drive_backends import (
-    kinematic_target_step, kinematic_velocity_step, wrap_angle)
+    kinematic_target_step, kinematic_velocity_step)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +45,6 @@ GRIPPER_RELATIVE_PATH = "arm0_link_fngr"
 
 MAX_TARGET_LINEAR_SPEED = 1.0  # m/s (task-7-brief.md Step 2)
 MAX_TARGET_ANGULAR_SPEED = 1.0  # rad/s (task-7-brief.md Step 2)
-
-_POSITION_EPS = 1e-6
-_ANGLE_EPS = 1e-6
 
 
 def _yaw_to_quat_wxyz(yaw: float) -> np.ndarray:
