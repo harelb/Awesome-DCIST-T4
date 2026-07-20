@@ -127,9 +127,16 @@ class Smoke(Node):
             st = self.status()
             if st in want:
                 return st
-            if st == "fallen" and on_fall is not None and not handled_fall:
-                handled_fall = True
-                on_fall()
+            if st == "fallen":
+                if on_fall is not None and not handled_fall:
+                    handled_fall = True
+                    on_fall()
+            else:
+                # Re-arm once the robot has recovered/re-planned away from
+                # "fallen", so a SECOND distinct fall (or `on_fall`'s
+                # remaining retries) is handled too -- without this the latch
+                # would cap retries at 1 regardless of --fall-retries.
+                handled_fall = False
         return self.status()
 
 

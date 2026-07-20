@@ -12,8 +12,9 @@
 #
 # Spawn (-2, 0): open lane floor near the origin, verified FREE against the
 # baked inflated costmap on the first GPU run (2026-07-20). yaw = -1.57 faces
-# -Y so the robot starts pointed down the aisle toward the default goal
-# (-2, -12), minimising the initial spin-up.
+# -Y (down the open corridor); the smoke's default assertion-A goal is
+# (-8, 12) in the +Y rack zone, so the planner rotates the robot toward it at
+# goal time (the initial heading isn't load-bearing -- pursuit turns in place).
 map_name: warehouse_nav_smoke
 environment:
   usd: assets/environments/warehouse_a.usd
