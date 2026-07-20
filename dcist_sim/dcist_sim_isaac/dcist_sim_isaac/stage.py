@@ -16,6 +16,24 @@ grasp attempt. `RigidBodyAPI` is applied fresh to the top-level object
 prim if the source USD didn't already author one (P1 placeholder assets
 may be plain meshes with no physics authored at all), so "kinematic" is
 guaranteed regardless of what Task 10's real assets end up authoring.
+
+Task 6 (P4 physics mode, `scenario.physics_mode`): when any robot in the
+scenario has `locomotion: policy` or `grasping: physics`, the stage is
+built physics-capable instead of kinematic-only --
+  - robots with `locomotion: policy` are spawned NOT kinematic (their
+    articulation stands under gravity/PhysX until Task 8's
+    PolicyDriveBackend drives it; robots with `locomotion: kinematic`
+    are unaffected -- see `_spawn_robots`);
+  - objects become dynamic rigid bodies with convex-hull colliders
+    instead of kinematic (`_make_dynamic`, spec §5) so they fall/settle
+    and can be pushed;
+  - every environment mesh gets a static triangle-mesh collider
+    (`_collide_environment`, spec §5);
+  - a `Costmap2D` is baked from the live PhysX scene right after
+    `world.reset()` (`costmap_bake.bake_costmap`) and stored on
+    `SimStage.costmap`/`.costmap_raw`.
+In kinematic-only scenarios (physics_mode is False) every one of these
+branches is skipped and behavior is bit-for-bit identical to pre-Task-6.
 """
 from __future__ import annotations
 
@@ -37,6 +55,12 @@ class SimStage:
     # if unset in the YAML -- see scenario.py).
     registry: object = None
     grasp_radius: float = 1.5
+    # Task 6: `costmap.Costmap2D` baked from the live PhysX scene, physics
+    # mode only (None in kinematic-only scenarios). `costmap` is the
+    # inflated map local_planner.py should navigate against; `costmap_raw`
+    # is the pre-inflation map, kept for Task 10's diagnostics/visualization.
+    costmap: object = None
+    costmap_raw: object = None
 
 
 def _yaw_to_quat_wxyz(yaw: float):
@@ -53,7 +77,9 @@ def _spawn_robots(world, scenario) -> list:
 
     robots = []
     for spec in scenario.robots:
-        robots.append(SpotSimRobot(world, spec))
+        robots.append(
+            SpotSimRobot(world, spec, kinematic=(spec.locomotion == "kinematic"))
+        )
     return robots
 
 
@@ -74,7 +100,25 @@ def _mark_kinematic(prim) -> None:
             UsdPhysics.RigidBodyAPI(child).CreateKinematicEnabledAttr(True)
 
 
-def _spawn_objects(scenario):
+def _make_dynamic(prim) -> None:
+    """Dynamic rigid body + convex-hull collider (spec §5): objects fall,
+    settle, and can be pushed. Applied to the top-level object prim
+    (mirrors `_mark_kinematic`'s "apply RigidBodyAPI fresh if absent"
+    guarantee -- P1 placeholder assets may be plain meshes with no
+    physics authored at all)."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        UsdPhysics.RigidBodyAPI.Apply(prim)
+    UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(False)
+    for child in Usd.PrimRange(prim):
+        if child.IsA(UsdGeom.Mesh) and not child.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI.Apply(child)
+            UsdPhysics.MeshCollisionAPI.Apply(child).CreateApproximationAttr(
+                "convexHull")
+
+
+def _spawn_objects(scenario, physics_mode: bool = False):
     import numpy as np
     import omni.usd
     from isaacsim.core.prims import XFormPrim
@@ -107,7 +151,10 @@ def _spawn_objects(scenario):
 
         prim = stage.GetPrimAtPath(prim_path)
         add_labels(prim, labels=[obj.label], instance_name="class")
-        _mark_kinematic(prim)
+        if physics_mode:
+            _make_dynamic(prim)
+        else:
+            _mark_kinematic(prim)
 
         registry.add(
             object_id=obj.object_id,
@@ -119,6 +166,25 @@ def _spawn_objects(scenario):
         )
 
     return registry
+
+
+def _collide_environment(stage) -> int:
+    """Static triangle-mesh colliders on every environment mesh (spec §5).
+    Returns the number of meshes that got a collider (0 = the prerequisite
+    check FAILED -- caller raises)."""
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    env = stage.GetPrimAtPath("/World/Environment")
+    if not env.IsValid():
+        return 0
+    n = 0
+    for prim in Usd.PrimRange(env):
+        if prim.IsA(UsdGeom.Mesh):
+            if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI.Apply(prim)
+                UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("none")
+            n += 1
+    return n
 
 
 def build_stage(scenario) -> SimStage:
@@ -152,8 +218,16 @@ def build_stage(scenario) -> SimStage:
             env_path,
         )
 
+    if scenario.physics_mode:
+        n_colliders = _collide_environment(stage)
+        if n_colliders == 0:
+            raise RuntimeError(
+                "physics mode requires environment collision meshes; "
+                f"'{env_path}' produced none (spec §5 prerequisite)")
+        logger.info("physics mode: %d environment meshes collidable", n_colliders)
+
     robots = _spawn_robots(world, scenario)
-    registry = _spawn_objects(scenario)
+    registry = _spawn_objects(scenario, scenario.physics_mode)
 
     world.reset()
 
@@ -163,6 +237,18 @@ def build_stage(scenario) -> SimStage:
     for robot in robots:
         robot.camera.initialize()
 
+    # Costmap bake (Task 6): must run AFTER world.reset() -- the PhysX
+    # scene query interface needs an initialized physics scene (see
+    # costmap_bake.py's module docstring). Colliders were already applied
+    # above, before robots/objects were spawned, so nothing here depends
+    # on spawn order.
+    costmap = None
+    costmap_raw = None
+    if scenario.physics_mode:
+        from dcist_sim_isaac.costmap_bake import bake_costmap
+        costmap, costmap_raw = bake_costmap(scenario.nav)
+
     return SimStage(
-        world=world, robots=robots, registry=registry, grasp_radius=scenario.grasp_radius
+        world=world, robots=robots, registry=registry,
+        grasp_radius=scenario.grasp_radius, costmap=costmap, costmap_raw=costmap_raw,
     )

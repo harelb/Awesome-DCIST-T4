@@ -111,10 +111,19 @@ def _to_local_frame(gripper_pos, gripper_quat, obj_pos, obj_quat):
 
 
 class _ObjectEntry:
-    __slots__ = ("xform", "label", "graspable", "held_by", "spawn_pos", "spawn_quat")
+    __slots__ = (
+        "xform", "prim_path", "label", "graspable", "held_by", "spawn_pos",
+        "spawn_quat",
+    )
 
-    def __init__(self, xform, label, graspable, spawn_pos, spawn_quat):
+    def __init__(self, xform, prim_path, label, graspable, spawn_pos, spawn_quat):
         self.xform = xform
+        # Stored directly rather than re-derived from `xform.prim_paths[0]`
+        # at use time (Task 6, `set_kinematic`): `add()` already has the
+        # exact string, and it sidesteps depending on `XFormPrim`/`Prim`'s
+        # view-style `prim_paths` list property for what is always a
+        # single-prim wrapper here.
+        self.prim_path = prim_path
         self.label = label
         self.graspable = graspable
         self.held_by = None
@@ -142,6 +151,7 @@ class ObjectRegistry:
 
         self._entries[object_id] = _ObjectEntry(
             xform=XFormPrim(prim_path),
+            prim_path=prim_path,
             label=label,
             graspable=graspable,
             spawn_pos=tuple(float(v) for v in spawn_pos),
@@ -194,6 +204,24 @@ class ObjectRegistry:
         for object_id, entry in self._entries.items():
             entry.held_by = None
             self.set_world_pose(object_id, entry.spawn_pos, entry.spawn_quat)
+
+    def set_kinematic(self, object_id, enabled):
+        """Suspend (True) or restore (False) PhysX dynamics on a dynamic
+        object -- used by physics-tier grasp backends (Task 8+) while an
+        object is held, so the same "we own the pose, PhysX doesn't"
+        invariant `GraspBackend.step`'s magic-attach relies on also holds
+        for physics-mode dynamic objects during a hold (spec §6.1).
+
+        Only meaningful for objects spawned dynamic (`stage._make_dynamic`,
+        physics_mode); calling this on a kinematic-tier object is harmless
+        (it already never has dynamics applied) but pointless.
+        """
+        import omni.usd
+        from pxr import UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(self._entries[object_id].prim_path)
+        UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(bool(enabled))
 
 
 class GraspBackend:

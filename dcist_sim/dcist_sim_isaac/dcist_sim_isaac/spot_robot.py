@@ -64,7 +64,7 @@ class SpotSimRobot:
     kinematic tier, so "world" and "{name}/odom" coincide.
     """
 
-    def __init__(self, world, spec):
+    def __init__(self, world, spec, kinematic=True):
         # Deferred imports: isaacsim.* only exists after SimulationApp
         # has booted (see dcist_sim_isaac/README.md).
         from isaacsim.core.prims import XFormPrim
@@ -76,14 +76,6 @@ class SpotSimRobot:
         self.world = world
         self.spec = spec
         self.prim_path = f"/World/{spec.name}"
-
-        if spec.locomotion != "kinematic":
-            logger.warning(
-                "robot '%s' requests locomotion='%s'; only the kinematic "
-                "tier is implemented (Task 7 P1 scope) -- falling back to "
-                "kinematic.",
-                spec.name, spec.locomotion,
-            )
 
         assets_root = get_assets_root_path()
         if not assets_root:
@@ -117,15 +109,30 @@ class SpotSimRobot:
         # verified empirically (2026-07-04) that a non-root child link
         # (fl_hip) still tracks the root's world pose 1:1 after
         # `set_cmd_vel` + repeated `step()`, despite these errors.
-        n_bodies = 0
-        for prim in Usd.PrimRange(root_prim):
-            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(True)
-                n_bodies += 1
-        logger.info(
-            "spawned Spot '%s' from %s at %s: marked %d rigid bodies kinematic",
-            spec.name, usd_path, self.prim_path, n_bodies,
-        )
+        #
+        # Task 6 (P4 physics mode): `kinematic=False` (locomotion="policy")
+        # skips this entirely and leaves the articulation exactly as
+        # authored -- it stands under gravity/PhysX contact dynamics until
+        # Task 8's PolicyDriveBackend drives its joints. `locomotion:
+        # kinematic` scenarios always pass kinematic=True (stage.py's
+        # `_spawn_robots`), so this branch is a no-op / bit-for-bit
+        # unchanged for every pre-Task-6 scenario.
+        if kinematic:
+            n_bodies = 0
+            for prim in Usd.PrimRange(root_prim):
+                if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                    UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(True)
+                    n_bodies += 1
+            logger.info(
+                "spawned Spot '%s' from %s at %s: marked %d rigid bodies kinematic",
+                spec.name, usd_path, self.prim_path, n_bodies,
+            )
+        else:
+            logger.info(
+                "spawned Spot '%s' from %s at %s: left un-kinematic "
+                "(physics mode, locomotion=%r)",
+                spec.name, usd_path, self.prim_path, spec.locomotion,
+            )
 
         self._xform = XFormPrim(self.prim_path)
         self._gripper_xform = XFormPrim(f"{self.prim_path}/{GRIPPER_RELATIVE_PATH}")

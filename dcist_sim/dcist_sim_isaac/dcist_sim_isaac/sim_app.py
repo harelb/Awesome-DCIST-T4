@@ -67,6 +67,11 @@ def main():
     parser.add_argument("--gt-replay", metavar="TRAJECTORY_JSONL",
                         help="replay a build_map trajectory.jsonl (teleport, "
                              "no ROS) and capture GT along it, then exit")
+    parser.add_argument("--costmap-out",
+                        help="physics-mode costmap output path (default: "
+                             "<gt-out parent>/costmap.npz when --gt-out is "
+                             "given; otherwise the costmap is baked but not "
+                             "written unless this is set)")
     args = parser.parse_args()
 
     from dcist_sim_isaac.scenario import load_scenario
@@ -81,6 +86,31 @@ def main():
     stage = build_stage(scenario)
     world = stage.world
     robots = stage.robots
+
+    # Physics mode (Task 6): let dynamic objects fall/settle onto the
+    # environment colliders before anything else runs -- world.step()
+    # with render=False (no camera pipeline touched yet) is cheap and
+    # keeps this deterministic regardless of headless/gui. Then persist
+    # the GT costmap baked by build_stage (spec §4.1/§7): `costmap.npz`
+    # is the inflated map local_planner.py navigates against;
+    # `costmap_raw.npz` is the pre-inflation map (Task-10 diagnostics).
+    if scenario.physics_mode:
+        SETTLE_FRAMES = 120
+        for _ in range(SETTLE_FRAMES):
+            world.step(render=False)      # objects fall + settle (spec §5)
+        if stage.costmap is not None:
+            costmap_out = args.costmap_out or (
+                os.path.join(os.path.dirname(args.gt_out), "costmap.npz")
+                if args.gt_out else None)
+            if costmap_out:
+                costmap_dir = os.path.dirname(costmap_out) or "."
+                os.makedirs(costmap_dir, exist_ok=True)
+                stage.costmap.save(costmap_out)
+                logger.info("costmap written to %s", costmap_out)
+                if stage.costmap_raw is not None:
+                    raw_out = os.path.join(costmap_dir, "costmap_raw.npz")
+                    stage.costmap_raw.save(raw_out)
+                    logger.info("raw costmap written to %s", raw_out)
 
     # GT replay: second pass over a recorded build_map trajectory --
     # teleport-driven, no ROS bridge, capture-only (spec §3.4 fallback for
