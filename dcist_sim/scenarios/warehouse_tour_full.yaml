@@ -1,0 +1,77 @@
+# Full-coverage warehouse mapping scenario (derived from warehouse_tour.yaml).
+# Same full_warehouse environment + objects + GT, but the tour is a
+# boustrophedon (lawnmower) sweep across the whole interior instead of the
+# small origin loop. Environment world bbox (measured 2026-07-20 via
+# _bounds_probe): X[-28, +8], Y[-41.4, +33.4] -> 36 x 75 m. Lanes are inset
+# ~2 m from the walls; locomotion is kinematic so the sweep passes through
+# rack rows without getting stuck.
+map_name: warehouse_sim_full
+environment:
+  usd: assets/environments/warehouse_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.52, yaw: 1.57}   # keep 0,0: world==odom; face the corridor
+    locomotion: kinematic
+    grasping: magic
+objects:
+  # Main-corridor edge; visible from wp0/wp1 (both dwell) at 2-5 m.
+  - id: bag_0
+    usd: assets/objects/duffel_bag.usd
+    label: bag
+    pose: {x: -1.5, y: 5.0, z: 0.0, yaw: 0.52}
+  # In the spawn view (robot spawns facing +Y), 4.4 m out.
+  - id: cone_0
+    usd: assets/objects/cone.usd
+    label: cone
+    pose: {x: 1.2, y: 4.2, z: 0.0, yaw: 0.0}
+  # Rack-aisle edge.
+  - id: pipe_0
+    usd: assets/objects/pipe.usd
+    label: pipe
+    pose: {x: -4.5, y: -1.5, z: 0.0, yaw: 1.57}
+grasp_radius: 1.5
+tour:  # full-coverage lawnmower over the 36x75 m warehouse interior (yaw rad)
+  - {x:   4.0, y:  -38.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   4.0, y:  -24.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   4.0, y:  -10.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   4.0, y:    4.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   4.0, y:   18.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   4.0, y:   30.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:   30.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:   18.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:    4.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  -10.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  -24.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  -38.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:  -38.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:  -24.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:  -10.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:    4.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:   18.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:   30.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -14.0, y:   30.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -14.0, y:   18.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -14.0, y:    4.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  -10.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  -24.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  -38.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -20.0, y:  -38.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -20.0, y:  -24.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -20.0, y:  -10.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -20.0, y:    4.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -20.0, y:   18.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -20.0, y:   30.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -26.0, y:   30.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -26.0, y:   18.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -26.0, y:    4.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -26.0, y:  -10.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -26.0, y:  -24.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -26.0, y:  -38.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:   0.0, y:    0.0, yaw:  1.57}                  # home
+gt:
+  rate_hz: 2.0
+  modalities: [rgb, semantic, instance, bbox2d]
+  semantics:
+    - {match: ".*SM_Palette.*", class: pallet}          # NOTE: "Palette" spelling
+    - {match: ".*SM_CardBox.*", class: box}
+    - {match: ".*SM_FireExtinguisher.*", class: fire_extinguisher}
