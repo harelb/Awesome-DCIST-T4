@@ -32,6 +32,7 @@ class RobotSpec:
     yaw: float  # radians (not degrees) -- rotation about world +Z
     locomotion: str
     grasping: str
+    contact_hold: bool = False
 
 
 @dataclass
@@ -75,6 +76,17 @@ class GtSpec:
 
 
 @dataclass
+class NavSpec:
+    """Local-planner parameters (spec §4); used only in physics mode."""
+    cell_size_m: float = 0.1
+    inflation_radius_m: float = 0.45   # Spot half-width ~0.25 + margin
+    snap_bound_m: float = 2.0          # tour waypoint snap search bound
+    stuck_timeout_s: float = 15.0
+    max_lin_speed: float = 1.0
+    max_ang_speed: float = 1.0
+
+
+@dataclass
 class Scenario:
     environment_usd: str
     robots: list = field(default_factory=list)
@@ -88,6 +100,7 @@ class Scenario:
     tour: list = field(default_factory=list)
     map_name: str = ""
     gt: GtSpec = field(default_factory=GtSpec)
+    nav: NavSpec = field(default_factory=NavSpec)
     # Directory the scenario YAML lives in. Asset paths (environment_usd,
     # ObjectSpec.usd) are stored exactly as authored (relative to this
     # directory, matching the spec's `interfaces` contract) rather than
@@ -95,6 +108,11 @@ class Scenario:
     # filesystem path (e.g. stage.py loading a USD reference) should join
     # relative paths against `base_dir` via `resolve_path`.
     base_dir: str = ""
+
+    @property
+    def physics_mode(self) -> bool:
+        return any(r.locomotion == "policy" or r.grasping == "physics"
+                   for r in self.robots)
 
     def resolve_path(self, usd: str) -> str:
         if os.path.isabs(usd):
@@ -127,6 +145,7 @@ def load_scenario(path) -> Scenario:
         spawn = _require(r, "spawn", context)
         locomotion = _require(r, "locomotion", context)
         grasping = _require(r, "grasping", context)
+        contact_hold = bool(r.get("contact_hold", False))
 
         if locomotion not in LOCOMOTIONS:
             raise ValueError(
@@ -139,6 +158,10 @@ def load_scenario(path) -> Scenario:
                 f"must be one of {sorted(GRASPING_MODES)}"
             )
 
+        if contact_hold and grasping != "physics":
+            raise ValueError(
+                f"robot '{name}': contact_hold requires grasping: physics")
+
         robots.append(
             RobotSpec(
                 name=name,
@@ -148,6 +171,7 @@ def load_scenario(path) -> Scenario:
                 yaw=float(_require(spawn, "yaw", f"{context}.spawn")),
                 locomotion=locomotion,
                 grasping=grasping,
+                contact_hold=contact_hold,
             )
         )
 
@@ -232,7 +256,19 @@ def load_scenario(path) -> Scenario:
             semantics=semantics,
         )
 
-    return Scenario(
+    nav = NavSpec()
+    nav_data = data.get("nav")
+    if nav_data is not None:
+        nav_dict = {}
+        for key in ["cell_size_m", "inflation_radius_m", "snap_bound_m", "stuck_timeout_s", "max_lin_speed", "max_ang_speed"]:
+            if key in nav_data:
+                value = float(nav_data[key])
+                if value <= 0:
+                    raise ValueError(f"nav.{key} must be > 0")
+                nav_dict[key] = value
+        nav = NavSpec(**nav_dict)
+
+    scenario = Scenario(
         environment_usd=environment_usd,
         robots=robots,
         objects=objects,
@@ -240,5 +276,13 @@ def load_scenario(path) -> Scenario:
         tour=tour,
         map_name=str(data.get("map_name", "")),
         gt=gt,
+        nav=nav,
         base_dir=base_dir,
     )
+
+    if scenario.physics_mode and scenario.gt.enabled and scenario.gt.mode == "replay":
+        raise ValueError(
+            "gt.mode 'replay' is kinematic-only (teleporting a dynamic "
+            "articulation is undefined); use mode 'live' in physics scenarios")
+
+    return scenario

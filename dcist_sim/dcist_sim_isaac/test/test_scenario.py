@@ -161,3 +161,57 @@ def test_gt_rejects_bad_regex(tmp_path):
     p.write_text(YAML + '\ngt:\n  semantics:\n    - {match: "[", class: pallet}\n')
     with pytest.raises(ValueError, match="regex"):
         load_scenario(p)
+
+
+def _write_minimal(tmp_path, locomotion="kinematic", grasping="magic", contact_hold=False, gt_mode="live"):
+    """Write a minimal scenario YAML with one robot, parameterized by locomotion/grasping/contact_hold/gt_mode."""
+    contact_hold_line = ""
+    if contact_hold:
+        contact_hold_line = "\n            contact_hold: true"
+
+    gt_block = ""
+    if gt_mode != "live":
+        gt_block = f"\ngt:\n  mode: {gt_mode}\n"
+
+    yaml_text = textwrap.dedent(f"""
+        environment:
+          usd: environments/field_a.usd
+        robots:
+          - name: robot
+            spawn: {{x: 1.0, y: 2.0, z: 0.52, yaw: 0.5}}
+            locomotion: {locomotion}
+            grasping: {grasping}{contact_hold_line}
+        objects: []
+    """) + gt_block
+
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml_text)
+    return p
+
+
+def test_nav_defaults(tmp_path):
+    p = _write_minimal(tmp_path)
+    s = load_scenario(p)
+    assert s.nav.cell_size_m == 0.1
+    assert s.nav.inflation_radius_m == 0.45
+    assert s.nav.snap_bound_m == 2.0
+    assert s.nav.stuck_timeout_s == 15.0
+    assert s.nav.max_lin_speed == 1.0
+    assert s.physics_mode is False
+
+
+def test_physics_mode_derived(tmp_path):
+    p = _write_minimal(tmp_path, locomotion="policy")
+    assert load_scenario(p).physics_mode is True
+
+
+def test_contact_hold_requires_physics_grasping(tmp_path):
+    p = _write_minimal(tmp_path, grasping="magic", contact_hold=True)
+    with pytest.raises(ValueError, match="contact_hold"):
+        load_scenario(p)
+
+
+def test_gt_replay_rejected_in_physics_mode(tmp_path):
+    p = _write_minimal(tmp_path, locomotion="policy", gt_mode="replay")
+    with pytest.raises(ValueError, match="replay"):
+        load_scenario(p)
