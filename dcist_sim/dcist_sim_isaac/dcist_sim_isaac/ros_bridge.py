@@ -58,12 +58,20 @@ Joint-name parity (task-7-brief.md Step 4) -- empirically verified
   node's current clock, never leave it default-constructed.
 
 Simulation time: this bridge stamps every message with
-`node.get_clock().now()` (wall clock; P1 does not wire up
-`use_sim_time`/a `/clock` publisher -- task-7-brief.md item 9). TF/
-JointState publish cadence is throttled against *wall-clock* elapsed
-time (the `dt` passed into `step()`), not simulated physics steps, so
-that `ros2 topic hz` reports the documented 50 Hz / 10 Hz regardless of
-how fast the Isaac render loop actually iterates.
+`node.get_clock().now()`. P1/kinematic mode leaves `use_sim_time=False`
+(the default) -- wall clock, no `/clock` publisher, byte-identical to
+the original P1 behavior. Task 7 (physics mode) constructs this bridge
+with `use_sim_time=True`: the node's `use_sim_time` parameter is set at
+construction (so `get_clock().now()` follows `/clock` for every stamp
+call below with no further changes needed) and a `rosgraph_msgs/Clock`
+publisher is created and fed from `step(dt)`'s `dt` argument, which
+sim_app.py's main loop makes the *physics-time* delta
+(`world.get_rendering_dt()`) rather than a wall-clock measurement in
+that mode. TF/JointState publish cadence is throttled against the `dt`
+passed into `step()` either way (wall-clock in kinematic mode,
+physics-time in physics mode), so that `ros2 topic hz` reports the
+documented 50 Hz / 10 Hz regardless of how fast the Isaac render loop
+actually iterates in wall-clock terms.
 
 Rate-gate history (2026-07-04): the first version of this file reset
 the publish accumulators to 0.0 after each publish, which discarded up
@@ -392,9 +400,31 @@ STATUS_HZ = 1.0
 class RosBridge:
     """Owns the single `dcist_sim` rclpy node for the whole sim process."""
 
-    def __init__(self, robots, registry, grasp_radius=grasp_backend.DEFAULT_GRASP_RADIUS):
+    def __init__(self, robots, registry,
+                 grasp_radius=grasp_backend.DEFAULT_GRASP_RADIUS,
+                 use_sim_time=False):
         rclpy.init(args=[])
-        self.node = rclpy.create_node("dcist_sim")
+        self.node = rclpy.create_node(
+            "dcist_sim",
+            parameter_overrides=[rclpy.parameter.Parameter(
+                "use_sim_time", value=use_sim_time)])
+
+        # Task 7 (physics mode): publish /clock from accumulated physics
+        # time so the whole robot stack (launched with use_sim_time:=true,
+        # see build_map.py's orchestrate_up) can run slower than real-time
+        # without drifting off the sim. `node.get_clock().now()` then
+        # follows /clock automatically because `use_sim_time` is set on
+        # the node above -- every existing `get_clock().now()` stamp call
+        # in this file keeps working unchanged. Kinematic mode passes
+        # use_sim_time=False (the default): no publisher, no parameter
+        # override effect, byte-identical to pre-Task-7 behavior (P1 runs
+        # wall clock -- see this file's "Simulation time" docstring
+        # section above, now superseded for physics mode only).
+        self._clock_pub = None
+        self._sim_time_s = 0.0
+        if use_sim_time:
+            from rosgraph_msgs.msg import Clock
+            self._clock_pub = self.node.create_publisher(Clock, "/clock", 10)
 
         # Task 9: one shared backend for every robot's grasp/place/
         # teleport services plus the global reset service.
@@ -423,6 +453,19 @@ class RosBridge:
         return response
 
     def step(self, dt: float) -> None:
+        if self._clock_pub is not None:
+            # Physics mode: dt is the physics-time delta for this frame
+            # (sim_app.py's main loop passes world.get_rendering_dt(), not
+            # wall-clock elapsed time), so accumulated _sim_time_s tracks
+            # simulated time even when the render loop runs slower/faster
+            # than real-time.
+            from rosgraph_msgs.msg import Clock
+            self._sim_time_s += dt
+            msg = Clock()
+            msg.clock.sec = int(self._sim_time_s)
+            msg.clock.nanosec = int((self._sim_time_s % 1.0) * 1e9)
+            self._clock_pub.publish(msg)
+
         rclpy.spin_once(self.node, timeout_sec=0)
 
         # Task 9: re-pin every held object to its gripper every frame,

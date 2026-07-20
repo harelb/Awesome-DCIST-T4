@@ -160,7 +160,8 @@ def main():
     ros_bridge = None
     if not args.smoke:
         from dcist_sim_isaac.ros_bridge import RosBridge
-        ros_bridge = RosBridge(robots, stage.registry, stage.grasp_radius)
+        ros_bridge = RosBridge(robots, stage.registry, stage.grasp_radius,
+                                use_sim_time=scenario.physics_mode)
 
     # Mapping-harness GT capture (live mode). Scenario objects already carry
     # semantics from stage.py's add_labels; this stamps the env props and
@@ -182,16 +183,35 @@ def main():
 
     frames = 60 if args.smoke else None
     n = 0
-    # Robot kinematics integrate against *wall-clock* dt (P1 runs wall
-    # clock, no /clock publisher -- task-7-brief.md item 9), decoupled
-    # from however fast/slow world.step() actually runs. Clamp dt so a
-    # slow first frame (shader compiles etc.) can't produce a
-    # discontinuous jump.
+    # Kinematic mode: robot kinematics integrate against *wall-clock* dt
+    # (no /clock publisher -- see ros_bridge.py's module docstring),
+    # decoupled from however fast/slow world.step() actually runs. Clamp
+    # dt so a slow first frame (shader compiles etc.) can't produce a
+    # discontinuous jump. This block is byte-identical to pre-Task-7 P1
+    # behavior when scenario.physics_mode is False.
+    #
+    # Physics mode (Task 7): drive with fixed physics time instead of
+    # wall-clock, so a real-time-slower-than-wall run still reports a
+    # consistent sim rate on /clock and the 50/10/15 Hz ROS publish
+    # gates. `world.get_rendering_dt()` is the intended frame_dt source
+    # (each `world.step(render=True)` call advances that many seconds of
+    # physics/render time) -- confirmed by reading the installed
+    # isaacsim.core.api.SimulationContext source (World subclasses it):
+    # get_rendering_dt() returns self._rendering_dt, which defaults to
+    # 1.0/60.0 when the stage uses defaults (simulation_context.py
+    # __init__, ~line 145: "if self._initial_rendering_dt is None:
+    # self._initial_rendering_dt = 1.0 / 60.0"). World() is still
+    # constructed bare here (physics_dt/rendering_dt left at their
+    # defaults) -- Task 8 pins the real values; until then this yields a
+    # default-derived frame_dt, which is fine for Task 7's purposes.
     last_time = time.monotonic()
     while sim_app.is_running():
-        now = time.monotonic()
-        dt = min(now - last_time, 0.25)
-        last_time = now
+        if scenario.physics_mode:
+            dt = world.get_rendering_dt()
+        else:
+            now = time.monotonic()
+            dt = min(now - last_time, 0.25)
+            last_time = now
 
         for robot in robots:
             robot.step(dt)

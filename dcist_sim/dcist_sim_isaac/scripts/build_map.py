@@ -107,7 +107,7 @@ def wait_until(pred, timeout, poll=0.5, what=""):
     return False
 
 
-def orchestrate_up(args, raw_dir):
+def orchestrate_up(args, raw_dir, scenario):
     # APPEND to PYTHONPATH, never replace: clobbering drops the ROS-provided
     # rclpy and sim_app dies with ModuleNotFoundError (sim_runbook.md §2).
     pkg_path = os.path.join(REPO_ROOT, "dcist_sim", "dcist_sim_isaac")
@@ -131,10 +131,25 @@ def orchestrate_up(args, raw_dir):
     # router -- started inside the run-adt4 session -- is up. Waiting for
     # /sim/status first deadlocks (found the hard way on the first
     # field_smoke regression run).
-    subprocess.run(
-        [RUN_ADT4, "-n", args.robot, "-c", "topaz", "-o", raw_dir, "-y", "-f",
-         f"--tmuxp-args=-d -L {args.socket}", "spot_isaac-isaac_sim"],
-        cwd=REPO_ROOT, env=env, check=True)
+    # Task 7 (physics mode): run-adt4 exposes sim time as a plain CLI flag,
+    # NOT an env var it reads -- `--sim-time`/`-s` is a bare `is_flag=True`
+    # click option with no `envvar=` (dcist_launch_system/bin/run-adt4:285;
+    # contrast with `--robot-name`/`-n` at line 262, which does have
+    # `envvar="ADT4_ROBOT_NAME"`). run-adt4's main() (line 343) sets
+    # env["ADT4_SIM_TIME"] = "true"/"false" from that flag for the tmuxp
+    # session it launches; base_launch.yaml:6 (`sim_time: $ADT4_SIM_TIME`)
+    # and master.launch.yaml (every `{name: use_sim_time, value: $(var
+    # sim_time)}` node argument, e.g. lines 95/118/134/...) thread it down
+    # to every node's `use_sim_time` ROS parameter. So the only way to get
+    # sim time into the launched robot stack from here is to pass `-s` on
+    # this command line -- there is no ADT4_SIM_TIME env var we could set
+    # in `env` instead and have it picked up.
+    run_adt4_cmd = [RUN_ADT4, "-n", args.robot, "-c", "topaz", "-o", raw_dir,
+                     "-y", "-f", f"--tmuxp-args=-d -L {args.socket}"]
+    if scenario.physics_mode:
+        run_adt4_cmd.append("-s")
+    run_adt4_cmd.append("spot_isaac-isaac_sim")
+    subprocess.run(run_adt4_cmd, cwd=REPO_ROOT, env=env, check=True)
     # /sim/status proves the sim is fully up AND reachable via the router.
     ok = wait_until(
         lambda: isaac.poll() is None and subprocess.run(
@@ -250,7 +265,7 @@ def main():
 
     isaac = None
     if args.orchestrate:
-        isaac = orchestrate_up(args, raw_dir)
+        isaac = orchestrate_up(args, raw_dir, scenario)
 
     rclpy.init()
     node = BuildMapNode(args.robot)
