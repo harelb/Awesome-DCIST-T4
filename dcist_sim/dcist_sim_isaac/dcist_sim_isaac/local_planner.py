@@ -1,9 +1,10 @@
 """Pure local planner: A* on a Costmap2D + pure-pursuit follower (spec §4).
 
-Import contract: stdlib + numpy only.  Sits inside SpotSimRobot's target
-mode (Task 9) -- the slot the BD API's local navigation occupies on real
-hardware.  vy is always 0 (forward-drive + rotate-in-place); the walking
-policy accepts lateral velocity but forward-only keeps pursuit simple.
+Import contract: stdlib + dcist_sim_isaac.costmap.  Sits inside
+SpotSimRobot's target mode (Task 9) -- the slot the BD API's local
+navigation occupies on real hardware.  vy is always 0 (forward-drive +
+rotate-in-place); the walking policy accepts lateral velocity but
+forward-only keeps pursuit simple.
 """
 from __future__ import annotations
 
@@ -61,6 +62,18 @@ def astar(costmap, start_xy, goal_xy):
                 continue
             if grid[n[1], n[0]] != Costmap2D.FREE:
                 continue
+            if dx != 0 and dy != 0:
+                # No cutting a corner between two occupied flanking cells:
+                # both orthogonal neighbors of the diagonal step must be
+                # free, or the move threads a zero-clearance pinch point.
+                ax, ay = cx + dx, cy
+                bx, by = cx, cy + dy
+                if not (0 <= ax < nx and 0 <= ay < ny
+                        and grid[ay, ax] == Costmap2D.FREE):
+                    continue
+                if not (0 <= bx < nx and 0 <= by < ny
+                        and grid[by, bx] == Costmap2D.FREE):
+                    continue
             ng = g[cur] + cost
             if ng < g.get(n, math.inf):
                 g[n] = ng

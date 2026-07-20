@@ -34,6 +34,34 @@ def test_prune_keeps_endpoints_and_clearance():
     assert path[0] == (-5.0, 0.0) and path[-1] == (5.0, 0.0)
 
 
+def test_astar_no_corner_cut_detour():
+    """Two occupied cells touching diagonally form a zero-clearance pinch
+    between their free orthogonal neighbors; astar must detour around it
+    rather than cutting through the shared corner."""
+    grid = np.zeros((4, 4), dtype=np.uint8)
+    grid[1, 1] = Costmap2D.OCCUPIED  # ix=1, iy=1
+    grid[2, 2] = Costmap2D.OCCUPIED  # ix=2, iy=2
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=1.0)
+    start = m.grid_to_world(2, 1)   # free cell diagonally adjacent to goal
+    goal = m.grid_to_world(1, 2)    # across the pinch from start
+    path = astar(m, start, goal)
+    assert path is not None
+    assert len(path) > 2            # a direct corner-cut would be 2 points
+
+
+def test_astar_none_when_only_route_is_a_corner_cut():
+    """A 2x2 map where the only connectivity between start and goal is the
+    diagonal cut across two occupied corner cells: must be None, not a
+    corner-cutting path."""
+    grid = np.zeros((2, 2), dtype=np.uint8)
+    grid[0, 0] = Costmap2D.OCCUPIED  # ix=0, iy=0
+    grid[1, 1] = Costmap2D.OCCUPIED  # ix=1, iy=1
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=1.0)
+    start = m.grid_to_world(1, 0)
+    goal = m.grid_to_world(0, 1)
+    assert astar(m, start, goal) is None
+
+
 def _drive(planner, pose, dt=0.1, t0=0.0, max_steps=3000):
     """Integrate the planner's own commands with unicycle kinematics."""
     import math
@@ -65,6 +93,16 @@ def test_blocked_goal():
     cmd, status = p.update((-5.0, 0.0, 0.0), 1.0)  # first update plans -> BLOCKED
     assert cmd == (0.0, 0.0, 0.0) and status == LocalPlanner.BLOCKED
     assert p.status == LocalPlanner.BLOCKED       # terminal until next set_goal
+
+
+def test_cancel_resets_to_idle():
+    m = _corridor_map()
+    p = LocalPlanner(m)
+    p.set_goal(5.0, 0.0, 0.0, now=0.0)
+    p.cancel()
+    assert p.status == LocalPlanner.IDLE
+    cmd, status = p.update((-5.0, 0.0, 0.0), 1.0)
+    assert cmd == (0.0, 0.0, 0.0) and status == LocalPlanner.IDLE
 
 
 def test_stuck_when_not_progressing():
