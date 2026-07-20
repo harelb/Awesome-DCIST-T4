@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 
 from dcist_sim_isaac.drive_backends import (
-    assemble_spot_obs, compose_root_pose, fallen, kinematic_target_step,
-    kinematic_velocity_step, sanitize_action, wrap_angle)
+    assemble_spot_obs, build_arm_stow, compose_root_pose, fallen,
+    kinematic_target_step, kinematic_velocity_step, sanitize_action,
+    wrap_angle)
 
 
 def _yaw_R(yaw):
@@ -78,6 +79,25 @@ def test_assemble_spot_obs_layout():
     np.testing.assert_allclose(obs[24:36], joint_vel)
     # previous action
     np.testing.assert_allclose(obs[36:48], prev_action)
+
+
+def test_build_arm_stow_maps_by_suffix():
+    # spot_with_arm.usd's live arm dof order (policy_spike_report §5): the
+    # 7 'arm0_*' joints, INTERLEAVED among the legs, come back in this order.
+    names = ["arm0_sh1", "arm0_el0", "arm0_sh0", "arm0_el1",
+             "arm0_wr0", "arm0_wr1", "arm0_f1x"]
+    stow = build_arm_stow(names)
+    # value-per-name, same order as the input names (folded stow pose):
+    #   sh1=-3.1, el0=3.1, sh0=0, el1=0, wr0=0, wr1=0, f1x(gripper)=-1.5
+    np.testing.assert_allclose(
+        stow, [-3.1, 3.1, 0.0, 0.0, 0.0, 0.0, -1.5])
+    assert stow.dtype == np.float64
+    assert len(stow) == 7
+
+
+def test_build_arm_stow_unknown_suffix_raises():
+    with pytest.raises(RuntimeError, match="no known stow suffix"):
+        build_arm_stow(["arm0_sh0", "arm0_bogus"])
 
 
 def test_fallen_upright_standing():

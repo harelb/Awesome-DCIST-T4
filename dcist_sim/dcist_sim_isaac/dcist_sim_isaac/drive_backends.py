@@ -171,6 +171,44 @@ POLICY_LEG_DOF_ORDER = (
 POLICY_CHECKPOINT_REL = "Isaac/Samples/Policies/Spot_Policies/spot_policy.pt"
 POLICY_ENV_CONFIG_REL = "Isaac/Samples/Policies/Spot_Policies/spot_env.yaml"
 
+# Arm STOW hold pose (Task 10 standing-stability mitigation). The arm-loaded
+# spot_with_arm asset TOPPLES at rest under the leg-only flat-terrain policy
+# (~2 falls/sim-minute, Task 9 GPU run): the USD default arm pose is deployed
+# forward, shifting the CoM in a way the leg policy never trained on. Folding
+# the arm tight against the body in the BD stow pose (minimal CoM offset -- the
+# pose the asset is designed to carry) removes that bias so standing is stable.
+# Values mirror ros_bridge._STANDING_POSITIONS' arm block (arm0 short-name ->
+# radians), keyed by the USD DOF-name suffix after the last "_"
+# ('arm0_sh1' -> 'sh1'). spot_with_arm.usd's 7 arm DOFs are
+# sh0/sh1/el0/el1/wr0/wr1/f1x (README "Spot prim layout"; policy_spike_report
+# §5), interleaved among the 12 legs.
+POLICY_ARM_STOW_BY_SUFFIX = {
+    "sh0": 0.0, "sh1": -3.1, "el0": 3.1, "el1": 0.0,
+    "wr0": 0.0, "wr1": 0.0, "f1x": -1.5,
+}
+
+
+def build_arm_stow(arm_dof_names):
+    """Map the 7 arm DOF names to BD stow-pose position targets (radians),
+    value-per-name in the SAME order as `arm_dof_names` (whatever order the
+    live articulation reports its 'arm0_*' joints in). Pure (numpy only),
+    Isaac-free -- unit-tested. Raises if a name carries no known arm-joint
+    suffix, so a future asset revision that renamed/added an arm DOF fails
+    loudly instead of silently leaving the arm at a CoM-shifting rest pose
+    (mirrors the leg-DOF order guard's fail-loud philosophy)."""
+    import numpy as np
+
+    out = []
+    for n in arm_dof_names:
+        suffix = str(n).rsplit("_", 1)[-1]        # 'arm0_sh1' -> 'sh1'
+        if suffix not in POLICY_ARM_STOW_BY_SUFFIX:
+            raise RuntimeError(
+                f"arm DOF '{n}' has no known stow suffix (known: "
+                f"{sorted(POLICY_ARM_STOW_BY_SUFFIX)})")
+        out.append(POLICY_ARM_STOW_BY_SUFFIX[suffix])
+    return np.array(out, dtype=np.float64)
+
+
 # Name of the Spot BODY link in spot_with_arm.usd (child of the robot root
 # prim). CRITICAL: the articulation's `get_world_pose()`/`get_*_velocity()`
 # return the *articulation root* link, which on spot_with_arm.usd is NOT the
@@ -428,14 +466,23 @@ class PolicyDriveBackend:
         view.set_max_efforts(np.array([eff], dtype=np.float64),
                              joint_indices=self._leg_idx)
 
-        # Seat the legs at the trained default pose; snapshot the arm's spawn
-        # pose as the hold target. Build a full-width default vector for reset.
+        # Seat the legs at the trained default pose and FOLD the arm to the BD
+        # stow pose (Task 10 standing-stability mitigation, see
+        # POLICY_ARM_STOW_BY_SUFFIX): we both set_joint_positions the arm to
+        # stow now (so it starts folded -- no swing transient during settle)
+        # AND hold it there every policy tick (`_arm_hold` -> _apply_leg_targets
+        # position targets). Build a full-width default vector for reset that
+        # re-seats BOTH legs and arm on every reset_standing / fall recovery.
+        arm_names = [names[i] for i in self._arm_idx]
+        self._arm_hold = build_arm_stow(arm_names)
         self._art.set_joint_positions(self._default_pos,
                                       joint_indices=self._leg_idx)
+        self._art.set_joint_positions(self._arm_hold,
+                                      joint_indices=self._arm_idx)
         full = np.asarray(self._art.get_joint_positions(), dtype=np.float64)
-        self._arm_hold = full[self._arm_idx].copy()
         self._full_default = full.copy()
         self._full_default[self._leg_idx] = self._default_pos
+        self._full_default[self._arm_idx] = self._arm_hold
 
         self._prev_action = np.zeros(len(self._leg_idx), dtype=np.float64)
         self._policy_counter = 0
