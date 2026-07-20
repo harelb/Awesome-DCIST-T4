@@ -387,6 +387,17 @@ class PolicyDriveBackend:
         self._policy = None
         self._device = None
         self._policy_counter = 0
+        # Task 13 arm-ownership handoff. While True (the default), every policy
+        # tick writes the 7 arm DOFs to their stow hold target as part of the
+        # full-width position action (`_apply_leg_targets`) -- the Task-10
+        # standing-stability behaviour. A grasp op takes arm ownership by
+        # calling `set_arm_hold(False)`: the policy then commands ONLY the 12
+        # leg DOFs (a leg-index-scoped action), leaving the arm's PhysX position
+        # targets to whatever the grasp backend's IK servo last set, so the
+        # 50 Hz stow write can't fight the servo. The grasp backend restores
+        # ownership (re-stow) with `set_arm_hold(True)` when the op ends.
+        # Set here in the Isaac-free ctor so the flag logic is unit-testable.
+        self._arm_hold_enabled = True
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -514,6 +525,35 @@ class PolicyDriveBackend:
     def halt(self):
         self._cmd = (0.0, 0.0, 0.0)
 
+    # -- arm-ownership handoff (Task 13) -------------------------------------
+
+    def set_arm_hold(self, enabled):
+        """Enable (True) or release (False) the policy's per-tick arm stow
+        hold. Released while a grasp op servos the arm so the 50 Hz stow write
+        stops fighting the IK servo; re-enabled (re-stow) when the op ends.
+        Pure flag flip -- unit-tested without Isaac."""
+        self._arm_hold_enabled = bool(enabled)
+
+    def arm_hold_enabled(self):
+        return self._arm_hold_enabled
+
+    # -- narrow accessors for the Task-13 arm IK (avoid reaching into privates
+    #    from grasp_backends.py) ----------------------------------------------
+
+    def articulation(self):
+        """The initialized `SingleArticulation` (None before `initialize`)."""
+        return self._art
+
+    def arm_dof_indices(self):
+        """DOF indices of the 7 `arm0_*` joints in the 19-DOF articulation
+        (6 arm joints + the f1x gripper finger), in articulation dof order."""
+        return list(self._arm_idx)
+
+    def arm_dof_names(self):
+        """Names of the 7 arm DOFs, aligned with `arm_dof_indices()`."""
+        names = list(self._art.dof_names)
+        return [names[i] for i in self._arm_idx]
+
     # -- physics callback (500 Hz) -------------------------------------------
 
     def _on_physics_step(self, step_size):
@@ -565,10 +605,19 @@ class PolicyDriveBackend:
 
         leg_target = self._default_pos + \
             np.asarray(action, dtype=np.float64) * POLICY_ACTION_SCALE
-        targets = np.empty(self._art.num_dof, dtype=np.float64)
-        targets[self._leg_idx] = leg_target
-        targets[self._arm_idx] = self._arm_hold
-        self._art.apply_action(ArticulationAction(joint_positions=targets))
+        if self._arm_hold_enabled:
+            # Full-width action: legs + arm stow hold (the GPU-validated Task 10
+            # standing-stability path -- unchanged).
+            targets = np.empty(self._art.num_dof, dtype=np.float64)
+            targets[self._leg_idx] = leg_target
+            targets[self._arm_idx] = self._arm_hold
+            self._art.apply_action(ArticulationAction(joint_positions=targets))
+        else:
+            # A grasp op owns the arm: command ONLY the legs (leg-index-scoped
+            # action) so the policy's stow write no longer overwrites the IK
+            # servo's arm position targets each tick.
+            self._art.apply_action(ArticulationAction(
+                joint_positions=leg_target, joint_indices=self._leg_idx))
 
     # -- state readback ------------------------------------------------------
 
