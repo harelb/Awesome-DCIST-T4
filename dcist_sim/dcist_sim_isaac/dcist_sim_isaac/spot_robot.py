@@ -20,6 +20,9 @@ import math
 
 import numpy as np
 
+from dcist_sim_isaac.drive_backends import (
+    kinematic_target_step, kinematic_velocity_step, wrap_angle)
+
 logger = logging.getLogger(__name__)
 
 # Isaac 6.0 assets root layout, verified 2026-07-04 by spawning the
@@ -45,10 +48,6 @@ MAX_TARGET_ANGULAR_SPEED = 1.0  # rad/s (task-7-brief.md Step 2)
 
 _POSITION_EPS = 1e-6
 _ANGLE_EPS = 1e-6
-
-
-def _wrap_angle(angle: float) -> float:
-    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def _yaw_to_quat_wxyz(yaw: float) -> np.ndarray:
@@ -189,46 +188,16 @@ class SpotSimRobot:
         self._write_pose_to_stage()
 
     def _step_velocity(self, dt: float) -> None:
-        # Exactly FakeSpot.update_velocity_control's math (fake_spot.py:
-        # 253-266): body-frame (vx, vy) rotated into the odom frame by the
-        # *current* yaw, plus wz integrated directly. Note FakeSpot's dp[1]
-        # uses `vx*sin(theta) - vy*cos(theta)`, which is what we reproduce
-        # here verbatim (not the more usual `vx*sin+vy*cos`) for parity
-        # with the real executor's kinematics.
-        vx, vy, vz = self.cmd_vel_linear
-        wz = self.cmd_vel_angular[2]
-        theta = self.base_pose[3]
-
-        dx = vx * math.cos(theta) + vy * math.sin(theta)
-        dy = vx * math.sin(theta) - vy * math.cos(theta)
-
-        self.base_pose[0] += dx * dt
-        self.base_pose[1] += dy * dt
-        self.base_pose[2] += vz * dt
-        self.base_pose[3] = _wrap_angle(theta + wz * dt)
+        self.base_pose[:] = kinematic_velocity_step(
+            tuple(self.base_pose), tuple(self.cmd_vel_linear),
+            tuple(self.cmd_vel_angular), dt)
 
     def _step_target(self, dt: float) -> None:
         if self.target_pose is None:
             return
-        tx, ty, tyaw = self.target_pose
-        x, y, z, yaw = self.base_pose
-
-        dx, dy = tx - x, ty - y
-        dist = math.hypot(dx, dy)
-        dyaw = _wrap_angle(tyaw - yaw)
-
-        max_step = MAX_TARGET_LINEAR_SPEED * dt
-        max_dyaw = MAX_TARGET_ANGULAR_SPEED * dt
-
-        if dist > _POSITION_EPS:
-            step_dist = min(dist, max_step)
-            x += dx / dist * step_dist
-            y += dy / dist * step_dist
-
-        if abs(dyaw) > _ANGLE_EPS:
-            yaw = _wrap_angle(yaw + max(-max_dyaw, min(max_dyaw, dyaw)))
-
-        self.base_pose[:] = (x, y, z, yaw)
+        self.base_pose[:] = kinematic_target_step(
+            tuple(self.base_pose), self.target_pose, dt,
+            MAX_TARGET_LINEAR_SPEED, MAX_TARGET_ANGULAR_SPEED)
 
     # -- USD writeback ---------------------------------------------------------
 
