@@ -50,3 +50,19 @@ def test_save_load_roundtrip(tmp_path):
     m2 = Costmap2D.load(path)
     assert np.array_equal(m2.grid, m.grid)
     assert m2.origin_xy == m.origin_xy and m2.resolution == m.resolution
+
+
+def test_defensive_copy():
+    """Verify that mutating the source array doesn't corrupt the costmap."""
+    grid = np.zeros((20, 20), dtype=np.uint8)
+    grid[9:11, 9:11] = Costmap2D.OCCUPIED
+    grid_copy = grid.copy()
+    m = Costmap2D(grid, origin_xy=(-5.0, -5.0), resolution=0.5)
+
+    # Mutate the source array
+    grid[:] = Costmap2D.FREE
+
+    # Costmap should still have its own copy
+    assert np.array_equal(m.grid, grid_copy)
+    assert m.is_free_world(-4.0, -4.0)
+    assert not m.is_free_world(-0.2, -0.2)   # block still occupied in costmap

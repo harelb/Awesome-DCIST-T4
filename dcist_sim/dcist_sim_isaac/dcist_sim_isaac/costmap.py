@@ -16,7 +16,7 @@ class Costmap2D:
     OCCUPIED = 1
 
     def __init__(self, grid, origin_xy, resolution):
-        self.grid = np.asarray(grid, dtype=np.uint8)
+        self.grid = np.asarray(grid, dtype=np.uint8).copy()
         self.origin_xy = (float(origin_xy[0]), float(origin_xy[1]))
         self.resolution = float(resolution)
 
