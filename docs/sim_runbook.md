@@ -470,3 +470,199 @@ encodes (each one cost a failed run):
   robot's spawn view (`warehouse_tour.yaml`'s cone_0) or the e2e prerequisite
   (objects>=1) can't be met before motion; the cement-bag asset is NOT
   detectable indoors (0 YOLOE hits at any conf in every warehouse probe).
+
+---
+
+## 12. Physics tiers (P4) — locomotion policy + physics grasp
+
+Phase 4 adds a **physics tier**: a robot with `locomotion: policy` (a PhysX
+walking-policy Spot, Tasks 8-10) and/or `grasping: physics` (the G1 IK-reach
+grasp backend, Tasks 12-13). This section is the delta from §2 (Phase-1
+kinematic bring-up), plus the physics-mode semantics and the **A1 acceptance
+status** (see 12.9 — A1 is currently BLOCKED on a perception defect, with the
+evidence + root cause recorded there).
+
+Scenario: `dcist_sim/scenarios/field_smoke_physics.yaml` (robot
+`locomotion: policy`, `grasping: physics`; objects spawn DYNAMIC, a costmap is
+baked, the World runs 500 Hz physics / 60 Hz render — Task 6).
+
+### 12.1 Bring-up deltas vs §2
+
+Same three-terminal shape as §2, with these physics-mode changes:
+
+- **Isaac** (terminal 1): launch WITHOUT `--smoke` (physics needs the
+  ros_bridge for the grasp services + `/clock`). `physics_mode` auto-publishes
+  `/clock` at the render rate.
+- **Robot stack** (terminal 2, run-adt4): add **`-s`** (sim-time; REQUIRED in
+  physics mode — Task 7 wires `-s` -> `ADT4_SIM_TIME` -> `use_sim_time`). The
+  `--tmuxp-args="-d -L <sock>"` form is still needed (libtmux `-t4` bug, §2).
+  ```
+  run-adt4 -n hilbert -c topaz -o "$OUT" -y -f -s \
+      --tmuxp-args="-d -L t15phys" spot_isaac-isaac_sim
+  ```
+- **Omniplanner** (terminal 3): launch with **`sim_time:=true`** so it shares
+  the sim clock with the sim-time robot stack (a wall-clock omniplanner sees
+  sim-stamped TF as far-future and drops lookups). Still needs
+  `ADT4_OUTPUT_DIR` + `config=isaac_sim` when launched manually (§11).
+- **e2e_smoke.py** (terminal 4): unchanged. It uses WALL-clock timeouts
+  (`time.time()`), so at RTF < 1 its internal budgets cover LESS sim-time —
+  keep the work close (12.2).
+
+**sim_time verification** (once the stack is up — all three MUST hold):
+```
+ros2 topic hz /clock                                    # ~34 Hz (render rate)
+ros2 param get /hilbert/spot_executor_node use_sim_time # Boolean value is: True
+ros2 param get /hilbert/omniplanner_node   use_sim_time # Boolean value is: True
+```
+Verified this run: `/clock` ~34 Hz, both nodes `use_sim_time=True`.
+
+### 12.2 RTF expectations
+
+Physics is sub-real-time on the RTX 3090 Ti. Measured RTF: policy_spike flat
+**0.66-0.68**, warehouse **0.61-0.63** (Task 1); this field_smoke_physics
+full-stack run measured `/clock` ~**34 Hz** against nominal 60 Hz render =>
+RTF ~**0.57**. Design external timeouts for RTF < 1 — a 90 s wall budget buys
+~50 s of sim motion.
+
+### 12.3 nav_status vocabulary + fall auto-reset
+
+`/sim/nav_status` (JSON `{robot: state}`, Task 9) reports the policy robot's
+`LocalPlanner` status plus a physics-only `fallen`:
+
+| state     | meaning |
+|-----------|---------|
+| `idle`    | no active goal |
+| `active`  | driving a planned path toward the goal |
+| `reached` | goal reached (within goal tol) |
+| `blocked` | no collision-free A* path to the goal (costmap) |
+| `stuck`   | no progress for `stuck_timeout_s`; gave up |
+| `fallen`  | body fell (or the policy emitted NaN) — auto-reset fired |
+
+**Fall auto-reset** (spot_robot.py `_terminal_recovery_reason` +
+drive_backends.py `fallen`): each frame, if the body-up axis tilts past ~60 deg
+(`up_z < 0.5`) OR the base sinks below z=0.3 m, OR the policy emits a non-finite
+action, the robot **self-heals** — `reset_standing()` re-seats legs+arm upright
+at the current (x,y,yaw), the in-flight planner goal is **cancelled**, and
+`nav_status` latches `fallen`. A fall therefore **fails the active goal** (the
+executor's Follow ends early). Task 10's arm-STOW hold pose cut falls from
+~10/5 sim-min to ~1 boot-settle transient over 347 s, so a single clean
+traverse is reliable; long dwells that thrash are not.
+
+### 12.4 Async grasp states (G1 physics)
+
+`grasping: physics` routes to `PhysicsGraspBackend` (Task 13). Grasp/place are
+ASYNC (Task 11): `grasp_object`/`place_object` only ACCEPT; the terminal
+outcome is polled from the `GraspStatus` service (`/{robot}/sim/grasp_status`),
+state in `{idle, in_progress, succeeded, failed}` (sim_spot maps `in_progress`
+-> bosdyn `MANIP_STATE_MOVING_TO_GRASP`). State machine:
+`selecting -> deploy -> reach_pregrasp -> descend -> validate -> attach ->
+carry -> succeeded`; place: `place_deploy -> lower -> detach -> stow ->
+succeeded`. Any servo failure / no target / out-of-reach -> `failed` with a
+reason string. The backend selects the nearest graspable within `reach_m`
+(0.984 m) of the arm, class-agnostic — so where the executor STOPS decides
+whether the pick can even start.
+
+### 12.5 Jacobian validity envelope + HEAD-ON approach (hard requirement)
+
+The G1 servo uses a CONSTANT base-frame jacobian measured at the arm deploy
+pose (`grasp_backends.ARM_JACOBIAN_BASE`), because the live PhysX
+`get_jacobians()` is column-mapped wrong for `spot_with_arm`. Preconditions
+(verbatim from `grasp_backends.py` `ARM_JACOBIAN_BASE`):
+
+>  1. The arm is AT (or very near) the ARM_DEPLOY_BY_SUFFIX deploy pose. Every
+>     servo phase (grasp reach/descend/carry AND place lower) MUST be preceded
+>     by a deploy so this holds -- servoing from stow (or any far pose) with
+>     this jacobian stalls (the shoulders' true jacobian there is different).
+>  2. The target is roughly HEAD-ON (small base-frame lateral |y|). Lateral
+>     authority at the deploy pose is weak: expect up to ~0.08 m residual in
+>     base-frame y, so a target more than ~0.08 m off the sagittal plane may
+>     never reach the 0.10 m validate gate. Approach objects facing them.
+>  3. Reach is SHORT (deploy pose -> ground object ~0.7 m in front). A constant
+>     jacobian is a local linearization; large excursions are not modelled.
+>  4. The DOF-order guard in _ArmInterface catches only a change in the arm's
+>     servoed-joint ORDER, NOT a change in link geometry/masses/gains. Any new
+>     arm asset (or retuned drive gains) invalidates these numbers -- re-measure
+>     ARM_JACOBIAN_BASE + ARM_DEPLOY_BY_SUFFIX by finite difference.
+
+Consequence: the robot must end its approach with the object roughly in front
+and within ~0.7-0.98 m. The rearrange planner puts the pick standoff on the FAR
+side of the object, so the follower (goal_tolerance 1.0 m) stops just short of
+it — head-on by construction *provided the perceived object node is accurate*
+(see 12.7, where it is not, under physics).
+
+### 12.6 contact_hold (G2) — EXPERIMENTAL, non-functional
+
+`grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`,
+Task 14) swaps the kinematic attach for a real PhysX friction hold (close the
+`arm0_f1x` finger, poll finger<->object contact, ride on friction). It is
+**non-functional on the current asset**: the Spot arm/finger links carry NO
+PhysX colliders (floating-Spot design), so the closing finger sails through the
+object/floor and `get_contact_report()` stays empty — `grasp_smoke.py
+--contact-hold` always fails "no contact". The machinery is implemented +
+unit-tested behind the flag and G1 is provably untouched. FOLLOW-UPS: add
+colliders to the arm/finger links, then retune `CONTACT_PRESS_M` /
+`CONTACT_POLL_S` (see `.superpowers/sdd/task-14-report.md`). G1 is the shipped
+tier; do NOT use G2 on any default path.
+
+### 12.7 Physics-mode object localization — KNOWN DEFECT (blocks A1 B/C)
+
+Under physics locomotion the DSG localizes scenario objects with a large,
+**systematic** error (measured ~**2.8 m** for the field_smoke duffel, and up to
+~11-13 m for a spurious node), consistent run-to-run and across viewpoints.
+Kinematic mode (Phase 1 / mapping harness) localizes accurately and e2e passes;
+only the physics tier is affected. Because the perceived object node is ~2.8 m
+off the real object, the rearrange executor navigates to the wrong standoff and
+the G1 grasp fires **out of reach** (executor log: `Detection is valid` ->
+`GRASP FAILED` / `MANIP_STATE_GRASP_FAILED`; grasp backend: nearest graspable
+> `reach_m`). Detection itself succeeds; navigation-to-the-node is what fails.
+
+Ruled out during Task 15 (see task-15-report.md for the full log):
+- **Viewing baseline** — a deliberate head-on approach made localization *no
+  better* (still scattered 4-13 m).
+- **Body-tilt in the odom->body TF** — the dynamic TF publishes yaw-only while
+  the walking body rolls/pitches ~4-5 deg; publishing the true body quaternion
+  is *more correct* but changed the localization error by < 0.1 m (2.85 -> 2.81
+  m), so tilt is NOT the dominant term. (This correctness fix was prototyped and
+  reverted; it is a recommended-but-insufficient follow-up, not a Task-15
+  deliverable.)
+
+Most likely remaining cause: an **image <-> TF timestamp coupling under
+`use_sim_time`/`/clock`** (the offset tracks the direction the robot drove), or
+a depth/extrinsic bias specific to the PhysX camera path. This is a Task-7/8
+(sim-time + camera integration) perception defect, outside Task 15's
+scenario/config/docs scope. Note the G1 grasp *mechanism* is sound: Task 13's
+`grasp_smoke.py` drives directly to ~0.7 m of `cone_0` (bypassing the DSG) and
+grasps + places successfully — it is only the DSG-position-driven navigation
+that the localization error breaks.
+
+### 12.8 Scope cut
+
+A robot with kinematic locomotion + `grasping: physics` (no policy drive
+backend, hence no arm) FAILS CLEANLY: `PhysicsGraspBackend.grasp` returns
+`failed` "physics grasping requires locomotion: policy in this phase". Verified
+by unit test; not a crash.
+
+### 12.9 A1 acceptance status — BLOCKED (B/C), with evidence
+
+Reproduce (fresh GPU; Isaac + `spot_isaac -s` stack + omniplanner
+`sim_time:=true`, one warm-up drive so places>=2, then):
+```
+~/environments/dcist/spark_env/bin/python \
+    dcist_sim/dcist_sim_isaac/scripts/e2e_smoke.py --robot hilbert
+```
+Latest run (field_smoke_physics, TF fix reverted — result identical either way):
+```
+[e2e] STAGE A: goto 't(1)' at (-0.28, 13.01) (start (0.07, 0.01))
+[e2e] PASS A: displacement 3.10 m (need > 3.0)
+[e2e] STAGE B: rearrange goal '(object-in-place o0 t7)' (obj@(6.67, 2.73) -> place@(-7.29, 8.49))
+[e2e] FAIL B: held object = None (within 120 s)
+[e2e] FAIL C: no object was held, cannot verify place
+[e2e] OVERALL: FAIL
+```
+- **A (nav) PASSES** under physics — the policy walk + local planner drive the
+  base > 3 m reliably (3.10-3.21 m across runs).
+- **B (pick) / C (place) BLOCKED** by the 12.7 localization defect: the object
+  node is ~2.8 m off, the executor stops out of arm reach, and the grasp fails
+  cleanly (`GRASP FAILED`, never `succeeded`). No e2e threshold was weakened.
+  A1 cannot pass until the physics-mode perception mislocalization (12.7) is
+  fixed at the Task-7/8 layer.
