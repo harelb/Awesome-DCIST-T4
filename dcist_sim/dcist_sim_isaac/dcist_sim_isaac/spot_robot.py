@@ -138,6 +138,12 @@ class SpotSimRobot:
         self._gripper_xform = XFormPrim(f"{self.prim_path}/{GRIPPER_RELATIVE_PATH}")
 
         self.base_pose = np.array([spec.x, spec.y, spec.z, spec.yaw], dtype=float)
+        # Intentional ONE-TIME pre-reset spawn placement (runs before
+        # world.reset(), so PhysX reads it as the articulation's initial
+        # transform). This is NOT the per-frame USD write that step() must
+        # avoid for policy robots -- do not "fix" this as a never-write
+        # violation; policy robots still spawn from here, then PhysX owns the
+        # pose and step() reads it back via the drive backend.
         self._write_pose_to_stage()
 
         # ZED-shaped camera (Task 8): a child prim of this robot's root,

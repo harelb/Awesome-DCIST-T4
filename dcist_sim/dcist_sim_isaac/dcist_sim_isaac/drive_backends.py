@@ -155,6 +155,17 @@ POLICY_STANDING_Z = 0.55
 POLICY_DEFAULT_LEG_POS = (
     0.1, -0.1, 0.1, -0.1, 0.9, 0.9, 1.1, 1.1, -1.5, -1.5, -1.5, -1.5)
 
+# The EXACT 12 leg-DOF names, in the order the policy was trained on (leg-only
+# spot.usd dof order, spike report §5). `initialize()` asserts the by-name leg
+# filter reproduces this list exactly: the `"arm0" not in n` filter + a bare
+# len==12 check would silently pass a future asset revision that returned 12
+# legs in a DIFFERENT order, scrambling obs[12:24] and the action scatter
+# (both are indexed in THIS order). Guarding the order, not just the count,
+# turns that into a loud RuntimeError.
+POLICY_LEG_DOF_ORDER = (
+    "fl_hx", "fr_hx", "hl_hx", "hr_hx", "fl_hy", "fr_hy", "hl_hy", "hr_hy",
+    "fl_kn", "fr_kn", "hl_kn", "hr_kn")
+
 # Nucleus-relative paths of the pretrained checkpoint + its env config
 # (spike report §2). Streamed at initialize() time -- no local copy needed.
 POLICY_CHECKPOINT_REL = "Isaac/Samples/Policies/Spot_Policies/spot_policy.pt"
@@ -280,6 +291,36 @@ def _R_to_quat_wxyz(R):
     return np.array([w, x, y, z], dtype=np.float64)
 
 
+def compose_root_pose(body_pos, body_quat_wxyz, p_br, R_br):
+    """Physics ROOT link world pose from a desired BODY world pose + the fixed
+    body<-root rigid offset (R_br, p_br), where world_root = world_body @
+    (R_br, p_br). Pure (numpy only), no Isaac imports -- unit-tested.
+
+    `reset_standing` uses this: we can only command the physics *root* link's
+    pose, but callers think in *body* poses, and on spot_with_arm.usd the root
+    link is a large fixed offset from the body (see BASE_LINK_NAME).
+
+    Args:
+        body_pos: desired body position, (3,)
+        body_quat_wxyz: desired body orientation, scalar-first (w, x, y, z)
+        p_br: body-frame translation body->root, (3,)
+        R_br: body-frame rotation body->root, (3, 3)
+
+    Returns:
+        (root_pos (3,) float64, root_quat_wxyz (4,) float64)
+    """
+    import numpy as np
+
+    w, x, y, z = (float(v) for v in body_quat_wxyz)
+    R_body = _quat_wxyz_to_R_world_from_body(w, x, y, z)
+    R_br = np.asarray(R_br, dtype=np.float64)
+    p_br = np.asarray(p_br, dtype=np.float64)
+    body_pos = np.asarray(body_pos, dtype=np.float64)
+    R_root = R_body @ R_br
+    p_root = body_pos + R_body @ p_br
+    return p_root, _R_to_quat_wxyz(R_root)
+
+
 class PolicyDriveBackend:
     """Drives a spawned `spot_with_arm.usd` articulation with the pretrained
     Spot flat-terrain walking policy under PhysX.
@@ -345,6 +386,14 @@ class PolicyDriveBackend:
             raise RuntimeError(
                 f"expected 12 leg DOFs on {self._prim_path}, found "
                 f"{len(self._leg_idx)}: {leg_names} (dof_names={names})")
+        # Order guard (not just count): obs[12:24] and the action scatter are
+        # indexed in POLICY_LEG_DOF_ORDER; a future asset that returned the 12
+        # legs in a different order would silently scramble both.
+        if leg_names != list(POLICY_LEG_DOF_ORDER):
+            raise RuntimeError(
+                f"leg DOF order mismatch on {self._prim_path}: by-name filter "
+                f"gave {leg_names} but the policy was trained on "
+                f"{list(POLICY_LEG_DOF_ORDER)} (dof_names={names})")
 
         self._default_pos = np.array(POLICY_DEFAULT_LEG_POS, dtype=np.float64)
 
@@ -493,17 +542,14 @@ class PolicyDriveBackend:
         import numpy as np
 
         # Desired BODY pose: standing upright at (x, y, POLICY_STANDING_Z),
-        # heading `yaw`. The physics ROOT link is offset from the body by the
-        # fixed (R_br, p_br) captured at spawn, so command the root at
-        # T_root = T_body_desired @ (R_br, p_br).
-        c, s = math.cos(yaw), math.sin(yaw)
-        R_body = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
-                          dtype=np.float64)
-        p_body = np.array([x, y, POLICY_STANDING_Z], dtype=np.float64)
-        R_root = R_body @ self._R_br
-        p_root = p_body + R_body @ self._p_br
-        self._art.set_world_pose(position=p_root,
-                                 orientation=_R_to_quat_wxyz(R_root))
+        # heading `yaw` (a pure world-Z rotation). Compose the physics ROOT
+        # pose from it + the fixed body<-root offset captured at spawn (pure,
+        # unit-tested helper).
+        half = yaw * 0.5
+        body_quat = (math.cos(half), 0.0, 0.0, math.sin(half))
+        p_root, q_root = compose_root_pose(
+            [x, y, POLICY_STANDING_Z], body_quat, self._p_br, self._R_br)
+        self._art.set_world_pose(position=p_root, orientation=q_root)
         self._art.set_joint_positions(self._full_default)
         self._art.set_joint_velocities(np.zeros(self._art.num_dof))
         self._art.set_linear_velocity(np.zeros(3))

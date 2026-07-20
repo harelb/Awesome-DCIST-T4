@@ -4,8 +4,13 @@ import numpy as np
 import pytest
 
 from dcist_sim_isaac.drive_backends import (
-    assemble_spot_obs, fallen, kinematic_target_step, kinematic_velocity_step,
-    sanitize_action, wrap_angle)
+    assemble_spot_obs, compose_root_pose, fallen, kinematic_target_step,
+    kinematic_velocity_step, sanitize_action, wrap_angle)
+
+
+def _yaw_R(yaw):
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
 def test_velocity_step_fakespot_parity():
@@ -119,3 +124,36 @@ def test_sanitize_action_inf_falls_back():
     out, tripped = sanitize_action(action, prev)
     assert tripped is True
     np.testing.assert_allclose(out, prev)
+
+
+# ---- reset_standing offset composition (pure) -----------------------------
+
+def test_compose_root_pose_identity_body_yaw_offset():
+    # Body upright at origin (yaw 0 -> identity quat). Root is offset from the
+    # body by (0.3, 0, 0.19) with a 90-deg-yaw rotation. With R_body = I the
+    # root pose is just the raw offset.
+    R_br = _yaw_R(math.pi / 2)
+    p_br = np.array([0.3, 0.0, 0.19])
+    root_pos, root_quat = compose_root_pose(
+        [0.0, 0.0, 0.0], (1.0, 0.0, 0.0, 0.0), p_br, R_br)
+    np.testing.assert_allclose(root_pos, [0.3, 0.0, 0.19], atol=1e-9)
+    # 90-deg yaw quat (w,x,y,z) = (cos45, 0, 0, sin45)
+    np.testing.assert_allclose(
+        root_quat, [math.cos(math.pi / 4), 0.0, 0.0, math.sin(math.pi / 4)],
+        atol=1e-9)
+
+
+def test_compose_root_pose_body_yaw_rotates_offset():
+    # Same offset, but the BODY is at (1, 2, 0.55) with yaw 90 deg. The
+    # body-frame translation (0.3,0,0.19) rotates into world as (0, 0.3, 0.19)
+    # and adds to the body position; the rotations compose to 180 deg yaw.
+    R_br = _yaw_R(math.pi / 2)
+    p_br = np.array([0.3, 0.0, 0.19])
+    half = (math.pi / 2) * 0.5
+    body_quat = (math.cos(half), 0.0, 0.0, math.sin(half))
+    root_pos, root_quat = compose_root_pose(
+        [1.0, 2.0, 0.55], body_quat, p_br, R_br)
+    np.testing.assert_allclose(root_pos, [1.0, 2.3, 0.74], atol=1e-9)
+    # 90 (body) + 90 (offset) = 180 deg yaw -> quat (0,0,0,1) up to sign
+    assert abs(abs(root_quat[3]) - 1.0) < 1e-9
+    np.testing.assert_allclose(root_quat[:3], [0.0, 0.0, 0.0], atol=1e-9)
