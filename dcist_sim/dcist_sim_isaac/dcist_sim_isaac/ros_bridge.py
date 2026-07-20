@@ -108,7 +108,12 @@ unconditionally -- not rate-gated like TF/joints/camera, since a
 one-frame-stale carried object would visibly lag behind a fast-moving
 gripper. Also publishes a `/sim/status` `std_msgs/String` JSON debug
 topic (`{object_id: held_by_or_null}`) at ~1 Hz for the Task 12 e2e
-harness. Service *names* the ROS side (`SimSpot`,
+harness. Task 9 adds a second, separate `/sim/nav_status`
+`std_msgs/String` JSON topic (`{robot_name: status}`, status one of
+idle|active|reached|blocked|stuck|fallen) at the same ~1 Hz cadence --
+`/sim/status`'s schema is intentionally untouched (e2e_smoke.py parses
+it) so nav status is a NEW topic, not a new key grafted onto the old
+one. Service *names* the ROS side (`SimSpot`,
 `dcist_sim_ros/sim_spot.py`) calls are relative (`sim/grasp_object`,
 `sim/place_object`) resolved against that node's own `{robot_name}`
 namespace -- they land on the same absolute topic (`/{name}/sim/...`)
@@ -116,6 +121,7 @@ this bridge advertises.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 
@@ -435,6 +441,12 @@ class RosBridge:
             ResetScenario, "/sim/reset_scenario", self._on_reset_scenario
         )
         self._status_pub = self.node.create_publisher(String, "/sim/status", 10)
+        # Task 9: per-robot nav status debug topic (idle|active|reached|
+        # blocked|stuck|fallen), NEW topic at the same 1 Hz cadence as
+        # `/sim/status` above -- that topic's schema is untouched (e2e_smoke
+        # parses it) so nav status gets its own topic rather than a new key
+        # folded into it.
+        self._nav_pub = self.node.create_publisher(String, "/sim/nav_status", 10)
 
         self._tf_period = 1.0 / TF_HZ
         self._joint_period = 1.0 / JOINT_HZ
@@ -483,6 +495,12 @@ class RosBridge:
         publish_status = self._status_accum >= self._status_period
         if publish_status:
             self._status_pub.publish(String(data=self.grasp_backend.status_json()))
+            # Task 9: kinematic robots have no `nav_status` attribute
+            # (planner is physics-mode only) -- default to "idle" so this
+            # topic still exists and is well-formed in kinematic scenarios.
+            self._nav_pub.publish(String(data=json.dumps(
+                {b.robot.spec.name: getattr(b.robot, "nav_status", "idle")
+                 for b in self._bridges})))
             self._status_accum = min(
                 self._status_accum - self._status_period, self._status_period
             )

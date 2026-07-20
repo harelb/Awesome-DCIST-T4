@@ -176,12 +176,37 @@ class SpotSimRobot:
             from dcist_sim_isaac.drive_backends import PolicyDriveBackend
             self.drive_backend = PolicyDriveBackend(self.prim_path, spec)
 
+        # Task 9: go-to-target planner for policy robots. `_planner` stays
+        # None until `stage.build_stage` calls `attach_planner()` (after the
+        # costmap bake); `_pending_goal` is how `set_target_pose` hands a
+        # fresh goal to `_step_physics` (which owns the monotonic time source
+        # the planner needs). `nav_status` is the public vocabulary
+        # (idle|active|reached|blocked|stuck|fallen) `ros_bridge.py` publishes
+        # on `/sim/nav_status`; kinematic robots keep it at "idle" forever
+        # (ros_bridge defaults missing/kinematic robots to "idle" too via
+        # `getattr(..., "idle")`, so this is belt-and-suspenders, not load-
+        # bearing for them). `_sim_t` is the accumulated physics-mode clock
+        # (see `_step_physics`) -- monotonic, decoupled from wall time so the
+        # planner's stuck-timeout math works under RTF != 1.
+        self._planner = None
+        self._pending_goal = None
+        self.nav_status = "idle"
+        self._sim_t = 0.0
+        self._nan_logged = False
+
     # -- setters called from ros_bridge.py's subscription callbacks --------
 
     def set_cmd_vel(self, vx: float, vy: float, wz: float) -> None:
-        """A fresh cmd_vel always switches back to velocity mode (brief item 8)."""
+        """A fresh cmd_vel always switches back to velocity mode (brief item 8),
+        mirroring the kinematic tier's mode switch: any in-flight planner goal
+        is cancelled (Task 9) so a stale target-mode command can't fight the
+        velocity command about to be applied."""
         self._mode = "velocity"
         if self.drive_backend is not None:
+            if self._planner is not None:
+                self._planner.cancel()
+                self._pending_goal = None
+                self.nav_status = "idle"
             self.drive_backend.set_command(vx, vy, wz)
             return
         self.cmd_vel_linear[:] = (vx, vy, 0.0)
@@ -191,11 +216,18 @@ class SpotSimRobot:
         self._mode = "target"
         self.target_pose = (x, y, yaw)
         if self.drive_backend is not None:
-            # Task 8: policy robots have no go-to-pose controller yet -- Task 9
-            # lands the planner that turns a target into cmd_vel. Until then,
-            # halt (zero command) so a set_target_pose call can't leave a stale
-            # velocity running. Documented velocity-halt fallback.
-            self.drive_backend.halt()
+            if self._planner is not None:
+                # Task 9: arm the goal; `_step_physics` (which owns the
+                # monotonic sim-time source `LocalPlanner.set_goal` needs)
+                # plants it on the planner on its next tick.
+                self._pending_goal = (x, y, yaw)
+            else:
+                # Defensive fallback: planner not attached yet (shouldn't
+                # happen for `locomotion: policy` scenarios -- stage.py
+                # always attaches one after the costmap bake -- but avoids
+                # a stale velocity running if it somehow isn't). Task-8
+                # documented velocity-halt fallback.
+                self.drive_backend.halt()
 
     def teleport(self, x: float, y: float, z: float, yaw: float) -> None:
         """Instantaneously set the robot's pose (Task 9 `Teleport` service
@@ -213,6 +245,18 @@ class SpotSimRobot:
             # write. z is owned by the backend's standing height, not the arg.
             self.drive_backend.reset_standing(x, y, yaw)
             self.base_pose[:] = self.drive_backend.base_pose_xyzyaw()
+            # Task 9: reset_standing() also clears the backend's nan_tripped
+            # latch, so mirror that on the planner side -- an in-flight goal
+            # from before the teleport is against a now-stale pose and
+            # `nav_status` must not stay stuck at whatever it was ("active"/
+            # "fallen"/etc.) forever with nothing left to update it (the
+            # target-mode branch of `_step_physics` only runs in "target"
+            # mode, which this method just switched away from).
+            if self._planner is not None:
+                self._planner.cancel()
+            self._pending_goal = None
+            self.nav_status = "idle"
+            self._nan_logged = False
             return
         self.cmd_vel_linear[:] = 0.0
         self.cmd_vel_angular[:] = 0.0
@@ -237,14 +281,92 @@ class SpotSimRobot:
             self._step_target(dt)
         self._write_pose_to_stage()
 
+    def attach_planner(self, costmap, nav_spec) -> None:
+        """Task 9: give this (policy) robot a go-to-target planner. Called by
+        `stage.build_stage` for every `locomotion: policy` robot, once, right
+        after the physics-mode costmap bake -- `costmap` is the SAME
+        `Costmap2D` instance every policy robot in the scenario navigates
+        against (baked once from the shared PhysX scene, not per-robot)."""
+        from dcist_sim_isaac.local_planner import LocalPlanner
+
+        self._planner = LocalPlanner(
+            costmap,
+            max_lin_speed=nav_spec.max_lin_speed,
+            max_ang_speed=nav_spec.max_ang_speed,
+            stuck_timeout_s=nav_spec.stuck_timeout_s)
+        self.nav_status = "idle"
+
     def _step_physics(self, dt: float) -> None:
-        """Per-frame hook for policy robots (Task 8 stub). Velocity commands
-        already flow to the policy the instant `set_cmd_vel` calls
-        `drive_backend.set_command`, and the policy runs on its own physics
-        callback, so there is nothing to do here yet. Task 9 fills this with
-        the go-to-target planner (target pose -> cmd_vel) and nav status.
+        """Per-frame hook for policy robots (Task 9). Runs once per
+        `SpotSimRobot.step()` call (i.e. once per main-loop `world.step()`,
+        the rendering rate -- NOT the 500 Hz physics substep the policy's own
+        `add_physics_callback` runs at). Order of concerns, most terminal
+        first:
+
+          1. NaN-tripped policy action (`drive_backends.sanitize_action`
+             latches `PolicyDriveBackend._nan_tripped` forever once it fires,
+             cleared only by `reset_standing`/`initialize`): treat as a
+             terminal failure distinct from a fall -- halt (the backend
+             already zeroed `_cmd` internally when it tripped; `halt()` here
+             is belt-and-suspenders against a set_command race) and cancel
+             any in-flight goal, but do NOT auto-reset the robot's pose (a
+             fall gets auto-stood-up because it's a recoverable physical
+             event; a NaN action means the policy itself produced garbage,
+             which teleporting away would silently paper over). Folded into
+             the same `nav_status` value as a fall ("fallen") per the
+             produced vocabulary (idle|active|reached|blocked|stuck|fallen)
+             -- there is no 6th slot for it -- but logged distinctly (once,
+             not every frame) so it's diagnosable from the sim log.
+          2. Fell over (spec §8): fail the goal, auto-reset standing, log.
+          3. Target mode: arm any pending goal, run the planner, forward its
+             (vx, vy, wz) to the drive backend (zeros on REACHED/BLOCKED/
+             STUCK -- `LocalPlanner.update` returns `ZERO` for every
+             non-ACTIVE status), publish `status` as `nav_status`.
+          4. Velocity mode: nothing to do -- `set_cmd_vel` already forwarded
+             the command straight to `drive_backend.set_command`.
         """
-        return
+        self._sim_t += dt
+
+        if self.drive_backend.nan_tripped():
+            if not self._nan_logged:
+                logger.error(
+                    "'%s' policy action NaN-tripped -- halting and failing "
+                    "the goal (nav_status='fallen'); pose held at last-good "
+                    "position, NOT auto-reset (see _step_physics docstring)",
+                    self.spec.name,
+                )
+                self._nan_logged = True
+            self.drive_backend.halt()
+            if self._planner is not None:
+                self._planner.cancel()
+            self.nav_status = "fallen"
+            self._mode = "velocity"
+            return
+
+        if self.drive_backend.is_fallen():
+            logger.warning(
+                "'%s' FELL at (%.1f, %.1f) -- auto-reset standing",
+                self.spec.name, self.base_pose[0], self.base_pose[1],
+            )
+            x, y, _, yaw = self.drive_backend.base_pose_xyzyaw()
+            self.drive_backend.reset_standing(x, y, yaw)
+            if self._planner is not None:
+                self._planner.cancel()
+            self.nav_status = "fallen"
+            self._mode = "velocity"
+            return
+
+        if self._mode == "target" and self._planner is not None:
+            if self._pending_goal is not None:
+                gx, gy, gyaw = self._pending_goal
+                self._pending_goal = None
+                self._planner.set_goal(gx, gy, gyaw, self._sim_t)
+            pose = self.drive_backend.base_pose_xyzyaw()
+            cmd, status = self._planner.update(
+                (pose[0], pose[1], pose[3]), self._sim_t)
+            self.nav_status = status
+            self.drive_backend.set_command(*cmd)   # zeros on terminal states
+        # velocity mode: command already forwarded by set_cmd_vel
 
     def _step_velocity(self, dt: float) -> None:
         self.base_pose[:] = kinematic_velocity_step(

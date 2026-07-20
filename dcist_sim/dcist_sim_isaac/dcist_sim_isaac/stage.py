@@ -264,6 +264,15 @@ def build_stage(scenario) -> SimStage:
     if scenario.physics_mode:
         from dcist_sim_isaac.costmap_bake import bake_costmap
         costmap, costmap_raw = bake_costmap(scenario.nav)
+        # Task 9: give every policy robot a go-to-target planner navigating
+        # the SAME baked (inflated) costmap -- one bake per scenario, shared
+        # by all policy robots, mirroring how the real BD local nav would
+        # share one map. Kinematic robots have `drive_backend is None` and
+        # are unaffected (their `set_target_pose` still slews directly,
+        # pre-Task-6 behavior).
+        for robot in robots:
+            if robot.drive_backend is not None:
+                robot.attach_planner(costmap, scenario.nav)
 
     return SimStage(
         world=world, robots=robots, registry=registry,
