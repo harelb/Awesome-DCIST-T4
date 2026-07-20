@@ -9,6 +9,50 @@ object being suspended from PhysX via `ObjectRegistry.set_kinematic(True)` so
 spec §6.1). Place detaches (`set_kinematic(False)`), letting the object fall
 and settle under gravity.
 
+TIER G2 -- CONTACT-BASED HOLD (Task 14, ``RobotSpec.contact_hold``) -- EXPERIMENTAL/UNSTABLE:
+    When a robot's spec sets ``contact_hold: true`` the ATTACH phase is
+    replaced by a real *friction* hold instead of the G1 kinematic pin. Grasp
+    servos+validates identically, then: close the ``arm0_f1x`` gripper finger
+    toward 0 rad with a position target, poll PhysX contact between the finger
+    link and the target object for ~1 s (``CONTACT_POLL_S``); contact present
+    -> hold the object WITHOUT ``set_kinematic(True)`` and WITHOUT the per-step
+    re-pin (the object stays DYNAMIC and rides on friction), contact absent ->
+    ``failed`` ("no contact"). While carrying, every step monitors the
+    gripper<->object distance; > ``CONTACT_DROP_DIST_M`` (0.3 m) => the object
+    slipped: clear the hold, log, and mark ``status()`` ``failed`` ("dropped").
+    Place opens the gripper and clears the hold but skips ``set_kinematic`` (the
+    object was never suspended). This tier is spec §6.2's explicitly-optional
+    grasp mode and is NOT on any default path -- G1 (``contact_hold`` false) is
+    the shipped tier. Contact holding is sensitive to grip geometry / friction
+    and is documented as unstable; see task-14-report.md for the GPU findings.
+
+    TIME-BOXED STOP (2026-07-20, GPU-measured -- THIS TIER IS NON-FUNCTIONAL ON
+    THE CURRENT ASSET): grasp_smoke.py --contact-hold always fails "no contact".
+    Root cause: the Spot arm links carry NO PhysX collider in this phase
+    (floating Spot, no arm collision -- by design; see the P4 status notes), so
+    pressing the finger into the object drives the finger link clear THROUGH the
+    floor (gripper z -> -0.08 m) while
+    ``get_physx_simulation_interface().get_contact_report()`` stays EMPTY every
+    poll -- there is simply no finger contact for PhysX to report. The machinery
+    below (finger close, press, contact poll, friction hold, carry drop-monitor,
+    place-open) is implemented + unit-tested at the fake seam, and the
+    contact-report API path is verified correct on Isaac 6.0.1; it is left
+    behind the flag for a future collision-enabled arm asset. FOLLOW-UP: give
+    the arm/finger links PhysX colliders (or a fixed jaw collider) so contacts
+    are generated, then re-tune CONTACT_PRESS_M / CONTACT_POLL_S and re-run
+    grasp_smoke.py --contact-hold. G1 remains the shipped grasp tier (spec §6.2).
+
+    ARM OWNERSHIP DURING A CONTACT CARRY (critical, differs from G1): the grip
+    is held ONLY by the finger's PhysX position drive (f1x -> 0) plus the 6
+    servo joints holding their last targets. If the op released arm ownership
+    on grasp success, ``PolicyDriveBackend``'s 50 Hz stow write would re-stow
+    the arm AND drive f1x back to its open stow target (-1.5 rad), instantly
+    dropping the object. So a *successful contact grasp does NOT release arm
+    ownership* -- ``set_arm_hold`` stays False through the whole carry, the
+    policy commands only the 12 legs, and the arm (incl. the closed f1x) holds
+    its PhysX drive targets while the robot walks. Ownership is returned (arm
+    re-stows, which also opens f1x) only at the place terminal or on a drop.
+
 Async contract (FROZEN by Task 11 -- `ros_bridge.py`'s `_backend_for`
 dispatch calls these exact methods):
 
@@ -147,6 +191,23 @@ ARM_JACOBIAN_BASE = np.array([
 # the deploy pose (GPU: ~1 s from stow; 1.5 s for margin).
 DEPLOY_SETTLE_S = 1.5
 
+# ---------------------------------------------------------------------------
+# G2 contact-hold constants (Task 14) -- EXPERIMENTAL. See module docstring.
+# Gripper/finger link relative path (mirrors spot_robot.GRIPPER_RELATIVE_PATH;
+# duplicated here to keep grasp_backends Isaac-import-free at module load).
+GRIPPER_LINK_RELATIVE = "arm0_link_fngr"
+GRIPPER_CLOSE_RAD = 0.0        # arm0_f1x closed position target (grip)
+GRIPPER_OPEN_RAD = -1.5        # arm0_f1x open target (== POLICY_ARM_STOW f1x)
+CONTACT_THRESHOLD_N = 0.1      # PhysxContactReportAPI force threshold (N)
+CONTACT_POLL_S = 2.5           # dwell pressing+closing+polling before deciding
+CONTACT_DROP_DIST_M = 0.3      # gripper<->object dist > this while carrying = drop
+# The G1 servo converges with the gripper ~7 cm ABOVE a ground object (the 8 cm
+# servo tol + validate gate), i.e. the closed finger hovers in the air and never
+# touches. So contact hold PRESSES the gripper this far below the object origin
+# (best-effort; the object/ground stalls the descent) so the closing finger
+# physically contacts the object before we poll (GPU-measured, task-14-report).
+CONTACT_PRESS_M = 0.10
+
 # External status vocabulary (GraspStatus.srv: sim_spot polls these strings).
 IDLE = "idle"
 IN_PROGRESS = "in_progress"
@@ -187,6 +248,12 @@ class _ArmInterface:
         self._arm6_idx = [i for i, n in zip(arm_idx, arm_names)
                           if "f1x" not in n]
         self._arm6_names = [n for n in arm_names if "f1x" not in n]
+        # f1x gripper-finger DOF (G2 contact hold owns this one via targets;
+        # it is deliberately excluded from the 6-joint servo above).
+        self._f1x_idx = [i for i, n in zip(arm_idx, arm_names) if "f1x" in n]
+        # Finger link prim path + lazily-applied PhysX contact reporting (G2).
+        self._finger_path = f"{robot.prim_path}/{GRIPPER_LINK_RELATIVE}"
+        self._contact_ready = False
         suffixes = tuple(n.rsplit("_", 1)[-1] for n in self._arm6_names)
         # Fail loud if the asset's servoed arm-DOF set/order ever changes: the
         # hardcoded deploy pose + base-frame jacobian are keyed to THIS order.
@@ -243,6 +310,81 @@ class _ArmInterface:
     def release(self):
         self._drive.set_arm_hold(True)
 
+    # -- G2 contact hold (Task 14, EXPERIMENTAL) -----------------------------
+
+    def _set_f1x(self, rad):
+        """Command the f1x gripper finger to an absolute position target.
+        Touches only the f1x DOF index, so the 6 servo joints keep their own
+        drive targets (and vice-versa)."""
+        from isaacsim.core.utils.types import ArticulationAction
+
+        self._art.apply_action(ArticulationAction(
+            joint_positions=np.array([float(rad)], dtype=float),
+            joint_indices=self._f1x_idx))
+
+    def close_gripper(self):
+        self._set_f1x(GRIPPER_CLOSE_RAD)
+
+    def open_gripper(self):
+        self._set_f1x(GRIPPER_OPEN_RAD)
+
+    def enable_contact_reporting(self):
+        """Apply PhysxContactReportAPI to the finger link once (idempotent) so
+        PhysX emits contact events for it. Verified on Isaac 6.0.1 (omni.physx
+        110.1.13): PhysxSchema.PhysxContactReportAPI.Apply(prim) +
+        CreateThresholdAttr(N); events read via
+        get_physx_simulation_interface().get_contact_report()."""
+        if self._contact_ready:
+            return
+        import omni.usd
+        from pxr import PhysxSchema
+
+        stage = omni.usd.get_context().get_stage()
+        prim = stage.GetPrimAtPath(self._finger_path)
+        if not prim or not prim.IsValid():
+            raise RuntimeError(
+                f"contact-hold: finger prim '{self._finger_path}' not found")
+        api = PhysxSchema.PhysxContactReportAPI.Apply(prim)
+        api.CreateThresholdAttr(float(CONTACT_THRESHOLD_N))
+        self._contact_ready = True
+
+    def finger_object_contact(self, object_prim_path):
+        """True iff the current PhysX contact report pairs the finger link with
+        the given object prim (FOUND or PERSIST). Reads the global per-step
+        report and filters by actor path -- see enable_contact_reporting for
+        the verified 6.0 API."""
+        from omni.physx import get_physx_simulation_interface
+        from pxr import PhysicsSchemaTools
+        from omni.physx.bindings._physx import ContactEventType
+
+        # get_contact_report() returns (headers, data) on Isaac 6.0.1
+        # (omni.physx 110.1.13) -- the .pyi advertises a 3-tuple incl. friction
+        # anchors but the live binding is a 2-tuple; index [0] is robust to both.
+        report = get_physx_simulation_interface().get_contact_report()
+        headers = report[0]
+        finger = self._finger_path
+        obj = object_prim_path
+        # NOTE (GPU-measured 2026-07-20, task-14-report.md): on this asset the
+        # report is EMPTY every poll even while the finger link is driven well
+        # below the floor (gripper z -> -0.08) into the object -- the arm links
+        # carry no PhysX collider in this phase (floating Spot, no arm collision
+        # by design), so no finger contact is EVER generated. This filter is
+        # correct but structurally cannot detect a hold on this asset; kept for
+        # a future collision-enabled setup. logger.debug leaves a trace.
+        for h in headers:
+            if h.type == ContactEventType.CONTACT_LOST:
+                continue
+            a0 = str(PhysicsSchemaTools.intToSdfPath(h.actor0))
+            a1 = str(PhysicsSchemaTools.intToSdfPath(h.actor1))
+            pair = {a0, a1}
+            f_hit = any(p == finger or p.startswith(finger + "/") for p in pair)
+            o_hit = any(p == obj or p.startswith(obj + "/") for p in pair)
+            if f_hit and o_hit:
+                return True
+        logger.debug("contact poll: %d headers, no finger<->object pair",
+                     len(headers))
+        return False
+
 
 def _default_arm_factory(robot):
     """Build the real Isaac `_ArmInterface`, or return None if this robot can't
@@ -262,6 +404,8 @@ class _Op:
     DESCEND = "descend"
     VALIDATE = "validate"
     ATTACH = "attach"
+    # G2 (Task 14): close finger + poll PhysX contact instead of ATTACH's pin.
+    CONTACT_CLOSE = "contact_close"
     CARRY = "carry"
     # place phases (PLACE_DEPLOY re-deploys the arm from stow so the fixed
     # base-frame jacobian is valid again before LOWER servos -- see
@@ -271,7 +415,7 @@ class _Op:
     DETACH = "detach"
     STOW = "stow"
 
-    def __init__(self, kind, arm):
+    def __init__(self, kind, arm, contact_hold=False):
         self.kind = kind          # "grasp" | "place"
         self.arm = arm
         self.phase = self.SELECTING if kind == "grasp" else self.PLACE_DEPLOY
@@ -281,6 +425,12 @@ class _Op:
         self.servo = None
         self.t = 0.0              # op-local elapsed sim time (s)
         self.deploy_until = None  # sim-time to hold the deploy pose until
+        # G2 contact hold (Task 14): friction hold instead of the kinematic
+        # pin. For a grasp, from RobotSpec.contact_hold; for a place, inherited
+        # from the held object's recorded mode.
+        self.contact_hold = bool(contact_hold)
+        self.contact_until = None  # sim-time to keep closing+polling until
+        self.contact_seen = False  # any finger<->object contact observed yet
 
 
 class PhysicsGraspBackend:
@@ -308,7 +458,8 @@ class PhysicsGraspBackend:
         if robot is None:
             return False, "", f"unknown robot '{robot_name}'"
         if robot_name in self._held:
-            msg = f"'{robot_name}' is already holding '{self._held[robot_name][0]}'"
+            msg = (f"'{robot_name}' is already holding "
+                   f"'{self._held[robot_name]['object_id']}'")
             self._set_last(robot_name, FAILED, msg, "")
             return False, "", msg
         if robot_name in self._ops:
@@ -320,8 +471,9 @@ class PhysicsGraspBackend:
                    f"phase ('{robot_name}' has no arm drive backend)")
             self._set_last(robot_name, FAILED, msg, "")
             return False, "", msg
+        contact_hold = bool(getattr(robot.spec, "contact_hold", False))
         arm.take_ownership()
-        self._ops[robot_name] = _Op("grasp", arm)
+        self._ops[robot_name] = _Op("grasp", arm, contact_hold=contact_hold)
         self._set_last(robot_name, IN_PROGRESS, "grasp started", "")
         logger.info("'%s' physics grasp accepted", robot_name)
         return True, "", "grasp started"
@@ -342,9 +494,10 @@ class PhysicsGraspBackend:
                    f"phase ('{robot_name}' has no arm drive backend)")
             self._set_last(robot_name, FAILED, msg, "")
             return False, msg
+        held = self._held[robot_name]
         arm.take_ownership()
-        op = _Op("place", arm)
-        op.object_id = self._held[robot_name][0]
+        op = _Op("place", arm, contact_hold=(held["mode"] == "contact"))
+        op.object_id = held["object_id"]
         self._ops[robot_name] = op
         self._set_last(robot_name, IN_PROGRESS, "place started",
                        op.object_id)
@@ -378,20 +531,57 @@ class PhysicsGraspBackend:
                 logger.exception("'%s' physics %s op crashed",
                                  robot_name, op.kind)
                 self._fail(robot_name, op, f"{op.kind} op error: {exc}")
-        # Re-pin every held object to its gripper's CURRENT pose (identical to
-        # grasp.GraspBackend.step; runs after robots stepped this frame).
-        self._repin_held()
+        # Maintain every held object (after robots stepped this frame): G1 pin
+        # objects are re-pinned to the gripper; G2 contact objects ride PhysX
+        # on friction and are only monitored for a drop.
+        self._update_held()
 
-    def _repin_held(self):
-        for robot_name, (object_id, off_pos, off_quat) in self._held.items():
-            robot = self.robots[robot_name]
-            g_pos, g_quat = robot.gripper_world_pose()
-            g_pos = tuple(float(v) for v in g_pos)
-            g_quat = tuple(float(v) for v in g_quat)
-            world_off = _rotate_vector(off_pos, g_quat)
-            new_pos = tuple(g + o for g, o in zip(g_pos, world_off))
-            new_quat = _quat_mul(g_quat, off_quat)
-            self.registry.set_world_pose(object_id, new_pos, new_quat)
+    def _update_held(self):
+        for robot_name, held in list(self._held.items()):
+            if held["mode"] == "contact":
+                self._monitor_contact_hold(robot_name, held)
+            else:
+                self._repin(robot_name, held)
+
+    def _repin(self, robot_name, held):
+        object_id, off_pos, off_quat = (
+            held["object_id"], held["off_pos"], held["off_quat"])
+        robot = self.robots[robot_name]
+        g_pos, g_quat = robot.gripper_world_pose()
+        g_pos = tuple(float(v) for v in g_pos)
+        g_quat = tuple(float(v) for v in g_quat)
+        world_off = _rotate_vector(off_pos, g_quat)
+        new_pos = tuple(g + o for g, o in zip(g_pos, world_off))
+        new_quat = _quat_mul(g_quat, off_quat)
+        self.registry.set_world_pose(object_id, new_pos, new_quat)
+
+    def _monitor_contact_hold(self, robot_name, held):
+        """G2 (Task 14) carry-time drop detection. Only runs when NO op is in
+        flight for this robot -- i.e. during a pure carry (grasp finished, place
+        not yet started); an active op (carry lift / place lower) governs the
+        arm+object itself. If the gripper<->object distance exceeds
+        CONTACT_DROP_DIST_M the object slipped: clear the hold, return the arm
+        to the policy, and mark status failed ("dropped") retroactively."""
+        if robot_name in self._ops:
+            return
+        object_id = held["object_id"]
+        robot = self.robots[robot_name]
+        g_pos, _ = robot.gripper_world_pose()
+        obj_pos, _ = self.registry.world_pose(object_id)
+        d = _dist3(np.asarray(g_pos, dtype=float)[:3], obj_pos)
+        if d <= CONTACT_DROP_DIST_M:
+            return
+        logger.info("'%s' DROPPED contact-held '%s' (gripper %.3f m away > "
+                    "%.2f m)", robot_name, object_id, d, CONTACT_DROP_DIST_M)
+        self._held.pop(robot_name, None)
+        self.registry.clear_held(object_id)
+        try:
+            held["arm"].release()   # hand the arm back to the policy (re-stow)
+        except Exception:                                  # noqa: BLE001
+            logger.exception("'%s' arm release after drop failed", robot_name)
+        self._set_last(robot_name, FAILED,
+                       f"dropped '{object_id}' during carry (contact lost)",
+                       object_id)
 
     # -- grasp state machine -------------------------------------------------
 
@@ -449,7 +639,64 @@ class PhysicsGraspBackend:
                            f"validate failed: gripper {d:.3f} m from "
                            f"'{op.object_id}' (tol {self.validate_tol} m)")
                 return
+            # G2 (contact hold): close the finger + poll PhysX contact instead
+            # of the G1 kinematic pin.
+            if op.contact_hold:
+                gwp, _ = self.robots[robot_name].gripper_world_pose()
+                logger.debug("contact-hold validate ok: gripper<->obj %.4f m; "
+                             "gripper_world=%s obj_world=%s", d,
+                             tuple(round(float(v), 3) for v in gwp),
+                             tuple(round(float(v), 3) for v in obj_pos))
+                arm.enable_contact_reporting()
+                arm.close_gripper()
+                op.contact_until = op.t + CONTACT_POLL_S
+                op.contact_seen = False
+                op.servo = None       # CONTACT_CLOSE builds the press servo
+                op.phase = _Op.CONTACT_CLOSE
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"closing gripper on '{op.object_id}'",
+                               op.object_id)
+                return
             op.phase = _Op.ATTACH
+            return
+
+        if op.phase == _Op.CONTACT_CLOSE:
+            # Press the gripper DOWN into the object (target CONTACT_PRESS_M below
+            # its origin; the object/ground stalls the descent -- best-effort, a
+            # stall is expected and fine) while the finger closes, and poll PhysX
+            # contact. First finger<->object contact within the window = grip.
+            if op.servo is None:
+                obj_pos, _ = self.registry.world_pose(op.object_id)
+                op.target = np.array([obj_pos[0], obj_pos[1],
+                                      obj_pos[2] - CONTACT_PRESS_M], dtype=float)
+                op.servo = self._new_servo(op)
+            self._advance_servo(op)          # press (ignore convergence/stall)
+            arm.close_gripper()
+            try:
+                if arm.finger_object_contact(
+                        self.registry.prim_path(op.object_id)):
+                    op.contact_seen = True
+            except Exception:                              # noqa: BLE001
+                logger.exception("'%s' contact query failed", robot_name)
+            if not op.contact_seen and op.t < op.contact_until:
+                return
+            if not op.contact_seen:
+                self._fail(robot_name, op,
+                           f"no contact: gripper closed on '{op.object_id}' "
+                           f"but PhysX reported no finger contact in "
+                           f"{CONTACT_POLL_S:.1f} s")
+                return
+            self._contact_attach(robot_name, op)
+            # carry: lift back to the pregrasp height above the (now gripped)
+            # object; it rides on friction (dynamic), no re-pin.
+            obj_pos, _ = self.registry.world_pose(op.object_id)
+            op.target = np.array([obj_pos[0], obj_pos[1],
+                                  obj_pos[2] + self.pregrasp_z], dtype=float)
+            op.phase = _Op.CARRY
+            op.servo = self._new_servo(op)
+            self._set_last(robot_name, IN_PROGRESS,
+                           f"carrying '{op.object_id}' (contact hold)",
+                           op.object_id)
             return
 
         if op.phase == _Op.ATTACH:
@@ -531,8 +778,14 @@ class PhysicsGraspBackend:
             return
 
         if op.phase == _Op.DETACH:
-            object_id = self._held.pop(robot_name, (op.object_id,))[0]
-            self.registry.set_kinematic(object_id, False)   # object -> dynamic
+            held = self._held.pop(robot_name, None)
+            object_id = held["object_id"] if held else op.object_id
+            if op.contact_hold:
+                # G2: object was never suspended (still dynamic) -- just open
+                # the finger to release the friction grip; it falls under PhysX.
+                arm.open_gripper()
+            else:
+                self.registry.set_kinematic(object_id, False)   # -> dynamic
             self.registry.clear_held(object_id)
             op.object_id = object_id
             op.phase = _Op.STOW
@@ -585,14 +838,33 @@ class PhysicsGraspBackend:
         g_quat = tuple(float(v) for v in g_quat)
         obj_pos, obj_quat = self.registry.world_pose(target_id)
         off_pos, off_quat = _to_local_frame(g_pos, g_quat, obj_pos, obj_quat)
-        self._held[robot_name] = (target_id, off_pos, off_quat)
+        self._held[robot_name] = {
+            "object_id": target_id, "mode": "pin",
+            "off_pos": off_pos, "off_quat": off_quat, "arm": op.arm}
         self.registry.set_held_by(target_id, robot_name)
         logger.info("'%s' attached '%s' (kinematic hold)",
                     robot_name, target_id)
 
+    def _contact_attach(self, robot_name, op):
+        """G2 (Task 14): record a friction hold. The object stays DYNAMIC (no
+        set_kinematic) and is NOT re-pinned -- PhysX + the closed finger own its
+        pose. Only mark it held so selection/status track it."""
+        target_id = op.object_id
+        self._held[robot_name] = {
+            "object_id": target_id, "mode": "contact",
+            "off_pos": None, "off_quat": None, "arm": op.arm}
+        self.registry.set_held_by(target_id, robot_name)
+        logger.info("'%s' contact-holding '%s' (friction, still dynamic)",
+                    robot_name, target_id)
+
     def _succeed_grasp(self, robot_name, op):
+        # A contact grasp must NOT release arm ownership: the finger drive (f1x
+        # closed) + the 6 servo joints holding their targets are the ONLY thing
+        # gripping the object during carry. Re-stowing would open f1x and drop
+        # it. Ownership returns at place / on a drop instead (module docstring).
         self._finish(robot_name, op, SUCCEEDED,
-                     f"grasped '{op.object_id}'", op.object_id)
+                     f"grasped '{op.object_id}'", op.object_id,
+                     release_arm=not op.contact_hold)
 
     def _fail(self, robot_name, op, message):
         # A failed grasp leaves nothing held; a failed place already popped
@@ -600,11 +872,16 @@ class PhysicsGraspBackend:
         logger.info("'%s' physics %s failed: %s", robot_name, op.kind, message)
         self._finish(robot_name, op, FAILED, message, op.object_id)
 
-    def _finish(self, robot_name, op, state, message, object_id):
-        try:
-            op.arm.release()
-        except Exception:                                  # noqa: BLE001
-            logger.exception("'%s' arm release failed", robot_name)
+    def _finish(self, robot_name, op, state, message, object_id,
+                release_arm=True):
+        # release_arm=False only for a successful G2 contact grasp: the arm must
+        # keep its (closed-finger) targets through the carry, so ownership is
+        # NOT handed back to the policy here (see _succeed_grasp / docstring).
+        if release_arm:
+            try:
+                op.arm.release()
+            except Exception:                              # noqa: BLE001
+                logger.exception("'%s' arm release failed", robot_name)
         self._ops.pop(robot_name, None)
         self._set_last(robot_name, state, message, object_id)
 
@@ -615,18 +892,29 @@ class PhysicsGraspBackend:
     # -- reset ---------------------------------------------------------------
 
     def reset(self):
-        # Release arm ownership on any in-flight op.
+        # Release arm ownership on any in-flight op AND on any G2 contact hold
+        # (a contact carry has no in-flight op but still owns the arm -- see
+        # _succeed_grasp); release() is idempotent so double-release is safe.
         for op in self._ops.values():
             try:
                 op.arm.release()
             except Exception:                              # noqa: BLE001
                 logger.exception("arm release during reset failed")
+        for held in self._held.values():
+            if held["mode"] == "contact":
+                try:
+                    held["arm"].release()
+                except Exception:                          # noqa: BLE001
+                    logger.exception("contact-hold arm release on reset failed")
         # Restore dynamics on anything we kinematic-held (the shared
         # GraspBackend.reset re-poses objects to spawn + clears held_by, but
         # only THIS backend flipped set_kinematic(True), so only it can undo).
-        for object_id, *_ in self._held.values():
+        # G2 contact-held objects were never suspended (still dynamic) -- skip.
+        for held in self._held.values():
+            if held["mode"] != "pin":
+                continue
             try:
-                self.registry.set_kinematic(object_id, False)
+                self.registry.set_kinematic(held["object_id"], False)
             except Exception:                              # noqa: BLE001
                 logger.exception("set_kinematic(False) on reset failed")
         self._ops.clear()

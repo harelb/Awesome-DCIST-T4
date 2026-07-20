@@ -1,0 +1,34 @@
+# Task 14: G2 contact-hold grasp smoke scenario (EXPERIMENTAL tier). Identical
+# to field_smoke_physics.yaml (policy locomotion + physics grasping) EXCEPT the
+# robot sets `contact_hold: true`, so PhysicsGraspBackend replaces the G1
+# kinematic-pin attach with a friction hold: close the arm0_f1x finger, poll
+# PhysX contact between the finger link and the object, and (contact present)
+# carry the object WITHOUT set_kinematic(True) -- it stays DYNAMIC and rides on
+# friction. See grasp_backends.py's module docstring and task-14-report.md.
+#
+# grasp_smoke.py --contact-hold drives adjacent to cone_0, grasps it with the
+# contact hold, carries it ~10 m, then places it. This tier is spec §6.2's
+# explicitly-optional grasp mode; G1 (field_smoke_physics.yaml) is the shipped
+# default. Objects/poses are identical to field_smoke_physics.yaml.
+environment:
+  usd: assets/environments/field_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.55, yaw: 0.0}
+    locomotion: policy
+    grasping: physics
+    contact_hold: true
+objects:
+  - id: bag_0
+    usd: assets/objects/duffel_bag.usd
+    label: bag
+    pose: {x: 5.0, y: 0.6, z: 0.0, yaw: 0.52}
+  - id: cone_0
+    usd: assets/objects/cone.usd
+    label: cone
+    pose: {x: 4.0, y: 1.6, z: 0.0, yaw: 0.0}
+  - id: pipe_0
+    usd: assets/objects/pipe.usd
+    label: pipe
+    pose: {x: 5.6, y: -1.6, z: 0.0, yaw: 1.57}
+grasp_radius: 1.5

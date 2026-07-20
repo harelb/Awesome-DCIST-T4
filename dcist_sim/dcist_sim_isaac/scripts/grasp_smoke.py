@@ -27,6 +27,13 @@ Asserts (exit 0 iff all three):
   C. FAIL: from the spawn (all objects ≥ 4 m away, beyond the arm reach), a
      grasp_object -> "succeeded"? NO -> "failed" (out of reach) quickly.
 
+G2 contact-hold mode (Task 14, EXPERIMENTAL): with `--contact-hold` and the sim
+running `field_smoke_contact_hold.yaml` (robot `contact_hold: true`), an extra
+CARRY leg runs between A and B: the robot walks `--carry-dist` m (default 10)
+holding the cone on friction, and the smoke asserts `grasp_status` is still
+"succeeded" + `/sim/status` still shows it held (a slip would have flipped the
+status to failed("dropped")) before placing.
+
 Timeouts are generous in WALL time because the physics sim runs sub-real-time
 (RTF ~0.6, policy_spike_report §6): the brief's "succeeded ≤ 20 s / failed
 ≤ 15 s" are SIM-time budgets; the wall defaults below (~60 s / ~30 s) cover
@@ -178,6 +185,14 @@ def main():
     ap.add_argument("--grasp-timeout", type=float, default=70.0)
     ap.add_argument("--place-timeout", type=float, default=70.0)
     ap.add_argument("--fail-timeout", type=float, default=40.0)
+    ap.add_argument("--contact-hold", action="store_true",
+                    help="G2 (Task 14) mode: after the grasp, carry the object "
+                         "--carry-dist m and assert it is still held (not "
+                         "dropped) before placing. Run against "
+                         "field_smoke_contact_hold.yaml (contact_hold: true).")
+    ap.add_argument("--carry-dist", type=float, default=10.0,
+                    help="contact-hold carry distance (m) away from the cone")
+    ap.add_argument("--carry-timeout", type=float, default=240.0)
     args = ap.parse_args()
 
     rclpy.init()
@@ -221,6 +236,28 @@ def main():
               f"/sim/status holder of {args.object_id}={held!r}: "
               f"{'PASS' if a_ok else 'FAIL'}")
         ok &= a_ok
+
+        # ---- CARRY (contact-hold only): walk --carry-dist m, stay held ----
+        if a_ok and args.contact_hold:
+            # drive away from the cone (−x, a clear direction in field_a) far
+            # enough that a dropped object would fall > 0.3 m behind and flip
+            # grasp_status to failed("dropped").
+            gx, gy = (s.odom or (0.0, 0.0))
+            tx, ty = gx - args.carry_dist, gy
+            print(f"CARRY: walk {args.carry_dist:.1f} m to ({tx:.2f}, {ty:.2f}) "
+                  f"holding {args.object_id}")
+            s.goto(tx, ty)
+            nav = s.wait_nav({"reached"}, timeout=args.carry_timeout)
+            cbase = tuple(round(v, 2) for v in (s.odom or (float("nan"),) * 2))
+            state, cmsg, _ = s.poll_status()
+            held = s.held_by(args.object_id)
+            carry_ok = (nav == "reached" and state == "succeeded"
+                        and held == args.robot)
+            print(f"CARRY: nav={nav} @ odom {cbase}; grasp_status={state} "
+                  f"({cmsg!r}); holder={held!r}: "
+                  f"{'PASS' if carry_ok else 'FAIL'}")
+            ok &= carry_ok
+            a_ok = a_ok and carry_ok
 
         # ---- B: place -> succeeded + released ----
         if a_ok:

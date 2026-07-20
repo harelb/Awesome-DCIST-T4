@@ -190,6 +190,11 @@ class ObjectRegistry:
             }
         return snapshot
 
+    def prim_path(self, object_id):
+        """USD prim path of `object_id` (Task 14 contact hold filters the PhysX
+        contact report by this actor path)."""
+        return self._entries[object_id].prim_path
+
     def set_held_by(self, object_id, robot_name):
         self._entries[object_id].held_by = robot_name
 
