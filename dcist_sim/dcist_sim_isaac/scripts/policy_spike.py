@@ -9,7 +9,9 @@ Tries, in order:
 
 Success: Spot walks a ~4x4 m square on flat ground without falling
 (headless), exit 0, and prints a real-time factor line.  Then repeats a
-short straight walk inside full_warehouse.usd for the loaded-scene RTF.
+short straight walk inside warehouse_a.usd (this repo's local wrapper that
+composes Nucleus's Isaac/Environments/Simple_Warehouse/full_warehouse.usd)
+for the loaded-scene RTF.
 
 Run:
   source /opt/ros/jazzy/setup.zsh && source ~/dcist_ws/install/setup.zsh
@@ -168,7 +170,46 @@ def main():
     ok, rtf = drive_square(world, spot, base_state, cmd_tensor)
     print(f"[spike] flat-ground square: {'OK' if ok else 'FAIL'}  RTF={rtf:.2f}")
 
-    # --- DOF report for spot_with_arm (Task 8/13 dependency) -------------
+    # --- warehouse RTF ------------------------------------------------------
+    # NOTE (fix, post-review): this measurement must run BEFORE the
+    # spot_with_arm DOF probe below, and with nothing else added to the
+    # stage -- an earlier version left the spot_with_arm probe prim
+    # (/World/spot_arm_probe, a second 19-DOF idle articulation) resident in
+    # the scene while timing this loop, so the "warehouse RTF" it reported
+    # was actually Spot + an idle second robot + warehouse, not Spot alone.
+    # Reordered so the only articulation present during this timing is the
+    # one Spot being driven.
+    w_ok = True
+    import os
+    if os.path.exists(args.warehouse):
+        add_reference_to_stage(usd_path=os.path.abspath(args.warehouse),
+                               prim_path="/World/Warehouse")
+        world.reset()
+        spot.initialize()
+
+        # settle after reset, same as the flat-ground path, before timing.
+        for _ in range(SETTLE_STEPS):
+            spot.forward(PHYSICS_DT, cmd_tensor([0.0, 0.0, 0.0]))
+            world.step(render=False)
+
+        wall0, steps = time.monotonic(), 2000
+        sim_t = 0.0
+        for _ in range(steps):
+            spot.forward(PHYSICS_DT, cmd_tensor([0.5, 0.0, 0.0]))
+            world.step(render=False)
+            sim_t += PHYSICS_DT
+            _, _, z, _ = base_state()
+            if z < FALL_Z:
+                print(f"[spike] warehouse: FELL at sim_t={sim_t:.1f}s (z={z:.2f})")
+                w_ok = False
+                break
+        wrtf = sim_t / (time.monotonic() - wall0)
+        print(f"[spike] warehouse RTF={wrtf:.2f}  "
+              f"{'upright (full ' + str(steps) + ' steps)' if w_ok else 'FELL'}")
+
+    # --- DOF report for spot_with_arm (Task 8/13 dependency) -----------------
+    # Runs AFTER the warehouse RTF measurement above so it never contaminates
+    # that timing (see NOTE above).
     add_reference_to_stage(
         usd_path=f"{get_assets_root_path()}/Isaac/Robots/BostonDynamics/spot/spot_with_arm.usd",
         prim_path="/World/spot_arm_probe")
@@ -179,22 +220,8 @@ def main():
     print(f"[spike] spot_with_arm dof_names ({arm_spot.num_dof}): "
           f"{list(arm_spot.dof_names)}")
 
-    # --- warehouse RTF ----------------------------------------------------
-    import os
-    if os.path.exists(args.warehouse):
-        add_reference_to_stage(usd_path=os.path.abspath(args.warehouse),
-                               prim_path="/World/Warehouse")
-        world.reset()
-        spot.initialize()
-        wall0, steps = time.monotonic(), 2000
-        for _ in range(steps):
-            spot.forward(PHYSICS_DT, cmd_tensor([0.5, 0.0, 0.0]))
-            world.step(render=False)
-        wrtf = (steps * PHYSICS_DT) / (time.monotonic() - wall0)
-        print(f"[spike] warehouse RTF={wrtf:.2f}")
-
     sim_app.close()
-    return 0 if ok else 3
+    return 0 if (ok and w_ok) else 3
 
 
 if __name__ == "__main__":

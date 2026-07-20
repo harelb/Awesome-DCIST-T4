@@ -158,15 +158,17 @@ calling into the policy's obs/action code, and scatter the 12-wide action
 back into the same 12 leg indices, leaving the 7 arm DOFs to a separate
 IK/grasp controller (Task 13's `arm_ik.py` territory).
 
-## 6. Real-time factor (measured, reproduced across two runs — see §8)
+## 6. Real-time factor (measured; see §8 for the exact command + verbatim log)
 
 Physics at the policy's native rate (0.002 s / 500 Hz, decimation 10):
 
 - **Flat ground** (default ground plane, 4×4 m square walk, ~30 sim-s):
   **RTF = 0.66-0.67** (sub-real-time)
 - **`warehouse_a.usd`** (local wrapper of Nucleus
-  `Isaac/Environments/Simple_Warehouse/full_warehouse.usd`, 26k prims, 4
-  sim-s straight walk): **RTF = 0.41** (sub-real-time)
+  `Isaac/Environments/Simple_Warehouse/full_warehouse.usd`, 26k prims,
+  4 sim-s straight walk, single Spot articulation only): **RTF = 0.61-0.63
+  (sub-real-time), Spot upright for the full 2000-step walk (no fall) —
+  see fix note below and §8 for the verbatim clean-measurement logs.**
 
 **Caveat — dt mismatch on the first attempt**: an initial run used the
 brief's literal `PHYSICS_DT = 1/200` (200 Hz), which does NOT match
@@ -179,8 +181,27 @@ silently drops the effective control rate to 20 Hz instead of the trained
 steps were taken for the same sim-time), but that number does not reflect
 the policy's intended operating point. **Task 8 must use `physics_dt =
 0.002` (or read `spot._dt`/`policy_env_params["sim"]["dt"]` and match it)
-for physically-meaningful behavior** — this report's RTF numbers (0.66/0.41)
-are from the corrected, matched-rate run.
+for physically-meaningful behavior** — this report's RTF numbers are from
+the corrected, matched-rate run.
+
+**Fix note (post-review, same day)**: the first `warehouse_a.usd`
+measurement (originally reported as RTF=0.41) was **contaminated** — the
+script left the `spot_with_arm.usd` DOF-report probe
+(`/World/spot_arm_probe`, a second, idle, 19-DOF articulation) resident in
+the stage while timing the warehouse walk, so that number measured
+"Spot + an idle second robot + warehouse," not Spot alone. `policy_spike.py`
+was restructured so the arm-DOF probe runs **after** the warehouse RTF
+measurement (never before/during it), a fall check
+(`z < FALL_Z`, same threshold as the flat-ground path) was added to the
+warehouse loop, and a 200-step settle period was added after
+`world.reset()`/`spot.initialize()` before the warehouse timer starts
+(matching the flat-ground path). The clean re-measurement is **RTF =
+0.61-0.63** (two runs), Spot **upright for the full 2000-step walk** both
+times (no fall) — see §8 for the verbatim rerun logs. Note this corrected
+number is *higher* than the contaminated 0.41, confirming the idle second
+articulation was adding real per-step physics cost, not masking a slower
+true rate. The 0.41 number in earlier revisions of this report is
+superseded.
 
 ## 7. API surprises / integration traps for Task 8 (`PolicyDriveBackend`) and Task 13 (`arm_ik.py`)
 
@@ -240,11 +261,21 @@ are from the corrected, matched-rate run.
    changed to point at `warehouse_a.usd`.
 9. **No fall, no NaNs, no instability observed** at either physics rate
    tested (200 Hz mismatched, 500 Hz matched), on flat ground or in the
-   loaded warehouse scene, across 3 independent full-script runs.
+   loaded warehouse scene, across 5 independent full-script runs total (3
+   pre-fix, 2 post-fix clean).
+10. **A stale idle articulation left resident in the stage silently
+    inflates RTF measurements.** The first `warehouse_a.usd` RTF (0.41) was
+    contaminated by a second, unmoving 19-DOF `spot_with_arm.usd` probe
+    left in the scene from an earlier DOF-report step — its passive
+    physics solve cost was real and measurable (removing it raised the
+    clean RTF to 0.61-0.63, not lowered it). Any spike/benchmark script
+    that adds multiple prims across sequential measurement phases must
+    either remove earlier probe prims or reorder so timing-sensitive
+    measurements run first, before anything else is added to the stage.
 
 ## 8. Run evidence (reproducibility)
 
-Final (matched-rate, `PHYSICS_DT = 1/500`) run, command:
+Command (identical for every run below):
 
 ```bash
 source /opt/ros/jazzy/setup.zsh && source ~/dcist_ws/install/setup.zsh
@@ -255,8 +286,13 @@ PYTHONPATH=dcist_sim/dcist_sim_isaac:$PYTHONPATH \
 echo "exit=$?"
 ```
 
-Key stdout lines (verbatim, from the final run):
+### 8a. Clean (fixed) runs — canonical numbers, post-review
 
+Two independent runs after the arm-probe-contamination fix (DOF probe
+moved after the warehouse timing, fall check + settle added to the
+warehouse loop). Key stdout lines, verbatim:
+
+Run 1:
 ```
 [spike] found policy class: isaacsim.robot.policy.examples.robots.spot.SpotFlatTerrainPolicy
 [spike] assets_root_path: https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/6.0
@@ -266,21 +302,42 @@ Key stdout lines (verbatim, from the final run):
 [spike] default_pos (leg-policy dof order)=[0.10000000149011612, -0.10000000149011612, 0.10000000149011612, -0.10000000149011612, 0.8999999761581421, 0.8999999761581421, 1.100000023841858, 1.100000023841858, -1.5, -1.5, -1.5, -1.5]
 [spike] default_vel (leg-policy dof order)=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 [spike] flat-terrain spot.usd dof_names (12): ['fl_hx', 'fr_hx', 'hl_hx', 'hr_hx', 'fl_hy', 'fr_hy', 'hl_hy', 'hr_hy', 'fl_kn', 'fr_kn', 'hl_kn', 'hr_kn']
-[spike] flat-ground square: OK  RTF=0.66
+[spike] flat-ground square: OK  RTF=0.68
+[spike] warehouse RTF=0.61  upright (full 2000 steps)
 [spike] spot_with_arm dof_names (19): ['arm0_sh1', 'arm0_el0', 'arm0_sh0', 'arm0_el1', 'fl_hx', 'fr_hx', 'hl_hx', 'hr_hx', 'arm0_wr0', 'fl_hy', 'fr_hy', 'hl_hy', 'hr_hy', 'arm0_wr1', 'fl_kn', 'fr_kn', 'hl_kn', 'hr_kn', 'arm0_f1x']
-[spike] warehouse RTF=0.41
 ```
-
 `echo "exit=$?"` → `exit=0`.
 
-Reproduced twice at the matched 500 Hz rate (RTF 0.67/0.41 and 0.66/0.41,
-run-to-run noise ~1-2%); also run once (superseded) at the brief's literal
-200 Hz (RTF 1.68/1.40, exit 0) before the dt mismatch was identified — see
-§6.
+Run 2 (repeat, same command):
+```
+[spike] flat-ground square: OK  RTF=0.67
+[spike] warehouse RTF=0.63  upright (full 2000 steps)
+```
+`exit=0`. (Remaining lines identical to run 1 — assets_root_path, engine,
+decimation/dt, action_scale, default_pos/vel, and both dof_names lists are
+deterministic and reproduce byte-for-byte across runs; only the RTF floats
+vary run-to-run.)
 
-GPU state before the runs: RTX 3090 Ti, ~9.4/24.6 GiB used by other
-processes, 30-35% utilization (idle headroom confirmed sufficient). Each
-full script run (boot + flat square + arm-DOF probe + warehouse walk +
+**Note the order-of-magnitude direction**: the corrected warehouse RTF
+(0.61-0.63) is *higher* than the earlier contaminated reading (0.41) — the
+idle `spot_with_arm.usd` probe articulation was consuming real per-step
+physics solver time even though it never moved, which is exactly the kind
+of measurement bug the reviewer flagged.
+
+### 8b. Superseded pre-fix run (kept for the historical dt-mismatch record only)
+
+Prior to the contamination fix, one run at the matched 500 Hz rate produced
+`flat-ground square: OK RTF=0.66` and `warehouse RTF=0.41` — the flat-ground
+number remains valid (nothing else was in that stage), but the warehouse
+number is superseded by §8a above. A separate, even earlier run at the
+brief's literal 200 Hz (before the dt mismatch in §6 was identified)
+produced `RTF=1.68`/`RTF=1.40`, exit 0 — also superseded, kept only to
+document that the 200→500 Hz correction was made before the contamination
+fix, not confused with it.
+
+GPU state before the runs: RTX 3090 Ti, ~9.3-9.4/24.6 GiB used by other
+processes, <35% utilization (idle headroom confirmed sufficient each time).
+Each full script run (boot + flat square + warehouse walk + arm-DOF probe +
 shutdown) took ~85-90 s wall time at the 500 Hz rate (Isaac boot ~8s of
 that).
 
@@ -293,11 +350,22 @@ that).
 - Build commands as device-matched `torch.Tensor`s, not numpy.
 - Set `World(physics_dt=0.002, ...)` (or read `policy_env_params["sim"]["dt"]`
   dynamically) — do not reuse Phase 1's kinematic-tier step rate.
-- Budget for **sub-real-time execution**: 0.66x flat, 0.41x in a populated
-  warehouse, on a 3090 Ti. Any downstream planner/avoidance loop timing
-  (Task 9, Task 10) must tolerate the sim running slower than wall-clock,
-  not assume 1.0x.
+- Budget for **sub-real-time execution**: ~0.66-0.68x flat, ~0.61-0.63x in
+  a populated warehouse (Spot alone, single articulation — see §8a), on a
+  3090 Ti. Any downstream planner/avoidance loop timing (Task 9, Task 10)
+  must tolerate the sim running slower than wall-clock, not assume 1.0x.
 - For `spot_with_arm.usd`, gather the 12 leg DOFs by **name** (list in §5),
   not by a fixed index range — the arm and leg joints are interleaved and
   the interleave order is not obviously derivable without reading it live
   (as done here).
+- **Hardcode the discovered constants in Task 8, don't read `spot._*` at
+  runtime.** This spike prints `spot._decimation`, `spot._dt`,
+  `spot.render_interval`, and `spot._action_scale` (§4) by reaching into
+  `PolicyController`'s private attributes — convenient for one-off
+  discovery, but those are underscore-prefixed internals of a third-party
+  extension with no API stability guarantee across Isaac Sim point
+  releases. `PolicyDriveBackend` should hardcode the values this report
+  already recorded — **500 Hz physics (`dt=0.002`), `decimation=10` (50 Hz
+  control rate), `action_scale=0.2`** — as named constants in Task 8's own
+  module, not read them off `spot._decimation`/`spot._dt`/`spot._action_scale`
+  at runtime.
