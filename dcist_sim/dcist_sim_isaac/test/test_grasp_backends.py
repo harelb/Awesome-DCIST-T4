@@ -117,6 +117,21 @@ def _run(backend, name, dt=0.1, max_steps=500):
     return backend.status(name)
 
 
+def _run_phases(backend, name, dt=0.1, max_steps=500):
+    """Like `_run` but also returns the ordered list of distinct internal op
+    phases visited (for pinning phase order)."""
+    phases = []
+    for _ in range(max_steps):
+        state, _msg, _oid = backend.status(name)
+        if state in ("succeeded", "failed"):
+            return state, phases
+        op = backend._ops.get(name)
+        if op is not None and (not phases or phases[-1] != op.phase):
+            phases.append(op.phase)
+        backend.step(dt)
+    return backend.status(name)[0], phases
+
+
 def _make(objects, arms):
     robots = [a.robot for a in arms.values()]
     reg = _FakeRegistry(objects)
@@ -188,9 +203,12 @@ def test_place_detaches_and_succeeds():
 
     accepted, _msg = backend.place("hilbert")
     assert accepted is True
-    state, _msg, oid = _run(backend, "hilbert")
+    state, phases = _run_phases(backend, "hilbert")
     assert state == "succeeded"
-    assert oid == "cone_0"
+    # place re-deploys the arm (jacobian valid) BEFORE lowering, then detaches
+    # and stows: pin that phase order.
+    assert phases == ["place_deploy", "lower", "detach", "stow"], phases
+    assert backend.status("hilbert")[2] == "cone_0"
     # detach: object made dynamic again + released
     assert (("cone_0", False) in reg.kinematic_calls)
     assert reg._o["cone_0"]["held_by"] is None

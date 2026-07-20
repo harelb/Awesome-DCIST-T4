@@ -113,8 +113,31 @@ ARM_DEPLOY_BY_SUFFIX = {
 # (this MUST match `_ArmInterface._arm6_names`).
 SERVO_JOINT_SUFFIXES = ("sh1", "el0", "sh0", "el1", "wr0", "wr1")
 # Base-frame position jacobian d(gripper_base_xyz)/d(arm6 joints) at the deploy
-# pose (3x6), measured by finite difference (probe v8). Columns align with
+# pose (3x6), measured by finite difference (GPU probe). Columns align with
 # SERVO_JOINT_SUFFIXES.
+#
+# ============================ VALIDITY ENVELOPE ============================
+# This is a CONSTANT jacobian for a resolved-rate servo. It is only valid under
+# ALL of these hard preconditions -- Task 15/16 physics-tour authors and the
+# runbook (docs/sim_runbook.md §12 / Task 15) inherit these from here:
+#   1. The arm is AT (or very near) the ARM_DEPLOY_BY_SUFFIX deploy pose. Every
+#      servo phase (grasp reach/descend/carry AND place lower) MUST be preceded
+#      by a deploy so this holds -- servoing from stow (or any far pose) with
+#      this jacobian stalls (the shoulders' true jacobian there is different).
+#   2. The target is roughly HEAD-ON (small base-frame lateral |y|). Lateral
+#      authority at the deploy pose is weak: expect up to ~0.08 m residual in
+#      base-frame y, so a target more than ~0.08 m off the sagittal plane may
+#      never reach the 0.10 m validate gate. Approach objects facing them.
+#   3. Reach is SHORT (deploy pose -> ground object ~0.7 m in front). A constant
+#      jacobian is a local linearization; large excursions are not modelled.
+#   4. The DOF-order guard in _ArmInterface catches only a change in the arm's
+#      servoed-joint ORDER, NOT a change in link geometry/masses/gains. Any new
+#      arm asset (or retuned drive gains) invalidates these numbers -- re-measure
+#      ARM_JACOBIAN_BASE + ARM_DEPLOY_BY_SUFFIX by finite difference.
+# WHY not the live PhysX jacobian: get_jacobians() on this asset maps joint
+# columns wrongly (both shoulders read an all-zero linear jacobian), so it is
+# unusable -- see task-13-report.md "jacobian findings".
+# ===========================================================================
 ARM_JACOBIAN_BASE = np.array([
     [-0.4418, -0.3889, -0.0284,  0.0052, -0.0789,  0.0065],
     [-0.0084, -0.0062,  0.5543,  0.1191,  0.0024, -0.0159],
@@ -240,18 +263,18 @@ class _Op:
     VALIDATE = "validate"
     ATTACH = "attach"
     CARRY = "carry"
-    # place phases
+    # place phases (PLACE_DEPLOY re-deploys the arm from stow so the fixed
+    # base-frame jacobian is valid again before LOWER servos -- see
+    # ARM_JACOBIAN_BASE validity envelope).
+    PLACE_DEPLOY = "place_deploy"
     LOWER = "lower"
     DETACH = "detach"
     STOW = "stow"
-    # terminal
-    DONE = "done"
-    ERROR = "error"
 
     def __init__(self, kind, arm):
         self.kind = kind          # "grasp" | "place"
         self.arm = arm
-        self.phase = self.SELECTING if kind == "grasp" else self.LOWER
+        self.phase = self.SELECTING if kind == "grasp" else self.PLACE_DEPLOY
         self.message = ""
         self.object_id = ""
         self.target = None        # current servo world target (3,)
@@ -469,6 +492,22 @@ class PhysicsGraspBackend:
 
     def _step_place(self, robot_name, op):
         arm = op.arm
+        if op.phase == _Op.PLACE_DEPLOY:
+            # After a grasp, the arm is re-stowed and the held object rides the
+            # stowed gripper -- but ARM_JACOBIAN_BASE is only valid at the
+            # deploy pose. Re-deploy first (the held object rides along via the
+            # per-step re-pin), so LOWER servos from a jacobian-valid pose.
+            arm.deploy()
+            if op.deploy_until is None:
+                op.deploy_until = op.t + DEPLOY_SETTLE_S
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"deploying arm to place '{op.object_id}'",
+                               op.object_id)
+            if op.t < op.deploy_until:
+                return
+            op.phase = _Op.LOWER
+            return
+
         if op.phase == _Op.LOWER:
             if op.servo is None:
                 # world gripper pose -> drop straight down (op.target is world;
