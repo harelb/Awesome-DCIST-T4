@@ -117,10 +117,15 @@ def orchestrate_up(args, raw_dir):
                ADT4_WS=os.path.expanduser("~/dcist_ws"),
                ADT4_ENV=os.path.expanduser("~/environments/dcist"))
     isaac_log = open(os.path.join(raw_dir, "isaac.log"), "w")
+    # --gui shows the Isaac window (omit --headless) so the tour can be watched;
+    # everything else (bring-up, shutdown-save, teardown) is unchanged.
+    sim_cmd = [ISAAC_PY, "-m", "dcist_sim_isaac.sim_app", "--scenario", args.scenario]
+    if not args.gui:
+        sim_cmd.append("--headless")
+    sim_cmd += ["--gt-out", os.path.join(args.map_dir, "gt")]
     isaac = subprocess.Popen(
-        [ISAAC_PY, "-m", "dcist_sim_isaac.sim_app", "--scenario", args.scenario,
-         "--headless", "--gt-out", os.path.join(args.map_dir, "gt")],
-        cwd=REPO_ROOT, env=env, stdout=isaac_log, stderr=subprocess.STDOUT)
+        sim_cmd, cwd=REPO_ROOT, env=env, stdout=isaac_log,
+        stderr=subprocess.STDOUT)
     # Start the robot stack BEFORE waiting on any topic: under rmw_zenoh,
     # peers (Isaac's rclpy included) are only discoverable once the zenoh
     # router -- started inside the run-adt4 session -- is up. Waiting for
@@ -217,6 +222,9 @@ def main():
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--orchestrate", action="store_true")
     mode.add_argument("--attach", action="store_true")
+    ap.add_argument("--gui", action="store_true",
+                    help="show the Isaac window during --orchestrate (omit "
+                         "--headless) so the tour can be watched")
     ap.add_argument("--socket", default="t4map")
     # Must exceed the executor's goal_tolerance (1.0 m in the isaac_sim
     # overlay): the follower STOPS up to that far from the goal, so a
