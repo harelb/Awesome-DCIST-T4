@@ -6,6 +6,8 @@ launch_configs:
   map: [main, hydra, roman]
   # like `map`, but hydra consumes ROMAN intra-session loop closures (drift reduction)
   map_lc: [main, hydra_lc, roman]
+  # like `map`, but hydra consumes dcist_sim's GT semantic label topic (Task 15e)
+  map_isaac: [main, hydra_isaac, roman]
   relocalize: [main, hydra_multi, roman]
   # development groupings
   map_old: [main, hydra_old, roman]
@@ -102,7 +104,8 @@ experiments:
     launch_config: [plan_prior_heracles, spot_sim]
     config: [prior_dsg]
 
-  # Isaac Sim — full robot-side stack (live hydra+roman) against dcist_sim_isaac
+  # Isaac Sim — full robot-side stack (live hydra+roman) against dcist_sim_isaac.
+  # Uses map_isaac so hydra ingests the sim's GT semantic labels (Task 15e).
   spot_isaac:
-    launch_config: [map, spot_isaac]
+    launch_config: [map_isaac, spot_isaac]
     config: [isaac_sim]

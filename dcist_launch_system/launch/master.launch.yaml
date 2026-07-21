@@ -86,6 +86,12 @@ launch:
   # (subscriber stays on its private topic that nobody publishes). Intra-session ROMAN
   # loop closures are enabled by pointing this at roman/roman_lc/pose_graph_update.
   - arg: {name: hydra_external_lc_topic, default: '~/external_loop_closures'}
+  # Topic feeding hydra's semantic LABEL image. Default = the live perception
+  # frontend's output ($(var camera)/semantic/image_raw). The isaac_sim
+  # experiment points this at dcist_sim's ground-truth label topic
+  # ($(var camera)/semantic/gt_image_raw) so DSG objects are placed from
+  # pixel-perfect GT masks (Task 15e; see the hydra_isaac launch component).
+  - arg: {name: hydra_semantic_topic, default: $(var camera)/semantic/image_raw}
   - node:
       if: $(var launch_hydra)
       pkg: hydra_ros
@@ -97,7 +103,7 @@ launch:
         - {from: ~/input/camera/depth_registered/image_rect, to: $(var camera)/depth/depth_registered}
         - {from: ~/input/camera/rgb/image_raw, to: $(var camera)/rgb/image_rect_color}
         - {from: ~/input/camera/rgb/camera_info, to: $(var camera)/rgb/camera_info}
-        - {from: ~/input/camera/semantic/image_raw, to: $(var camera)/semantic/image_raw}
+        - {from: ~/input/camera/semantic/image_raw, to: $(var hydra_semantic_topic)}
         - {from: ~/external_loop_closures, to: $(var hydra_external_lc_topic)}
         - {from: ~/status, to: ros_system_monitor/hydra/status}
       args: >-
