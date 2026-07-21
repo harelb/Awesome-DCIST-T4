@@ -12,6 +12,8 @@ convention as `grasp.py`). Covered per the brief's Step 1:
 Plus: async accept contract, the arm-ownership handoff, no-drive-backend
 scope-cut failure, and the `PolicyDriveBackend.set_arm_hold` flag logic.
 """
+import math
+
 import numpy as np
 
 from dcist_sim_isaac.grasp_backends import PhysicsGraspBackend
@@ -45,7 +47,8 @@ class _FakeArm:
     `movable=False` (used to force a servo stall)."""
 
     def __init__(self, robot, reach_origin=(0.0, 0.0, 0.5), movable=True,
-                 contact=False):
+                 contact=False, base_pose=(0.0, 0.0, 0.5, 0.0),
+                 base_rotates=True, base_dt=0.1):
         self.robot = robot
         self._origin = np.asarray(reach_origin, dtype=float)
         self.movable = movable
@@ -56,9 +59,36 @@ class _FakeArm:
         self.contact = contact
         self.gripper_closed = False
         self.contact_reporting = False
+        # Task 15f base yaw-align scripting: (x, y, z, yaw). `set_base_cmd`
+        # integrates the commanded wz into `_base` yaw by `base_dt` per call
+        # (one align step) when `base_rotates`, so the fake base actually turns
+        # toward the target; `base_rotates=False` models a base that can't
+        # align (exercises the timeout). `base_cmds` records the rotate
+        # commands (for sign assertions); `stop_count` the stop_base calls.
+        self._base = list(map(float, base_pose))
+        self._base_rotates = base_rotates
+        self._base_dt = base_dt
+        self.base_cmds = []
+        self.stop_count = 0
 
     def reach_origin(self):
         return self._origin
+
+    def base_pose_xyzyaw(self):
+        return tuple(self._base)
+
+    def set_base_cmd(self, vx, vy, wz):
+        self.base_cmds.append((vx, vy, wz))
+        if self._base_rotates:
+            # integrate one align step: rotate yaw + drive vx along the (new)
+            # heading, so the fake base both faces AND closes on the target
+            yaw = self._base[3]
+            self._base[0] += vx * math.cos(yaw) * self._base_dt
+            self._base[1] += vx * math.sin(yaw) * self._base_dt
+            self._base[3] += wz * self._base_dt
+
+    def stop_base(self):
+        self.stop_count += 1
 
     def to_servo_frame(self, world_xyz):
         # identity servo frame in the fake (== world), so target and gripper
@@ -249,6 +279,128 @@ def test_no_graspable_object_fails():
     state, msg, _ = _run(backend, "hilbert")
     assert state == "failed"
     assert "graspable" in msg
+
+
+# -- base align phase: yaw + stand-off (Task 15f) ---------------------------
+
+
+def test_align_rotates_toward_left_target_then_grasps():
+    # Target 45 deg to the LEFT (positive bearing) at ~stand-off range: the
+    # align phase engages, its first command turns the base TOWARD the target
+    # (positive/CCW wz, no lateral vy), reaches head-on, and grasps.
+    from dcist_sim_isaac.grasp_backends import ALIGN_TOL_RAD, ALIGN_STANDOFF_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    r = ALIGN_STANDOFF_M
+    objs = {"bag_0": {"pos": (r * math.cos(0.785), r * math.sin(0.785), 0.0),
+                      "graspable": True, "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
+
+    backend.grasp("hilbert")
+    state, phases = _run_phases(backend, "hilbert")
+    assert state == "succeeded", (state, phases)
+    # align engaged and preceded the arm deploy
+    assert "align" in phases
+    assert phases.index("align") < phases.index("deploy")
+    # first command turns TOWARD the target: no lateral vy, positive (CCW) wz
+    assert arm.base_cmds, "expected at least one base command"
+    assert arm.base_cmds[0][1] == 0.0
+    assert arm.base_cmds[0][2] > 0.0
+    # base ended head-on (bearing within tol) and was stopped
+    _rng, brg = backend._base_range_bearing_to(arm, "bag_0")
+    assert abs(brg) <= ALIGN_TOL_RAD + 1e-6
+    assert arm.stop_count >= 1
+
+
+def test_align_rotates_correct_sign_for_right_target():
+    # Target to the RIGHT (negative bearing) -> negative (CW) rotate command.
+    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    r = ALIGN_STANDOFF_M
+    objs = {"bag_0": {"pos": (r * math.cos(-0.785), r * math.sin(-0.785), 0.0),
+                      "graspable": True, "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    assert arm.base_cmds[0][2] < 0.0
+
+
+def test_align_backs_off_when_too_close():
+    # Head-on but TOO CLOSE (range << stand-off): align drives the base BACKWARD
+    # (vx < 0) to open the stand-off, then grasps.
+    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M, ALIGN_DIST_TOL_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    objs = {"bag_0": {"pos": (0.35, 0.0, 0.0), "graspable": True,
+                      "held_by": None}}   # 0.35 m << 0.72 m stand-off
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    assert any(c[0] < 0.0 for c in arm.base_cmds), arm.base_cmds  # backed off
+    rng, _brg = backend._base_range_bearing_to(arm, "bag_0")
+    assert abs(rng - ALIGN_STANDOFF_M) <= ALIGN_DIST_TOL_M + 1e-6
+
+
+def test_align_drives_forward_when_too_far():
+    # Head-on but TOO FAR (still within reach_m): align drives FORWARD (vx > 0)
+    # to close to the stand-off, then grasps.
+    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M, ALIGN_DIST_TOL_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    objs = {"bag_0": {"pos": (0.95, 0.0, 0.0), "graspable": True,
+                      "held_by": None}}   # 0.95 m > 0.72 m, < reach_m 0.984
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    assert any(c[0] > 0.0 for c in arm.base_cmds), arm.base_cmds  # drove forward
+    rng, _brg = backend._base_range_bearing_to(arm, "bag_0")
+    assert abs(rng - ALIGN_STANDOFF_M) <= ALIGN_DIST_TOL_M + 1e-6
+
+
+def test_align_timeout_fails_and_stops_base():
+    # A base that can't move toward an off-axis target must TIME OUT ->
+    # failed "align timeout", arm released, base stopped, nothing held.
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0), base_rotates=False)
+    objs = {"bag_0": {"pos": (0.5, 0.5, 0.0), "graspable": True,
+                      "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+
+    backend.grasp("hilbert")
+    state, msg, _ = _run(backend, "hilbert")
+    assert state == "failed"
+    assert "align timeout" in msg.lower()
+    assert arm.owned is False              # arm ownership returned
+    assert arm.stop_count >= 1             # base stopped (no runaway motion)
+    assert reg._o["bag_0"]["held_by"] is None
+
+
+def test_already_aligned_skips_motion():
+    # Head-on AND at stand-off (bearing ~0, range ~0.72): no base command is
+    # ever issued; align settles then deploys and the grasp succeeds.
+    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    objs = {"bag_0": {"pos": (ALIGN_STANDOFF_M, 0.0, 0.0), "graspable": True,
+                      "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    state, phases = _run_phases(backend, "hilbert")
+    assert state == "succeeded"
+    assert "align" in phases               # phase still visited (settle ticks)
+    assert arm.base_cmds == []             # but no drive/rotate command issued
 
 
 def test_status_idle_before_any_attempt():

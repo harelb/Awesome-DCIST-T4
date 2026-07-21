@@ -71,9 +71,12 @@ accept itself was rejected). This mirrors the shape `grasp.GraspBackend`
 returns so the two backends are interchangeable behind the dispatch.
 
 Per-robot state machine (grasp):
-    idle -> selecting -> reach_pregrasp -> descend -> validate -> attach
-         -> carry -> succeeded
-(any servo FAILED / no target / out of reach -> failed with a reason message).
+    idle -> selecting -> align -> deploy -> reach_pregrasp -> descend
+         -> validate -> attach -> carry -> succeeded
+(any servo FAILED / no target / out of reach / align timeout -> failed with a
+reason message). `align` (Task 15f) rotates the base to face the target AND
+drives it to the head-on IK stand-off before the arm deploys -- see the
+ALIGN_* constants.
 Place:
     lower -> detach (set_kinematic(False), clear held) -> stow -> succeeded.
 While an object is held, `step()` re-derives its world pose from the gripper's
@@ -107,6 +110,7 @@ import math
 import numpy as np
 
 from dcist_sim_isaac.arm_ik import IkServo, dls_step
+from dcist_sim_isaac.drive_backends import wrap_angle
 from dcist_sim_isaac.grasp import (
     PLACE_DROP_OFFSET,
     _quat_mul,
@@ -132,6 +136,50 @@ SERVO_STALL_WINDOW_S = 2.5
 # policy holds the base with a slow wobble, so a gentle 0.06 rad/tick converges
 # without the base-reaction overshoot a larger step causes (see report).
 SERVO_DQ_MAX = 0.06
+
+# ---------------------------------------------------------------------------
+# Base align phase (Task 15f) -- rotate the base to face the target AND drive
+# it to the head-on IK stand-off BEFORE deploying the arm.
+#
+# WHY (yaw): the fixed base-frame jacobian (ARM_JACOBIAN_BASE, precondition 2)
+# only reaches targets with a small base-frame lateral |y| (~0.08 m residual
+# limit). Task 15e measured the executor stopping ~36 deg off-axis, landing the
+# bag at base-frame y=0.258 m -- far outside the envelope, so the servo stalled.
+# The align phase rotates the base (a proportional rotate-in-place law mirroring
+# LocalPlanner: wz = clamp(ALIGN_KP*bearing)) until |bearing| <= ALIGN_TOL_RAD.
+#
+# WHY (stand-off): with the yaw fixed, Task 15f's first GPU run then stalled in
+# DESCEND with lateral_y=0.074 (INSIDE the envelope) but a huge forward/down
+# error -- the object had ended up only ~0.12 m in front of the base, far
+# inside the ~0.7 m the constant jacobian is linearized for (precondition 3),
+# so the descend diverged (gripper drifted UP, wrong sign) and the arm-heavy
+# Spot toppled. The executor's approach + goal_tolerance stops the base too
+# close, and the arm deploy nudges it closer still. So align ALSO regulates the
+# base->object horizontal distance to ALIGN_STANDOFF_M (Task 13 grasp_smoke
+# grasped reliably from ~0.7 m): drive vx = clamp(ALIGN_KP_LIN*dist_err) once
+# roughly facing the target. After both are satisfied it holds still for
+# ALIGN_SETTLE_S to bleed off rotation momentum (an arm deploy on a still-
+# turning base was toppling it) before deploying.
+#
+# The base command goes through the ROBOT's PUBLIC `set_cmd_vel` (see
+# _ArmInterface.set_base_cmd): that switches the robot to velocity mode and
+# cancels any in-flight planner goal, so `SpotSimRobot._step_physics` -- which
+# runs BEFORE the grasp step each main-loop frame and would otherwise overwrite
+# a direct drive_backend.set_command with the (post-goto REACHED -> ZERO)
+# planner output every tick -- leaves our command intact. The command is zeroed
+# on EVERY terminal path (align success, timeout, servo failure, crash, reset
+# -> see _finish / reset) so the base can never run away.
+ALIGN_TOL_RAD = 0.09      # aligned when |base->target bearing| <= this (~5 deg)
+ALIGN_KP = 2.0            # proportional gain on the bearing (mirrors LocalPlanner)
+ALIGN_WMAX = 0.6          # clamp on the commanded rotate-in-place yaw rate (rad/s)
+ALIGN_STANDOFF_M = 0.72   # target base->object horizontal distance (m); ~ the
+                          # jacobian design point + Task 13 smoke's working reach
+ALIGN_DIST_TOL_M = 0.12   # accept the stand-off within this band (m)
+ALIGN_KP_LIN = 1.0        # proportional gain on the stand-off distance error
+ALIGN_VMAX = 0.3          # clamp on the commanded approach speed (m/s)
+ALIGN_FACE_TO_DRIVE_RAD = 0.35  # only translate once roughly facing the target
+ALIGN_SETTLE_S = 1.0      # hold still after aligned to bleed momentum pre-deploy
+ALIGN_TIMEOUT_S = 12.0    # sim-time budget for the align phase; exceed -> fail
 
 # ---------------------------------------------------------------------------
 # Arm kinematics constants -- EMPIRICALLY MEASURED on spot_with_arm.usd under
@@ -310,6 +358,28 @@ class _ArmInterface:
     def release(self):
         self._drive.set_arm_hold(True)
 
+    # -- base yaw-align (Task 15f) -------------------------------------------
+
+    def base_pose_xyzyaw(self):
+        """The robot base pose (x, y, z, yaw) in the world frame -- the align
+        phase computes the base->target bearing from it each step."""
+        return self._drive.base_pose_xyzyaw()
+
+    def set_base_cmd(self, vx, vy, wz):
+        """Command a base velocity through the robot's PUBLIC path. This is
+        deliberately `SpotSimRobot.set_cmd_vel`, NOT `drive_backend.set_command`
+        directly: set_cmd_vel switches the robot to velocity mode and cancels
+        any in-flight planner goal, so `_step_physics` (which runs before the
+        grasp step each frame and would otherwise re-issue the planner's ZERO
+        command post-goto) stops fighting this rotate command. See the ALIGN_*
+        constants for the ordering rationale."""
+        self._robot.set_cmd_vel(float(vx), float(vy), float(wz))
+
+    def stop_base(self):
+        """Zero the base velocity command (hold station). Idempotent; called on
+        every op terminal path so a rotate-in-place can never run away."""
+        self._robot.set_cmd_vel(0.0, 0.0, 0.0)
+
     # -- G2 contact hold (Task 14, EXPERIMENTAL) -----------------------------
 
     def _set_f1x(self, rad):
@@ -399,6 +469,9 @@ class _Op:
 
     # grasp phases
     SELECTING = "selecting"
+    # Task 15f: rotate the base in place until the target is head-on before the
+    # arm deploys (the fixed jacobian only reaches near-sagittal targets).
+    ALIGN = "align"
     DEPLOY = "deploy"
     REACH_PREGRASP = "reach_pregrasp"
     DESCEND = "descend"
@@ -424,6 +497,8 @@ class _Op:
         self.target = None        # current servo world target (3,)
         self.servo = None
         self.t = 0.0              # op-local elapsed sim time (s)
+        self.align_until = None   # sim-time deadline for the align phase (15f)
+        self.aligned_since = None  # sim-time the base first became aligned (15f)
         self.deploy_until = None  # sim-time to hold the deploy pose until
         # G2 contact hold (Task 14): friction hold instead of the kinematic
         # pin. For a grasp, from RobotSpec.contact_hold; for a place, inherited
@@ -592,13 +667,62 @@ class PhysicsGraspBackend:
             if target_id is None:
                 return  # _select_target already failed the op
             op.object_id = target_id
-            # Deploy/unstow the arm to the fixed extended pose before servoing
-            # (the stow pose is degenerate for reaching -- see ARM constants).
-            arm.deploy()
-            op.deploy_until = op.t + DEPLOY_SETTLE_S
-            op.phase = _Op.DEPLOY
+            # Task 15f: rotate the base to face the target BEFORE deploying the
+            # arm, so the fixed base-frame jacobian's head-on envelope holds
+            # (see the ALIGN_* constants / ARM_JACOBIAN_BASE precondition 2).
+            op.align_until = op.t + ALIGN_TIMEOUT_S
+            op.phase = _Op.ALIGN
             self._set_last(robot_name, IN_PROGRESS,
-                           f"deploying arm for '{target_id}'", target_id)
+                           f"aligning base toward '{target_id}'", target_id)
+            return
+
+        if op.phase == _Op.ALIGN:
+            rng, bearing = self._base_range_bearing_to(arm, op.object_id)
+            dist_err = rng - ALIGN_STANDOFF_M     # >0 too far, <0 too close
+            facing = abs(bearing) <= ALIGN_TOL_RAD
+            ranged = abs(dist_err) <= ALIGN_DIST_TOL_M
+            if facing and ranged:
+                # Head-on AND at stand-off: hold still, then (after a short
+                # settle to bleed rotation momentum) deploy the arm.
+                arm.stop_base()
+                if op.aligned_since is None:
+                    op.aligned_since = op.t
+                    self._set_last(robot_name, IN_PROGRESS,
+                                   f"settling base before deploy for "
+                                   f"'{op.object_id}'", op.object_id)
+                    return
+                if op.t - op.aligned_since < ALIGN_SETTLE_S:
+                    return
+                bx, by, _bz, byaw = arm.base_pose_xyzyaw()
+                logger.info(
+                    "'%s' base aligned+settled for '%s': base=(%.2f, %.2f, "
+                    "yaw=%.3f) range=%.2f m bearing=%.3f rad -> deploy",
+                    robot_name, op.object_id, bx, by, byaw, rng, bearing)
+                arm.deploy()
+                op.deploy_until = op.t + DEPLOY_SETTLE_S
+                op.phase = _Op.DEPLOY
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"deploying arm for '{op.object_id}'",
+                               op.object_id)
+                return
+            op.aligned_since = None   # drifted back out of tolerance -> re-settle
+            if op.t >= op.align_until:
+                arm.stop_base()   # never leave the base driving (15f)
+                self._fail(robot_name, op,
+                           f"align timeout: base {math.degrees(abs(bearing)):.1f}"
+                           f" deg / {rng:.2f} m from '{op.object_id}' "
+                           f"(want <={math.degrees(ALIGN_TOL_RAD):.0f} deg, "
+                           f"{ALIGN_STANDOFF_M:.2f}+-{ALIGN_DIST_TOL_M:.2f} m) "
+                           f"after {ALIGN_TIMEOUT_S:.0f} s")
+                return
+            # Proportional rotate-in-place toward the target (wz same sign as the
+            # bearing, mirroring LocalPlanner); once roughly facing it, also
+            # drive vx to the stand-off (vx>0 approach, vx<0 back off).
+            wz = max(-ALIGN_WMAX, min(ALIGN_WMAX, ALIGN_KP * bearing))
+            vx = 0.0
+            if abs(bearing) <= ALIGN_FACE_TO_DRIVE_RAD:
+                vx = max(-ALIGN_VMAX, min(ALIGN_VMAX, ALIGN_KP_LIN * dist_err))
+            arm.set_base_cmd(vx, 0.0, wz)
             return
 
         if op.phase == _Op.DEPLOY:
@@ -606,6 +730,21 @@ class PhysicsGraspBackend:
             if op.t < op.deploy_until:
                 return
             obj_pos, _ = self.registry.world_pose(op.object_id)
+            # Diagnostic (Task 15f): the base can drift while the arm deploys
+            # (CoM shift). Log where the object landed in the base (servo) frame
+            # after the settle -- forward x should be ~ARM_STANDOFF_M and
+            # lateral |y| small, or the fixed jacobian's envelope is violated.
+            try:
+                tgt_b = arm.to_servo_frame(obj_pos)
+                rng_after, bearing_after = self._base_range_bearing_to(
+                    arm, op.object_id)
+                logger.info(
+                    "'%s' post-deploy for '%s': object base-frame=(x=%.3f "
+                    "y=%.3f z=%.3f) range=%.2f m bearing=%.3f rad",
+                    robot_name, op.object_id, tgt_b[0], tgt_b[1], tgt_b[2],
+                    rng_after, bearing_after)
+            except Exception:  # noqa: BLE001 -- diagnostic must never throw
+                logger.exception("post-deploy diagnostic failed")
             op.target = np.array([obj_pos[0], obj_pos[1],
                                   obj_pos[2] + self.pregrasp_z], dtype=float)
             op.phase = _Op.REACH_PREGRASP
@@ -710,6 +849,16 @@ class PhysicsGraspBackend:
             self._set_last(robot_name, IN_PROGRESS,
                            f"carrying '{op.object_id}'", op.object_id)
             return
+
+    def _base_range_bearing_to(self, arm, object_id):
+        """(range_m, bearing_rad) from the robot base to the object's LIVE
+        world position: horizontal distance + signed base-frame bearing (wrapped
+        to [-pi, pi]). Recomputed every align step because the object is static
+        but the base is rotating/translating (Task 15f)."""
+        obj_pos, _ = self.registry.world_pose(object_id)
+        bx, by, _bz, byaw = arm.base_pose_xyzyaw()
+        dx, dy = obj_pos[0] - bx, obj_pos[1] - by
+        return math.hypot(dx, dy), wrap_angle(math.atan2(dy, dx) - byaw)
 
     def _select_target(self, robot_name, arm):
         origin = arm.reach_origin()
@@ -893,6 +1042,13 @@ class PhysicsGraspBackend:
         # release_arm=False only for a successful G2 contact grasp: the arm must
         # keep its (closed-finger) targets through the carry, so ownership is
         # NOT handed back to the policy here (see _succeed_grasp / docstring).
+        # Zero any base velocity command the align phase (15f) issued: EVERY
+        # terminal path (success, failure, align timeout, crash) must leave the
+        # base stopped, never a runaway rotate-in-place. Idempotent + fail-safe.
+        try:
+            op.arm.stop_base()
+        except Exception:                              # noqa: BLE001
+            logger.exception("'%s' base stop on finish failed", robot_name)
         if release_arm:
             try:
                 op.arm.release()
@@ -912,6 +1068,10 @@ class PhysicsGraspBackend:
         # (a contact carry has no in-flight op but still owns the arm -- see
         # _succeed_grasp); release() is idempotent so double-release is safe.
         for op in self._ops.values():
+            try:
+                op.arm.stop_base()   # kill any in-flight align rotate (15f)
+            except Exception:                              # noqa: BLE001
+                logger.exception("base stop during reset failed")
             try:
                 op.arm.release()
             except Exception:                              # noqa: BLE001
