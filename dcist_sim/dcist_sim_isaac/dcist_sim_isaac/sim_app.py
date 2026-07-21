@@ -74,6 +74,21 @@ def main():
                              "written unless this is set)")
     args = parser.parse_args()
 
+    # Surface dcist_sim_isaac INFO (esp. the physics grasp/place state machine's
+    # accept / out-of-reach / validate / attach / fail messages) to stderr ->
+    # isaac.log. Isaac's own C++ logging is unaffected (separate system); the
+    # root logger otherwise defaults to WARNING, which silently swallowed every
+    # grasp diagnostic and cost a debug cycle in Tasks 15/15b/15c. Package-scoped
+    # so we don't flood the log with third-party INFO. Idempotent.
+    _pkg_log = logging.getLogger("dcist_sim_isaac")
+    if not any(getattr(h, "_dcist_grasp_trace", False) for h in _pkg_log.handlers):
+        _h = logging.StreamHandler()
+        _h._dcist_grasp_trace = True
+        _h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+        _pkg_log.addHandler(_h)
+        _pkg_log.setLevel(logging.INFO)
+        _pkg_log.propagate = False
+
     from dcist_sim_isaac.scenario import load_scenario
     scenario = load_scenario(args.scenario)
     _warn_if_robot_name_mismatch(scenario)

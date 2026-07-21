@@ -701,3 +701,46 @@ Latest runs (field_smoke_physics, with the 12.7 frame fix in place):
   locomotion/approach work (faster/steadier walk, a proper pre-grasp standoff
   inside `reach_m`, or a pick timeout matched to policy speed) — tracked as
   follow-up, NOT a perception fix. No e2e threshold was weakened.
+
+### 12.10 A1 update (Task 15c) — locomotion was NOT the blocker; PDDL crash fixed
+
+Task 15c measured the physics e2e end-to-end with proper instrumentation and
+overturned the 12.9 diagnosis:
+
+- **The walk is clean and fast, not wobbly.** Instrumented `LocalPlanner`
+  trace over a full executor->planner->policy drive: heading error mean **1.9°**
+  (max 7.2°), `wz` never saturates, `vx`≈1.0, achieved speed p50 **0.94 m/s**
+  (max 1.19). The "0.1–0.4 m/s wobble" in 12.9 was the robot sitting STOPPED
+  after reaching goal_tolerance, not slow/unsteady walking. Pursuit gains were
+  NOT changed.
+
+- **BUG 1 (FIXED): the omniplanner rearrange PDDL solve crashed, so the pick
+  never fired.** `dsg_pddl/pddl_planning.py:solve_pddl` ran fast-downward
+  without `cwd=`; FD's translate writes a *relative* `output.sas` into the
+  process CWD, which under `ros2 launch` is `/` (non-writable) → `translate exit
+  code 30`, `FileNotFoundError: 'output.sas'` → `Exception: Planning failed` →
+  the whole `omniplanner_node` died. Stage B then only ran `follow` actions.
+  Fix: `cwd=tmpdirname` (the per-solve temp dir). After it, the plan is produced
+  (`goto-poi, pick-object, goto-poi, place-object`) and the executor runs the
+  pick. This crash likely also silently broke Task 15/15b's B (misread as reach).
+  ⚠ REBUILD omniplanner after pulling: `colcon build --packages-select omniplanner`.
+
+- **BUG 2 (REMAINING, perception — NOT locomotion): pick-time YOLOE detection
+  fails.** `execute_pick -> object_grasp` needs a detection to proceed; the DSG
+  object node is consistently **~0.9–1.0 m beyond the true bag** along the
+  approach line (run 3 node (5.79,0.91), run 4 (6.03,0.83) vs true (5.0,0.6)), so
+  the robot aims at / faces the mislocalized node and the true bag is off-axis /
+  out of the forward FOV → `has_detection=False` → auto_approver rejects →
+  "Detection is invalid" (fails at BOTH goal_tolerance 0.6 and 1.0). The
+  detection-range (~1–1.5 m) vs `reach_m`=0.984 m windows barely fail to overlap
+  even with perfect localization; the ~0.9 m mislocalization removes any overlap.
+  Closing A1 needs the physics-tier object localization tightened (the M4
+  0.01–0.13 m figure was a favourable head-on geometry; the Stage-A→B trajectory
+  is ~0.9 m off), OR a gaze-at-object step before the pick, OR reconsidering the
+  YOLOE detection gate for a sim grasp that already selects on ground-truth pose.
+
+- **Diagnostics:** `sim_app.py` now routes `dcist_sim_isaac` INFO (incl. the
+  grasp state machine) to stderr → isaac.log (was WARNING-suppressed).
+
+A still PASSES (3.0–3.2 m). B/C remain FAIL, now on the perception defect above.
+No e2e threshold weakened; `reach_m` and goal_tolerance (1.0) unchanged.
