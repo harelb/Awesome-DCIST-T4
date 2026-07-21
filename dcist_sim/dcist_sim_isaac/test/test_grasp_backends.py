@@ -137,6 +137,8 @@ class _FakeRegistry:
         # objects: {oid: {"pos": (x,y,z), "graspable": bool, "held_by": str|None}}
         self._o = {k: dict(v) for k, v in objects.items()}
         self.kinematic_calls = []           # list of (oid, enabled)
+        self.collision_calls = []           # list of (oid, enabled) -- Task 15i
+        self.ops_log = []                   # ordered ("kin"|"col", oid, enabled)
 
     def selection_snapshot(self):
         return {k: {"pos": v["pos"], "graspable": v["graspable"],
@@ -159,6 +161,11 @@ class _FakeRegistry:
 
     def set_kinematic(self, oid, enabled):
         self.kinematic_calls.append((oid, bool(enabled)))
+        self.ops_log.append(("kin", oid, bool(enabled)))
+
+    def set_collision_enabled(self, oid, enabled):
+        self.collision_calls.append((oid, bool(enabled)))
+        self.ops_log.append(("col", oid, bool(enabled)))
 
 
 def _run(backend, name, dt=0.1, max_steps=500):
@@ -533,6 +540,65 @@ def test_reset_releases_and_restores_dynamics():
     # reset restored dynamics (set_kinematic(False)) on the held object
     assert (("cone_0", False) in reg.kinematic_calls)
     assert backend.status("hilbert") == ("idle", "", "")
+
+
+# -- held-object collision toggle (Task 15i, the 281-falls carry fix) -------
+
+
+def test_collision_disabled_while_held_reenabled_on_place():
+    # On attach the held object's collision is DISABLED (after set_kinematic
+    # True); on place it is RE-ENABLED (before set_kinematic False). Ordering
+    # matters: the collider must be off the whole time the pin owns the pose.
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5))
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    # disabled while held; and it was disabled AFTER the kinematic suspend
+    assert reg.collision_calls[-1] == ("cone_0", False)
+    assert reg.ops_log == [("kin", "cone_0", True), ("col", "cone_0", False)]
+
+    accepted, _msg = backend.place("hilbert")
+    assert accepted is True
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    # re-enabled on place, BEFORE dynamics were restored
+    assert reg.collision_calls[-1] == ("cone_0", True)
+    assert reg.ops_log[-2:] == [("col", "cone_0", True), ("kin", "cone_0", False)]
+
+
+def test_collision_reenabled_on_reset_while_held():
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5))
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    assert reg.collision_calls[-1] == ("cone_0", False)   # disabled while held
+
+    assert backend.reset() is True
+    # reset re-enabled collision (before restoring dynamics), same as place
+    assert reg.collision_calls[-1] == ("cone_0", True)
+    assert reg.ops_log[-2:] == [("col", "cone_0", True), ("kin", "cone_0", False)]
+
+
+def test_contact_hold_never_toggles_collision():
+    # A G2 contact (friction) hold keeps the object DYNAMIC and needs its
+    # collider ON to hold by friction -- collision is never toggled at all.
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    accepted, _msg = backend.place("hilbert")
+    assert accepted is True
+    assert _run(backend, "hilbert")[0] == "succeeded"
+    assert reg.collision_calls == []
 
 
 def test_no_drive_backend_is_clean_failure():

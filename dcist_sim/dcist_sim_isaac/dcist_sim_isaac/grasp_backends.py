@@ -1010,8 +1010,14 @@ class PhysicsGraspBackend:
             if op.contact_hold:
                 # G2: object was never suspended (still dynamic) -- just open
                 # the finger to release the friction grip; it falls under PhysX.
+                # Its collision was never disabled (friction needs it), so
+                # nothing to re-enable here.
                 arm.open_gripper()
             else:
+                # Task 15i: re-enable the collider BEFORE restoring dynamics, so
+                # the placed object collides + settles normally the moment PhysX
+                # owns it again (pairs with the disable in _attach).
+                self.registry.set_collision_enabled(object_id, True)
                 self.registry.set_kinematic(object_id, False)   # -> dynamic
             self.registry.clear_held(object_id)
             op.object_id = object_id
@@ -1103,6 +1109,11 @@ class PhysicsGraspBackend:
     def _attach(self, robot_name, op):
         target_id = op.object_id
         self.registry.set_kinematic(target_id, True)   # suspend PhysX dynamics
+        # Task 15i: with the object pinned to the gripper we own its pose
+        # exactly, so its convex-hull collider must not fight the robot's own
+        # colliders (the 281-falls carry bug, §12.15). Disable it while held;
+        # DETACH/reset re-enable before restoring dynamics.
+        self.registry.set_collision_enabled(target_id, False)
         g_pos, g_quat = self.robots[robot_name].gripper_world_pose()
         g_pos = tuple(float(v) for v in g_pos)
         g_quat = tuple(float(v) for v in g_quat)
@@ -1195,6 +1206,9 @@ class PhysicsGraspBackend:
             if held["mode"] != "pin":
                 continue
             try:
+                # Task 15i: re-enable collision (paired with _attach's disable)
+                # before restoring dynamics -- ALL detach paths, reset included.
+                self.registry.set_collision_enabled(held["object_id"], True)
                 self.registry.set_kinematic(held["object_id"], False)
             except Exception:                              # noqa: BLE001
                 logger.exception("set_kinematic(False) on reset failed")

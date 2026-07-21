@@ -56,6 +56,7 @@ class _FakeRegistry:
 
     def __init__(self, objects):
         self._objects = objects  # {object_id: {"pos", "graspable", "held_by"}}
+        self.collision_calls = []            # (oid, enabled) -- Task 15i
 
     def selection_snapshot(self):
         return {oid: dict(v) for oid, v in self._objects.items()}
@@ -71,6 +72,9 @@ class _FakeRegistry:
 
     def clear_held(self, object_id):
         self._objects[object_id]["held_by"] = None
+
+    def set_collision_enabled(self, object_id, enabled):
+        self.collision_calls.append((object_id, bool(enabled)))
 
     def reset_all(self):
         pass
@@ -138,3 +142,26 @@ def test_reset_clears_last_to_idle():
     assert backend.reset() is True
 
     assert backend.status("hilbert") == ("idle", "", "")
+
+
+# -- held-object collision toggle in the magic backend (Task 15i) -----------
+
+
+def test_magic_grasp_disables_collision_place_reenables():
+    robot = _FakeRobot("hilbert", gripper_pos=(5.0, 2.0, 0.1))
+    reg = _one_bag_registry()
+    backend = GraspBackend([robot], reg, grasp_radius=1.5)
+    backend.grasp("hilbert")
+    assert reg.collision_calls[-1] == ("bag_0", False)   # disabled while held
+    backend.place("hilbert")
+    assert reg.collision_calls[-1] == ("bag_0", True)    # re-enabled on place
+
+
+def test_magic_reset_reenables_collision_while_held():
+    robot = _FakeRobot("hilbert", gripper_pos=(5.0, 2.0, 0.1))
+    reg = _one_bag_registry()
+    backend = GraspBackend([robot], reg, grasp_radius=1.5)
+    backend.grasp("hilbert")
+    assert reg.collision_calls[-1] == ("bag_0", False)
+    assert backend.reset() is True
+    assert reg.collision_calls[-1] == ("bag_0", True)    # re-enabled on reset

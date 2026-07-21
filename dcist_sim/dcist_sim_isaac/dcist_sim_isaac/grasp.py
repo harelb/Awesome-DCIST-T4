@@ -228,6 +228,38 @@ class ObjectRegistry:
         prim = stage.GetPrimAtPath(self._entries[object_id].prim_path)
         UsdPhysics.RigidBodyAPI(prim).CreateKinematicEnabledAttr(bool(enabled))
 
+    def set_collision_enabled(self, object_id, enabled):
+        """Enable (True) or disable (False) collision on a held object's
+        collider prims (Task 15i).
+
+        A physics-tier object keeps the convex-hull collider `stage.
+        _make_dynamic` applied even while it is kinematic-suspended and pinned
+        to the gripper (`set_kinematic(True)`). That collider then rides
+        pressed against / near the robot's OWN dynamic colliders and PhysX
+        resolves the interpenetration with contact forces every step, which
+        topples the leg-only walking policy during the carry (measured: 281
+        falls over a 95 m carry, §12.15). Disabling the held object's collision
+        removes that wrestling-match while the pin owns its pose exactly; it is
+        re-enabled on release so a placed object collides + settles normally.
+
+        Toggles `UsdPhysics.CollisionAPI.collisionEnabled` on EVERY collider
+        prim under the object's stored `prim_path` (the mesh children
+        `_make_dynamic`/the source USD gave a `CollisionAPI`). It is a NO-OP
+        for an object with no colliders -- e.g. a kinematic-tier object
+        (`_mark_kinematic` applies none) -- so callers may invoke it
+        unconditionally: the CollisionAPI-presence check below IS the "gate on
+        the object actually having colliders". Only meaningful in physics mode.
+        """
+        import omni.usd
+        from pxr import Usd, UsdPhysics
+
+        stage = omni.usd.get_context().get_stage()
+        root = stage.GetPrimAtPath(self._entries[object_id].prim_path)
+        for prim in Usd.PrimRange(root):
+            if prim.HasAPI(UsdPhysics.CollisionAPI):
+                UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(
+                    bool(enabled))
+
 
 class GraspBackend:
     """Backend for the grasp/place/teleport/reset services (Task 9).
@@ -290,6 +322,13 @@ class GraspBackend:
         )
         self._attached[robot_name] = (target_id, offset_pos, offset_quat)
         self.registry.set_held_by(target_id, robot_name)
+        # Task 15i: a magic-grasp object is re-pinned to the gripper every
+        # frame (step()) but, in a PHYSICS scenario, was spawned DYNAMIC with a
+        # convex-hull collider -- the same wrestling-match-during-carry problem
+        # the physics backend has. Disable its collision while held (re-enabled
+        # on place/reset). No-op for kinematic-tier objects (no colliders), so
+        # kinematic scenarios are byte-for-byte unchanged.
+        self.registry.set_collision_enabled(target_id, False)
         message = f"grasped '{target_id}'"
         self._last[robot_name] = {
             "state": "succeeded", "message": message, "object_id": target_id,
@@ -318,6 +357,9 @@ class GraspBackend:
             (float(gripper_pos[0]), float(gripper_pos[1]), drop_z),
             obj_quat,
         )
+        # Task 15i: re-enable collision (paired with grasp's disable) so the
+        # dropped object collides + settles under PhysX once we stop re-pinning.
+        self.registry.set_collision_enabled(object_id, True)
         self.registry.clear_held(object_id)
         message = f"placed '{object_id}'"
         self._last[robot_name] = {
@@ -345,6 +387,11 @@ class GraspBackend:
         return True
 
     def reset(self):
+        # Task 15i: re-enable collision on anything still magic-held before
+        # clearing (paired with grasp's disable); reset_all re-poses objects to
+        # spawn. No-op for kinematic-tier objects (no colliders).
+        for object_id, *_ in self._attached.values():
+            self.registry.set_collision_enabled(object_id, True)
         for robot in self.robots.values():
             spec = robot.spec
             robot.teleport(spec.x, spec.y, spec.z, spec.yaw)
