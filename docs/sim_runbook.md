@@ -909,3 +909,97 @@ task's GT-routing mandate):**
    range-dependent open-set mask localization — mask-centroid depth filtering
    (reject background pixels), a SAM3 frontend instead of FastSAM on synthetic
    RGB, or the executor re-detect/gaze behaviour in spot_tools.
+
+### 12.13 A1 update (Task 15f) — base align phase SHIPS the pick; A1 full-pass BLOCKED on P4 walking-policy falls
+
+Task 15f added the deferred **base align phase** (§12.12 follow-up 1, the
+"highest leverage" fix) to `PhysicsGraspBackend`'s grasp state machine:
+
+    selecting -> align -> deploy -> reach_pregrasp -> descend -> validate
+              -> attach -> carry -> succeeded
+
+`align` (see `grasp_backends.ALIGN_*`) rotates the base to face the target AND
+drives it to a ~0.72 m head-on stand-off (proportional rotate-in-place + approach
+law, mirroring `LocalPlanner`), then holds still `ALIGN_SETTLE_S` to bleed
+rotation momentum, before the arm deploys. Base commands go through the robot's
+**public `set_cmd_vel`** (velocity mode + cancel planner goal) so
+`SpotSimRobot._step_physics` — which runs before the grasp step each frame —
+cannot overwrite them with the post-goto `REACHED -> ZERO` planner output. The
+base command is zeroed on **every** terminal path (align success, 12 s timeout,
+servo failure, crash, reset) so a rotate/approach can never run away.
+
+**Result — the grasp head-on blocker (§12.5 / §12.12) is CLOSED.** On GPU
+(field_smoke_physics, full stack, GT semantics) the align phase put the base
+head-on at the stand-off and the pick succeeded:
+
+```
+'hilbert' physics grasp accepted
+'hilbert' base aligned+settled for 'bag_0': base=(4.84, 1.28, yaw=-1.276) range=0.70 m bearing=-0.063 rad -> deploy
+'hilbert' post-deploy for 'bag_0': object base-frame=(x=0.780 y=-0.041 z=-0.446) range=0.78 m bearing=-0.053 rad
+'hilbert' attached 'bag_0' (kinematic hold)
+```
+
+Lateral residual collapsed from Task 15e's **0.258 m** (36 deg off-axis, servo
+stalled) to **0.041 m** (well inside the ~0.08 m envelope); the bag ATTACHED.
+`e2e_smoke.py` **Stage B (pick) PASSES**.
+
+**A1 e2e (verbatim, both consecutive runs) — still FAIL, at a NEW blocker
+downstream of the grasp: P4 walking-policy FALLS.**
+
+```
+# Run 1
+[e2e] STAGE A: goto 't(1)' at (-0.9797872689334639, 13.391488847009668) (start (0.06, 0.02))
+[e2e] PASS A: displacement 3.02 m (need > 3.0)
+[e2e] STAGE B: rearrange goal '(object-in-place o0 t7)' (obj@(4.83, 0.82) -> place@(-7.77, 9.53))
+[e2e] PASS B: held object = bag_0 (within 120 s)
+[e2e] FAIL C: released=False, carried 12.85 m (robot travel while holding; placement-at-goal not verified) (need > 0.5)
+[e2e] OVERALL: FAIL
+# Run 2
+[e2e] STAGE A: goto 't(27)' at (-1.116666715095441, 21.735417499175924) (start (0.04, 0.0))
+[e2e] PASS A: displacement 3.19 m (need > 3.0)
+[e2e] STAGE B: rearrange goal '(object-in-place o0 t30)' (obj@(4.98, 0.67) -> place@(-4.95, 20.6))
+[e2e] FAIL B: held object = None (within 120 s)
+[e2e] FAIL C: no object was held, cannot verify place
+[e2e] OVERALL: FAIL
+```
+
+Both failures are **the same root cause — the PhysX walking policy falls on the
+long e2e traverses** (auto-reset fires, which CANCELS the active nav goal ->
+the executor's `Follow` returns `False` -> the next action never dispatches):
+
+- **Run 1 (C):** pick succeeded and the robot carried the bag **12.85 m**, then
+  FELL at ~(-6.0, 8.6) — **~2 m short** of place `t7` (-7.77, 9.53) — and kept
+  falling there (`FELL` x4 near (-6, 8.8)), so `place-object` never dispatched.
+- **Run 2 (B):** the `Follow` to the pick stand-off `returned False` (fell on
+  approach) so the grasp was **never dispatched** (0 "grasp accepted", 0 "out of
+  reach" in the sim log) — the §12.9 pick-dispatch flakiness, here fall-driven.
+
+Measured over the two runs: **6 falls / ~1 accepted grasp**; falls occur even in
+Stage A with no load (e.g. (-0.1, 0.0), (0.4, 3.8)). The held bag is
+`set_kinematic(True)` (massless to the robot; arm links have no colliders), so
+the carry does NOT add load — the falls are the **baseline policy fall rate**
+(Task 10 cut it to ~1/sim-min but did not eliminate it) accumulated over the
+long traverse. Critically, `e2e_smoke.py` **deliberately targets the mesh-place
+FARTHEST from the object** ("large carry", Stage B) and the farthest place for
+Stage A, so a ~14–25 m fall-exposed traverse is built into the harness — two
+consecutive clean A+B+C passes are systematically improbable at this fall rate,
+not merely unlucky.
+
+**Conclusion:** the base-align deliverable is COMPLETE and PROVEN (it closes the
+grasp head-on blocker; Stage B picks + attaches with a clean envelope). Full A1
+(A+B+C exit 0 twice) is **BLOCKED on P4 walking-policy robustness** — an
+independent Task 8/10 locomotion layer, downstream of and unrelated to the grasp
+align. No e2e threshold, `reach_m`, or select-on-GT was touched.
+
+**Deferred to fully close A1 (locomotion layer, NOT the grasp):**
+1. **Reduce the walking-policy fall rate on long traverses** (Task 8/10):
+   root-cause the recurring falls (costmap turns near far places, cumulative
+   drift), retune the policy/gains, or slow `nav_spec.max_lin/ang_speed` (still
+   fits the e2e wall budget at RTF ~0.57) and re-measure fall/km.
+2. **Make a fall non-fatal to the goal** (Task 9 design change): after
+   `reset_standing` recovery, re-plan and CONTINUE the active goal instead of
+   cancelling it (nav_status='fallen' currently ends the `Follow`). Would let a
+   transient stumble mid-traverse self-heal without aborting pick/place.
+3. **§12.9 pick-dispatch overlap** still applies once falls are handled
+   (goal_tolerance 1.0 m vs reach_m 0.984 m; align now closes the last stand-off
+   gap once the grasp is dispatched, so this is less critical than in 15e).
