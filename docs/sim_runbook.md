@@ -1003,3 +1003,62 @@ align. No e2e threshold, `reach_m`, or select-on-GT was touched.
 3. **§12.9 pick-dispatch overlap** still applies once falls are handled
    (goal_tolerance 1.0 m vs reach_m 0.984 m; align now closes the last stand-off
    gap once the grasp is dispatched, so this is less critical than in 15e).
+
+### 12.14 A1 update (Task 15g) — command slew limiting + fall characterization; FIRST full A+B+C PASS, but not 2× consecutive
+
+Task 15g targeted the §12.13 blocker (P4 walking-policy falls) with the brief's
+command-layer lever. **Measured first, then mitigated.** An in-process harness
+(`scripts/fall_characterize.py`) boots Isaac, builds `field_smoke_physics`, and
+drives a scripted long-traverse goto loop through the real `LocalPlanner`, dumping
+`PolicyDriveBackend`'s always-on ~3 s command/tilt trace on each fall.
+
+**Mechanism verdict (measured, falsifies the command-discontinuity hypothesis):**
+clean OPEN-FIELD pursuit nav is stable — **0 falls / ~140 m**, slew OFF *and* ON,
+including a 22 m diagonal. The only falls are (1) the spawn/reset settle
+**z-transient** (body drops from spawn z=0.55, dips below the `fallen` z_min=0.3
+while up_z stays ~0.93 — a false-positive that self-clears on the next goal;
+Stage A passes right after it) and (2) **object-collider collisions** when the
+base is driven onto/into the small bag/cone/pipe colliders. Neither is a pursuit
+command step (the pursuit already gates vx by cos(herr)).
+
+**Fix shipped:** command **slew-rate limiting** in `PolicyDriveBackend`
+(`drive_backends.py`, `slew_command` + `POLICY_MAX_LIN_ACCEL/ANG_ACCEL`): the
+policy observes an accel-bounded ramp of the requested command each 50 Hz tick,
+protecting every source incl. the 15f align cmd_vel, zeroed on `reset_standing`.
+It PRESERVES walking (every open-field leg + Stage A + warm-up reached) and is a
+low-risk robustness measure — but the before/after fall rate is essentially
+unchanged because the falls are not command-driven. A peak-yaw magnitude CLAMP
+(0.6 rad/s) was **tried and REJECTED on evidence**: it broke pursuit
+path-tracking (the base under-turns while walking and circles the goal → nav
+TIMEOUT on every leg) and was unnecessary (full-rate in-place yaw is stable in
+open field). Only the command RATE is limited, never its magnitude. isaac unit
+suite 112 → 119.
+
+**A1 e2e (4 attempts, GT-semantics full stack, slew ON):** A PASS 4/4;
+**OVERALL PASS 1/4 (run 3) — the first full A+B+C pass in the 15-series**
+(15c/d/e/f never cleared B+C together). Runs 1/2/4 FAIL at Stage B on an
+object-cluster collision fall during the pick approach/align (run 1 drove the
+base to 0.03 m from the bag facing 168° away → align could not back-off+rotate
+off the object within its 12 s timeout; runs 2/4 fell on approach before grasp
+dispatch). Run 3 hit the same cluster falls but the auto-reset recovery + the
+grasp's in-stage retry carried it through the 120 s pick window AND the place
+(carried 16.12 m, released). **Not 2× consecutive**, so the acceptance gate is
+NOT met.
+
+`e2e_smoke.py` now ends with `os._exit(main())` (+flush) so the exit code
+reflects the PASS/FAIL verdict rather than a flaky rmw_zenoh teardown SIGABRT
+(run 3 printed `OVERALL: PASS` then aborted with exit 134) — documented helper
+pattern (§12), no assertion/threshold/logic change.
+
+**Residual A1 blocker (for the owner — NOT the command layer, NOT walking
+robustness):** an object-proximity collision fall on the pick approach and
+carry-egress. The base is driven onto/into the small object colliders (executor
+rearrange standoff + 15f align geometry), and the leg-only flat-terrain policy
+tips when a leg catches an object. Highest-leverage fixes: (1) a real pick
+standoff so the base never stops within object-collision range (executor
+standoff / align back-off-before-rotate — grasp/approach layer); (2) bake the
+settled object footprints into the costmap for base clearance; (3) seat the
+robot at its true settled height on teleport/reset to kill the (harmless) settle
+z-transient; (4) resume-after-fall (re-plan + continue) — the spec-reserved
+item, human decision. Command slew limiting is retained (correct, harmless,
+preserves walking) but is not the A1-closing lever.

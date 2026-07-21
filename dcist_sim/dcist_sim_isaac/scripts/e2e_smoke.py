@@ -31,6 +31,7 @@ Assertions (each prints a PASS/FAIL line; process exits 0 iff all pass):
 import argparse
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -299,4 +300,17 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Exit via os._exit after flushing so the process's exit code faithfully
+    # reflects main()'s PASS/FAIL return. A plain sys.exit() runs the normal
+    # interpreter teardown, which under rmw_zenoh with a live spin thread
+    # sometimes SIGABRTs (exit 134) AFTER the result is already printed --
+    # clobbering the exit code of an otherwise-clean PASS (observed Task 15g
+    # run 3: "OVERALL: PASS" then exit 134). This is the documented ADT4
+    # helper-script pattern (docs/sim_runbook.md §12; the warm-up helper in
+    # warehouse_pddl_smoke.zsh uses os._exit for the same reason). It changes
+    # ONLY the teardown exit path -- no assertion, threshold, or PASS/FAIL
+    # logic is affected (main() has already returned its verdict).
+    _code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_code)
