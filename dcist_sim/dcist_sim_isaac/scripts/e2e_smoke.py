@@ -26,6 +26,20 @@ Assertions (each prints a PASS/FAIL line; process exits 0 iff all pass):
                   (held_by null) AND the robot carried it > 0.5 m (the object is
                   rigidly attached to the gripper while held, so the robot's
                   travel between pick and release equals the object's transport).
+
+Clock basis for the timeout windows:
+
+  The physics stack runs on ``use_sim_time`` with the sim publishing ``/clock``
+  at RTF < 1 (docs/sim_runbook.md §12.2 measured ~0.57). Per spec §2 ("sim time
+  absorbs slowdown -- everything slows in lockstep"), every stage-deadline window
+  below is measured in the SAME clock as the physics it is timing. This harness
+  therefore measures its deadlines in ROS time when the stack runs sim time
+  (auto-detected from a live ``/clock`` publisher, or forced with ``--sim-time`` /
+  ``--no-sim-time``); with no ``/clock`` it falls back to WALL time so the P1
+  kinematic invocation is byte-identical. The timeout NUMBERS and the distance
+  thresholds are the SAME in both bases -- only the clock the deadlines are read
+  from changes. A ``[e2e] clock basis: ...`` line is printed at start so the
+  chosen basis and observed RTF are self-documenting in the evidence.
 """
 
 import argparse
@@ -43,6 +57,7 @@ from hydra_ros import DsgSubscriber
 from nav_msgs.msg import Odometry
 from omniplanner_msgs.msg import GotoPointsGoalMsg, PddlGoalMsg
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from std_msgs.msg import String
 
 # --- assertion thresholds (see module docstring) ---
@@ -139,14 +154,86 @@ class E2ESmoke(Node):
         return objs, places
 
 
-def wait_until(pred, timeout, poll=0.5):
-    end = time.time() + timeout
-    while time.time() < end:
+def _now_s(node):
+    """Current time in the harness's active deadline basis, in seconds.
+
+    Returns ROS time when the node's clock is sim-driven (``use_sim_time`` set
+    True and a live ``/clock`` -- ``ros_time_is_active``), else wall time. Passing
+    ``node=None`` forces wall time -- used only for the bootstrap wait that waits
+    FOR the sim clock to start (it cannot use the sim clock to time itself).
+    """
+    if node is not None and node.get_clock().ros_time_is_active:
+        return node.get_clock().now().nanoseconds / 1e9
+    return time.time()
+
+
+def wait_until(node, pred, timeout, poll=0.5):
+    """Poll ``pred`` until truthy or ``timeout`` elapses in the node's clock basis.
+
+    The DEADLINE (``timeout``) is measured in sim time when the node runs sim
+    time, else wall time. The poll SLEEP stays wall-clock -- it is scheduling
+    granularity, not part of the stage budget, so it needs no basis conversion.
+    """
+    end = _now_s(node) + timeout
+    while _now_s(node) < end:
         v = pred()
         if v:
             return v
         time.sleep(poll)
     return pred()
+
+
+def configure_clock_basis(node, sim_time_override):
+    """Pick + install the deadline clock basis; return (is_sim, rtf_or_none).
+
+    ``sim_time_override``: True forces sim, False forces wall, None auto-detects
+    from a live ``/clock`` publisher. When sim is selected we set the node's
+    ``use_sim_time`` parameter True (the rclpy TimeSource then subscribes to
+    ``/clock`` and drives the node clock in ROS time), wait for the sim clock to
+    start ticking, and measure the observed RTF over a short wall window. If sim
+    was requested/detected but ``/clock`` never starts, we warn and fall back to
+    wall so the harness cannot hang on a dead clock.
+    """
+    if sim_time_override is None:
+        # Auto-detect: is anything publishing /clock? (graph discovery is up by
+        # now -- the spin thread has been running through the imports/waits.)
+        detect_end = time.time() + 3.0
+        is_sim = False
+        while time.time() < detect_end:
+            if node.count_publishers("/clock") > 0:
+                is_sim = True
+                break
+            time.sleep(0.1)
+    else:
+        is_sim = bool(sim_time_override)
+
+    if not is_sim:
+        return False, None
+
+    node.set_parameters(
+        [Parameter("use_sim_time", Parameter.Type.BOOL, True)]
+    )
+    # Wait (in WALL time) for the sim clock to actually start advancing.
+    live = wait_until(
+        None, lambda: node.get_clock().now().nanoseconds > 0, 10.0, poll=0.1
+    )
+    if not live:
+        node.set_parameters(
+            [Parameter("use_sim_time", Parameter.Type.BOOL, False)]
+        )
+        print(
+            "[e2e] WARN: sim time requested but /clock never started; "
+            "falling back to WALL-clock deadlines"
+        )
+        return False, None
+
+    # Observe RTF over a short wall window (sim seconds per wall second).
+    w0, s0 = time.time(), node.get_clock().now().nanoseconds / 1e9
+    time.sleep(2.0)
+    w1, s1 = time.time(), node.get_clock().now().nanoseconds / 1e9
+    wall_dt = w1 - w0
+    rtf = (s1 - s0) / wall_dt if wall_dt > 0 else float("nan")
+    return True, rtf
 
 
 def reset_scenario(node, timeout_s=10.0):
@@ -162,8 +249,13 @@ def reset_scenario(node, timeout_s=10.0):
         print("[e2e] FAIL: reset_scenario service unavailable")
         return False
     fut = node.reset_cli.call_async(ResetScenario.Request())
-    end = time.time() + timeout_s
-    while not fut.done() and time.time() < end:
+    # Deadline in the active basis: the reset lands on the sim-stamped
+    # /sim/status + odom/TF stream, so under sim time a sim-time budget is the
+    # correct one (a wall budget shrinks as RTF drops). The 0.05 s poll stays
+    # wall (granularity). Note: reset_cli.wait_for_service() above is an rclpy
+    # discovery/liveness wait, not a stage budget, so it is left wall-clock.
+    end = _now_s(node) + timeout_s
+    while not fut.done() and _now_s(node) < end:
         time.sleep(0.05)
     if not fut.done():
         print("[e2e] FAIL: reset_scenario timed out")
@@ -179,8 +271,12 @@ def reset_scenario(node, timeout_s=10.0):
     with node._lock:
         node.status = None
         node.odom = None
-    status_ok = wait_until(lambda: node.status is not None, timeout_s, poll=0.1)
-    odom_ok = wait_until(lambda: node.get_odom() is not None, timeout_s, poll=0.1)
+    status_ok = wait_until(
+        node, lambda: node.status is not None, timeout_s, poll=0.1
+    )
+    odom_ok = wait_until(
+        node, lambda: node.get_odom() is not None, timeout_s, poll=0.1
+    )
     if not status_ok or not odom_ok:
         print("[e2e] FAIL: no fresh /sim/status or odom/TF within timeout after reset")
         return False
@@ -190,6 +286,19 @@ def reset_scenario(node, timeout_s=10.0):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--robot", default="hilbert")
+    ap.add_argument(
+        "--sim-time",
+        dest="sim_time",
+        action="store_true",
+        default=None,
+        help="force sim-time (ROS-time) deadlines (default: auto-detect /clock)",
+    )
+    ap.add_argument(
+        "--no-sim-time",
+        dest="sim_time",
+        action="store_false",
+        help="force wall-clock deadlines (P1 kinematic behavior)",
+    )
     args = ap.parse_args()
 
     rclpy.init()
@@ -199,11 +308,28 @@ def main():
     )
     spin.start()
 
+    # Choose the deadline clock basis (sim vs wall) BEFORE any timed wait, so
+    # every stage window below is measured in the basis matching the physics it
+    # times (spec §2 lockstep). Wall is the default when no /clock exists ->
+    # P1 kinematic invocation is byte-identical.
+    is_sim, rtf = configure_clock_basis(node, args.sim_time)
+    if is_sim:
+        print(
+            f"[e2e] clock basis: sim (RTF observed {rtf:.3f}; "
+            f"stage deadlines measure ROS/sim time)"
+        )
+    else:
+        print(
+            "[e2e] clock basis: wall (RTF observed n/a; "
+            "stage deadlines measure wall time)"
+        )
+
     results = {}
     try:
         # Wait for the stack to be observable.
         print("[e2e] waiting for /sim/status, odom, and a populated DSG ...")
         ok = wait_until(
+            node,
             lambda: (
                 node.status is not None
                 and node.get_odom() is not None
@@ -220,7 +346,7 @@ def main():
         if not reset_scenario(node):
             print("[e2e] FAIL: reset_scenario failed before Stage A")
             return 1
-        start = wait_until(lambda: node.get_odom(), 10)
+        start = wait_until(node, lambda: node.get_odom(), 10)
         _objs, places = node.symbols()
         # goto the place farthest from the start pose -> guarantees > 3 m.
         far_place = max(places, key=lambda pp: _dist(pp[1], start))
@@ -233,6 +359,7 @@ def main():
             GotoPointsGoalMsg(robot_id=args.robot, point_names_to_visit=[goto_sym])
         )
         moved = wait_until(
+            node,
             lambda: _dist(node.get_odom(), start) > NAV_DISPLACEMENT_M,
             NAV_TIMEOUT_S,
         )
@@ -263,7 +390,7 @@ def main():
         )
         node.rearrange_pub.publish(PddlGoalMsg(robot_id=args.robot, pddl_goal=goal))
 
-        held = wait_until(lambda: node.held_object(), PICK_TIMEOUT_S)
+        held = wait_until(node, lambda: node.held_object(), PICK_TIMEOUT_S)
         results["B_pick"] = bool(held)
         pick_pos = node.get_odom()
         print(
@@ -276,7 +403,7 @@ def main():
             print("[e2e] FAIL C: no object was held, cannot verify place")
         else:
             released = wait_until(
-                lambda: node.held_object() is None, PLACE_TIMEOUT_S
+                node, lambda: node.held_object() is None, PLACE_TIMEOUT_S
             )
             release_pos = node.get_odom()
             carried = _dist(pick_pos, release_pos) if release_pos else 0.0
