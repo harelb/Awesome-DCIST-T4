@@ -744,3 +744,57 @@ overturned the 12.9 diagnosis:
 
 A still PASSES (3.0–3.2 m). B/C remain FAIL, now on the perception defect above.
 No e2e threshold weakened; `reach_m` and goal_tolerance (1.0) unchanged.
+
+### 12.11 A1 root-caused (Task 15d) — RANGE-DEPENDENT perception error, both tiers (BLOCKED)
+
+Task 15d measured the ~1 m defect directly and overturned the "physics-tier
+localization bug" framing. **The error is a function of VIEWING DISTANCE, not
+motion, and it is NOT physics-specific.** Full measurement tables in
+`.superpowers/sdd/task-15d-report.md`; scratch probes in the session scratchpad
+(`skew_probe.py`, `loc_monitor.py`, `depth_scale_probe.py`, `dsg_bbox.py`).
+
+- **The 15b-vs-15c reconciliation: it is RANGE.** The DSG bag-node error grows
+  with the range from which the bag is observed. Robot **stationary** at spawn
+  (~4.7 m from the bag): node **1.11 m beyond** (errx +1.08). Walking closer:
+  0.51 m @1.8 m, **0.33 m @1.0 m, ~0.25 m** dwelling within ~1 m. Fit
+  `err ≈ 0.21·range + 0.12` (a ~21 % along-ray overshoot). 15b's 0.01–0.13 m was
+  a close head-on view; 15c's ~1 m was the node built from far.
+
+- **H-split A (image↔TF time skew): FALSIFIED.** The error is ~1.1 m with the
+  robot fully STOPPED. `rendering_dt = 1/60 s`, so render-pipeline content lag is
+  ≤ ~0.05 m at 0.94 m/s — three orders too small. The camera and TF are read from
+  the same frame in `RosBridge.step()` and co-stamped; no relative skew.
+
+- **H-split B (depth convention/scale): FALSIFIED.** The PUBLISHED depth matches
+  known geometry to <5 % (bag/cone/pipe ratios 0.95–0.98 measured by projecting
+  each object into the image via tf2 + `camera_info` and reading the depth).
+  Annotator unchanged since Task 8 (`distance_to_image_plane`).
+
+- **H-split C (hydra object extraction): CONFIRMED.** hydra's object semantics
+  come from **FastSAM** (`fastsam_node`), not the sim's GT labels. The masks
+  over-segment on the synthetic RGB — DSG bboxes are grossly oversized (bag
+  1.31×1.26 m vs ~0.6×0.3 true; other nodes are 9–12 m floor/background blobs).
+  The masks bleed onto adjacent floor/background pixels (valid, larger depth), so
+  the back-projected object CENTROID is pulled beyond the object, proportional to
+  range. This IS the M2 range-dependent overshoot.
+
+- **NOT physics-specific.** In the KINEMATIC tier (`field_smoke.yaml`, robot
+  bit-still at odom (0,0)), the same ~4.7 m viewpoint localizes the bag **2.64 m**
+  off (a single over-segmented blob) — at least as bad as physics. The
+  physics-specific bug WAS the frozen-root camera (12.7, Task 15b); that fix is
+  correct and still holding (M3's pixels land on the objects).
+
+**Status: BLOCKED.** Every dcist_sim output (depth, intrinsics, extrinsics, TF,
+stamps) is correct — there is no sim-side bug left. Closing A1 requires improving
+FastSAM masks and/or changing hydra's object localization from centroid-of-mask
+to a range-robust estimator (both submodules), OR a GT-select / gaze / approach
+hack (all prohibited). The <0.3 m bar IS met at close range (~0.25 m within
+~1 m); the e2e fails only because the rearrange targets the far-view node
+(~1 m off) and the approach then overshoots the true bag out of the YOLOE FOV.
+
+**Recommended next step (likely in-scope, non-gaming):** route the sim's GT
+instance segmentation to hydra in an isaac_sim-only perception conf
+(`gt_capture` already stamps instance labels; `instance_segmentation` is
+available) — a config_generation edit, not a perception-model or gate change —
+which makes object masks pixel-perfect and should collapse the far-view error
+through the real localization path. See task-15d-report.md §"Precise follow-up".
