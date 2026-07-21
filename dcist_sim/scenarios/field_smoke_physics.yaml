@@ -21,6 +21,21 @@
 # Opt-in; only affects hydra's object mapping, not the executor's own YOLOE
 # detection gate (spot_executor reads the RGB topic directly). See §12.12.
 gt_semantics_pub: true
+# Task 15k: object footprints are bounds-derived (a wide asset like the duffel
+# bag gets a disc covering its real XY axis-extent, not a global 0.25 m), which
+# is the effective fix for the 15j onto-bag topple (the base no longer arrives
+# on the object). The goal-snap standoff is left at 0 here: with the bag and
+# cone only ~1.35 m apart, any extra standoff on top of the (already ample)
+# bounds footprint over-pushed the goto-poi staging point into the neighbouring
+# object's basin, so the goal-blind grasp target selection picked the wrong
+# (nearer) object and the pick failed out-of-reach (measured, 15k acceptance).
+# Snapping to the nearest free cell on the inflated footprint edge keeps the
+# base as close to the TARGET as topple-safe; the grasp align phase
+# (ALIGN_STANDOFF_M 0.78 m) does the final close approach. Other nav params
+# keep the physics defaults (cell 0.1, inflation 0.45 m = Spot half-width
+# ~0.25 + margin).
+nav:
+  snap_standoff_m: 0.0
 environment:
   usd: assets/environments/field_a.usd
 robots:

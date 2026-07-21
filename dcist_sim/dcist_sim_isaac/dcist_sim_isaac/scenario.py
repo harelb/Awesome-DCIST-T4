@@ -81,6 +81,13 @@ class NavSpec:
     cell_size_m: float = 0.1
     inflation_radius_m: float = 0.45   # Spot half-width ~0.25 + margin
     snap_bound_m: float = 2.0          # tour waypoint snap search bound
+    # Task 15k: minimum free standoff (m) BEYOND the inflated obstacle boundary
+    # that a snapped goto-poi/rearrange goal must clear, so the base does not
+    # park on the inflation edge immediately adjacent to an object footprint
+    # (the 15j onto-bag topple). 0.0 = pre-15k behavior (snap to nearest free
+    # cell). Only the live LocalPlanner goal-snap uses it; tour-waypoint
+    # snapping (build_map) is unaffected.
+    snap_standoff_m: float = 0.0
     stuck_timeout_s: float = 15.0
     max_lin_speed: float = 1.0
     max_ang_speed: float = 1.0
@@ -274,6 +281,12 @@ def load_scenario(path) -> Scenario:
                 if value <= 0:
                     raise ValueError(f"nav.{key} must be > 0")
                 nav_dict[key] = value
+        # snap_standoff_m may be 0 (disabled); only reject negatives.
+        if "snap_standoff_m" in nav_data:
+            value = float(nav_data["snap_standoff_m"])
+            if value < 0:
+                raise ValueError("nav.snap_standoff_m must be >= 0")
+            nav_dict["snap_standoff_m"] = value
         nav = NavSpec(**nav_dict)
 
     scenario = Scenario(

@@ -127,6 +127,51 @@ def test_goal_inside_footprint_snaps_and_plans():
     assert status == LocalPlanner.ACTIVE            # planned, not BLOCKED
 
 
+def test_goal_snap_with_standoff_parks_farther_from_footprint():
+    # Task 15k: with snap_standoff_m set, the snapped goal must clear the
+    # footprint by the standoff -- strictly farther from the object than the
+    # plain (15i) nearest-free snap, so the base does not park on the edge.
+    m = _object_footprint_map()
+    obj = (5.0, 5.0)
+    p0 = LocalPlanner(m, snap_bound_m=3.0, snap_standoff_m=0.0)
+    p0.set_goal(*obj, 0.0, now=0.0)
+    d0 = np.hypot(p0._goal[0] - obj[0], p0._goal[1] - obj[1])
+    p1 = LocalPlanner(m, snap_bound_m=3.0, snap_standoff_m=0.5)
+    p1.set_goal(*obj, 0.0, now=0.0)
+    d1 = np.hypot(p1._goal[0] - obj[0], p1._goal[1] - obj[1])
+    assert m.is_free_world(p1._goal[0], p1._goal[1])
+    assert d1 > d0                                  # standoff pushed it out
+    _cmd, status = p1.update((1.0, 1.0, 0.0), 0.0)
+    assert status == LocalPlanner.ACTIVE            # still plannable
+
+
+def test_goal_snap_approach_aware_stages_toward_robot():
+    # Task 15k: passing robot_xy snaps the occupied goal to the object edge on
+    # the robot's side (between robot and object), not an arbitrary nearest cell.
+    m = _object_footprint_map()
+    obj = (5.0, 5.0)
+    p = LocalPlanner(m, snap_bound_m=3.0)
+    p.set_goal(*obj, 0.0, now=0.0, robot_xy=(2.0, 2.0))   # robot to the SW
+    sx, sy = p._goal[0], p._goal[1]
+    assert m.is_free_world(sx, sy)
+    assert sx < obj[0] and sy < obj[1]                    # snapped SW, toward robot
+    _cmd, status = p.update((2.0, 2.0, 0.0), 0.0)
+    assert status == LocalPlanner.ACTIVE
+
+
+def test_goal_snap_standoff_falls_back_when_bound_too_tight():
+    # If nothing clears the standoff within the bound, snap still lands on a
+    # free cell (nearest_free fallback) rather than leaving the goal occupied.
+    # bound (0.6 m) reaches the nearest free cell (~0.5 m out) but NO cell
+    # within it clears a 1.0 m standoff -> standoff snap returns None, fallback
+    # to nearest_free lands on a free cell.
+    m = _object_footprint_map()
+    p = LocalPlanner(m, snap_bound_m=0.6, snap_standoff_m=1.0)
+    p.set_goal(5.0, 5.0, 0.0, now=0.0)
+    assert p._goal[:2] != (5.0, 5.0)                # snapped off the footprint
+    assert m.is_free_world(p._goal[0], p._goal[1])  # fell back to nearest free
+
+
 def test_goal_deep_in_obstacle_beyond_bound_still_blocked():
     # A goal deep inside a large obstacle with NO free cell within the snap
     # bound stays BLOCKED -- snapping must not paper over an unreachable goal.

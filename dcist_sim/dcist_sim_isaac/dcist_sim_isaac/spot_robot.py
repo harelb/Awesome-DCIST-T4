@@ -340,7 +340,11 @@ class SpotSimRobot:
             # goto-poi/rearrange goal landing AT an object node would otherwise
             # be BLOCKED. Snap it to the nearest free cell within the tour snap
             # bound so the follower approaches instead of giving up.
-            snap_bound_m=nav_spec.snap_bound_m)
+            snap_bound_m=nav_spec.snap_bound_m,
+            # Task 15k: keep the snapped goal a fixed standoff beyond the
+            # inflated object footprint so the base does not arrive on the
+            # inflation edge and topple (the 15j onto-bag residual).
+            snap_standoff_m=nav_spec.snap_standoff_m)
         self.nav_status = "idle"
 
     def _step_physics(self, dt: float) -> None:
@@ -398,7 +402,14 @@ class SpotSimRobot:
             if self._pending_goal is not None:
                 gx, gy, gyaw = self._pending_goal
                 self._pending_goal = None
-                self._planner.set_goal(gx, gy, gyaw, self._sim_t)
+                # Task 15k: hand the planner the robot's current position so an
+                # occupied (at-object) goal snaps to the object's near edge on
+                # the robot's approach side (approach-aware snap), keeping the
+                # base within reach of the intended target and clear of a
+                # neighbouring object.
+                gpose = self.drive_backend.base_pose_xyzyaw()
+                self._planner.set_goal(gx, gy, gyaw, self._sim_t,
+                                       robot_xy=(gpose[0], gpose[1]))
             pose = self.drive_backend.base_pose_xyzyaw()
             cmd, status = self._planner.update(
                 (pose[0], pose[1], pose[3]), self._sim_t)

@@ -134,6 +134,86 @@ class Costmap2D:
                     best, best_d2 = (wx, wy), d2
         return best
 
+    def _cell_has_clearance(self, ix, iy, clear_cells):
+        """True iff cell (ix, iy) is FREE and every cell within Chebyshev
+        radius `clear_cells` is FREE and in-bounds -- i.e. the cell has at
+        least `clear_cells * resolution` of free standoff to any occupied cell
+        or the map edge. `clear_cells<=0` reduces to a plain FREE test."""
+        ny, nx = self.grid.shape
+        if not (0 <= ix < nx and 0 <= iy < ny):
+            return False
+        if clear_cells <= 0:
+            return self.grid[iy, ix] == self.FREE
+        for dy in range(-clear_cells, clear_cells + 1):
+            for dx in range(-clear_cells, clear_cells + 1):
+                jx, jy = ix + dx, iy + dy
+                if not (0 <= jx < nx and 0 <= jy < ny):
+                    return False           # map edge counts as no clearance
+                if self.grid[jy, jx] != self.FREE:
+                    return False
+        return True
+
+    def nearest_free_with_standoff(self, x, y, max_dist_m, standoff_m):
+        """Nearest cell center within `max_dist_m` that is FREE AND has at
+        least `standoff_m` of free clearance (Chebyshev) to any OCCUPIED cell
+        or the map edge, else None. `standoff_m<=0` falls back to
+        `nearest_free` (nearest FREE cell, no clearance requirement). If
+        (x, y)'s own cell qualifies, returns its center.
+
+        Task 15k: goal-snapping onto the nearest merely-FREE cell can park the
+        base on the inflation boundary immediately adjacent to an object
+        footprint (15j onto-bag topple: base arrived 0.10-0.49 m from the bag).
+        Requiring a standoff pushes the snapped goal a fixed distance BEYOND the
+        footprint edge so the leg-only policy does not catch the object collider
+        on arrival; the grasp align phase then does the final close approach."""
+        if standoff_m <= 0:
+            return self.nearest_free(x, y, max_dist_m)
+        clear_cells = int(math.ceil(standoff_m / self.resolution))
+        r_cells = int(math.ceil(max_dist_m / self.resolution))
+        ny, nx = self.grid.shape
+        cell = self.world_to_grid(x, y)
+        if cell is not None and self._cell_has_clearance(cell[0], cell[1],
+                                                         clear_cells):
+            return self.grid_to_world(*cell)
+        sx = int(np.clip((x - self.origin_xy[0]) / self.resolution, 0, nx - 1))
+        sy = int(np.clip((y - self.origin_xy[1]) / self.resolution, 0, ny - 1))
+        best = None
+        best_d2 = None
+        for iy in range(max(0, sy - r_cells), min(ny, sy + r_cells + 1)):
+            for ix in range(max(0, sx - r_cells), min(nx, sx + r_cells + 1)):
+                if not self._cell_has_clearance(ix, iy, clear_cells):
+                    continue
+                wx, wy = self.grid_to_world(ix, iy)
+                d2 = (wx - x) ** 2 + (wy - y) ** 2
+                if d2 <= max_dist_m ** 2 and (best_d2 is None or d2 < best_d2):
+                    best, best_d2 = (wx, wy), d2
+        return best
+
+    def first_free_toward(self, gx, gy, rx, ry, max_dist_m):
+        """Walk from goal (gx, gy) toward reference point (rx, ry) in
+        resolution-sized steps and return the center of the FIRST cell that is
+        FREE, else None. Used to snap a goal that lands inside an object
+        footprint back to the near edge ON THE APPROACH SIDE (the side the
+        robot is coming from), so the base stages between the robot and the
+        object -- within arm reach and away from a neighbouring object -- rather
+        than at an arbitrary nearest-free cell that can sit toward the
+        neighbour. Stops after `max_dist_m`; returns None if the ray never
+        clears (goal too deep / robot inside the same obstacle)."""
+        dx, dy = rx - gx, ry - gy
+        d = math.hypot(dx, dy)
+        if d < 1e-9:
+            return self.grid_to_world(*self.world_to_grid(gx, gy)) \
+                if self.is_free_world(gx, gy) else None
+        ux, uy = dx / d, dy / d
+        n = int(math.ceil(min(max_dist_m, d) / self.resolution))
+        for i in range(n + 1):
+            s = i * self.resolution
+            cx, cy = gx + ux * s, gy + uy * s
+            if self.is_free_world(cx, cy):
+                ix, iy = self.world_to_grid(cx, cy)
+                return self.grid_to_world(ix, iy)
+        return None
+
     def save(self, path):
         np.savez_compressed(path, grid=self.grid,
                             origin_xy=np.array(self.origin_xy),

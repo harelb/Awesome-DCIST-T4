@@ -211,7 +211,24 @@ def test_nav_defaults(tmp_path):
     assert s.nav.snap_bound_m == 2.0
     assert s.nav.stuck_timeout_s == 15.0
     assert s.nav.max_lin_speed == 1.0
+    assert s.nav.snap_standoff_m == 0.0        # Task 15k default (disabled)
     assert s.physics_mode is False
+
+
+def test_nav_snap_standoff_parsed(tmp_path):
+    # Task 15k: snap_standoff_m parses, accepts 0 (disabled), rejects negative.
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "nav:\n  snap_standoff_m: 0.30\n")
+    assert load_scenario(p).nav.snap_standoff_m == pytest.approx(0.30)
+
+    p0 = tmp_path / "s0.yaml"
+    p0.write_text(YAML + "nav:\n  snap_standoff_m: 0.0\n")
+    assert load_scenario(p0).nav.snap_standoff_m == 0.0
+
+    pn = tmp_path / "sn.yaml"
+    pn.write_text(YAML + "nav:\n  snap_standoff_m: -0.1\n")
+    with pytest.raises(ValueError, match="snap_standoff_m"):
+        load_scenario(pn)
 
 
 def test_physics_mode_derived(tmp_path):

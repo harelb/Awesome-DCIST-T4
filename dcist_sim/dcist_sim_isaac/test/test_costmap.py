@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from dcist_sim_isaac.costmap import Costmap2D
-from dcist_sim_isaac.costmap_bake import stamp_footprints
+from dcist_sim_isaac.costmap_bake import radius_from_extent, stamp_footprints
 
 
 def _map_with_block():
@@ -136,3 +136,93 @@ def test_stamp_footprints_off_grid_object_skipped():
     grid = np.zeros((10, 10), dtype=np.uint8)     # 1x1 m @ 0.1 m
     stamp_footprints(grid, (0.0, 0.0), 0.1, [(50.0, 50.0)], radius_m=0.25)
     assert int(grid.sum()) == 0                   # object well off-grid: no-op
+
+
+# -- Task 15k: bounds-derived footprint radius + per-object radii ------------
+
+
+def test_radius_from_extent_uses_larger_axis_and_floors():
+    # Uses the LARGER half-extent (axis coverage), not the half-diagonal.
+    assert radius_from_extent(0.25, 0.25) == pytest.approx(0.25)
+    # A wide/long asset uses its longer half-extent.
+    assert radius_from_extent(0.25, 0.46) == pytest.approx(0.46)
+    assert radius_from_extent(0.46, 0.25) == pytest.approx(0.46)
+    # A tiny asset (cone) is floored at the leg-clearance minimum.
+    assert radius_from_extent(0.05, 0.05) == pytest.approx(0.25)
+    assert radius_from_extent(0.05, 0.05, min_radius_m=0.1) == pytest.approx(0.1)
+
+
+def test_stamp_footprints_per_object_radii():
+    """A per-object radius sequence stamps a distinct disc per object: the wide
+    object's footprint reaches farther than the small one's."""
+    grid = np.zeros((60, 60), dtype=np.uint8)     # 6x6 m @ 0.1, origin (0,0)
+    stamp_footprints(grid, (0.0, 0.0), 0.1,
+                     [(1.5, 1.5), (4.5, 4.5)], radius_m=[0.5, 0.2])
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.1)
+    assert not m.is_free_world(1.5, 1.95)         # within the 0.5 m disc
+    assert m.is_free_world(1.5, 2.1)              # beyond it
+    assert not m.is_free_world(4.5, 4.65)         # within the 0.2 m disc
+    assert m.is_free_world(4.5, 4.8)              # beyond the small disc
+
+
+def test_stamp_footprints_radii_length_mismatch_raises():
+    grid = np.zeros((10, 10), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        stamp_footprints(grid, (0.0, 0.0), 0.1, [(0.5, 0.5)], radius_m=[0.2, 0.3])
+
+
+# -- Task 15k: nearest_free_with_standoff ------------------------------------
+
+
+def test_nearest_free_with_standoff_keeps_distance_from_obstacle():
+    """With a standoff, the snapped cell must clear the obstacle by at least
+    standoff_m -- strictly farther out than plain nearest_free."""
+    m = _map_single_obstacle()                    # obstacle cell center (1.05,1.05)
+    near = m.nearest_free(1.05, 1.05, 1.0)        # adjacent free cell
+    far = m.nearest_free_with_standoff(1.05, 1.05, 1.0, standoff_m=0.3)
+    assert near is not None and far is not None
+    d_near = np.hypot(near[0] - 1.05, near[1] - 1.05)
+    d_far = np.hypot(far[0] - 1.05, far[1] - 1.05)
+    assert d_far > d_near
+    # every cell within 0.3 m of the returned cell is free (Chebyshev clearance)
+    assert m._cell_has_clearance(*m.world_to_grid(*far), clear_cells=3)
+
+
+def test_nearest_free_with_standoff_zero_falls_back_to_nearest_free():
+    m = _map_single_obstacle()
+    assert (m.nearest_free_with_standoff(1.05, 1.05, 1.0, standoff_m=0.0)
+            == m.nearest_free(1.05, 1.05, 1.0))
+
+
+def test_nearest_free_with_standoff_none_when_unreachable():
+    m = _map_single_obstacle()
+    # bound too tight to find any cell with 0.3 m clearance around it
+    assert m.nearest_free_with_standoff(1.05, 1.05, 0.1, standoff_m=0.3) is None
+
+
+# -- Task 15k: approach-aware snap (first_free_toward) -----------------------
+
+
+def test_first_free_toward_stages_on_approach_side():
+    """A goal inside a footprint backs off toward the reference (robot) point to
+    the near free edge ON THAT SIDE -- not the opposite side."""
+    grid = np.zeros((60, 60), dtype=np.uint8)         # 6x6 m @ 0.1, origin (0,0)
+    grid[25:35, 25:35] = Costmap2D.OCCUPIED           # block ~ (2.5..3.5) sq
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.1)
+    goal = (3.0, 3.0)                                  # dead center of block
+    # robot approaching from the SOUTH-WEST -> snapped cell must be SW of block
+    p = m.first_free_toward(goal[0], goal[1], 0.2, 0.2, max_dist_m=3.0)
+    assert p is not None and m.is_free_world(*p)
+    assert p[0] < 2.5 and p[1] < 2.5                   # on the SW (robot) side
+    # robot approaching from the NORTH-EAST -> snapped cell must be NE of block
+    q = m.first_free_toward(goal[0], goal[1], 5.5, 5.5, max_dist_m=3.0)
+    assert q is not None and m.is_free_world(*q)
+    assert q[0] > 3.5 and q[1] > 3.5                   # opposite side from p
+
+
+def test_first_free_toward_none_when_ray_never_clears():
+    grid = np.zeros((60, 60), dtype=np.uint8)
+    grid[25:35, 25:35] = Costmap2D.OCCUPIED
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.1)
+    # reference point still inside the block, short bound -> never clears
+    assert m.first_free_toward(3.0, 3.0, 3.1, 3.1, max_dist_m=0.2) is None

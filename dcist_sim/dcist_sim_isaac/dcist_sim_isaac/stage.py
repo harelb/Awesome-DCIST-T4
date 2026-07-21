@@ -262,14 +262,25 @@ def build_stage(scenario) -> SimStage:
     costmap = None
     costmap_raw = None
     if scenario.physics_mode:
-        from dcist_sim_isaac.costmap_bake import bake_costmap
+        from dcist_sim_isaac.costmap_bake import (
+            bake_costmap, object_footprint_radius)
         # Task 15i: stamp each object's footprint into the costmap so the
         # planner keeps clearance from objects (they're excluded from the env
         # overlap bake by design). Positions are the live post-reset object
         # poses from the registry (settled at spawn).
-        object_xy = [(e["pos"][0], e["pos"][1])
-                     for e in registry.selection_snapshot().values()]
-        costmap, costmap_raw = bake_costmap(scenario.nav, object_xy)
+        # Task 15k: derive each footprint radius from the object's live USD
+        # world bounds (so a wide/flat asset like the duffel bag gets a disc
+        # that covers its true XY extent, not an undersized global 0.25 m --
+        # the 15j onto-bag topple root cause). Iterate in a stable order so
+        # object_xy and object_radii stay parallel.
+        object_ids = list(registry.selection_snapshot().keys())
+        snap = registry.selection_snapshot()
+        object_xy = [(snap[oid]["pos"][0], snap[oid]["pos"][1])
+                     for oid in object_ids]
+        object_radii = [object_footprint_radius(registry.prim_path(oid))
+                        for oid in object_ids]
+        costmap, costmap_raw = bake_costmap(
+            scenario.nav, object_xy, object_radii=object_radii)
         # Task 9: give every policy robot a go-to-target planner navigating
         # the SAME baked (inflated) costmap -- one bake per scenario, shared
         # by all policy robots, mirroring how the real BD local nav would
