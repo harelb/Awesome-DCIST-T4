@@ -190,6 +190,11 @@ def main():
                          "--carry-dist m and assert it is still held (not "
                          "dropped) before placing. Run against "
                          "field_smoke_contact_hold.yaml (contact_hold: true).")
+    ap.add_argument("--carry", action="store_true",
+                    help="G1 (Task 15i) carry: after a normal pin grasp, walk "
+                         "--carry-dist m holding the object then place -- the "
+                         "held-object-collision carry-fall measurement. Same "
+                         "carry leg as --contact-hold but for the pin tier.")
     ap.add_argument("--carry-dist", type=float, default=10.0,
                     help="contact-hold carry distance (m) away from the cone")
     ap.add_argument("--carry-timeout", type=float, default=240.0)
@@ -237,8 +242,8 @@ def main():
               f"{'PASS' if a_ok else 'FAIL'}")
         ok &= a_ok
 
-        # ---- CARRY (contact-hold only): walk --carry-dist m, stay held ----
-        if a_ok and args.contact_hold:
+        # ---- CARRY (contact-hold or --carry): walk --carry-dist m, stay held ----
+        if a_ok and (args.contact_hold or args.carry):
             # drive away from the cone (−x, a clear direction in field_a) far
             # enough that a dropped object would fall > 0.3 m behind and flip
             # grasp_status to failed("dropped").

@@ -613,6 +613,21 @@ base the `goto-poi` follower drove fully ONTO the object before grasp dispatch
 12.15). Place adds a symmetric carry-EGRESS: after detach+stow, back the base to
 MIN off the just-placed object before reporting succeeded.
 
+**Held-object collision (Task 15i, `ObjectRegistry.set_collision_enabled`).** A
+G1-pinned object stays kinematic-suspended AND keeps the convexHull collider
+`stage._make_dynamic` gave it; that collider, pressed against the robot's own
+dynamic colliders, made PhysX apply contact forces every step and toppled the
+carry (GPU A/B: **218 carry falls with collision ON vs 0 with it OFF**). The
+grasp backend now disables the held object's collision on attach (after
+`set_kinematic(True)`) and re-enables it on every release (place DETACH, reset)
+before restoring dynamics; the magic backend does the same for physics-scenario
+magic grasps. No-op when the object has no colliders → kinematic tier untouched.
+**Object footprints (Task 15i, `costmap_bake.stamp_footprints`).** Registry
+objects (excluded from the env overlap bake) now get a 0.25 m disc stamped into
+the RAW costmap before inflation, so the LocalPlanner keeps the robot body clear
+of objects during goto-poi; `LocalPlanner.set_goal` snaps an occupied goal to the
+nearest free cell within `nav.snap_bound_m` (default off preserves BLOCKED).
+
 ### 12.6 contact_hold (G2) — EXPERIMENTAL, non-functional
 
 `grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`,
@@ -1169,3 +1184,46 @@ unreachable), stand-off + egress ship as the correct, unit-tested, GPU-proven
 pick-approach fix (full A+B+C PASS demonstrated); the 2× A1 gate needs the two
 downstream locomotion/approach levers above, which are outside this task's
 grasp-approach scope.
+
+### 12.16 A1 FINAL (Task 15i) — carry-fall + arrive-on-object fixes SHIP; 2× gate BLOCKED on traverse time
+
+Task 15i implemented the two mechanistic fixes 15h identified as the downstream
+A1 residuals, and both WORK:
+
+1. **Held-object collision disable** (§12.5, `set_collision_enabled`). GPU A/B on
+   `grasp_smoke.py --carry --carry-dist 12`: baseline (collision ON while pinned)
+   **218 carry falls**, base thrashed to (-324,158) — reproducing the 15h
+   attempt-3 281-fall carry; fixed (collision OFF while pinned) **4 falls**
+   (ordinary walk transients). In the full 6-run e2e: **1 FELL total** (a warmup
+   transient), and run 3 carried the cone **23.61 m fall-free**.
+2. **Object footprints + goal snapping** (§12.5). Bake stamps 3 object footprints;
+   `render_costmap.py --check` on `warehouse_tour_physics.yaml` with footprints =
+   **all 24 waypoints free+margin, 0 adjustments**. Picks arrived head-on and
+   attached cleanly (aligned+settled 0.75 m) with 0 arrive-on-object topples.
+
+**GPU e2e (field_smoke_physics, GT-semantics, slew ON, standoff; 6 attempts,
+thresholds untouched, `e2e_smoke os._exit(main())` = verdict):**
+```
+Run 1  A PASS 3.05 m | B FAIL (no pick in 120 s; still following) | 0 falls
+Run 2  A PASS 3.15 m | B FAIL (no pick in 120 s) | 0 falls; plan produced+Published
+Run 3  A PASS 3.16 m | B PASS held cone_0 (aligned 0.75 m) | C FAIL carried 23.61 m FALL-FREE, place@~32 m not reached in 90 s
+Run 4  A PASS 3.13 m | B FAIL held=None@120 s but "attached cone_0" (late) | 0 falls
+Run 5  A PASS 3.09 m | B FAIL held=None@120 s, attached late | 0 falls
+Run 6  A PASS 3.09 m | B FAIL held=None@120 s, attached late | 0 falls
+```
+Tally: A 6/6; pick attached 4/6 (run 3 in-window → B PASS; 4/5/6 just past 120 s);
+full A+B+C 0/6; **1 FELL across all 6 runs**. **NOT 2× consecutive.**
+
+**Verdict — both assigned levers SUCCEEDED; the 2× A1 gate is BLOCKED on a THIRD,
+out-of-scope residual: traverse time vs e2e's frozen wall windows.** Every failure
+was the robot not reaching the object within the 120 s pick window (runs 1/2/4/5/6)
+or not reaching the FARTHEST place within the 90 s place window (run 3) — at
+RTF ~0.57 a 90 s wall buys ~51 s sim ≈ 29 m, and e2e targets the max-carry place
+(~32 m). Zero failures were carry falls or arrive-on-object topples. This is the
+§12.9 #1 / §12.13 locomotion-speed × frozen-window residual (Task 8 walk speed /
+harness), NOT the grasp-carry layer. Per the task escape hatch: the carry-fall and
+footprint fixes ship (unit-tested isaac 133 + ros 23; GPU-proven 218→0 carry falls,
+fall-free 23.61 m carry, clean footprint recheck); closing the 2× gate needs Task 17
+to either widen the physics e2e wall windows to match RTF or gate A1 on a
+bounded-distance place. FOLLOW-UPS PRUNED: 15h residual #1 (carry falls) CLOSED by
+fix 1; 15h residual #2 (goto-poi onto object) CLOSED by fix 2.
