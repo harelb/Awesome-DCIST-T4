@@ -154,7 +154,7 @@ def orchestrate_up(args, raw_dir, scenario):
                      "-y", "-f", f"--tmuxp-args=-d -L {args.socket}"]
     if scenario.physics_mode:
         run_adt4_cmd.append("-s")
-    run_adt4_cmd.append("spot_isaac-isaac_sim")
+    run_adt4_cmd.append(args.session)
     subprocess.run(run_adt4_cmd, cwd=REPO_ROOT, env=env, check=True)
     # /sim/status proves the sim is fully up AND reachable via the router.
     ok = wait_until(
@@ -277,6 +277,14 @@ def main():
                     help="show the Isaac window during --orchestrate (omit "
                          "--headless) so the tour can be watched")
     ap.add_argument("--socket", default="t4map")
+    # run-adt4 session to orchestrate. Default is the REAL-perception isaac
+    # mapping session (plain `map` group -> FastSAM frontend), matching how
+    # warehouse_sim_full was built -- mapping tours want perception realism.
+    # `spot_isaac-isaac_sim` (the map_isaac GT-semantics overlay) is the A1
+    # e2e-grasp session; pass --session to select it. See sim_runbook §12.19.
+    ap.add_argument("--session", default="spot_isaac_map-isaac_sim",
+                    help="run-adt4 session name to orchestrate "
+                         "(default: real-perception isaac mapping session)")
     # Must exceed the executor's goal_tolerance (1.0 m in the isaac_sim
     # overlay): the follower STOPS up to that far from the goal, so a
     # tighter arrival test here times out ~1 m short of every waypoint

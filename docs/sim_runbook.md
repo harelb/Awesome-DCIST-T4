@@ -1357,3 +1357,144 @@ executor re-detect); (b) reduce walking-policy falls near obstacles or make a fa
 non-fatal to the goal (resume-after-fall, spec §8 — human decision); (c) optionally
 plumb the rearrange TARGET id into the grasp select so it is goal-aware rather than
 nearest-graspable.
+
+### 12.19 P4 acceptance FINAL (Task 17) — A2 physics map PASS; A1 accepted-with-caveat; kinematic regression
+
+This closes Isaac Sim Phase 4. It records the **A2** acceptance (a physics-tier
+mapping run), the **A1** final disposition, the kinematic regression, and the
+full follow-up list.
+
+**A1 (physics pick-and-place e2e) — ACCEPTED WITH CAVEAT (user, 2026-07-21).**
+The loop is proven: across the 15-series 6 full A+B+C passes were captured
+verbatim (§12.13-12.18), but per-run reliability is ~1/3. Two flakiness sources
+are root-caused and deferred (they are NOT sim-side defects): (1) **range-
+dependent open-set perception mislocalization** (§12.11 — FastSAM over-segments
+synthetic RGB; GT-semantics→hydra (§12.12) fixes it in sim but the real-
+perception fix — mask-centroid depth filter / SAM3 frontend / executor re-detect
+— is deferred), including the GT-mode node-clustering variant seen in 15k; and
+(2) **P4 walking-policy falls near obstacles** (§12.13-12.16) where a fall
+cancels the active goal (spec §8) — the deferred fix is fall-rate reduction or a
+resume-after-fall behaviour (spec-reserved, human decision).
+
+**A2 (physics-tier mapping run) — PASS.** Scenario
+`warehouse_tour_physics.yaml` (`locomotion: policy`, `grasping: magic`), built
+with `build_map.py --orchestrate` (exit 0). Evidence
+(`~/adt4_output/warehouse_sim_physics/`):
+
+| metric | A2 (physics tour) | kinematic baseline (`warehouse_sim_full`) | A2 bar |
+|---|---|---|---|
+| objects | **25** | 33 | ≥ 7 ✅ |
+| places | **118** | 201 | ≥ 30 ✅ |
+| tour waypoints reached | **18 / 18 (0 % skip)** | 37 / 37 | ≤ 30 % skip ✅ |
+| mesh vertices | 298 612 | 734 409 | — |
+| artifacts | dsg_with_mesh.json, mesh.ply, provenance.yaml (**fidelity: policy/magic/contact_hold=false**), trajectory.jsonl, gt/ | — | all present ✅ |
+
+The physics tour covers the open lower floor only (18 waypoints vs the kinematic
+full sweep's 37), so lower absolute counts are expected; both clear the bars
+comfortably. **GT capture is a SECOND pass, not live** (see below): the gt-replay
+produced **597 GT frames** (`gt/manifest.jsonl`, 597 rows) over the run's
+`trajectory.jsonl` — well above the ≥30 reasonable-count bar.
+
+**Why A2 is authored/run the way it is (three deltas from Task 16 + a bug fix):**
+
+1. **GT disabled on the physics run; captured by kinematic `--gt-replay`.** Live
+   Replicator GT annotators SIGSEGV inside `world.step(render=True)` under PhysX
+   + the warehouse render (Task 16, reproduced 2×; a semantic-only annotator
+   survived 400 physics frames on the SMALL field_smoke scene, so the crash is
+   warehouse-render-specific). `warehouse_tour_physics.yaml` therefore sets
+   `gt.enabled: false` (build_map's gt gate passes when the scenario disables gt),
+   and GT is captured in a second, teleport-driven pass:
+   ```
+   ISAAC_PY -m dcist_sim_isaac.sim_app \
+       --scenario dcist_sim/scenarios/warehouse_tour_physics_gt.yaml \
+       --gt-replay ~/adt4_output/warehouse_sim_physics/trajectory.jsonl \
+       --gt-out   ~/adt4_output/warehouse_sim_physics/gt --headless
+   ```
+   `warehouse_tour_physics_gt.yaml` is a KINEMATIC twin (same env/objects/gt
+   block, `locomotion: kinematic`, `gt.mode: replay`). Teleport replay is
+   kinematic-only by design (the schema rejects `gt.mode: replay` on a physics
+   robot), so it never re-enters the physics+GT crash path.
+2. **Real-perception mapping session, not the GT-semantics overlay.** A2 uses the
+   real FastSAM perception frontend (mapping realism is the point), matching how
+   `warehouse_sim_full` was built. Because Task 15e repointed the default
+   `spot_isaac` experiment to the GT-semantics hydra (`map_isaac`, for the A1
+   e2e pick), a dedicated **`spot_isaac_map`** experiment (launch_config
+   `[map, spot_isaac]`, real perception) was added; `build_map.py` now defaults
+   `--session spot_isaac_map-isaac_sim` (mapping tours want real perception;
+   pass `--session spot_isaac-isaac_sim` to select the GT overlay).
+3. **Tour RE-AUTHORED for a walking robot (real bug found + fixed).** Task 16's
+   tour swept the vertical aisles THROUGH the rack rows and only margin-checked
+   waypoint CELLS. Under a real policy walker two effects broke it on the A2 run:
+   (a) the follower stops within `goal_tolerance` (1.0 m) of the goal, so a
+   waypoint 0.2-0.5 m from inflation lets the base PARK inside an inflated
+   obstacle, and `local_planner.astar` refuses to plan from an OCCUPIED start
+   cell (no start-snap) → permanently BLOCKED (the run stuck beside bag_0's
+   Task-15i footprint at the old (-2,6) waypoint); (b) the narrow rack aisles
+   need DETOUR paths the pretrained flat-terrain policy tracks poorly → the base
+   jams against a rack even when an A* path exists. Re-authored as an **18-wp
+   open-floor snake** (world X[-24,+3], Y[-21,+6]) where every waypoint has
+   **≥ 1.5 m clearance** to inflation (distance transform of the run's own
+   footprint-aware bake; 1.5 m > goal_tolerance so the base — or a fall auto-
+   reset — always stops in a FREE, replannable cell), every consecutive hop is
+   **A*-connected with the whole path below the rack line** (max y < 9.5), and the
+   ORDER starts north (gentle ~26° first turn, not a ~180° spin-in-place). The
+   rack rows are mapped from the y=6 row looking north; objects are viewed from
+   (-3.3,6.7)/(3,6).
+   * **Operational note:** the run is sensitive to a **stale Isaac process** from
+     a previous orchestrated run. A zombie `sim_app` co-running on the `/sim`
+     topics corrupts odom/physics and the policy robot never leaves spawn
+     (nav_status latches `fallen`). Always confirm `nvidia-smi` shows no compute
+     app and no `sim_app`/`rmw_zenohd` survivors before launching. With a clean
+     slate the 18-wp tour completes 18/18, 0 skips.
+
+**Kinematic regression (Global Constraint — physics work must not change the
+kinematic tier).**
+
+- **Kinematic mapping tour** — `build_map.py --scenario warehouse_tour.yaml`
+  (kinematic, live GT): **exit 0**, tour 7/7, 0 skipped, map + gt (518 files).
+  Confirms the build_map path (incl. the new `--session` default) and kinematic
+  nav/mapping/perception are non-regressive.
+- **Original e2e_smoke flow** — `e2e_smoke.py` on `field_smoke.yaml` (kinematic,
+  NO `-s`): prints **`[e2e] clock basis: wall`** and **Stage A PASS** (3.4 m,
+  displacement) on wall time in both runs — the 15j clock-basis default is
+  preserved (P1 wall-clock invocation intact). Stage B (pick) FAILS both runs
+  (`held = None`): the DSG object node is localized ~2.3 m from the true bag,
+  beyond the `grasp_radius` (1.5 m) magic reach. This is the **pre-existing
+  §12.11 range-dependent FastSAM mislocalization**, NOT a regression:
+  `field_smoke.yaml` and the perception `map` launch group are byte-identical to
+  P1, §12.11 documents the kinematic tier already localizing ~2.6 m off (so P1's
+  pick passed only marginally when the run geometry gave < 1.5 m error), and the
+  kinematic tour above passes cleanly. It is the same perception layer as the A1
+  caveat and is tracked in the follow-ups.
+
+**G2 (contact_hold friction grasp) — EXPERIMENTAL, non-functional** (§12.6,
+unchanged): the Spot arm/finger links carry no PhysX colliders, so the friction
+hold cannot form. Machinery is implemented behind the `contact_hold` flag and
+G1 is provably untouched. Not on any default path.
+
+**Consolidated P4 follow-ups (deferred, none blocking the shipped tiers):**
+1. **Real-perception object localization** (closes A1 for real hardware): mask-
+   centroid depth filtering (reject background pixels), a SAM3 frontend instead
+   of FastSAM on synthetic RGB, or executor re-detect/gaze (spot_tools). Also the
+   GT-mode node-clustering variant (§12.18/15k). This same issue makes the
+   kinematic `e2e_smoke` Stage-B pick marginal (§12.19).
+2. **P4 walking-policy robustness**: reduce fall rate near obstacles, or make a
+   fall non-fatal (resume-after-fall re-plan+continue instead of cancelling the
+   goal — spec §8-reserved, human decision). Fall-non-fatal would also make the
+   physics mapping tour cover the rack aisles (the open-floor-only A2 tour was
+   chosen to avoid the fall-prone rack-detour navigation).
+3. **G2 colliders**: add PhysX colliders to the arm/finger links, then retune
+   `CONTACT_PRESS_M`/`CONTACT_POLL_S`; single finger can't pincer a cone (use
+   bag/pipe); CARRY should re-check gripper-object distance (§12.6, task-14).
+4. **`local_planner.astar` start-snap**: snap an OCCUPIED start cell to the
+   nearest free cell (mirrors the Task-15i goal-snap) so a base that parks in
+   inflation can recover instead of latching BLOCKED (worked around in A2 by the
+   ≥1.5 m clearance authoring).
+5. **Orchestrate-flow minors**: `run-adt4 -f` wipes `raw/isaac.log` before Isaac
+   finishes writing (Task 16) — write it to `map_dir`; and build_map's final
+   `-> exit 0` line prints "(with gt)" when a scenario DISABLES gt (the gt gate
+   auto-passes) — cosmetic.
+6. **Minor final-review triage** carried from Tasks 1-16 ledger (e.g. physics
+   grasping=="physics" branch untested in scenario.py, `_articulation_view`
+   private access, duplicated test fakes, nearest_free vs nearest_free_with_margin
+   near-duplicate scan) — non-blocking cleanups.

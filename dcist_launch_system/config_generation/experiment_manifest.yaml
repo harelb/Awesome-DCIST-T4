@@ -106,6 +106,16 @@ experiments:
 
   # Isaac Sim — full robot-side stack (live hydra+roman) against dcist_sim_isaac.
   # Uses map_isaac so hydra ingests the sim's GT semantic labels (Task 15e).
+  # This is the A1 e2e-grasp session (GT-semantics overlay closes the pick-time
+  # object mislocalization, docs/sim_runbook.md §12.11/§12.12).
   spot_isaac:
     launch_config: [map_isaac, spot_isaac]
+    config: [isaac_sim]
+  # Isaac Sim MAPPING session (Task 17 / A2): identical to spot_isaac EXCEPT it
+  # uses the plain `map` group (real FastSAM perception frontend) instead of
+  # map_isaac's GT-semantics overlay. Mapping tours want real-perception realism
+  # (FastSAM), matching how warehouse_sim_full was built; build_map --orchestrate
+  # drives this session by default. See docs/sim_runbook.md §12.19.
+  spot_isaac_map:
+    launch_config: [map, spot_isaac]
     config: [isaac_sim]
