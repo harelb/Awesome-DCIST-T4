@@ -1295,3 +1295,65 @@ frozen wall windows (12.17, clock-basis SHIPPED). What remains for the 2× gate 
 NOT any single sim-side defect but the compound reliability of the pick APPROACH
 (executor arrival geometry + policy fall + perception loc) and omniplanner PDDL
 robustness — all deferred, out-of-scope, human/Task-17 items.
+
+### 12.18 A1 update (Task 15k) — omniplanner crash-safe + bag-approach fixes SHIPPED; 2× gate STILL BLOCKED on perception loc + walking falls
+
+Task 15k re-ran A1 on a **fully uncontended GPU** (verified `nvidia-smi`: only the
+Isaac + roman + fastsam stack, no other-session job) after fixing the two 15j
+residuals. **Uncontended RTF measured ~0.43** (`/clock` ~25.9 Hz / 60) — the
+genuine value for this full perception stack on the RTX 3090 Ti (lower than the
+0.57 a lighter prior session saw; the 15j clock-basis fix makes the gate RTF-
+independent, so this is not itself a blocker).
+
+**Two fixes shipped + verified:**
+- **omniplanner `plan_handler` crash-safe** (submodule `0d5f148`, on `902dac1`):
+  a failed/crashing `solve_pddl` is caught at the rclpy callback boundary (logged
+  traceback, plan-failure returned) instead of killing the node. **No omniplanner
+  crash occurred in any 15k run** (15j's a3 crash is gone).
+- **bag-approach** (`dcist_sim`, commit `e23bc02`): (1) per-object footprint radius
+  from live USD bounds (larger XY half-extent, not the global 0.25 m) — **the
+  onto-bag topple is ELIMINATED (0 bag topples in any run)**; (2) approach-aware
+  goal-snap (`first_free_toward`) staging the base on the robot's approach side of
+  the target within reach and clear of the neighbour. A `snap_standoff_m` knob was
+  added but left 0 for field (any standoff on top of the bounds footprint pushed
+  staging past `reach_m` for the ~1.35 m-spaced bag/cone pair).
+
+**GPU A1 — 3 config iterations, verbatim (field_smoke_physics, GT-semantics, slew,
+standoff, held-collider, sim-time windows). 3 full A+B+C passes, but NEVER 2
+consecutive:**
+```
+# config 1 (diagonal footprint 0.56 m + snap_standoff 0.30 m -> staging 1.31 m)
+a1  PASS A 3.08 | PASS B held bag_0 | PASS C carried 1.03 m   -> OVERALL PASS (exit 0)
+a2  PASS A 3.15 | FAIL B: select picked cone_0 out-of-reach 1.27 m (staging too far, bag/cone ambiguous)
+a3  PASS A 3.02 | FAIL B: select picked cone_0 out-of-reach 1.47 m -> FELL on cone
+# config 2 (max-extent footprint 0.42 m + snap_standoff 0)
+a4  PASS A 3.04 | PASS B held cone_0 | PASS C carried 1.58 m   -> OVERALL PASS (exit 0)
+a5  PASS A 3.08 | FAIL B: nearest-free snap went NORTH (toward cone) -> off-axis servo fail lateral_y 0.265
+a6  FAIL prereq: robot stuck in fall-loop far from spawn (a5 far-place residue); reset recovered it
+# config 3 (max-extent footprint + APPROACH-AWARE snap first_free_toward)
+a7  PASS A 3.01 | PASS B held bag_0 (correct target, align range 0.74) | PASS C carried 8.26 m -> OVERALL PASS (exit 0)
+a8  PASS A 3.04 | FAIL B: walking-policy FALL on approach (fell (5.0,1.6)->(4.6,2.1)), no grasp dispatched
+a9  PASS A 3.22 | FAIL B: bag DSG node MISLOCALIZED to (3.70,1.21) vs true (4.85,0.64) ~1.3 m toward cone -> staged toward cone
+```
+**Verdict — both assigned fixes SHIP and are correct/verified** (omniplanner never
+crashed; onto-bag topple eliminated; approach-aware snap picks/attaches the correct
+target when perception is accurate — a7). **The 2× gate is NOT met.** The residual
+failures are the SAME deferred layers 12.9–12.17 flagged, now cleanly separated by
+the `goal snap:` diagnostic:
+1. **Range-dependent perception mislocalization** (§12.11): the bag DSG node is
+   pulled up to ~1.3 m toward the cone/background on some views (a9 verbatim). No
+   goal-snap can recover a fundamentally wrong target node — this is the open-set
+   mask-localization fix noted for the real-perception follow-up.
+2. **Walking-policy falls on the pick approach** (§12.13/15g): a fall cancels the
+   active goal (spec §8), so the pick never dispatches (a8). Open-field is fall-
+   free; the falls are near the object cluster.
+No threshold / `reach_m` / target logic / grasp was hacked to force a pass (the
+15c–15j honest-blocked ethos). The system demonstrably completes A+B+C (3 passes);
+2× consecutive needs two adjacent runs with BOTH accurate bag-node perception AND
+no approach fall — i.e. the deferred perception + locomotion layers, not the
+15k-assigned fixes. **A1 remains BLOCKED, escalated to the human/Task-17 layer:**
+(a) range-robust object localization (mask-centroid depth filter / SAM3 frontend /
+executor re-detect); (b) reduce walking-policy falls near obstacles or make a fall
+non-fatal to the goal (resume-after-fall, spec §8 — human decision); (c) optionally
+plumb the rearrange TARGET id into the grasp select so it is goal-aware rather than
+nearest-graspable.
