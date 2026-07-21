@@ -505,9 +505,18 @@ Same three-terminal shape as §2, with these physics-mode changes:
   the sim clock with the sim-time robot stack (a wall-clock omniplanner sees
   sim-stamped TF as far-future and drops lookups). Still needs
   `ADT4_OUTPUT_DIR` + `config=isaac_sim` when launched manually (§11).
-- **e2e_smoke.py** (terminal 4): unchanged. It uses WALL-clock timeouts
-  (`time.time()`), so at RTF < 1 its internal budgets cover LESS sim-time —
-  keep the work close (12.2).
+- **e2e_smoke.py** (terminal 4): measures its stage-deadline windows in the
+  SAME clock as the physics it times (Task 15j, spec §2 lockstep). It
+  auto-detects a live `/clock` publisher and, when present, sets `use_sim_time`
+  True on its own node so `NAV_TIMEOUT_S`/`PICK_TIMEOUT_S`/`PLACE_TIMEOUT_S`/
+  `DSG_WAIT_S` measure ROS/sim time (override with `--sim-time` / `--no-sim-time`).
+  The timeout NUMBERS and distance thresholds are unchanged; only the clock the
+  deadlines are read from changes, so a 120 s budget covers 120 s of *sim*
+  motion regardless of RTF. With no `/clock` it falls back to WALL time (P1
+  kinematic invocation byte-identical). It prints `[e2e] clock basis: sim|wall
+  (RTF observed ...)` at start. (Before 15j the windows were wall-clock, so at
+  RTF < 1 they covered LESS sim-time — that masked the traverse residual as a
+  time-out, §12.16/§12.17.)
 
 **sim_time verification** (once the stack is up — all three MUST hold):
 ```
@@ -1227,3 +1236,62 @@ fall-free 23.61 m carry, clean footprint recheck); closing the 2× gate needs Ta
 to either widen the physics e2e wall windows to match RTF or gate A1 on a
 bounded-distance place. FOLLOW-UPS PRUNED: 15h residual #1 (carry falls) CLOSED by
 fix 1; 15h residual #2 (goto-poi onto object) CLOSED by fix 2.
+
+### 12.17 A1 update (Task 15j) — e2e_smoke deadlines on SIM time (clock-basis fix); 2× gate BLOCKED on pick-approach + planner residuals
+
+The CONTROLLER DECISION for 15j: 15i showed the ONLY residual was the harness's
+frozen **wall** windows ticking against sim-time physics at RTF < 1 (spec §2 says
+"sim time absorbs slowdown — everything slows in lockstep", so the harness contra-
+dicted the spec). Fix = convert `e2e_smoke.py`'s timeout **clock basis** to sim
+time; every timeout NUMBER and distance threshold stays EXACTLY as-is (a spec-
+consistency bug fix, not a bar change). See §12.1 e2e bullet + `.superpowers/sdd/
+task-15j-report.md` (conversion table).
+
+**Implemented + verified (code):** `e2e_smoke.py` auto-detects a live `/clock`
+publisher (override `--sim-time`/`--no-sim-time`), sets `use_sim_time` on its own
+node, and reads every stage deadline (`DSG_WAIT`/`NAV`/`PICK`/`PLACE` + the reset
+fresh-status/odom + reset-future waits) from `node.get_clock().now()` in ROS time;
+wall otherwise (P1 kinematic byte-identical — proven by the `ros_time_is_active`
+gate + a dry-check). Poll sleeps + `wait_for_service` stay wall (granularity, not
+budget). Prints `[e2e] clock basis: sim|wall (RTF observed …)`. os._exit teardown
+kept. Unit suites unaffected: **isaac 133 / ros 23**.
+
+**GPU A1 (field_smoke_physics, GT-semantics, slew, standoff, held-collider +
+footprint fixes all in). Session RTF ~0.40** (a concurrent *other-session* SAM3
+GPU job was contending; sim-time windows correctly stretched in wall time). The
+basis conversion is LIVE and does its job — `[e2e] clock basis: sim (RTF observed
+0.40)`, Stage A PASSES on the sim-time NAV window every attempt, and the pick
+DISPATCHES within the sim-time pick window (the 15i traverse-time blocker is
+lifted). But **2× consecutive was NOT reached (0 full passes / 5 valid attempts)**;
+every Stage-B failure was a pre-existing, out-of-scope residual, none clock-basis,
+none new:
+```
+set1 a1  PASS A | FAIL B — base FELL ON bag_0 (0.49 m), stand-off timeout       [onto-object fall = 15h#2]
+set1 a2  PASS A | FAIL B — no grasp dispatched, 0 falls                         [never-arrive]
+set1 a3  PASS A | FAIL B — omniplanner_node DIED "Planning failed" on o2 t81    [PDDL crash, submodule]
+set2 a1  PASS A | FAIL B — grasp fired 4–8 m from object "out of reach 0.984"   [pick-dispatch/localization]
+set2 a2  PASS A | Stage B in flight when CUT (RTF 0.40 → ~10 min/attempt)       [not counted]
+```
+**Verdict — the assigned clock-basis conversion SHIPS and is correct/verified; the
+2× A1 gate is BLOCKED downstream on the SAME §12.9–12.16 out-of-scope layers**
+(pick-approach reliability: executor goto-poi object standoff + walking-policy
+fall + range-dependent perception localization) PLUS a pre-existing omniplanner
+PDDL `plan_handler` crash. The clock-basis fix is a PREREQUISITE (it removes the
+harness-window confound so those residuals can be measured honestly) but is not
+sufficient alone. Recommend Task 17: (a) catch `solve_pddl` failure in
+omniplanner `plan_handler` (don't die); (b) executor rearrange goto-poi object
+standoff (submodule) or wider costmap object footprint; (c) re-run A1 on an
+UNCONTENDED GPU (RTF ~0.57) where 15i's in-window pick + sim-time Stage-C budget
+should convert. Per the task escape hatch (BLOCKED with per-run analysis when a
+non-time failure recurs), no threshold/target/grasp was hacked to force a pass.
+
+**History note (§12.9–12.16, condensed):** A1 = {A nav, B pick, C place, exit 0
+twice}. A has passed since 12.9. The B/C blocker walked DOWN the stack as each
+was fixed: physics object-localization frame bug (12.7, FIXED) → range-dependent
+perception bias (12.11, GT-semantics→hydra workaround 12.12) → non-head-on grasp
+approach (12.12) → base align/stand-off (12.13/12.15, SHIPPED) → walking-policy
+carry falls + arrive-on-object (12.16, held-collider + footprint fixes SHIPPED) →
+frozen wall windows (12.17, clock-basis SHIPPED). What remains for the 2× gate is
+NOT any single sim-side defect but the compound reliability of the pick APPROACH
+(executor arrival geometry + policy fall + perception loc) and omniplanner PDDL
+robustness — all deferred, out-of-scope, human/Task-17 items.
