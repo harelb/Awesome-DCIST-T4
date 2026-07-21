@@ -73,12 +73,15 @@ returns so the two backends are interchangeable behind the dispatch.
 Per-robot state machine (grasp):
     idle -> selecting -> align -> deploy -> reach_pregrasp -> descend
          -> validate -> attach -> carry -> succeeded
-(any servo FAILED / no target / out of reach / align timeout -> failed with a
-reason message). `align` (Task 15f) rotates the base to face the target AND
-drives it to the head-on IK stand-off before the arm deploys -- see the
+(any servo FAILED / no target / out of reach / stand-off timeout -> failed with
+a reason message). `align` (Task 15f/15h) rotates the base to face the target
+AND regulates the base->object distance into the head-on stand-off BAND
+[ALIGN_STANDOFF_MIN_M, ALIGN_STANDOFF_MAX_M] before the arm deploys, so the base
+never sits on the object collider when the leg-only policy steps -- see the
 ALIGN_* constants.
 Place:
-    lower -> detach (set_kinematic(False), clear held) -> stow -> succeeded.
+    place_deploy -> lower -> detach (set_kinematic(False), clear held)
+                 -> egress (back off to the stand-off) -> stow -> succeeded.
 While an object is held, `step()` re-derives its world pose from the gripper's
 current pose + the fixed local offset recorded at attach (exactly
 `grasp.GraspBackend.step`, reusing `_to_local_frame`/`_rotate_vector`/
@@ -138,8 +141,9 @@ SERVO_STALL_WINDOW_S = 2.5
 SERVO_DQ_MAX = 0.06
 
 # ---------------------------------------------------------------------------
-# Base align phase (Task 15f) -- rotate the base to face the target AND drive
-# it to the head-on IK stand-off BEFORE deploying the arm.
+# Base align + STAND-OFF phase (Task 15f align; Task 15h stand-off band) --
+# rotate the base to face the target AND regulate the base->object distance into
+# a safe stand-off BAND before deploying the arm.
 #
 # WHY (yaw): the fixed base-frame jacobian (ARM_JACOBIAN_BASE, precondition 2)
 # only reaches targets with a small base-frame lateral |y| (~0.08 m residual
@@ -148,38 +152,87 @@ SERVO_DQ_MAX = 0.06
 # The align phase rotates the base (a proportional rotate-in-place law mirroring
 # LocalPlanner: wz = clamp(ALIGN_KP*bearing)) until |bearing| <= ALIGN_TOL_RAD.
 #
-# WHY (stand-off): with the yaw fixed, Task 15f's first GPU run then stalled in
-# DESCEND with lateral_y=0.074 (INSIDE the envelope) but a huge forward/down
-# error -- the object had ended up only ~0.12 m in front of the base, far
-# inside the ~0.7 m the constant jacobian is linearized for (precondition 3),
-# so the descend diverged (gripper drifted UP, wrong sign) and the arm-heavy
-# Spot toppled. The executor's approach + goal_tolerance stops the base too
-# close, and the arm deploy nudges it closer still. So align ALSO regulates the
-# base->object horizontal distance to ALIGN_STANDOFF_M (Task 13 grasp_smoke
-# grasped reliably from ~0.7 m): drive vx = clamp(ALIGN_KP_LIN*dist_err) once
-# roughly facing the target. After both are satisfied it holds still for
-# ALIGN_SETTLE_S to bleed off rotation momentum (an arm deploy on a still-
-# turning base was toppling it) before deploying.
+# WHY (stand-off BAND -- Task 15h): the A1-gating failure 15g root-caused is an
+# object-collider COLLISION on the pick approach: the executor drives the base
+# right up to the object (15g run 1: 0.03 m from the bag, facing 168 deg AWAY),
+# so the base footprint OVERLAPS the small object collider, and the leg-only
+# flat-terrain policy tips the moment a leg catches it. 15f's stand-off backed
+# off toward a single point (0.72 +- 0.12 m) but ONLY once roughly facing --
+# so from the 15g overshoot it first tried to rotate-in-place while standing ON
+# the object and toppled. 15h fixes that: the base must be BOTH (a) facing the
+# object (|bearing| <= ALIGN_TOL_RAD) AND (b) at a distance in
+# [ALIGN_STANDOFF_MIN_M, ALIGN_STANDOFF_MAX_M] (0.70-0.90 m: inside arm reach
+# 0.984 at deploy, outside leg-collision range; 15f measured a good grasp at a
+# base-object 0.78 m) before the arm deploys.
+#   * TOO CLOSE (rng < MIN): ESCAPE IMMEDIATELY, without waiting to face first.
+#     Command vx = -cos(bearing) * speed -- i.e. back straight away ALONG the
+#     bearing line to the object. Because d(range)/dt = speed*cos^2(bearing) >= 0
+#     this ALWAYS opens the range regardless of facing, so a base that overshot
+#     PAST the object (|bearing| > 90 deg, the 15g run-1 168 deg case) drives
+#     FORWARD off it instead of backing further onto it, and a base that stopped
+#     short (|bearing| < 90 deg, the nominal case) backs up (vx < 0). Yaw
+#     alignment (wz) runs simultaneously so facing is recovered while escaping,
+#     but we never rotate-in-place ON the collider.
+#   * TOO FAR (rng > MAX, still within the select reach gate): rotate to face,
+#     then creep FORWARD (vx = +cos(bearing)*speed) toward the setpoint. No
+#     collider-overlap risk out here, so requiring facing before translating is
+#     safe.
+#   * IN BAND but not facing: just rotate in place (safe at stand-off distance).
+# Distance + bearing are recomputed EVERY step (object static, base moving), so
+# yaw alignment re-runs after any translation. After BOTH are satisfied the base
+# holds still for ALIGN_SETTLE_S to bleed rotation momentum (an arm deploy on a
+# still-turning base was toppling it) before deploying.
 #
 # The base command goes through the ROBOT's PUBLIC `set_cmd_vel` (see
 # _ArmInterface.set_base_cmd): that switches the robot to velocity mode and
 # cancels any in-flight planner goal, so `SpotSimRobot._step_physics` -- which
 # runs BEFORE the grasp step each main-loop frame and would otherwise overwrite
 # a direct drive_backend.set_command with the (post-goto REACHED -> ZERO)
-# planner output every tick -- leaves our command intact. The command is zeroed
-# on EVERY terminal path (align success, timeout, servo failure, crash, reset
-# -> see _finish / reset) so the base can never run away.
+# planner output every tick -- leaves our command intact. The slew limiter
+# (Task 15g, PolicyDriveBackend) smooths these commands now. The command is
+# zeroed on EVERY terminal path (align/stand-off success, timeout, servo
+# failure, crash, reset -> see _finish / reset) so the base can never run away.
 ALIGN_TOL_RAD = 0.09      # aligned when |base->target bearing| <= this (~5 deg)
 ALIGN_KP = 2.0            # proportional gain on the bearing (mirrors LocalPlanner)
 ALIGN_WMAX = 0.6          # clamp on the commanded rotate-in-place yaw rate (rad/s)
-ALIGN_STANDOFF_M = 0.72   # target base->object horizontal distance (m); ~ the
-                          # jacobian design point + Task 13 smoke's working reach
-ALIGN_DIST_TOL_M = 0.12   # accept the stand-off within this band (m)
+ALIGN_STANDOFF_M = 0.78   # setpoint base->object horizontal distance (m) the
+                          # approach law aims at -- 15f's measured good-grasp
+                          # distance, mid-band; deploy accepts the whole band.
+ALIGN_STANDOFF_MIN_M = 0.70  # inner edge of the deploy band (m): closer than
+                             # this the base footprint risks the object collider.
+ALIGN_STANDOFF_MAX_M = 0.90  # outer edge of the deploy band (m): still well
+                             # inside arm reach 0.984 with servo margin.
+ALIGN_DIST_TOL_M = 0.08   # deploy-accept half-width around the setpoint (m): the
+                          # base parks at ALIGN_STANDOFF_M +- this ([0.70,0.86]),
+                          # i.e. BAND CENTRE, so station-keeping drift has margin
+                          # to both the object and the reach limit before deploy.
+ALIGN_DEADBAND_M = 0.04   # no approach command within this of the setpoint (let
+                          # the base rest instead of hunting the boundary).
 ALIGN_KP_LIN = 1.0        # proportional gain on the stand-off distance error
-ALIGN_VMAX = 0.3          # clamp on the commanded approach speed (m/s)
-ALIGN_FACE_TO_DRIVE_RAD = 0.35  # only translate once roughly facing the target
-ALIGN_SETTLE_S = 1.0      # hold still after aligned to bleed momentum pre-deploy
-ALIGN_TIMEOUT_S = 12.0    # sim-time budget for the align phase; exceed -> fail
+ALIGN_VMAX = 0.3          # clamp on the commanded approach/escape speed (m/s)
+ALIGN_FACE_TO_DRIVE_RAD = 0.35  # only creep/seek (not escape) once roughly facing
+# Once the settle has STARTED (base parked at the setpoint), MAINTAIN it across
+# small drift within this looser HYSTERESIS hold band, so the policy's hold-
+# station wobble does not reset the settle timer and trip the stand-off timeout
+# at a band edge (15h batch-1 attempt 3: reached 0.90 m facing but the settle
+# kept resetting on drift -> 20 s timeout). Drift BELOW hold-min (onto the
+# object) or outside the cone abandons the settle and re-approaches/escapes.
+ALIGN_HOLD_MIN_M = 0.66
+ALIGN_HOLD_MAX_M = 0.94
+ALIGN_HOLD_TOL_RAD = 0.17  # ~10 deg
+ALIGN_SETTLE_S = 0.6      # hold still after parked to bleed momentum pre-deploy
+                          # (15h: 1.0->0.6 so it deploys before drifting far)
+ALIGN_TIMEOUT_S = 20.0    # sim-time budget for the combined align+stand-off
+                          # phase; exceed -> fail "stand-off timeout" (15h: 12->20
+                          # s, since escape-then-reface can need a few more steps)
+
+# Carry-egress (Task 15h): after a PLACE detaches + stows, back the base up to
+# ALIGN_STANDOFF_MIN_M away from the just-placed object BEFORE reporting
+# succeeded, so the executor's next nav goal does not immediately walk the base
+# over the object it just set down (15g saw one C-stage fall from exactly that).
+# Same mechanics as the too-close escape (vx = -cos(bearing)*speed). Best-effort:
+# on timeout we still report the place succeeded (the place itself did happen).
+EGRESS_TIMEOUT_S = 10.0
 
 # ---------------------------------------------------------------------------
 # Arm kinematics constants -- EMPIRICALLY MEASURED on spot_with_arm.usd under
@@ -486,6 +539,9 @@ class _Op:
     PLACE_DEPLOY = "place_deploy"
     LOWER = "lower"
     DETACH = "detach"
+    # Task 15h: back the base off the just-placed object before finishing, so
+    # the next nav goal does not walk over it (carry-egress fall in 15g).
+    EGRESS = "egress"
     STOW = "stow"
 
     def __init__(self, kind, arm, contact_hold=False):
@@ -500,6 +556,7 @@ class _Op:
         self.align_until = None   # sim-time deadline for the align phase (15f)
         self.aligned_since = None  # sim-time the base first became aligned (15f)
         self.deploy_until = None  # sim-time to hold the deploy pose until
+        self.egress_until = None  # sim-time deadline for the place egress (15h)
         # G2 contact hold (Task 14): friction hold instead of the kinematic
         # pin. For a grasp, from RobotSpec.contact_hold; for a place, inherited
         # from the held object's recorded mode.
@@ -678,12 +735,18 @@ class PhysicsGraspBackend:
 
         if op.phase == _Op.ALIGN:
             rng, bearing = self._base_range_bearing_to(arm, op.object_id)
-            dist_err = rng - ALIGN_STANDOFF_M     # >0 too far, <0 too close
+            dist_err = rng - ALIGN_STANDOFF_M      # >0 too far, <0 too close
             facing = abs(bearing) <= ALIGN_TOL_RAD
-            ranged = abs(dist_err) <= ALIGN_DIST_TOL_M
-            if facing and ranged:
-                # Head-on AND at stand-off: hold still, then (after a short
-                # settle to bleed rotation momentum) deploy the arm.
+            at_setpoint = abs(dist_err) <= ALIGN_DIST_TOL_M
+            # Deploy when facing AND parked at the setpoint (band CENTRE, so the
+            # hold-station wobble has margin to both the object and the reach
+            # limit). Once the settle has STARTED, MAINTAIN it across small drift
+            # inside the looser hysteresis hold band, so the wobble does not
+            # reset the timer and trip the stand-off timeout at a band edge.
+            hold_ok = (op.aligned_since is not None
+                       and ALIGN_HOLD_MIN_M <= rng <= ALIGN_HOLD_MAX_M
+                       and abs(bearing) <= ALIGN_HOLD_TOL_RAD)
+            if (facing and at_setpoint) or hold_ok:
                 arm.stop_base()
                 if op.aligned_since is None:
                     op.aligned_since = op.t
@@ -705,23 +768,38 @@ class PhysicsGraspBackend:
                                f"deploying arm for '{op.object_id}'",
                                op.object_id)
                 return
-            op.aligned_since = None   # drifted back out of tolerance -> re-settle
+            op.aligned_since = None   # not parked / drifted out of the hold band
             if op.t >= op.align_until:
-                arm.stop_base()   # never leave the base driving (15f)
+                arm.stop_base()   # never leave the base driving (15f/15h)
                 self._fail(robot_name, op,
-                           f"align timeout: base {math.degrees(abs(bearing)):.1f}"
-                           f" deg / {rng:.2f} m from '{op.object_id}' "
-                           f"(want <={math.degrees(ALIGN_TOL_RAD):.0f} deg, "
-                           f"{ALIGN_STANDOFF_M:.2f}+-{ALIGN_DIST_TOL_M:.2f} m) "
-                           f"after {ALIGN_TIMEOUT_S:.0f} s")
+                           f"stand-off timeout: base "
+                           f"{math.degrees(abs(bearing)):.1f} deg / {rng:.2f} m "
+                           f"from '{op.object_id}' (want <="
+                           f"{math.degrees(ALIGN_TOL_RAD):.0f} deg, "
+                           f"{ALIGN_STANDOFF_M:.2f}+-{ALIGN_DIST_TOL_M:.2f}"
+                           f" m) after {ALIGN_TIMEOUT_S:.0f} s")
                 return
-            # Proportional rotate-in-place toward the target (wz same sign as the
-            # bearing, mirroring LocalPlanner); once roughly facing it, also
-            # drive vx to the stand-off (vx>0 approach, vx<0 back off).
+            # Rotate-in-place toward the target every step (wz same sign as the
+            # bearing, mirroring LocalPlanner) -- yaw alignment re-runs after any
+            # translation. The translation term depends on the range REGIME:
             wz = max(-ALIGN_WMAX, min(ALIGN_WMAX, ALIGN_KP * bearing))
             vx = 0.0
-            if abs(bearing) <= ALIGN_FACE_TO_DRIVE_RAD:
-                vx = max(-ALIGN_VMAX, min(ALIGN_VMAX, ALIGN_KP_LIN * dist_err))
+            if rng < ALIGN_STANDOFF_MIN_M:
+                # TOO CLOSE: escape the object collider IMMEDIATELY -- do NOT
+                # wait to face first (rotating in place while overlapping the
+                # collider is what toppled 15g). Back away ALONG the bearing
+                # line: vx = -cos(bearing)*speed opens the range for any bearing
+                # (d(range)/dt = speed*cos^2 >= 0), so an overshoot past the
+                # object drives forward off it and a short stop backs up.
+                speed = min(ALIGN_VMAX,
+                            ALIGN_KP_LIN * (ALIGN_STANDOFF_M - rng))
+                vx = -math.cos(bearing) * speed
+            elif abs(dist_err) > ALIGN_DEADBAND_M and abs(bearing) <= ALIGN_FACE_TO_DRIVE_RAD:
+                # SEEK the setpoint (band centre) once roughly facing: forward if
+                # too far, gently back if a touch too close (but still >= MIN).
+                # cos(bearing) ~ 1 when facing; the deadband lets it rest.
+                speed = min(ALIGN_VMAX, ALIGN_KP_LIN * abs(dist_err))
+                vx = math.copysign(speed, dist_err) * math.cos(bearing)
             arm.set_base_cmd(vx, 0.0, wz)
             return
 
@@ -937,12 +1015,39 @@ class PhysicsGraspBackend:
                 self.registry.set_kinematic(object_id, False)   # -> dynamic
             self.registry.clear_held(object_id)
             op.object_id = object_id
-            op.phase = _Op.STOW
+            op.phase = _Op.EGRESS
+            return
+
+        if op.phase == _Op.EGRESS:
+            # Carry-egress (Task 15h): back the base straight away from the
+            # just-placed object until it is >= ALIGN_STANDOFF_MIN_M clear, so
+            # the executor's next nav goal does not walk the base over the
+            # object it just set down (15g's one C-stage egress fall). Same
+            # mechanics as the too-close align escape: vx = -cos(bearing)*speed
+            # opens the range for any bearing. Best-effort -- the place already
+            # SUCCEEDED, so on timeout (or if already clear) we just finish.
+            if op.egress_until is None:
+                op.egress_until = op.t + EGRESS_TIMEOUT_S
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"backing off placed '{op.object_id}'",
+                               op.object_id)
+            rng, bearing = self._base_range_bearing_to(arm, op.object_id)
+            if rng >= ALIGN_STANDOFF_MIN_M or op.t >= op.egress_until:
+                arm.stop_base()
+                op.phase = _Op.STOW
+                return
+            # Aim at the mid-band setpoint (not MIN) so the proportional speed
+            # does not asymptote to zero right at MIN -- the rng>=MIN stop then
+            # fires while still moving, leaving the base just past the boundary.
+            speed = min(ALIGN_VMAX,
+                        ALIGN_KP_LIN * (ALIGN_STANDOFF_M - rng))
+            arm.set_base_cmd(-math.cos(bearing) * speed, 0.0, 0.0)
             return
 
         if op.phase == _Op.STOW:
             # Hand the arm back to the policy (re-stow) and finish. The dropped
-            # object falls/settles under PhysX from here.
+            # object falls/settles under PhysX from here. _finish also zeroes any
+            # residual egress base command (stop_base) on this terminal path.
             self._finish(robot_name, op, SUCCEEDED,
                          f"placed '{op.object_id}'", op.object_id)
             return

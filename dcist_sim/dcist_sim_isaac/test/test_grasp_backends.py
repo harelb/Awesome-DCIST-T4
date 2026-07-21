@@ -259,14 +259,47 @@ def test_place_detaches_and_succeeds():
     assert accepted is True
     state, phases = _run_phases(backend, "hilbert")
     assert state == "succeeded"
-    # place re-deploys the arm (jacobian valid) BEFORE lowering, then detaches
-    # and stows: pin that phase order.
-    assert phases == ["place_deploy", "lower", "detach", "stow"], phases
+    # place re-deploys the arm (jacobian valid) BEFORE lowering, then detaches,
+    # backs the base off the placed object (egress, 15h), and stows: pin order.
+    assert phases == ["place_deploy", "lower", "detach", "egress", "stow"], \
+        phases
     assert backend.status("hilbert")[2] == "cone_0"
     # detach: object made dynamic again + released
     assert (("cone_0", False) in reg.kinematic_calls)
     assert reg._o["cone_0"]["held_by"] is None
     assert arm.owned is False
+
+
+def test_place_egress_backs_base_off_placed_object():
+    # Carry-egress (Task 15h): if the base is sitting ON the just-placed object
+    # at detach, the egress phase must command a BACKWARD escape (vx < 0) and
+    # leave the base >= the stand-off MIN clear before the place reports
+    # succeeded -- so the next nav goal does not walk over the object (15g).
+    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_MIN_M
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    assert _run(backend, "hilbert")[0] == "succeeded"
+
+    # Force the base to sit right on top of the held object (simulating a base
+    # that drifted forward during the carry), facing it, before placing.
+    ox, oy, _oz = reg._o["cone_0"]["pos"]
+    arm._base = [ox - 0.2, oy, 0.5, 0.0]     # 0.2 m from the object, bearing ~0
+    accepted, _msg = backend.place("hilbert")
+    assert accepted is True
+    n_before = len(arm.base_cmds)
+    state, phases = _run_phases(backend, "hilbert")
+    assert state == "succeeded"
+    assert "egress" in phases
+    egress_cmds = arm.base_cmds[n_before:]
+    assert any(c[0] < 0.0 for c in egress_cmds), egress_cmds   # backed off
+    rng, _brg = backend._base_range_bearing_to(arm, "cone_0")
+    assert rng >= ALIGN_STANDOFF_MIN_M - 1e-6                  # cleared the object
 
 
 def test_no_graspable_object_fails():
@@ -331,44 +364,76 @@ def test_align_rotates_correct_sign_for_right_target():
 
 
 def test_align_backs_off_when_too_close():
-    # Head-on but TOO CLOSE (range << stand-off): align drives the base BACKWARD
-    # (vx < 0) to open the stand-off, then grasps.
-    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M, ALIGN_DIST_TOL_M
+    # Head-on but TOO CLOSE (range << band): align drives the base BACKWARD
+    # (vx < 0) to open the stand-off into the band, then grasps.
+    from dcist_sim_isaac.grasp_backends import (
+        ALIGN_STANDOFF_MIN_M, ALIGN_STANDOFF_MAX_M)
 
     robot = _FakeRobot("hilbert")
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
                    base_pose=(0.0, 0.0, 0.5, 0.0))
     objs = {"bag_0": {"pos": (0.35, 0.0, 0.0), "graspable": True,
-                      "held_by": None}}   # 0.35 m << 0.72 m stand-off
+                      "held_by": None}}   # 0.35 m << 0.70-0.90 m band
     backend, _reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
     assert _run(backend, "hilbert")[0] == "succeeded"
     assert any(c[0] < 0.0 for c in arm.base_cmds), arm.base_cmds  # backed off
     rng, _brg = backend._base_range_bearing_to(arm, "bag_0")
-    assert abs(rng - ALIGN_STANDOFF_M) <= ALIGN_DIST_TOL_M + 1e-6
+    assert ALIGN_STANDOFF_MIN_M - 1e-6 <= rng <= ALIGN_STANDOFF_MAX_M + 1e-6
+
+
+def test_align_too_close_facing_away_escapes_before_rotating():
+    # The 15g A1 blocker: the executor overshoots the base RIGHT onto the object
+    # collider facing ~168 deg AWAY (range 0.10 m). The base must ESCAPE the
+    # collider immediately -- the FIRST command must TRANSLATE (vx != 0), not
+    # merely rotate-in-place on top of the object, and one step must already
+    # OPEN the range (never drive further onto it).
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    b = math.radians(168.0)
+    r0 = 0.10
+    objs = {"bag_0": {"pos": (r0 * math.cos(b), r0 * math.sin(b), 0.0),
+                      "graspable": True, "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    rng_before, _ = backend._base_range_bearing_to(arm, "bag_0")
+    # step until the align phase issues its first base command
+    for _ in range(20):
+        backend.step(0.1)
+        if arm.base_cmds:
+            break
+    assert arm.base_cmds, "align never commanded the base"
+    # first command TRANSLATES to escape (does not just rotate in place on the
+    # collider); object is behind (|bearing|>90) so it drives FORWARD off it.
+    assert arm.base_cmds[0][0] != 0.0, arm.base_cmds[0]
+    assert arm.base_cmds[0][0] > 0.0, arm.base_cmds[0]
+    rng_after, _ = backend._base_range_bearing_to(arm, "bag_0")
+    assert rng_after > rng_before, (rng_before, rng_after)  # moved off the object
 
 
 def test_align_drives_forward_when_too_far():
     # Head-on but TOO FAR (still within reach_m): align drives FORWARD (vx > 0)
-    # to close to the stand-off, then grasps.
-    from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M, ALIGN_DIST_TOL_M
+    # to close to the band, then grasps.
+    from dcist_sim_isaac.grasp_backends import (
+        ALIGN_STANDOFF_MIN_M, ALIGN_STANDOFF_MAX_M)
 
     robot = _FakeRobot("hilbert")
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
                    base_pose=(0.0, 0.0, 0.5, 0.0))
     objs = {"bag_0": {"pos": (0.95, 0.0, 0.0), "graspable": True,
-                      "held_by": None}}   # 0.95 m > 0.72 m, < reach_m 0.984
+                      "held_by": None}}   # 0.95 m > 0.90 m band, < reach_m 0.984
     backend, _reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
     assert _run(backend, "hilbert")[0] == "succeeded"
     assert any(c[0] > 0.0 for c in arm.base_cmds), arm.base_cmds  # drove forward
     rng, _brg = backend._base_range_bearing_to(arm, "bag_0")
-    assert abs(rng - ALIGN_STANDOFF_M) <= ALIGN_DIST_TOL_M + 1e-6
+    assert ALIGN_STANDOFF_MIN_M - 1e-6 <= rng <= ALIGN_STANDOFF_MAX_M + 1e-6
 
 
 def test_align_timeout_fails_and_stops_base():
     # A base that can't move toward an off-axis target must TIME OUT ->
-    # failed "align timeout", arm released, base stopped, nothing held.
+    # failed "stand-off timeout", arm released, base stopped, nothing held.
     robot = _FakeRobot("hilbert")
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
                    base_pose=(0.0, 0.0, 0.5, 0.0), base_rotates=False)
@@ -379,15 +444,15 @@ def test_align_timeout_fails_and_stops_base():
     backend.grasp("hilbert")
     state, msg, _ = _run(backend, "hilbert")
     assert state == "failed"
-    assert "align timeout" in msg.lower()
+    assert "stand-off timeout" in msg.lower()
     assert arm.owned is False              # arm ownership returned
     assert arm.stop_count >= 1             # base stopped (no runaway motion)
     assert reg._o["bag_0"]["held_by"] is None
 
 
 def test_already_aligned_skips_motion():
-    # Head-on AND at stand-off (bearing ~0, range ~0.72): no base command is
-    # ever issued; align settles then deploys and the grasp succeeds.
+    # Head-on AND in the stand-off band (bearing ~0, range ~0.78): no base
+    # command is ever issued; align settles then deploys and the grasp succeeds.
     from dcist_sim_isaac.grasp_backends import ALIGN_STANDOFF_M
 
     robot = _FakeRobot("hilbert")
@@ -401,6 +466,42 @@ def test_already_aligned_skips_motion():
     assert state == "succeeded"
     assert "align" in phases               # phase still visited (settle ticks)
     assert arm.base_cmds == []             # but no drive/rotate command issued
+
+
+def test_align_settle_survives_hold_band_drift():
+    # 15h batch-1 attempt-3 fix: once the base has parked at the setpoint and the
+    # settle has started, station-keeping DRIFT to a band edge (within the looser
+    # hysteresis hold band) must NOT reset the settle timer -- the base still
+    # deploys and grasps rather than tripping the stand-off timeout.
+    from dcist_sim_isaac.grasp_backends import (
+        ALIGN_STANDOFF_M, ALIGN_STANDOFF_MAX_M, ALIGN_HOLD_MAX_M)
+
+    robot = _FakeRobot("hilbert")
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5),
+                   base_pose=(0.0, 0.0, 0.5, 0.0))
+    objs = {"bag_0": {"pos": (ALIGN_STANDOFF_M, 0.0, 0.0), "graspable": True,
+                      "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    # step until the settle has started (aligned_since set) while still in ALIGN
+    op = None
+    for _ in range(50):
+        backend.step(0.1)
+        op = backend._ops.get("hilbert")
+        if op is not None and op.phase == "align" and op.aligned_since is not None:
+            break
+    assert op is not None and op.aligned_since is not None
+    since0 = op.aligned_since
+    # simulate hold-station drift OUTWARD to past the band edge but still inside
+    # the hysteresis hold band (MAX 0.90 < 0.92 <= HOLD_MAX 0.94)
+    drift = 0.5 * (ALIGN_STANDOFF_MAX_M + ALIGN_HOLD_MAX_M)   # 0.92
+    reg._o["bag_0"]["pos"] = (drift, 0.0, 0.0)
+    backend.step(0.1)
+    op = backend._ops.get("hilbert")
+    if op is not None and op.phase == "align":
+        assert op.aligned_since == since0     # settle NOT reset by the drift
+    # and the grasp still completes (deploys despite the drift, no timeout)
+    assert _run(backend, "hilbert")[0] == "succeeded"
 
 
 def test_status_idle_before_any_attempt():
@@ -542,7 +643,8 @@ def test_contact_hold_place_opens_gripper_no_kinematic():
     assert accepted is True
     state, phases = _run_phases(backend, "hilbert")
     assert state == "succeeded"
-    assert phases == ["place_deploy", "lower", "detach", "stow"], phases
+    assert phases == ["place_deploy", "lower", "detach", "egress", "stow"], \
+        phases
     assert reg._o["cone_0"]["held_by"] is None
     assert arm.gripper_closed is False          # finger opened on detach
     assert reg.kinematic_calls == []            # never suspended/restored
