@@ -222,47 +222,24 @@ def _find_shutdown_dsg(raw_dir):
     return max(hits, key=os.path.getmtime) if hits else None
 
 
-def _has_margin(cm, x, y):
-    """True iff (x, y)'s cell and all 8 neighbors are FREE in the inflated map.
-    A waypoint on the inflation boundary (any occupied/off-map neighbor) has no
-    margin -- Task 10 trap: a dwell goal there makes the next cross-rack goal
-    unplannable, so we require headroom in every direction."""
-    cell = cm.world_to_grid(x, y)
-    if cell is None:
-        return False
-    ix, iy = cell
-    ny, nx = cm.grid.shape
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            jx, jy = ix + dx, iy + dy
-            if not (0 <= jx < nx and 0 <= jy < ny):
-                return False  # map edge counts as no margin
-            if cm.grid[jy, jx] != cm.FREE:
-                return False
-    return True
-
-
 def snap_tour(cm, scenario):
-    """Snap every tour waypoint onto a free cell WITH a 1-cell inflation margin.
+    """Snap every tour waypoint onto a free cell WITH a 1-cell 8-neighbor margin.
 
-    Mutates scenario.tour in place. A cell that is free in the map inflated one
-    more cell is guaranteed to have every 8-neighbor free in `cm` -- that IS the
-    margin rule -- so we snap against `margin_cm` and then belt-and-braces
-    re-check margin against `cm`. Any waypoint that can't be placed within
-    snap_bound_m aborts with exit 2 (map-failed), never mid-tour (spec §7)."""
+    Mutates scenario.tour in place. Uses Costmap2D.nearest_free_with_margin,
+    which evaluates the TRUE 8-neighbor (diagonals included) margin predicate on
+    every candidate and returns the nearest passing one -- so a cell merely
+    diagonal to an obstacle is never accepted (avoids the Task 10 boundary-dwell
+    trap). Any waypoint that can't be placed within snap_bound_m aborts with
+    exit 2 (map-failed), never mid-tour (spec §7)."""
     bound = scenario.nav.snap_bound_m
-    margin_cm = cm.inflate(cm.resolution)
     unreachable, no_margin = [], []
     for i, wp in enumerate(scenario.tour):
-        snapped = margin_cm.nearest_free(wp.x, wp.y, bound)
+        snapped = cm.nearest_free_with_margin(wp.x, wp.y, bound)
         if snapped is None:
             if cm.nearest_free(wp.x, wp.y, bound) is None:
                 unreachable.append(i)   # no free cell at all within bound
             else:
                 no_margin.append(i)     # free cell exists but none with margin
-            continue
-        if not _has_margin(cm, *snapped):
-            no_margin.append(i)         # should not happen given margin_cm
             continue
         wp.x, wp.y = snapped
     if unreachable or no_margin:

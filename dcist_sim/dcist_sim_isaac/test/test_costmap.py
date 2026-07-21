@@ -43,6 +43,49 @@ def test_nearest_free():
     assert m.nearest_free(-4.0, -4.0, max_dist_m=1.0) == pytest.approx((-3.75, -3.75))
 
 
+def _map_single_obstacle():
+    """2.1x2.1 m map @ 0.1 m cells, origin (0,0), ONE occupied cell at (10,10)
+    -> world center (1.05, 1.05)."""
+    grid = np.zeros((21, 21), dtype=np.uint8)
+    grid[10, 10] = Costmap2D.OCCUPIED
+    return Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.1)
+
+
+def test_has_margin_rejects_diagonal_to_obstacle():
+    """Reviewer's case: a cell DIAGONALLY adjacent to an obstacle must NOT be
+    reported as having margin. A 4-connected inflate (dx^2+dy^2<=1) would miss
+    this diagonal; has_margin is a true 8-neighbor (Chebyshev) test."""
+    m = _map_single_obstacle()
+    # (11,11) is the diagonal neighbor of the obstacle at (10,10): center 1.15.
+    assert not m.has_margin(1.15, 1.15)          # diagonal-to-obstacle -> no margin
+    assert not m.has_margin(1.05, 1.15)          # orthogonal neighbor -> no margin
+    assert m.is_free_world(1.15, 1.15)           # ...yet the cell itself is free
+    assert m.has_margin(0.35, 0.35)              # far from the obstacle -> margin
+
+
+def test_nearest_free_with_margin_skips_diagonal_cell():
+    """From the diagonal-to-obstacle cell, nearest_free_with_margin must NOT
+    return that cell (it fails the true 8-neighbor check) but the nearest cell
+    that genuinely has full margin."""
+    m = _map_single_obstacle()
+    p = m.nearest_free_with_margin(1.15, 1.15, max_dist_m=1.0)
+    assert p is not None
+    assert m.has_margin(*p)                       # returned cell truly has margin
+    assert p != pytest.approx((1.15, 1.15))       # not the diagonal-to-obstacle cell
+    # nearest valid cell is one ring further out (Chebyshev dist 2), ~0.1 m away
+    d = ((p[0] - 1.15) ** 2 + (p[1] - 1.15) ** 2) ** 0.5
+    assert d == pytest.approx(0.1, abs=0.05)
+
+
+def test_nearest_free_with_margin_happy_path():
+    """A point already sitting on a full-margin cell returns its own center;
+    when the whole neighborhood is blocked-out, returns None."""
+    m = _map_single_obstacle()
+    assert m.nearest_free_with_margin(0.35, 0.35, 1.0) == pytest.approx((0.35, 0.35))
+    # search bound too tight to escape the no-margin ring around the obstacle
+    assert m.nearest_free_with_margin(1.15, 1.15, max_dist_m=0.05) is None
+
+
 def test_save_load_roundtrip(tmp_path):
     m = _map_with_block()
     path = str(tmp_path / "cm.npz")

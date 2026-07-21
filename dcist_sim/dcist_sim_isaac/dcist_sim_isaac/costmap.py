@@ -83,6 +83,57 @@ class Costmap2D:
                     best, best_d2 = (wx, wy), d2
         return best
 
+    def _cell_has_margin(self, ix, iy):
+        """True iff cell (ix, iy) is FREE and all 8 neighbors are FREE and
+        in-bounds -- a full 1-cell (Chebyshev, DIAGONALS INCLUDED) margin."""
+        ny, nx = self.grid.shape
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                jx, jy = ix + dx, iy + dy
+                if not (0 <= jx < nx and 0 <= jy < ny):
+                    return False           # map edge counts as no margin
+                if self.grid[jy, jx] != self.FREE:
+                    return False
+        return True
+
+    def has_margin(self, x, y):
+        """True iff (x, y)'s cell and all 8 neighbors are FREE (in-bounds).
+
+        A cell on the inflation boundary (any occupied or off-map 8-neighbor,
+        diagonals included) has NO margin: a dwell/tour goal there can leave the
+        next cross-obstacle goal unplannable (Task 10 boundary-dwell trap). Note
+        this is a Chebyshev (max(|dx|,|dy|)<=1) test -- inflate()'s circular
+        kernel at r=1 is only 4-connected and would miss the diagonal case."""
+        cell = self.world_to_grid(x, y)
+        if cell is None:
+            return False
+        return self._cell_has_margin(cell[0], cell[1])
+
+    def nearest_free_with_margin(self, x, y, max_dist_m):
+        """Nearest cell center within max_dist_m that is FREE and has a full
+        1-cell 8-neighbor margin (see has_margin), else None. If (x, y) already
+        qualifies, returns its own cell center. Unlike snapping against an
+        inflate()d copy, this evaluates the TRUE 8-neighbor predicate on every
+        candidate, so a cell merely diagonal to an obstacle is never accepted."""
+        cell = self.world_to_grid(x, y)
+        r_cells = int(math.ceil(max_dist_m / self.resolution))
+        ny, nx = self.grid.shape
+        if cell is not None and self._cell_has_margin(cell[0], cell[1]):
+            return self.grid_to_world(*cell)
+        sx = int(np.clip((x - self.origin_xy[0]) / self.resolution, 0, nx - 1))
+        sy = int(np.clip((y - self.origin_xy[1]) / self.resolution, 0, ny - 1))
+        best = None
+        best_d2 = None
+        for iy in range(max(0, sy - r_cells), min(ny, sy + r_cells + 1)):
+            for ix in range(max(0, sx - r_cells), min(nx, sx + r_cells + 1)):
+                if not self._cell_has_margin(ix, iy):
+                    continue
+                wx, wy = self.grid_to_world(ix, iy)
+                d2 = (wx - x) ** 2 + (wy - y) ** 2
+                if d2 <= max_dist_m ** 2 and (best_d2 is None or d2 < best_d2):
+                    best, best_d2 = (wx, wy), d2
+        return best
+
     def save(self, path):
         np.savez_compressed(path, grid=self.grid,
                             origin_xy=np.array(self.origin_xy),

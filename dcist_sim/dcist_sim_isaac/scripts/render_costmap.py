@@ -35,35 +35,22 @@ def _extent(cm):
     return [x0, x0 + nx * cm.resolution, y0, y0 + ny * cm.resolution]
 
 
-def has_margin(cm, x, y):
-    """True iff (x, y)'s cell and all 8 neighbors are FREE in `cm`."""
-    cell = cm.world_to_grid(x, y)
-    if cell is None:
-        return False
-    ix, iy = cell
-    ny, nx = cm.grid.shape
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            jx, jy = ix + dx, iy + dy
-            if not (0 <= jx < nx and 0 <= jy < ny):
-                return False
-            if cm.grid[jy, jx] != cm.FREE:
-                return False
-    return True
-
-
 def check_tour(cm, scenario):
-    """Print a per-waypoint free/margin report; return list of bad indices."""
+    """Print a per-waypoint free/margin report; return list of bad indices.
+
+    Margin = Costmap2D.has_margin (true 8-neighbor, diagonals included). The
+    "would snap to" suggestion uses nearest_free_with_margin, so it only ever
+    proposes a cell that itself passes the true margin check."""
     bound = scenario.nav.snap_bound_m
     bad = []
     print(f"{'idx':>3} {'x':>8} {'y':>8}  {'free':>5} {'margin':>6}  "
           f"{'snap->':>6} note")
     for i, wp in enumerate(scenario.tour):
         free = cm.is_free_world(wp.x, wp.y)
-        margin = has_margin(cm, wp.x, wp.y)
+        margin = cm.has_margin(wp.x, wp.y)
         note = ""
         if not (free and margin):
-            snapped = cm.inflate(cm.resolution).nearest_free(wp.x, wp.y, bound)
+            snapped = cm.nearest_free_with_margin(wp.x, wp.y, bound)
             if snapped is None:
                 note = f"NO free+margin cell within {bound} m -> FAIL"
                 bad.append(i)
