@@ -263,7 +263,13 @@ def build_stage(scenario) -> SimStage:
     costmap_raw = None
     if scenario.physics_mode:
         from dcist_sim_isaac.costmap_bake import bake_costmap
-        costmap, costmap_raw = bake_costmap(scenario.nav)
+        # Task 15i: stamp each object's footprint into the costmap so the
+        # planner keeps clearance from objects (they're excluded from the env
+        # overlap bake by design). Positions are the live post-reset object
+        # poses from the registry (settled at spawn).
+        object_xy = [(e["pos"][0], e["pos"][1])
+                     for e in registry.selection_snapshot().values()]
+        costmap, costmap_raw = bake_costmap(scenario.nav, object_xy)
         # Task 9: give every policy robot a go-to-target planner navigating
         # the SAME baked (inflated) costmap -- one bake per scenario, shared
         # by all policy robots, mirroring how the real BD local nav would

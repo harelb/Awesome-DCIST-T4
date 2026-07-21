@@ -61,6 +61,17 @@ _Z_MIN, _Z_MAX = 0.15, 0.60
 _ENV_PREFIX = "/World/Environment"
 _MARGIN_M = 2.0     # pad around the environment bbox
 
+# Task 15i: registry objects are EXCLUDED from the env overlap bake by design
+# (they live under /World/objects, not /World/Environment -- see on_hit). But
+# they are real colliders the robot must not walk into/onto (the "goto-poi
+# drives the base ONTO the object" A1 residual, §12.15). Stamp a small disc
+# footprint for each object into the RAW grid -- object half-extent + a leg
+# margin, NOT the full robot inflation (that comes from inflate() on top). Both
+# maps then carry it: raw (true not-to-penetrate boundary, drives Task 10's
+# penetration assertion) and inflated (raw dilated by inflation_radius_m, so the
+# LocalPlanner keeps the ROBOT BODY clear of objects during goto-poi).
+_OBJECT_FOOTPRINT_RADIUS_M = 0.25
+
 # Identity rotation for `overlap_box`'s `rot` argument -- scalar-last
 # (x, y, z, w); see this module's docstring "API verification" section.
 _IDENTITY_QUAT_XYZW = (0.0, 0.0, 0.0, 1.0)
@@ -80,7 +91,31 @@ def _env_bounds():
             float(hi[0]) + _MARGIN_M, float(hi[1]) + _MARGIN_M)
 
 
-def bake_costmap(nav_spec):
+def stamp_footprints(grid, origin_xy, res, object_xy,
+                     radius_m=_OBJECT_FOOTPRINT_RADIUS_M):
+    """Stamp an OCCUPIED disc of `radius_m` into `grid` for each `(x, y)` in
+    `object_xy` (world coords), in-place. Pure numpy (no Isaac), so it is
+    unit-testable. Cells whose CENTER lies within `radius_m` of an object are
+    marked occupied; objects off the grid are silently skipped."""
+    if not object_xy:
+        return grid
+    ny, nx = grid.shape
+    x0, y0 = origin_xy
+    r_cells = int(np.ceil(radius_m / res))
+    r2 = radius_m * radius_m
+    for ox, oy in object_xy:
+        cix = int(np.floor((ox - x0) / res))
+        ciy = int(np.floor((oy - y0) / res))
+        for iy in range(max(0, ciy - r_cells), min(ny, ciy + r_cells + 1)):
+            wy = y0 + (iy + 0.5) * res
+            for ix in range(max(0, cix - r_cells), min(nx, cix + r_cells + 1)):
+                wx = x0 + (ix + 0.5) * res
+                if (wx - ox) ** 2 + (wy - oy) ** 2 <= r2:
+                    grid[iy, ix] = Costmap2D.OCCUPIED
+    return grid
+
+
+def bake_costmap(nav_spec, object_xy=None):
     """Rasterize env collision geometry -> `(inflated, raw)` Costmap2D pair.
 
     `raw` is the un-inflated occupancy grid (kept for Task 10's
@@ -89,6 +124,12 @@ def bake_costmap(nav_spec):
     `raw.inflate(nav_spec.inflation_radius_m)`, the map local_planner.py
     should actually navigate against. sim_app.py writes both to disk
     (`costmap.npz` = inflated, `costmap_raw.npz` = raw).
+
+    `object_xy` (Task 15i) is an optional list of registry object world
+    `(x, y)` positions; each gets an `_OBJECT_FOOTPRINT_RADIUS_M` disc stamped
+    into the RAW grid BEFORE inflation, so both maps carry the object footprint
+    (raw at the true radius, inflated dilated by `inflation_radius_m` on top).
+    Objects are otherwise excluded from the env overlap bake by design.
     """
     from omni.physx import get_physx_scene_query_interface
 
@@ -119,9 +160,14 @@ def bake_costmap(nav_spec):
             if hit_env[0]:
                 grid[iy, ix] = Costmap2D.OCCUPIED
 
+    n_obj = len(object_xy or [])
+    stamp_footprints(grid, (x0, y0), res, object_xy)
+
     raw = Costmap2D(grid, origin_xy=(x0, y0), resolution=res)
     inflated = raw.inflate(nav_spec.inflation_radius_m)
     occ = int((inflated.grid == Costmap2D.OCCUPIED).sum())
-    logger.info("costmap baked: %dx%d cells @ %.2fm, %.1f%% occupied (inflated)",
-                nx, ny, res, 100.0 * occ / (nx * ny))
+    logger.info("costmap baked: %dx%d cells @ %.2fm, %.1f%% occupied "
+                "(inflated); %d object footprint(s) @ r=%.2fm stamped",
+                nx, ny, res, 100.0 * occ / (nx * ny), n_obj,
+                _OBJECT_FOOTPRINT_RADIUS_M)
     return inflated, raw

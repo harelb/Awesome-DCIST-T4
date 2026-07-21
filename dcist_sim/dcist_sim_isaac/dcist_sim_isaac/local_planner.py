@@ -123,7 +123,8 @@ class LocalPlanner:
 
     def __init__(self, costmap, max_lin_speed=1.0, max_ang_speed=1.0,
                  lookahead_m=0.6, goal_tol_m=0.25, yaw_tol_rad=0.3,
-                 stuck_timeout_s=15.0, progress_eps_m=0.05):
+                 stuck_timeout_s=15.0, progress_eps_m=0.05,
+                 snap_bound_m=None):
         self._map = costmap
         self._vmax = max_lin_speed
         self._wmax = max_ang_speed
@@ -132,6 +133,12 @@ class LocalPlanner:
         self._yaw_tol = yaw_tol_rad
         self._stuck_timeout = stuck_timeout_s
         self._progress_eps = progress_eps_m
+        # Task 15i: when set (meters), a goal whose cell is OCCUPIED snaps to
+        # the nearest free cell within this bound in `set_goal` -- so a goal AT
+        # an object node (now stamped into the costmap, Fix 2) snaps to the
+        # nearest approachable free cell instead of failing BLOCKED. Default
+        # None preserves the pre-15i behavior (occupied goal -> BLOCKED).
+        self._snap_bound_m = snap_bound_m
         self._status = self.IDLE
         self._goal = None            # (x, y, yaw)
         self._path = []
@@ -148,6 +155,15 @@ class LocalPlanner:
         self._path = []
 
     def set_goal(self, x, y, yaw, now):
+        # Task 15i: snap an occupied goal to the nearest free cell within the
+        # snap bound (if configured). Keeps the requested yaw; a goal too deep
+        # inside an obstacle for any free cell within the bound is left as-is,
+        # so `_plan_from` still returns BLOCKED (pre-15i behavior preserved when
+        # snap_bound_m is None or nothing free is reachable).
+        if self._snap_bound_m is not None and not self._map.is_free_world(x, y):
+            snapped = self._map.nearest_free(x, y, self._snap_bound_m)
+            if snapped is not None:
+                x, y = snapped
         self._goal = (x, y, yaw)
         self._replanned_once = False
         self._progress_anchor = None

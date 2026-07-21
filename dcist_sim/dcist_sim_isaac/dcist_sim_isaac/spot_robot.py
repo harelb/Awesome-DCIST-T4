@@ -335,7 +335,12 @@ class SpotSimRobot:
             costmap,
             max_lin_speed=nav_spec.max_lin_speed,
             max_ang_speed=nav_spec.max_ang_speed,
-            stuck_timeout_s=nav_spec.stuck_timeout_s)
+            stuck_timeout_s=nav_spec.stuck_timeout_s,
+            # Task 15i: object footprints are now baked into the costmap, so a
+            # goto-poi/rearrange goal landing AT an object node would otherwise
+            # be BLOCKED. Snap it to the nearest free cell within the tour snap
+            # bound so the follower approaches instead of giving up.
+            snap_bound_m=nav_spec.snap_bound_m)
         self.nav_status = "idle"
 
     def _step_physics(self, dt: float) -> None:

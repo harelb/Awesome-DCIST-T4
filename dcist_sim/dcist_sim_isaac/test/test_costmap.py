@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from dcist_sim_isaac.costmap import Costmap2D
+from dcist_sim_isaac.costmap_bake import stamp_footprints
 
 
 def _map_with_block():
@@ -109,3 +110,29 @@ def test_defensive_copy():
     assert np.array_equal(m.grid, grid_copy)
     assert m.is_free_world(-4.0, -4.0)
     assert not m.is_free_world(-0.2, -0.2)   # block still occupied in costmap
+
+
+# -- object footprint stamping (Task 15i) -----------------------------------
+
+
+def test_stamp_footprints_marks_disc_and_leaves_far_free():
+    grid = np.zeros((40, 40), dtype=np.uint8)     # 4x4 m @ 0.1 m, origin (0,0)
+    stamp_footprints(grid, (0.0, 0.0), 0.1, [(2.0, 2.0)], radius_m=0.25)
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.1)
+    assert not m.is_free_world(2.0, 2.0)          # object center occupied
+    assert not m.is_free_world(2.0, 2.15)         # within 0.25 m radius
+    assert m.is_free_world(2.0, 2.6)              # 0.6 m away still free
+    assert m.is_free_world(0.5, 0.5)              # far corner untouched
+
+
+def test_stamp_footprints_empty_is_noop():
+    grid = np.zeros((10, 10), dtype=np.uint8)
+    out = stamp_footprints(grid, (0.0, 0.0), 0.1, None)
+    assert int(out.sum()) == 0
+    assert int(stamp_footprints(grid, (0.0, 0.0), 0.1, []).sum()) == 0
+
+
+def test_stamp_footprints_off_grid_object_skipped():
+    grid = np.zeros((10, 10), dtype=np.uint8)     # 1x1 m @ 0.1 m
+    stamp_footprints(grid, (0.0, 0.0), 0.1, [(50.0, 50.0)], radius_m=0.25)
+    assert int(grid.sum()) == 0                   # object well off-grid: no-op

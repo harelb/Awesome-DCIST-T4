@@ -95,6 +95,51 @@ def test_blocked_goal():
     assert p.status == LocalPlanner.BLOCKED       # terminal until next set_goal
 
 
+def test_blocked_goal_default_no_snap_preserved():
+    # Regression guard for Task 15i's default: with NO snap_bound_m, an occupied
+    # goal must still go BLOCKED (unchanged pre-15i behavior) -- same as
+    # test_blocked_goal but stated explicitly as the default-off contract.
+    m = _corridor_map()
+    p = LocalPlanner(m)                              # snap_bound_m defaults None
+    assert p._snap_bound_m is None
+    p.set_goal(0.0, 0.0, 0.0, now=0.0)              # on the wall
+    cmd, status = p.update((-5.0, 0.0, 0.0), 1.0)
+    assert cmd == (0.0, 0.0, 0.0) and status == LocalPlanner.BLOCKED
+
+
+def _object_footprint_map():
+    """40x40 @ 0.25 m, free except a small 3x3 occupied 'object footprint'
+    centered near world (5.0, 5.0) (cell (20, 20))."""
+    grid = np.zeros((40, 40), dtype=np.uint8)
+    grid[19:22, 19:22] = Costmap2D.OCCUPIED
+    return Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.25)
+
+
+def test_goal_inside_footprint_snaps_and_plans():
+    # Task 15i: a goal AT an object footprint (occupied) snaps to the nearest
+    # free cell within the bound and plans, rather than failing BLOCKED.
+    m = _object_footprint_map()
+    p = LocalPlanner(m, snap_bound_m=2.0)
+    p.set_goal(5.0, 5.0, 0.0, now=0.0)              # dead center of the block
+    assert p._goal[:2] != (5.0, 5.0)                # goal was snapped off it
+    assert m.is_free_world(p._goal[0], p._goal[1])  # onto a free cell
+    _cmd, status = p.update((1.0, 1.0, 0.0), 0.0)   # first update plans
+    assert status == LocalPlanner.ACTIVE            # planned, not BLOCKED
+
+
+def test_goal_deep_in_obstacle_beyond_bound_still_blocked():
+    # A goal deep inside a large obstacle with NO free cell within the snap
+    # bound stays BLOCKED -- snapping must not paper over an unreachable goal.
+    grid = np.zeros((40, 40), dtype=np.uint8)
+    grid[10:30, 10:30] = Costmap2D.OCCUPIED         # big 5x5 m block
+    m = Costmap2D(grid, origin_xy=(0.0, 0.0), resolution=0.25)
+    p = LocalPlanner(m, snap_bound_m=0.5)           # bound << distance to free
+    p.set_goal(5.0, 5.0, 0.0, now=0.0)              # center of the block
+    assert p._goal[:2] == (5.0, 5.0)                # nothing free within bound
+    cmd, status = p.update((0.5, 0.5, 0.0), 0.0)
+    assert cmd == (0.0, 0.0, 0.0) and status == LocalPlanner.BLOCKED
+
+
 def test_cancel_resets_to_idle():
     m = _corridor_map()
     p = LocalPlanner(m)
