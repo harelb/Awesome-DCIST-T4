@@ -72,6 +72,11 @@ def main():
                              "<gt-out parent>/costmap.npz when --gt-out is "
                              "given; otherwise the costmap is baked but not "
                              "written unless this is set)")
+    parser.add_argument("--bake-only", action="store_true",
+                        help="physics mode only: build the stage, settle, "
+                             "write costmap.npz + costmap_raw.npz, exit 0 "
+                             "(no ROS bridge, no tour). Used to bake a fresh "
+                             "costmap for tour authoring (see render_costmap.py)")
     args = parser.parse_args()
 
     # Surface dcist_sim_isaac INFO (esp. the physics grasp/place state machine's
@@ -126,6 +131,29 @@ def main():
                     raw_out = os.path.join(costmap_dir, "costmap_raw.npz")
                     stage.costmap_raw.save(raw_out)
                     logger.info("raw costmap written to %s", raw_out)
+    elif args.bake_only:
+        logger.error("--bake-only requires a physics-mode scenario "
+                     "(locomotion: policy or grasping: physics)")
+        sim_app.close()
+        return 1
+
+    # --bake-only: the costmap is the only artifact we wanted; skip the ROS
+    # bridge / tour / GT loop entirely so this is a cheap, repeatable bake for
+    # tour authoring (spec Task 16 §2).
+    if args.bake_only:
+        if stage.costmap is None:
+            logger.error("--bake-only: no costmap was baked (build_stage "
+                         "returned costmap=None)")
+            sim_app.close()
+            return 1
+        if not (args.costmap_out or args.gt_out):
+            logger.error("--bake-only: pass --costmap-out (or --gt-out) so the "
+                         "costmap has somewhere to be written")
+            sim_app.close()
+            return 1
+        logger.info("--bake-only: costmap baked + written; exiting")
+        sim_app.close()
+        return 0
 
     # GT replay: second pass over a recorded build_map trajectory --
     # teleport-driven, no ROS bridge, capture-only (spec §3.4 fallback for
