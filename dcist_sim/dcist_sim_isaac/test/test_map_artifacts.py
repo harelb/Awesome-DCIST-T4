@@ -45,3 +45,38 @@ def test_provenance_written(tmp_path):
     assert data["tour_stats"]["reached"] == 8
     assert data["git"]["parent"] == "deadbeef"
     assert "map_name: foo" in data["scenario_yaml"]
+    # No scenario passed -> no fidelity block (backwards compatible).
+    assert "fidelity" not in data
+
+
+class _FakeRobot:
+    def __init__(self, name, locomotion, grasping, contact_hold):
+        self.name = name
+        self.locomotion = locomotion
+        self.grasping = grasping
+        self.contact_hold = contact_hold
+
+
+class _FakeScenario:
+    def __init__(self, robots):
+        self.robots = robots
+
+
+def test_provenance_emits_fidelity_when_scenario_given(tmp_path):
+    d = _mk_map(tmp_path)
+    scen = tmp_path / "scen.yaml"
+    scen.write_text("map_name: foo\n")
+    scenario = _FakeScenario([
+        _FakeRobot("hilbert", "policy", "magic", False),
+        _FakeRobot("euclid", "kinematic", "physics", True),
+    ])
+    path = write_provenance(
+        d, str(scen), {"reached": 8}, repo_root=str(tmp_path),
+        sha_fn=lambda repo: "deadbeef", scenario=scenario,
+    )
+    data = yaml.safe_load(open(path))
+    fid = data["fidelity"]
+    assert fid["hilbert"] == {
+        "locomotion": "policy", "grasping": "magic", "contact_hold": False}
+    assert fid["euclid"] == {
+        "locomotion": "kinematic", "grasping": "physics", "contact_hold": True}

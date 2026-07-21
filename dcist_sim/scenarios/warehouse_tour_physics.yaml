@@ -1,0 +1,103 @@
+# Physics-tier full-coverage warehouse mapping tour (Task 16, Isaac Phase 4).
+#
+# Derived from warehouse_tour_full.yaml (same warehouse_a environment, objects,
+# and GT) but retiered for PHYSICS: locomotion: policy (the SpotFlatTerrainPolicy
+# walker, Tasks 8/9) instead of kinematic, so the tour must stay in navigable
+# free space -- the robot really walks and a real local planner (costmap A*,
+# Tasks 3-5) routes it. Grasping stays magic (mapping never grasps; magic keeps
+# the scenario simple -- spec §2).
+#
+# TOUR AUTHORING (see .superpowers/sdd/task-16-report.md):
+#   Waypoints were laid down the AISLES against a freshly baked inflated costmap
+#   (sim_app --bake-only on this environment; rendered + checked via
+#   scripts/render_costmap.py --check). World interior is X[-26,+5], Y[-24,+30];
+#   the upper half (Y ~ 11..25) holds 7 rack rows with clean vertical aisles at
+#   x = -2, -8, -14, -19; the lower half (Y < ~10) is open floor. The tour is a
+#   boustrophedon down those 4 through-aisles plus two lower-half breadth passes
+#   (x = -24 and x = +3). The kinematic full tour's columns (x = 4, -26, ...)
+#   ran straight over racks / into wall inflation -- unusable under physics --
+#   and its Y = -38 row sits OUTSIDE the building (free in the costmap but
+#   disconnected by the south wall), so those were dropped.
+#
+#   EVERY waypoint here is free in the INFLATED costmap AND has a 1-cell margin
+#   (its cell + all 8 neighbors free) -- verified by render_costmap.py --check
+#   (all 24 free+margin, zero snap needed). The margin rule avoids the Task 10
+#   trap: a dwell goal ON the inflation boundary makes the NEXT cross-rack goal
+#   unplannable. build_map re-snaps + re-margin-checks against the run's own
+#   freshly baked costmap before driving, so this stays correct even if the
+#   bake shifts slightly (e.g. once the settled props perturb the map).
+#
+#   Longest hop = 27 m (wp20->wp21, across the open lower floor) ~= 65 s wall at
+#   0.94 m/s walk / RTF ~0.57 + planner overhead; build_map defaults
+#   --waypoint-timeout to 180 s under physics_mode (~= 90/RTF, comfortable
+#   margin). Do NOT run the full tour here -- that is Task 17's acceptance run.
+map_name: warehouse_sim_physics
+environment:
+  usd: assets/environments/warehouse_a.usd
+robots:
+  - name: hilbert
+    spawn: {x: 0.0, y: 0.0, z: 0.55, yaw: 1.57}   # policy stand height (nav_smoke); face +Y
+    locomotion: policy
+    grasping: magic
+# Local-planner / costmap params (NavSpec defaults, pinned to match
+# warehouse_nav_smoke.yaml: inflation 0.45 m = Spot half-width ~0.25 + margin).
+nav:
+  cell_size_m: 0.1
+  inflation_radius_m: 0.45
+  snap_bound_m: 2.0
+  max_lin_speed: 1.0
+  max_ang_speed: 1.0
+  stuck_timeout_s: 15.0
+objects:
+  # Same props as warehouse_tour_full.yaml -- lower-corridor floor near origin,
+  # observed from the x=-2 aisle and the x=+3 / home passes.
+  - id: bag_0
+    usd: assets/objects/duffel_bag.usd
+    label: bag
+    pose: {x: -1.5, y: 5.0, z: 0.0, yaw: 0.52}
+  - id: cone_0
+    usd: assets/objects/cone.usd
+    label: cone
+    pose: {x: 1.2, y: 4.2, z: 0.0, yaw: 0.0}
+  - id: pipe_0
+    usd: assets/objects/pipe.usd
+    label: pipe
+    pose: {x: -4.5, y: -1.5, z: 0.0, yaw: 1.57}
+grasp_radius: 1.5
+tour:  # boustrophedon down the 4 through-aisles + 2 lower breadth passes (yaw rad)
+  # Aisle x=-2 (up)
+  - {x:  -2.0, y: -21.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  -8.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:   6.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  18.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:  -2.0, y:  27.0, yaw:  1.57, dwell_s: 1.5}
+  # Aisle x=-8 (down)
+  - {x:  -8.0, y:  27.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:  18.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:   6.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -8.0, y:  -8.0, yaw: -1.57, dwell_s: 1.5}
+  - {x:  -8.0, y: -21.0, yaw: -1.57, dwell_s: 1.5}
+  # Aisle x=-14 (up)
+  - {x: -14.0, y: -21.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  -8.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -14.0, y:   6.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  18.0, yaw:  1.57, dwell_s: 1.5}
+  - {x: -14.0, y:  27.0, yaw:  1.57, dwell_s: 1.5}
+  # Aisle x=-19 (down)
+  - {x: -19.0, y:  27.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -19.0, y:  18.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -19.0, y:   6.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -19.0, y:  -8.0, yaw: -1.57, dwell_s: 1.5}
+  - {x: -19.0, y: -21.0, yaw: -1.57, dwell_s: 1.5}
+  # Lower-half breadth passes (open floor, below the racks)
+  - {x: -24.0, y: -12.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   3.0, y: -12.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   3.0, y:   6.0, yaw:  1.57, dwell_s: 1.5}
+  - {x:   0.0, y:   0.0, yaw:  1.57}                  # home
+gt:
+  rate_hz: 2.0
+  modalities: [rgb, semantic, instance, bbox2d]
+  semantics:
+    - {match: ".*SM_Palette.*", class: pallet}          # NOTE: "Palette" spelling
+    - {match: ".*SM_CardBox.*", class: box}
+    - {match: ".*SM_FireExtinguisher.*", class: fire_extinguisher}

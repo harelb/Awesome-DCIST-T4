@@ -70,7 +70,8 @@ def _git_sha(repo_dir):
     ).stdout.strip()
 
 
-def write_provenance(map_dir, scenario_path, tour_stats, repo_root, sha_fn=None):
+def write_provenance(map_dir, scenario_path, tour_stats, repo_root, sha_fn=None,
+                     scenario=None):
     sha_fn = sha_fn or _git_sha
     shas = {}
     for name, rel in PROVENANCE_REPOS.items():
@@ -88,6 +89,19 @@ def write_provenance(map_dir, scenario_path, tour_stats, repo_root, sha_fn=None)
         "tour_stats": dict(tour_stats),
         "git": shas,
     }
+    # Fidelity tier per robot (spec §7): which locomotion/grasp path this map
+    # was actually built with, so a map's provenance records whether it came
+    # from the kinematic or physics pipeline. Only emitted when the caller
+    # threads the loaded scenario in (build_map does; tests may not).
+    if scenario is not None:
+        out["fidelity"] = {
+            r.name: {
+                "locomotion": r.locomotion,
+                "grasping": r.grasping,
+                "contact_hold": r.contact_hold,
+            }
+            for r in scenario.robots
+        }
     path = os.path.join(map_dir, "provenance.yaml")
     with open(path, "w") as f:
         yaml.safe_dump(out, f, sort_keys=False)

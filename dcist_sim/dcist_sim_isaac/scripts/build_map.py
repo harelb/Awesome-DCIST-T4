@@ -123,6 +123,12 @@ def orchestrate_up(args, raw_dir, scenario):
     if not args.gui:
         sim_cmd.append("--headless")
     sim_cmd += ["--gt-out", os.path.join(args.map_dir, "gt")]
+    # Physics mode: tell the sim exactly where to drop the costmap the
+    # snapping preflight (main()) will wait for, rather than relying on the
+    # <gt-out parent>/costmap.npz default. Kinematic scenarios bake no
+    # costmap, so this is a harmless no-op there.
+    if scenario.physics_mode:
+        sim_cmd += ["--costmap-out", os.path.join(args.map_dir, "costmap.npz")]
     isaac = subprocess.Popen(
         sim_cmd, cwd=REPO_ROOT, env=env, stdout=isaac_log,
         stderr=subprocess.STDOUT)
@@ -216,6 +222,59 @@ def _find_shutdown_dsg(raw_dir):
     return max(hits, key=os.path.getmtime) if hits else None
 
 
+def _has_margin(cm, x, y):
+    """True iff (x, y)'s cell and all 8 neighbors are FREE in the inflated map.
+    A waypoint on the inflation boundary (any occupied/off-map neighbor) has no
+    margin -- Task 10 trap: a dwell goal there makes the next cross-rack goal
+    unplannable, so we require headroom in every direction."""
+    cell = cm.world_to_grid(x, y)
+    if cell is None:
+        return False
+    ix, iy = cell
+    ny, nx = cm.grid.shape
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            jx, jy = ix + dx, iy + dy
+            if not (0 <= jx < nx and 0 <= jy < ny):
+                return False  # map edge counts as no margin
+            if cm.grid[jy, jx] != cm.FREE:
+                return False
+    return True
+
+
+def snap_tour(cm, scenario):
+    """Snap every tour waypoint onto a free cell WITH a 1-cell inflation margin.
+
+    Mutates scenario.tour in place. A cell that is free in the map inflated one
+    more cell is guaranteed to have every 8-neighbor free in `cm` -- that IS the
+    margin rule -- so we snap against `margin_cm` and then belt-and-braces
+    re-check margin against `cm`. Any waypoint that can't be placed within
+    snap_bound_m aborts with exit 2 (map-failed), never mid-tour (spec §7)."""
+    bound = scenario.nav.snap_bound_m
+    margin_cm = cm.inflate(cm.resolution)
+    unreachable, no_margin = [], []
+    for i, wp in enumerate(scenario.tour):
+        snapped = margin_cm.nearest_free(wp.x, wp.y, bound)
+        if snapped is None:
+            if cm.nearest_free(wp.x, wp.y, bound) is None:
+                unreachable.append(i)   # no free cell at all within bound
+            else:
+                no_margin.append(i)     # free cell exists but none with margin
+            continue
+        if not _has_margin(cm, *snapped):
+            no_margin.append(i)         # should not happen given margin_cm
+            continue
+        wp.x, wp.y = snapped
+    if unreachable or no_margin:
+        print(f"[build_map] tour waypoints with no free cell within snap bound "
+              f"{bound} m: {unreachable}; no free cell WITH inflation margin: "
+              f"{no_margin} (fix the scenario; render_costmap.py --check "
+              f"flags these)", flush=True)
+        sys.exit(2)
+    print(f"[build_map] snapped {len(scenario.tour)} waypoints against costmap "
+          f"(margin-checked)", flush=True)
+
+
 def collect(map_dir, raw_dir):
     dsg = _find_shutdown_dsg(raw_dir)
     if dsg is None:
@@ -247,13 +306,22 @@ def main():
     # (observed on the first moving field regression: 3/3 skipped while the
     # robot dutifully stopped 1 m from each target).
     ap.add_argument("--arrival-tol", type=float, default=1.5)
-    ap.add_argument("--waypoint-timeout", type=float, default=90.0)
+    # Default resolved after the scenario loads: 90 s kinematic, 180 s physics.
+    # Physics walks at ~0.94 m/s p50 (Task 15c) and RTF ~0.57 (Task 1/15c), so
+    # the wall budget for a D-metre hop is ~D/0.94/0.57 + planner overhead;
+    # 180 s covers the ~14 m cross-aisle hops in warehouse_tour_physics.yaml
+    # (see task-16-report.md timeout math) with margin.
+    ap.add_argument("--waypoint-timeout", type=float, default=None,
+                    help="per-waypoint wall-clock budget (s); default 90 "
+                         "kinematic, 180 physics")
     ap.add_argument("--stack-up-timeout", type=float, default=300.0)
     ap.add_argument("--min-places", type=int, default=10,
                     help="places-layer sanity floor (small scenes: lower it)")
     args = ap.parse_args()
 
     scenario = load_scenario(args.scenario)
+    if args.waypoint_timeout is None:
+        args.waypoint_timeout = 180.0 if scenario.physics_mode else 90.0
     map_name = args.map_name or scenario.map_name
     if not map_name:
         sys.exit("scenario has no map_name and --map-name not given")
@@ -276,6 +344,18 @@ def main():
         if not wait_until(lambda: node.odom_xy() is not None,
                           timeout=args.stack_up_timeout, what="first odom"):
             raise RuntimeError("robot stack never published odom")
+        # Physics mode: the sim bakes costmap.npz during build_stage settle
+        # (before /sim/status), so it is normally already on disk by now; wait
+        # up to 120 s as a safety margin, then snap+margin-check every waypoint
+        # so any unreachable goal fails HERE (exit 2) rather than mid-tour.
+        if scenario.physics_mode:
+            cm_path = os.path.join(args.map_dir, "costmap.npz")
+            if not wait_until(lambda: os.path.isfile(cm_path), timeout=120,
+                              what="costmap.npz"):
+                raise RuntimeError(
+                    "physics scenario but sim never wrote costmap.npz")
+            from dcist_sim_isaac.costmap import Costmap2D
+            snap_tour(Costmap2D.load(cm_path), scenario)
         seq = run_tour(node, scenario, args)
         with open(os.path.join(args.map_dir, "trajectory.jsonl"), "w") as f:
             for row in node.trajectory:
@@ -287,7 +367,8 @@ def main():
         failures = map_artifacts.verify_map(args.map_dir, sanity=sanity)
         map_artifacts.write_provenance(
             args.map_dir, args.scenario,
-            dict(seq.stats(), tour_ok=seq.ok()), repo_root=REPO_ROOT)
+            dict(seq.stats(), tour_ok=seq.ok()), repo_root=REPO_ROOT,
+            scenario=scenario)
         # GT only gates the exit code when the scenario asked for it.
         gt_ok = (not scenario.gt.enabled) or os.path.isfile(
             os.path.join(args.map_dir, "gt", "manifest.jsonl"))
