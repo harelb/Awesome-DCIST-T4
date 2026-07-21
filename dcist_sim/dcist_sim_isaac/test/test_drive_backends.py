@@ -4,9 +4,19 @@ import numpy as np
 import pytest
 
 from dcist_sim_isaac.drive_backends import (
-    assemble_spot_obs, build_arm_stow, compose_root_pose, fallen,
-    kinematic_target_step, kinematic_velocity_step, sanitize_action,
-    wrap_angle)
+    PolicyDriveBackend, assemble_spot_obs, build_arm_stow,
+    compose_root_pose, fallen, kinematic_target_step, kinematic_velocity_step,
+    sanitize_action, slew_command, wrap_angle)
+
+
+class _Spec:
+    name = "hilbert"
+
+
+def _backend():
+    # PolicyDriveBackend.__init__ is Isaac-free (imports only collections/os),
+    # so _next_applied_cmd can be exercised directly without a live sim.
+    return PolicyDriveBackend("/World/hilbert", _Spec())
 
 
 def _yaw_R(yaw):
@@ -177,3 +187,80 @@ def test_compose_root_pose_body_yaw_rotates_offset():
     # 90 (body) + 90 (offset) = 180 deg yaw -> quat (0,0,0,1) up to sign
     assert abs(abs(root_quat[3]) - 1.0) < 1e-9
     np.testing.assert_allclose(root_quat[:3], [0.0, 0.0, 0.0], atol=1e-9)
+
+
+# --- slew_command (Task 15g command smoother) -----------------------------
+
+def test_slew_command_caps_step_up():
+    # A 0 -> 0.94 pursuit step is limited to +cap on vx this tick; wz limited
+    # to its own cap; vy untouched (already at target 0).
+    out = slew_command((0.0, 0.0, 0.0), (0.94, 0.0, 1.0),
+                       max_dv=0.03, max_dw=0.06)
+    assert out == pytest.approx((0.03, 0.0, 0.06))
+
+
+def test_slew_command_reaches_target_within_cap_no_overshoot():
+    # When the remaining delta is <= cap, land exactly on target (no overshoot,
+    # no oscillation) -- both a shrinking vx and a wz already at target.
+    out = slew_command((0.92, 0.0, 1.0), (0.94, 0.0, 1.0),
+                       max_dv=0.03, max_dw=0.06)
+    assert out == pytest.approx((0.94, 0.0, 1.0))
+
+
+def test_slew_command_decelerates_through_zero_on_sign_flip():
+    # wz sign flip at a waypoint pop (+1.0 -> -1.0) is walked down toward the
+    # target one cap at a time, passing through the +side first -- never snaps.
+    out = slew_command((1.0, 0.0, 1.0), (0.0, 0.0, -1.0),
+                       max_dv=0.03, max_dw=0.06)
+    assert out == pytest.approx((0.97, 0.0, 0.94))
+    # symmetric on the negative side
+    out2 = slew_command((-1.0, 0.0, -1.0), (0.0, 0.0, 1.0),
+                        max_dv=0.03, max_dw=0.06)
+    assert out2 == pytest.approx((-0.97, 0.0, -0.94))
+
+
+def test_slew_command_multi_tick_ramp_converges_monotonically():
+    # Iterating the slew converges to the target in a bounded number of ticks,
+    # monotonically (the ramp shape the policy sees).
+    cur = (0.0, 0.0, 0.0)
+    tgt = (0.94, 0.0, 0.0)
+    seen = [cur[0]]
+    for _ in range(64):
+        cur = slew_command(cur, tgt, max_dv=0.03, max_dw=0.06)
+        seen.append(cur[0])
+    assert cur == pytest.approx(tgt)
+    # non-decreasing ramp, and 0->0.94 at dv=0.03 takes ~32 ticks (~0.63 s)
+    assert all(b >= a - 1e-12 for a, b in zip(seen, seen[1:]))
+    assert 30 <= next(i for i, v in enumerate(seen) if v >= 0.94 - 1e-9) <= 33
+
+
+# --- backend command slew integration ------------------------------------
+
+def test_slew_disabled_passes_command_raw():
+    b = _backend()
+    b.set_slew_enabled(False)
+    b.set_command(0.94, 0.0, 1.0)          # nav max_ang_speed request
+    assert b._next_applied_cmd() == pytest.approx((0.94, 0.0, 1.0))
+
+
+def test_slew_enabled_by_default_and_ramps_toward_target():
+    # ON by default: the observed command ramps toward the full requested
+    # magnitude (no clamp) one accel-bounded tick at a time.
+    b = _backend()
+    assert b.slew_enabled()
+    b.set_command(0.94, 0.0, 1.0)
+    first = b._next_applied_cmd()
+    assert first == pytest.approx((0.03, 0.0, 0.06))   # one tick from rest
+    b._applied_cmd = first
+    for _ in range(80):
+        b._applied_cmd = b._next_applied_cmd()
+    # converges to the FULL requested command -- rate-limited, not magnitude-capped
+    assert b._applied_cmd == pytest.approx((0.94, 0.0, 1.0))
+
+
+def test_reset_applied_cmd_zeroed_for_fresh_ramp():
+    # A recovered robot starts still: applied cmd must be zero so it ramps up.
+    b = _backend()
+    b._applied_cmd = (0.0, 0.0, 0.0)       # what reset_standing sets
+    b.set_command(0.94, 0.0, 1.0)
+    assert b._next_applied_cmd() == pytest.approx((0.03, 0.0, 0.06))

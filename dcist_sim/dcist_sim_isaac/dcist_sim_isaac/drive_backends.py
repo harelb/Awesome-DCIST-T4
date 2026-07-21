@@ -141,6 +141,37 @@ POLICY_RENDERING_DT = 1.0 / 60.0
 POLICY_DECIMATION = 10
 POLICY_ACTION_SCALE = 0.2
 
+# Control-tick period: the policy runs once every POLICY_DECIMATION physics
+# steps (spike report §4), i.e. 10 / 500 Hz = 0.02 s (50 Hz control rate).
+POLICY_CONTROL_DT = POLICY_DECIMATION * POLICY_PHYSICS_DT
+
+# --- Command slew-rate limiting (Task 15g) --------------------------------
+# The pure-pursuit law (local_planner.py) steps vx 0 -> ~0.94 m/s in a single
+# frame and flips wz sign hard at every waypoint pop and rotate<->walk
+# transition (|herr|>pi/2 -> vx=0, |wz| at cap). The pretrained flat-terrain
+# policy was trained on SMOOTH command curricula, so a step command at 50 Hz --
+# especially on the untrained arm-loaded asset -- destabilises the gait and
+# topples the robot on the e2e's long traverses (Task 15f: 6 falls / 2 runs,
+# occurring unloaded in Stage A too). We rate-limit the command the policy
+# OBSERVES (obs[9:12]) toward the requested target at a bounded acceleration
+# each control tick. This lives in the backend so it protects EVERY command
+# source (planner pursuit AND raw cmd_vel) with no planner change. Caps tuned
+# from the fall characterization (task-15g-report.md): the observed falls all
+# follow a hard rotate->walk command step, so the linear cap is the load-bearing
+# one. dv per tick = ACCEL * POLICY_CONTROL_DT.
+POLICY_MAX_LIN_ACCEL = 1.5    # m/s^2  -> dv = 0.030 m/s per 50 Hz tick
+POLICY_MAX_ANG_ACCEL = 3.0    # rad/s^2 -> dw = 0.060 rad/s per 50 Hz tick
+# NOTE (Task 15g): a peak-yaw magnitude CLAMP (tried at 0.6 rad/s) was rejected
+# on evidence -- it broke pursuit path-tracking (robot under-turns while walking
+# and circles the goal -> nav timeout on every leg), and it was unnecessary
+# because full-rate (1.0 rad/s) in-place yaw is stable in open field (0 falls).
+# Only the command RATE is limited (above), not its magnitude.
+
+# Length of the always-on command/pose trace ring buffer (control ticks). At
+# 50 Hz this holds the last 3 s -- enough to characterize the command history
+# leading into a fall (task-15g). Cheap (a few hundred small tuples).
+POLICY_TRACE_LEN = 150
+
 # Standing base height used at spawn/reset (m). Spot's nominal standing CoM
 # height; the settle loop lets PhysX drop it onto its feet from here.
 POLICY_STANDING_Z = 0.55
@@ -253,6 +284,43 @@ def assemble_spot_obs(base_lin_vel_b, base_ang_vel_b, projected_gravity_b,
     obs[24:36] = joint_vel                       # default_vel == 0 (§4)
     obs[36:48] = prev_action
     return obs
+
+
+def slew_command(current, target, max_dv, max_dw):
+    """Rate-limit a (vx, vy, wz) command from `current` toward `target`, moving
+    each component by at most `max_dv` (linear vx/vy) or `max_dw` (angular wz)
+    per call. When the remaining delta is within the cap the target is reached
+    exactly (no overshoot, no residual oscillation). Pure -- unit-tested,
+    Isaac-free.
+
+    This is the Task-15g command smoother: called once per 50 Hz control tick
+    with `max_dv = POLICY_MAX_LIN_ACCEL * POLICY_CONTROL_DT` (and likewise for
+    `max_dw`), so a 0 -> 0.94 m/s pursuit step ramps over ~0.6 s instead of
+    hitting the policy as an instantaneous 50 Hz step. Symmetric in sign, so a
+    wz sign flip at a waypoint pop decelerates through zero rather than
+    snapping.
+
+    Args:
+        current: last applied (vx, vy, wz)
+        target: requested (vx, vy, wz)
+        max_dv: max change in vx and vy this tick (>= 0)
+        max_dw: max change in wz this tick (>= 0)
+
+    Returns:
+        new (vx, vy, wz) tuple of floats
+    """
+    def _step(c, t, cap):
+        c = float(c)
+        d = float(t) - c
+        if d > cap:
+            return c + cap
+        if d < -cap:
+            return c - cap
+        return float(t)
+
+    return (_step(current[0], target[0], max_dv),
+            _step(current[1], target[1], max_dv),
+            _step(current[2], target[2], max_dw))
 
 
 def fallen(base_quat_wxyz, base_z, tilt_cos_min=0.5, z_min=0.3):
@@ -376,10 +444,29 @@ class PolicyDriveBackend:
         # spike_engine_cls is accepted for interface parity with the brief but
         # unused: SpotFlatTerrainPolicy can't wrap our 19-DOF arm articulation
         # (see module header), so we load the raw checkpoint ourselves.
+        import collections
+        import os
+
         self._prim_path = prim_path
         self._spec = spec
         self._engine_cls = spike_engine_cls
+        # `_cmd` is the requested TARGET command (set by set_command); the
+        # policy actually observes `_applied_cmd`, which slews toward the target
+        # at a bounded acceleration each control tick (Task 15g). They coincide
+        # when slew is disabled.
         self._cmd = (0.0, 0.0, 0.0)
+        self._applied_cmd = (0.0, 0.0, 0.0)
+        # Command shaping (slew-rate limit + peak-yaw clamp) ON by default (the
+        # Task-15g fix). `DCIST_POLICY_NO_SLEW=1` forces the raw pass-through for
+        # a full-stack baseline measurement; the in-process characterization
+        # harness flips it via set_slew_enabled().
+        self._slew_enabled = os.environ.get("DCIST_POLICY_NO_SLEW") != "1"
+        # Always-on command/pose trace (Task 15g fall characterization). Each
+        # 50 Hz control tick appends a compact record; dumped by the harness
+        # when it observes a fall.
+        self._trace = collections.deque(maxlen=POLICY_TRACE_LEN)
+        self._phys_t = 0.0
+        self._last_base = (0.0, 0.0, 0.0, 1.0)   # (x, y, z, up_z), for trace
         self._nan_tripped = False
         self._prev_action = None
         self._art = None
@@ -525,6 +612,28 @@ class PolicyDriveBackend:
     def halt(self):
         self._cmd = (0.0, 0.0, 0.0)
 
+    # -- command slew + trace (Task 15g) -------------------------------------
+
+    def set_slew_enabled(self, enabled):
+        """Enable/disable command slew-rate limiting. Default ON (the fix); the
+        characterization harness disables it to measure the baseline fall rate
+        under the raw pursuit step commands."""
+        self._slew_enabled = bool(enabled)
+
+    def slew_enabled(self):
+        return self._slew_enabled
+
+    def applied_command(self):
+        """The command the policy currently observes (post-slew)."""
+        return tuple(self._applied_cmd)
+
+    def recent_trace(self, n=None):
+        """Snapshot of the last `n` control-tick records (all if None). Each
+        record is (t_sim, tgt_vx, tgt_wz, applied_vx, applied_wz, x, y, z,
+        up_z) -- Task-15g fall characterization."""
+        items = list(self._trace)
+        return items if n is None else items[-n:]
+
     # -- arm-ownership handoff (Task 13) -------------------------------------
 
     def set_arm_hold(self, enabled):
@@ -563,6 +672,9 @@ class PolicyDriveBackend:
         # sufficient. If NaN latched, keep halting (zero command) but still
         # hold the last-good targets so the robot doesn't collapse instantly.
         if self._policy_counter % POLICY_DECIMATION == 0:
+            # Slew the observed command toward the requested target before it
+            # reaches the policy (Task 15g). One step per 50 Hz control tick.
+            self._applied_cmd = self._next_applied_cmd()
             action = self._compute_action()
             action, tripped = sanitize_action(action, self._prev_action)
             if tripped and not self._nan_tripped:
@@ -570,7 +682,36 @@ class PolicyDriveBackend:
                 self.halt()
             self._prev_action = action
             self._apply_leg_targets(action)
+            self._record_trace()
         self._policy_counter += 1
+        self._phys_t += float(step_size)
+
+    def _next_applied_cmd(self):
+        # Slew OFF (baseline): the policy observes the raw requested command.
+        if not self._slew_enabled:
+            return tuple(float(v) for v in self._cmd)
+        # Slew ON (Task 15g): rate-limit the observed command toward the target
+        # at a bounded accel, smoothing step onsets and sign flips (e.g. the
+        # 15f align phase's rotate/approach cmd_vel). vx/vy/wz are all only
+        # RATE-limited, not magnitude-clamped: open-field walking at full vx AND
+        # full-rate in-place yaw are both stable (measured, 0 falls / ~140 m
+        # over both baseline and slew runs), and a peak-yaw CLAMP was measured to
+        # break pursuit path-tracking (the robot under-turns while walking and
+        # circles the goal -> nav timeout), so only the RATE is bounded here.
+        return slew_command(
+            self._applied_cmd, self._cmd,
+            POLICY_MAX_LIN_ACCEL * POLICY_CONTROL_DT,
+            POLICY_MAX_ANG_ACCEL * POLICY_CONTROL_DT)
+
+    def _record_trace(self):
+        # Compact per-tick record for fall characterization (Task 15g). Base
+        # pose stashed by _compute_action this same tick (no extra readback).
+        x, y, z, up_z = self._last_base
+        self._trace.append((
+            round(self._phys_t, 4),
+            round(self._cmd[0], 4), round(self._cmd[2], 4),        # target vx,wz
+            round(self._applied_cmd[0], 4), round(self._applied_cmd[2], 4),
+            round(x, 3), round(y, 3), round(z, 3), round(up_z, 4)))
 
     def _compute_action(self):
         import numpy as np
@@ -580,6 +721,10 @@ class PolicyDriveBackend:
         w, x, y, z = (float(v) for v in quat)
         R_IB = _quat_wxyz_to_R_world_from_body(w, x, y, z)
         R_BI = R_IB.T
+        # Stash base pose + tilt (up_z, the body-z world component) for the
+        # trace so _record_trace needs no second get_world_pose readback.
+        self._last_base = (float(pos[0]), float(pos[1]), float(pos[2]),
+                           1.0 - 2.0 * (x * x + y * y))
         lin_w = np.asarray(self._base.get_linear_velocity(), dtype=np.float64)
         ang_w = np.asarray(self._base.get_angular_velocity(), dtype=np.float64)
         lin_b = R_BI @ lin_w
@@ -591,7 +736,8 @@ class PolicyDriveBackend:
         jv = np.asarray(self._art.get_joint_velocities(),
                         dtype=np.float64)[self._leg_idx]
 
-        obs = assemble_spot_obs(lin_b, ang_b, grav_b, np.asarray(self._cmd),
+        obs = assemble_spot_obs(lin_b, ang_b, grav_b,
+                                np.asarray(self._applied_cmd),
                                 jp, jv, self._default_pos, self._prev_action)
         obs_t = torch.from_numpy(obs.astype(np.float32)).view(1, -1).to(
             self._device)
@@ -667,3 +813,6 @@ class PolicyDriveBackend:
         self._policy_counter = 0
         self._nan_tripped = False
         self._cmd = (0.0, 0.0, 0.0)
+        # Fresh ramp after recovery: the just-reset robot is standing still, so
+        # the observed command must start at zero and slew up again (Task 15g).
+        self._applied_cmd = (0.0, 0.0, 0.0)
