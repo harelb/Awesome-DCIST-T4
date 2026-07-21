@@ -100,6 +100,14 @@ class Scenario:
     tour: list = field(default_factory=list)
     map_name: str = ""
     gt: GtSpec = field(default_factory=GtSpec)
+    # Task 15e: opt-in publishing of a ground-truth semantic LABEL image on
+    # the ZED `semantic/gt_image_raw` topic hydra can be pointed at (isaac_sim
+    # overlay), so hydra places DSG object nodes from pixel-perfect GT masks
+    # instead of FastSAM's range-biased ones (see docs/sim_runbook.md §12.12).
+    # This is INDEPENDENT of `gt` (the mapping-harness file capture): it is a
+    # lightweight ROS publisher, not the manifest/frame writer. Default OFF so
+    # kinematic/P1 behaviour is byte-identical (no annotator, no publisher).
+    gt_semantics_pub: bool = False
     nav: NavSpec = field(default_factory=NavSpec)
     # Directory the scenario YAML lives in. Asset paths (environment_usd,
     # ObjectSpec.usd) are stored exactly as authored (relative to this
@@ -276,6 +284,7 @@ def load_scenario(path) -> Scenario:
         tour=tour,
         map_name=str(data.get("map_name", "")),
         gt=gt,
+        gt_semantics_pub=bool(data.get("gt_semantics_pub", False)),
         nav=nav,
         base_dir=base_dir,
     )

@@ -14,6 +14,13 @@
 # Spawn z=0.55 is the policy standing height (drive_backends.POLICY_STANDING_Z);
 # the robot drops onto its feet during the settle phase. See field_smoke.yaml's
 # header for the object-distance rationale (unchanged here).
+# Task 15e: publish Isaac's ground-truth semantic LABEL image on
+# .../semantic/gt_image_raw so the isaac_sim hydra overlay places DSG object
+# nodes from pixel-perfect GT masks (collapses the range-dependent FastSAM
+# localization bias root-caused in runbook §12.11 that blocked the A1 pick).
+# Opt-in; only affects hydra's object mapping, not the executor's own YOLOE
+# detection gate (spot_executor reads the RGB topic directly). See §12.12.
+gt_semantics_pub: true
 environment:
   usd: assets/environments/field_a.usd
 robots:

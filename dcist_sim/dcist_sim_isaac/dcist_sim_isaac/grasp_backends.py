@@ -824,6 +824,22 @@ class PhysicsGraspBackend:
         the servo CONVERGED (caller advances the phase)."""
         status = self._advance_servo(op)
         if status == IkServo.FAILED:
+            # Diagnostic (Task 15e): report WHERE the servo gave up in the base
+            # (servo) frame -- the fixed jacobian's validity envelope hinges on
+            # a small lateral |y| (see ARM_JACOBIAN_BASE), so log it explicitly.
+            try:
+                tgt_b = op.arm.to_servo_frame(op.target)
+                grip_b = op.arm.gripper_pos()
+                err = tgt_b - grip_b
+                logger.info(
+                    "'%s' servo FAILED in '%s': base-frame target="
+                    "(x=%.3f y=%.3f z=%.3f) gripper=(x=%.3f y=%.3f z=%.3f) "
+                    "err_norm=%.3f lateral_y=%.3f",
+                    robot_name, op.phase, tgt_b[0], tgt_b[1], tgt_b[2],
+                    grip_b[0], grip_b[1], grip_b[2],
+                    float(np.linalg.norm(err)), abs(float(tgt_b[1])))
+            except Exception:  # noqa: BLE001 -- diagnostic must never throw
+                logger.exception("servo-fail diagnostic failed")
             self._fail(robot_name, op, f"IK servo failed in '{op.phase}'")
             return False
         return status == IkServo.CONVERGED

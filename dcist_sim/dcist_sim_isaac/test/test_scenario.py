@@ -32,6 +32,20 @@ def test_load_scenario(tmp_path):
     assert s.objects[0].graspable is True  # default
 
 
+def test_gt_semantics_pub_defaults_false(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML)
+    s = load_scenario(p)
+    assert s.gt_semantics_pub is False
+
+
+def test_gt_semantics_pub_opt_in(tmp_path):
+    p = tmp_path / "s.yaml"
+    p.write_text(YAML + "gt_semantics_pub: true\n")
+    s = load_scenario(p)
+    assert s.gt_semantics_pub is True
+
+
 def test_rejects_unknown_locomotion(tmp_path):
     p = tmp_path / "s.yaml"
     p.write_text(YAML.replace("kinematic", "warp9"))

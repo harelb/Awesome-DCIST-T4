@@ -204,7 +204,8 @@ def main():
     if not args.smoke:
         from dcist_sim_isaac.ros_bridge import RosBridge
         ros_bridge = RosBridge(robots, stage.registry, stage.grasp_radius,
-                                use_sim_time=scenario.physics_mode)
+                                use_sim_time=scenario.physics_mode,
+                                gt_semantics_pub=scenario.gt_semantics_pub)
 
     # Mapping-harness GT capture (live mode). Scenario objects already carry
     # semantics from stage.py's add_labels; this stamps the env props and

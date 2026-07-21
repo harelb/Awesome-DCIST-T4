@@ -214,7 +214,8 @@ class _RobotBridge:
     """Per-robot ROS wiring: cmd_vel/target_pose subs, tf/odom/joint pubs,
     and (Task 9) grasp/place/teleport services."""
 
-    def __init__(self, node, robot, backend, teleport_backend):
+    def __init__(self, node, robot, backend, teleport_backend,
+                 gt_semantics_pub=False):
         self.robot = robot
         # Task 11: `backend` is this robot's grasp/place/grasp_status target
         # (magic-shared `GraspBackend` or a per-scenario `PhysicsGraspBackend`,
@@ -252,6 +253,19 @@ class _RobotBridge:
         )
         self._depth_info_pub = node.create_publisher(
             CameraInfo, f"{camera_ns}/depth/camera_info", 10
+        )
+        # -- Task 15e: opt-in GT semantic LABEL image for hydra ----------
+        # A `32SC1` packed-label image (see gt_semantics.py) on a DEDICATED
+        # topic (`semantic/gt_image_raw`, not the FastSAM/instance-seg
+        # `semantic/image_raw`) so the isaac_sim hydra overlay can point at
+        # exactly one GT publisher. `_gt_semantics` is built lazily on the
+        # first camera publish (the Replicator annotator attach needs the
+        # camera initialized + a live sim view, guaranteed by then).
+        self._gt_semantics_enabled = gt_semantics_pub
+        self._gt_semantics = None
+        self._gt_label_pub = (
+            node.create_publisher(Image, f"{camera_ns}/semantic/gt_image_raw", 10)
+            if gt_semantics_pub else None
         )
         self._publish_static_camera_tf(node, name)
 
@@ -455,7 +469,47 @@ class _RobotBridge:
         self._depth_info_pub.publish(
             camera_contract.make_camera_info_msg(self._depth_frame_id, stamp)
         )
+
+        # Task 15e: GT semantic label image, stamped IDENTICALLY to the RGB/
+        # depth pair above so hydra's message-filter sync accepts the triple.
+        if self._gt_semantics_enabled:
+            self._publish_gt_semantics(stamp)
         return True
+
+    def _publish_gt_semantics(self, stamp) -> None:
+        if self._gt_semantics is None:
+            # Lazy attach on first frame (camera is initialized + sim view is
+            # live by now). Never let a GT-publisher failure kill the sim.
+            try:
+                from dcist_sim_isaac.gt_semantics import GtSemanticsPublisher
+
+                self._gt_semantics = GtSemanticsPublisher(self.robot.camera)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "GT semantics annotator attach failed; disabling GT "
+                    "semantics publish for the rest of the run")
+                self._gt_semantics_enabled = False
+                return
+        try:
+            label = self._gt_semantics.get_label_image()
+        except Exception:  # noqa: BLE001
+            logger.exception("GT semantics get_label_image failed; disabling")
+            self._gt_semantics_enabled = False
+            return
+        if label is None:
+            return  # annotator buffer not warmed up yet (see gt_capture warm-up)
+        from dcist_sim_isaac import gt_semantics as gt_sem
+
+        label = np.ascontiguousarray(label, dtype=np.int32)
+        msg = Image()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self._rgb_frame_id
+        msg.height, msg.width = label.shape[0], label.shape[1]
+        msg.encoding = gt_sem.LABEL_ENCODING
+        msg.is_bigendian = 0
+        msg.step = label.shape[1] * 4  # int32 = 4 bytes/px
+        msg.data = label.tobytes()
+        self._gt_label_pub.publish(msg)
 
 
 STATUS_HZ = 1.0
@@ -466,7 +520,7 @@ class RosBridge:
 
     def __init__(self, robots, registry,
                  grasp_radius=grasp_backend.DEFAULT_GRASP_RADIUS,
-                 use_sim_time=False):
+                 use_sim_time=False, gt_semantics_pub=False):
         rclpy.init(args=[])
         self.node = rclpy.create_node(
             "dcist_sim",
@@ -518,7 +572,8 @@ class RosBridge:
         }
         self._bridges = [
             _RobotBridge(
-                self.node, r, self._backend_for[r.spec.name], self.grasp_backend
+                self.node, r, self._backend_for[r.spec.name], self.grasp_backend,
+                gt_semantics_pub=gt_semantics_pub,
             )
             for r in robots
         ]
