@@ -591,6 +591,28 @@ side of the object, so the follower (goal_tolerance 1.0 m) stops just short of
 it — head-on by construction *provided the perceived object node is accurate*
 (see 12.7, where it is not, under physics).
 
+**Grasp-approach STAND-OFF BAND (Task 15h, `grasp_backends.ALIGN_*`).** The
+grasp ALIGN phase enforces precondition 2 (head-on) AND a distance band before
+the arm deploys: the base must be facing the object (`|bearing| <=
+ALIGN_TOL_RAD`) AND parked at the stand-off setpoint `ALIGN_STANDOFF_M` (0.78 m,
+centre of the safe band `[ALIGN_STANDOFF_MIN_M, ALIGN_STANDOFF_MAX_M]` =
+0.70-0.90 m: inside reach 0.984 with servo margin, outside the object's
+leg-collision range). If the base arrives TOO CLOSE (`rng < MIN`) it escapes the
+collider IMMEDIATELY, without waiting to face first, by `vx =
+-cos(bearing)*speed` (backing away ALONG the bearing line opens the range for
+ANY bearing, `d(range)/dt = speed*cos^2 >= 0`, so an overshoot PAST the object
+drives forward off it rather than backing further onto it — the 15g run-1 168°
+case); otherwise it SEEKS the setpoint with a deadband. A settle latch with a
+looser hysteresis hold band keeps the policy's station-keeping wobble from
+resetting the pre-deploy settle at a band edge. Combined phase timeout 20 s ->
+`stand-off timeout`. GPU-verified (12.15): this parks the base at 0.70-0.74 m
+and deploys cleanly, closing the 15g pick-approach collision fall — Stage B
+picks + attaches. NOTE: this fixes the pick-APPROACH only; it cannot recover a
+base the `goto-poi` follower drove fully ONTO the object before grasp dispatch
+(the leg-only policy tips on any step off an object it is standing on — see
+12.15). Place adds a symmetric carry-EGRESS: after detach+stow, back the base to
+MIN off the just-placed object before reporting succeeded.
+
 ### 12.6 contact_hold (G2) — EXPERIMENTAL, non-functional
 
 `grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`,
@@ -1062,3 +1084,88 @@ robot at its true settled height on teleport/reset to kill the (harmless) settle
 z-transient; (4) resume-after-fall (re-plan + continue) — the spec-reserved
 item, human decision. Command slew limiting is retained (correct, harmless,
 preserves walking) but is not the A1-closing lever.
+
+### 12.15 A1 FINAL (Task 15h) — grasp-approach STAND-OFF closes the PICK; A1 2× gate moves DOWNSTREAM to the carry-place traverse
+
+Task 15h implemented the binding USER DECISION: a grasp-approach **stand-off**
+so the base parks at a safe distance BEFORE the arm deploys, plus a symmetric
+place **carry-egress** (design + constants: §12.5, `grasp_backends.ALIGN_*`).
+Unit tests `isaac 119 -> 122` (too-close backs off then deploys; too-close +
+facing-AWAY escapes by TRANSLATING, not rotating on the collider, and opens the
+range; too-far seeks the setpoint; settle survives hold-band drift; stand-off
+timeout -> failed; egress backs the base off the placed object) + `ros 23`
+unchanged; kinematic/magic tiers untouched.
+
+**GPU (field_smoke_physics, GT semantics, slew ON, per §12.1). Two 5-attempt
+batches; thresholds untouched. e2e_smoke `os._exit(main())` exit code = verdict.**
+
+Batch 1 (commit `2db618a`, band + escape + egress) — 5/5 FAIL, four distinct
+signatures, only ONE inside the grasp-approach lever:
+```
+A1 fell during goto-poi APPROACH onto object (5.0,0.5), no grasp dispatched
+A2 grasp accepted, INSTANT fall (5.1,0.3) — base already on the object at accept
+A3 grasp accepted, stand-off REACHED band ("0.5 deg / 0.90 m") but the pre-deploy
+   settle kept resetting on hold-station drift at the band EDGE -> 20 s timeout, fell
+A4 never reached object in the 120 s window (slow locomotion, §12.9), no grasp
+A5 fell during approach at (3.7,1.1) near the object cluster, no grasp
+```
+A3 exposed an in-lever bug: the base parked at the 0.90 band EDGE (zero margin)
+and the policy's station-keeping wobble tripped the timeout. Fix (folded into
+`ef4d373`): SEEK the setpoint (band centre 0.78) with a deadband + LATCH the
+settle across a looser hysteresis hold band.
+
+Batch 2 (commit `ef4d373`, setpoint-seek + settle latch) — **the stand-off now
+WORKS**: the base parks at 0.70-0.74 m facing and the arm deploys+attaches in
+**4 of 5** attempts (was flaky in 15g). Verbatim:
+```
+# Attempt 1 — FULL A+B+C PASS
+[e2e] PASS A: displacement 3.00 m (need > 3.0)
+[e2e] PASS B: held object = bag_0 (within 120 s)
+[e2e] PASS C: released=True, carried 10.11 m (need > 0.5)
+[e2e] OVERALL: PASS
+   isaac: grasp accepted; base aligned+settled 'bag_0' range=0.74 m bearing=-0.087 rad -> deploy; attached
+# Attempt 2 — B FAIL (onto-object arrival)
+[e2e] PASS A: 3.03 m; FAIL B: held=None; OVERALL FAIL
+   isaac: grasp accepted; FELL at (4.9,0.4) [obj@(4.9,0.69)] — base driven ONTO the object by goto-poi, tips on the first escape step
+# Attempt 3 — B PASS, C FAIL (carry traverse)
+[e2e] PASS A: 3.14 m; PASS B: held cone_0; FAIL C: released=False, carried 95.35 m; OVERALL FAIL
+   isaac: aligned+settled range=0.70 m -> deploy; attached cone_0; then 281 FELL over the carry, place-object NEVER dispatched
+# Attempt 4 — B PASS, C FAIL (carry traverse)
+[e2e] PASS A: 3.04 m; PASS B: held bag_0; FAIL C: released=False, carried 14.21 m; OVERALL FAIL
+   isaac: aligned+settled range=0.73 m -> deploy; attached bag_0
+# Attempt 5 — B FAIL (deployed at 0.74 m but hold not confirmed in 120 s)
+[e2e] PASS A: 3.02 m; FAIL B: held=None; OVERALL FAIL
+   isaac: aligned+settled range=0.74 m -> deploy
+```
+Tally: A PASS 10/10 both batches; batch-2 grasp deploy+attach 4/5; full
+A+B+C PASS 1/10 (batch-2 attempt 1). **NOT 2× consecutive.**
+
+**Verdict — the assigned lever SUCCEEDED; A1's 2× gate is BLOCKED downstream.**
+The 15g A1-gating fall was the pick-APPROACH object collision; 15h's stand-off
+closes it (base parks 0.70-0.74 m, deploys, attaches — Stage B now passes when
+the follower leaves the base clear, 4/5). The residual is now TWO downstream
+blockers, both OUTSIDE the grasp-approach lever:
+1. **Carry-to-farthest-place traverse (Stage C, the dominant residual).**
+   `e2e_smoke` targets the FARTHEST place (max carry, §12.13). After a clean
+   pick the base cannot survive the long carry: attempt 3 fell **281×** carrying
+   the cone, wandered 95 m, and `place-object` never dispatched (each fall sets
+   `nav_status='fallen'` -> the goto-poi-to-place `Follow` returns False -> the
+   place action never fires). This is the 15f/15g **walking-policy fall +
+   fall-cancels-goal** blocker (Task 8/10 robustness / the spec-reserved
+   resume-after-fall item — human decision), NOT the grasp layer.
+2. **goto-poi drives the base ONTO the object before grasp dispatch**
+   (batch-2 attempt 2; batch-1 A1/A2/A5). The executor's goto-poi arrival has no
+   object standoff, so ~1/5 of arrivals overlap the collider and the base is
+   already entangled when grasp is accepted — the leg-only flat-terrain policy
+   tips on any step OFF an object it is standing on, so no grasp-side escape can
+   recover it. The real fix is an APPROACH standoff BEFORE grasp: either the
+   executor rearrange goto-poi standoff (submodule) or baking the graspable
+   object footprints into the costmap so the LocalPlanner keeps clearance during
+   goto-poi (in-repo `costmap_bake.py`, currently excludes objects by design) —
+   a DIFFERENT lever than the assigned align phase.
+
+Per the task's escape hatch (BLOCKED with per-run analysis when 2× is
+unreachable), stand-off + egress ship as the correct, unit-tested, GPU-proven
+pick-approach fix (full A+B+C PASS demonstrated); the 2× A1 gate needs the two
+downstream locomotion/approach levers above, which are outside this task's
+grasp-approach scope.
