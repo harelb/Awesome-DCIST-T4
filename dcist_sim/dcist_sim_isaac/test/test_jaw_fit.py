@@ -140,7 +140,9 @@ def test_fit_level_cone_reproduces_task2_h_fit():
     pts, tris = _cone(0.3368, 0.3346, 0.4640)
     h = fit_grasp_level(pts, tris, WIN_DEPTH, WIN_HEIGHT, margin=0.02, step=0.01)
     assert h is not None
-    assert abs(h - 0.1030) <= 0.01 + 1e-9, h
+    level, base_z = h
+    assert abs(level - 0.1030) <= 0.01 + 1e-9, level
+    assert abs(base_z - 0.0) <= 1e-9, base_z    # base ring sits at z=0
 
 
 def test_fit_level_cone_finer_step_tighter_to_1030():
@@ -148,13 +150,32 @@ def test_fit_level_cone_finer_step_tighter_to_1030():
     h = fit_grasp_level(pts, tris, WIN_DEPTH, WIN_HEIGHT, margin=0.02,
                         step=0.001)
     assert h is not None
-    assert abs(h - 0.1030) <= 0.001 + 1e-6, h
+    level, base_z = h
+    assert abs(level - 0.1030) <= 0.001 + 1e-6, level
+    assert abs(base_z - 0.0) <= 1e-9, base_z
+
+
+def test_fit_level_returns_base_z_for_offset_mesh():
+    # JEG Task 4 z-origin fix: for a mesh whose base is NOT at z=0 the returned
+    # base_z carries the true scan-axis minimum, so the caller reconstructs the
+    # fit plane at base_z + level independent of any separate object origin.
+    pts, tris = _cone(0.3368, 0.3346, 0.4640)
+    pts = pts + np.array([0.0, 0.0, 1.7])       # lift the whole cone by 1.7 m
+    h = fit_grasp_level(pts, tris, WIN_DEPTH, WIN_HEIGHT, margin=0.02, step=0.01)
+    assert h is not None
+    level, base_z = h
+    assert abs(level - 0.1030) <= 0.01 + 1e-9, level   # level unchanged
+    assert abs(base_z - 1.7) <= 1e-9, base_z           # base carries the offset
+    assert abs((base_z + level) - 1.803) <= 0.01 + 1e-9  # fit plane world Z
 
 
 def test_fit_level_box_that_fits_everywhere_is_zero():
     pts, tris = _box(0.20, 0.20, 0.40)
     h = fit_grasp_level(pts, tris, 0.30, 0.30, margin=0.0, step=0.01)
-    assert h == 0.0
+    assert h is not None
+    level, base_z = h
+    assert level == 0.0
+    assert base_z == 0.0
 
 
 def test_fit_level_box_too_big_is_none():
@@ -171,8 +192,9 @@ def test_fit_level_truncated_cone_is_higher_than_taper_to_point():
     pts, tris = _truncated_cone(0.40, 0.20, 0.40)
     h = fit_grasp_level(pts, tris, 0.30, 0.30, margin=0.0, step=0.01)
     assert h is not None
-    assert abs(h - 0.20) <= 0.01 + 1e-9, h
-    assert h > 0.10 + 0.01   # strictly above the taper-to-point prediction
+    level, _base_z = h
+    assert abs(level - 0.20) <= 0.01 + 1e-9, level
+    assert level > 0.10 + 0.01   # strictly above the taper-to-point prediction
 
 
 def test_fit_level_none_when_fit_only_near_apex():

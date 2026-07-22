@@ -817,12 +817,16 @@ class _Op:
         # JEG jaw-entry phases (Task 3). phase_deadline: per-phase sim-time
         # timeout (set on entering each jaw phase); jaw_retries: shove/slip
         # back-off count (one retry allowed); fit_level: mesh-sliced descend
-        # depth (m above the object base) from jaw_fit; jaw_obj0: object XY at
-        # the current jaw-phase entry (shove reference); lift baselines record
-        # the gripper + object z at LIFT_VERIFY entry.
+        # depth (m above the object base) from jaw_fit; fit_base_z: the sliced
+        # mesh's world base (scan-axis minimum) Z captured at slice time -- the
+        # fit plane sits at fit_base_z + fit_level, origin-independent (JEG Task
+        # 4 z-origin fix); jaw_obj0: object XY at the current jaw-phase entry
+        # (shove reference); lift baselines record the gripper + object z at
+        # LIFT_VERIFY entry.
         self.phase_deadline = None
         self.jaw_retries = 0
         self.fit_level = None
+        self.fit_base_z = None
         self.jaw_obj0 = None
         self.lift_gz0 = None
         self.lift_objz0 = None
@@ -1232,7 +1236,9 @@ class PhysicsGraspBackend:
                 if fit is None:
                     self._fail(robot_name, op, "no fit height")
                     return
-                op.fit_level = float(fit)
+                # (level above the mesh base, world Z of that base) -- pairing
+                # them keeps the fit plane origin-independent (JEG Task 4).
+                op.fit_level, op.fit_base_z = float(fit[0]), float(fit[1])
                 # Colliders + contact reporting enable HERE, at the VALIDATE->
                 # JAW_STAGE transition (JEG enable point). The jaw STAGE+ADVANCE
                 # motions give PhysX ample sim steps to register the shapes
@@ -1260,6 +1266,19 @@ class PhysicsGraspBackend:
             if op.t >= op.phase_deadline:
                 self._fail(robot_name, op, "jaw stage timeout")
                 return
+            # Per-tick target REFRESH (JEG Task 4): the staging target is
+            # fit_pt - (depth + standoff) * m, and BOTH the live mouth axis m
+            # AND the object fit point drift while we converge -- the GPU probe
+            # (task-3-jeg-report.md) measured the palm-frame world mouth axis
+            # swinging X +0.99/-0.58/+0.72 across settle points as the standing
+            # base wobbles through the ~0.85 m arm. A target computed ONCE at
+            # entry (as JAW_ADVANCE already avoids) goes stale by convergence, so
+            # re-aim every tick down the CURRENT slot axis. `_enter_jaw_stage`
+            # still seeds op.target/servo; this keeps op.servo (its convergence
+            # bookkeeping) and only re-points the target.
+            m = self._jaw_world_mouth_axis(op)
+            fit_pt = self._jaw_fit_point(op)
+            op.target = fit_pt - (JAW_WINDOW_DEPTH_M + JAW_STAGE_STANDOFF_M) * m
             if self._advance_servo(op) != IkServo.CONVERGED:
                 return
             op.jaw_obj0 = np.asarray(
@@ -1380,10 +1399,15 @@ class PhysicsGraspBackend:
     # -- jaw-entry helpers (JEG Task 3) --------------------------------------
 
     def _jaw_fit_level(self, robot_name, op):
-        """Shape-adaptive descend depth (m above the object base) from slicing
-        the target's live USD mesh, or None on any failure (no mesh / no fit).
-        Never raises -- a failure funnels to the caller's clean "no fit height"
-        fail (JEG scope A: never guess)."""
+        """Shape-adaptive descend from slicing the target's live USD mesh.
+
+        Returns ``(level, base_z)`` -- the fit depth (m above the mesh base) and
+        the world Z of that base -- or ``None`` on any failure (no mesh / no
+        fit). Because ``mesh_world`` returns the mesh in world coordinates,
+        ``base_z + level`` is directly the world Z of the fit cross-section, so
+        the caller never re-bases it on the registry origin (JEG Task 4). Never
+        raises -- a failure funnels to the caller's clean "no fit height" fail
+        (JEG scope A: never guess)."""
         try:
             mesh = self.registry.mesh_world(op.object_id)
         except Exception:                                  # noqa: BLE001
@@ -1414,12 +1438,16 @@ class PhysicsGraspBackend:
         return m / n if n > 1e-9 else m
 
     def _jaw_fit_point(self, op):
-        """The world point on the object driven into the slot: the live object
-        pose lifted by the mesh-sliced fit level along the scan axis (world
-        +Z), i.e. the fit-height cross-section the jaw pinches."""
+        """The world point on the object driven into the slot: the fit-height
+        cross-section the jaw pinches. XY tracks the object LIVE (so a shove
+        re-aims the jaw); Z is the sliced mesh base + fit level captured at
+        slice time (``fit_base_z + fit_level``) -- origin-independent, NOT the
+        registry origin's Z, so it holds for assets whose origin is not at the
+        mesh base (JEG Task 4 z-origin fix)."""
         obj_pos, _ = self.registry.world_pose(op.object_id)
         return np.array([obj_pos[0], obj_pos[1],
-                         obj_pos[2] + float(op.fit_level)], dtype=float)
+                         float(op.fit_base_z) + float(op.fit_level)],
+                        dtype=float)
 
     def _enter_jaw_stage(self, robot_name, op, reopen=False):
         """(Re)enter JAW_STAGE: optionally reopen the jaw, aim the open gripper

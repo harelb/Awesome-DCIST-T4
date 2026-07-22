@@ -935,6 +935,32 @@ def test_jaw_stage_timeout_named_and_clean():
                        "jaw stage timeout")
 
 
+def test_jaw_stage_target_refreshes_per_tick():
+    # JEG Task 4: the live mouth axis swings with the base wobble, so JAW_STAGE
+    # re-aims its staging target EVERY tick (like JAW_ADVANCE) instead of
+    # computing it once at entry. Proven by moving the target mid-stage while
+    # the servo is frozen: the staging target must track the object's NEW
+    # position (a once-computed target would stay put).
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    op = _run_to_phase(backend, "hilbert", "jaw_stage")
+    assert op is not None
+    arm.movable = False                          # never converge -> stay staging
+    backend.step(0.1)                            # one stage tick (target set)
+    tgt_before = np.array(op.target, dtype=float)
+    reg.teleport("cone_0", (0.5, 0.4, 0.0))      # move the target while staging
+    backend.step(0.1)                            # next tick must re-aim
+    tgt_after = np.array(op.target, dtype=float)
+    assert not np.allclose(tgt_before, tgt_after)          # it moved
+    # mouth axis has no Y component in the fake (identity palm frame), so the
+    # staging target's Y tracks the object's +0.4 m move exactly.
+    assert abs((tgt_after[1] - tgt_before[1]) - 0.4) < 1e-6
+
+
 def test_jaw_advance_timeout_named_and_clean():
     # Reach JAW_ADVANCE, freeze the arm at the (out-of-window) stage pose with
     # a static object (no shove) -> "jaw advance timeout".

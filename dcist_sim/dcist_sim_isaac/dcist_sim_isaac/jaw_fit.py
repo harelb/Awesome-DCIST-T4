@@ -25,13 +25,16 @@ Task 2's 0.1030 within `step`; for a truncated cone it returns the correct
 (higher) level the algebra got wrong.
 
 Scan axis convention: `fit_grasp_level` scans along axis index 2 (local +Z)
-and returns the level as a height ABOVE the mesh's minimum-Z (its base). The
-caller (`grasp_backends`) is responsible for transforming the mesh into the
-frame it scans in (for the deployed pose the jaw mouth axis is ~world -Z and
-the object stands vertically, so the scan frame is just the world frame with Z
-up). Both scan-frame extents are compared against the jaw window's (depth,
-height) with the most-favorable pairing (larger extent vs larger window dim),
-matching Task 2's convention.
+and returns ``(level, base_z)`` -- the fit height ABOVE the mesh base together
+with that base's Z coordinate in the passed frame -- so the caller can place
+the fit cross-section at ``base_z + level`` without needing a separate object
+origin (see its docstring; JEG Task 4 z-origin fix). The caller
+(`grasp_backends`) is responsible for transforming the mesh into the frame it
+scans in (for the deployed pose the jaw mouth axis is ~world -Z and the object
+stands vertically, so the scan frame is just the world frame with Z up). Both
+scan-frame extents are compared against the jaw window's (depth, height) with
+the most-favorable pairing (larger extent vs larger window dim), matching
+Task 2's convention.
 """
 from __future__ import annotations
 
@@ -146,16 +149,23 @@ def _fits(ext, window_small, window_big):
 
 def fit_grasp_level(points, triangles, window_depth, window_height,
                     margin=0.02, step=0.01):
-    """Lowest level (height above the mesh base, along scan axis Z) at which the
-    horizontal cross-section fits the margined jaw window.
+    """Lowest level at which the horizontal cross-section fits the margined jaw
+    window, returned WITH the mesh's base (scan-axis minimum) coordinate.
 
     Scans Z from the mesh's minimum upward in ``step`` increments; at each level
     slices the mesh and checks the cross-section against the window shrunk by
     ``margin`` on each dimension (favorable pairing). Also enforces that at
     least ``MIN_REMAINING_ABOVE_M`` of mesh remains ABOVE the chosen level (so
-    the closed finger has something to pinch). Returns the level (float) or
-    ``None`` if no level fits (including "fits only within the top-margin
-    sanity floor").
+    the closed finger has something to pinch).
+
+    Returns ``(level, base_z)`` -- ``level`` is the height ABOVE the mesh base
+    and ``base_z`` is that base's scan-axis (Z) coordinate IN THE PASSED FRAME
+    -- or ``None`` if no level fits (including "fits only within the top-margin
+    sanity floor"). The caller reconstructs the fit plane's coordinate as
+    ``base_z + level`` WITHOUT reference to any separate object origin (JEG Task
+    4 z-origin fix): because ``mesh_world`` passes the mesh in world coordinates,
+    ``base_z + level`` is directly the world Z of the fit cross-section, correct
+    even for assets whose registry origin is NOT at the mesh base.
 
     Pure geometry; the caller maps the window's ``(depth, height)`` onto this
     function and interprets the returned level in the scan frame.
@@ -189,5 +199,5 @@ def fit_grasp_level(points, triangles, window_depth, window_height,
             continue
         if (z_max - plane_value) < MIN_REMAINING_ABOVE_M:
             return None  # fits only too close to the top -- nothing to pinch
-        return float(level)
+        return float(level), float(z_min)
     return None
