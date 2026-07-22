@@ -278,13 +278,13 @@ def main():
                          "--headless) so the tour can be watched")
     ap.add_argument("--socket", default="t4map")
     # run-adt4 session to orchestrate. Default is the REAL-perception isaac
-    # mapping session (plain `map` group -> FastSAM frontend), matching how
-    # warehouse_sim_full was built -- mapping tours want perception realism.
-    # `spot_isaac-isaac_sim` (the map_isaac GT-semantics overlay) is the A1
-    # e2e-grasp session; pass --session to select it. See sim_runbook §12.19.
-    ap.add_argument("--session", default="spot_isaac_map-isaac_sim",
+    # session `spot_isaac-isaac_sim` (plain `map` group -> FastSAM frontend),
+    # matching how warehouse_sim_full was built -- mapping tours want perception
+    # realism. `spot_isaac_gt-isaac_sim` (the map_isaac GT-semantics overlay) is
+    # the A1 e2e-grasp session; pass --session to select it. See sim_runbook §12.19.
+    ap.add_argument("--session", default="spot_isaac-isaac_sim",
                     help="run-adt4 session name to orchestrate "
-                         "(default: real-perception isaac mapping session)")
+                         "(default: real-perception isaac session)")
     # Must exceed the executor's goal_tolerance (1.0 m in the isaac_sim
     # overlay): the follower STOPS up to that far from the goal, so a
     # tighter arrival test here times out ~1 m short of every waypoint
