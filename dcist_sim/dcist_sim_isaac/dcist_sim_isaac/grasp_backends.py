@@ -120,6 +120,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 
 import numpy as np
 
@@ -682,12 +683,13 @@ class PhysicsGraspBackend:
         # recoil for G1 (no colliders) -- pushing the object clear out of the
         # fixed-jacobian servo's short-reach envelope so the reach_pregrasp
         # servo fails before contact is ever attempted. Instead they are enabled
-        # in the VALIDATE phase, right before CONTACT_CLOSE presses/closes the
-        # finger (deploy/reach/descend run collider-free, identical to G1), and a
-        # successful contact grasp keeps them enabled through the whole carry
-        # (they ARE the hold; see _finish/_succeed_grasp). All disable paths
-        # (drop/fail/place/reset) are unchanged. Gated on contact_hold so G1 is
-        # untouched.
+        # at the REACH_PREGRASP->DESCEND transition (see _step_grasp), so the
+        # deploy + reach-up motions stay collider-free (no recoil) while the
+        # DESCEND onto the object and the CONTACT_CLOSE press run with the
+        # colliders live; a successful contact grasp keeps them enabled through
+        # the whole carry (they ARE the hold; see _finish/_succeed_grasp). All
+        # disable paths (drop/fail/place/reset) are unchanged. Gated on
+        # contact_hold so G1 is untouched.
         self._ops[robot_name] = _Op("grasp", arm, contact_hold=contact_hold)
         self._set_last(robot_name, IN_PROGRESS, "grasp started", "")
         logger.info("'%s' physics grasp accepted", robot_name)
@@ -848,7 +850,7 @@ class PhysicsGraspBackend:
     def _step_grasp(self, robot_name, op):
         arm = op.arm
         if (op.contact_hold and getattr(arm, "_contact_ready", False)
-                and __import__("os").environ.get("DCIST_CONTACT_DIAG")):
+                and os.environ.get("DCIST_CONTACT_DIAG")):
             try:
                 arm.diag_dump_contacts(op.phase)
             except Exception:                              # noqa: BLE001
@@ -1046,12 +1048,14 @@ class PhysicsGraspBackend:
                              "gripper_world=%s obj_world=%s", d,
                              tuple(round(float(v), 3) for v in gwp),
                              tuple(round(float(v), 3) for v in obj_pos))
-                # Colliders + contact reporting were already enabled at the end
-                # of DEPLOY (see that phase for why: PhysX needs several steps
-                # after a collisionEnabled toggle before it reports contacts, so
-                # enabling one tick before this press reported 0 contacts). Here
-                # we only close the finger and start the contact poll window.
-                # enable_* are idempotent, so re-affirm defensively.
+                # Colliders + contact reporting were already enabled at the
+                # REACH_PREGRASP->DESCEND transition (see that branch for why:
+                # PhysX needs several sim steps after a collisionEnabled toggle
+                # before it reports contacts, so enabling only one tick before
+                # this press reported 0 contacts). Here we only close the finger
+                # and start the contact poll window; the set_gripper_colliders /
+                # enable_contact_reporting calls below are idempotent
+                # belt-and-braces re-asserts, not the primary enable point.
                 arm.set_gripper_colliders(True)
                 arm.enable_contact_reporting()
                 arm.close_gripper()

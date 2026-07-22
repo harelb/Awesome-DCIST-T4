@@ -684,6 +684,15 @@ RTX 3090 Ti headless, Isaac 6.0.1, zenoh router + `sim_app`
 `DCIST_SIM_DEBUG=1` enables the `dcist_sim_isaac` debug trace;
 `DCIST_CONTACT_DIAG=1` dumps the raw contact report each grasp step.
 
+NOTE on the raw contact dump: `diag_dump_contacts` only fires once
+`_contact_ready` is set, i.e. AFTER the colliders + report API are enabled. Under
+the **shipped** enable point (REACH_PREGRASP→DESCEND) the first dump therefore
+appears in `DIAG[descend]` — the reproduce command below shows
+`DIAG[descend] ... finger↔<object>` (there is NO `DIAG[deploy]` line). The
+`DIAG[deploy] ... finger↔Ground` line quoted in `task-3-g2-report.md` decisive
+measurement #1 is from the earlier **enable-at-accept baseline** probe (row
+"baseline" below), not from the shipped code — do not expect it here.
+
 | run | target | enable point | deploy recoil | reached phase | contact reported | outcome |
 |-----|--------|--------------|---------------|---------------|------------------|---------|
 | G1 control | cone | (none) | 0.73→0.75 m (0.02) | attach | n/a | **PASS** (pin) |
