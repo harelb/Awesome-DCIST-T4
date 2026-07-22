@@ -107,6 +107,21 @@ DEFAULT_MAX_MATCH_M = 5.0  # search radius for candidate matches (not the bar)
 # which then never match a real scenario label -- see module docstring.
 ID_TO_LABEL = {v: k for k, v in LABELSPACE_NAME_TO_ID.items()}
 
+# Detected-label synonyms (Task 4, live-verified). The closed-set YOLOE
+# instance_seg frontend classifies the field duffel bag as "box" (id 17), NOT
+# "bag" (id 3) -- documented in docs/sim_runbook.md §5 and confirmed live: the
+# duffel's DSG object node carries semantic_label 17. Scenarios name that object
+# `bag_<n>`, so match_objects derives the required label "bag" from the id and
+# would never match the "box"-labeled node (the object IS detected and IS what
+# the depth filter targets -- it is only mis-labeled). Canonicalize the detected
+# label through this synonym table so a scenario "bag" object matches its "box"
+# detection. This is SAFE across every scenario under dcist_sim/scenarios/: none
+# author a `box_<n>` object (all object ids are bag_/cone_/pipe_), so it can
+# never mis-canonicalize a genuine "box" GT object. A future scenario that adds
+# real boxes AND bags would instead need a symmetric alias-group match in
+# localization_probe_lib.match_objects.
+LABEL_ALIASES = {"box": "bag"}
+
 
 class LocalizationProbe(Node):
     def __init__(self, robot):
@@ -130,6 +145,7 @@ class LocalizationProbe(Node):
         for n in g.get_layer(spark_dsg.DsgLayers.OBJECTS).nodes:
             p = n.attributes.position
             label = ID_TO_LABEL.get(n.attributes.semantic_label)
+            label = LABEL_ALIASES.get(label, label)
             out.append((label, p[0], p[1]))
         return out
 
