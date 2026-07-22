@@ -46,6 +46,118 @@ GRIPPER_RELATIVE_PATH = "arm0_link_fngr"
 MAX_TARGET_LINEAR_SPEED = 1.0  # m/s (task-7-brief.md Step 2)
 MAX_TARGET_ANGULAR_SPEED = 1.0  # rad/s (task-7-brief.md Step 2)
 
+# Task 1 (G2 contact-hold, spec Sec3): gripper collider provisioning.
+#
+# Both gripper prims start with NO PhysX collider on this asset -- Task 14's
+# GPU finding was that `arm0_link_fngr` reports 0 contacts even penetrating
+# the floor, and a one-shot `overlap_sphere` probe at its world position
+# (task-1-report.md) confirmed 0 hits with nothing added. Contact-based
+# holding is therefore structurally impossible without authoring one
+# ourselves.
+#
+# PALM_RELATIVE_PATH is the fixed-jaw mesh the closing finger's arc swings
+# against -- pinned from a one-shot [GPU] dump of `/World/<robot>/
+# arm0_link_wr1` (task-1-report.md): that subtree has exactly one
+# UsdGeom.Mesh child, `visuals` (the only sibling is the `arm0_f1x` revolute
+# joint, not geometry), so it is the only candidate and needs no further
+# disambiguation.
+PALM_RELATIVE_PATH = "arm0_link_wr1/visuals"
+
+# GRIPPER_RELATIVE_PATH (the finger LINK, not its own `visuals` mesh child)
+# is reused as-is for the finger collider -- deliberately, for continuity
+# with `gripper_world_pose()` and `grasp_backends.py`'s `_finger_path` /
+# contact-reporting target, which already key off this exact path. GPU-
+# verified (task-1-report.md, paired `overlap_sphere` probe with an
+# identical robot pose in both runs) that applying `UsdPhysics.CollisionAPI`
+# to the bare link Xform cooks a real PhysX shape belonging to that link's
+# rigid body -- IDENTICAL to applying it to the `visuals` mesh child (both:
+# 1 hit, body=arm0_link_fngr; a no-collider control at the same pose: 0
+# hits) -- so reusing the link path here has no correctness gap.
+GRIPPER_FRICTION_STATIC = 1.2   # rubber-pad-like; convex-on-convex pinches
+GRIPPER_FRICTION_DYNAMIC = 1.1  # shed objects without high friction
+
+
+def gripper_collider_paths_for(robot_prim_path):
+    """Pure path builder (Task 1): the two gripper collider prim paths for a
+    robot spawned at `robot_prim_path`. No Isaac import here -- unit-tested
+    directly; `provision_gripper_colliders`/`set_gripper_colliders_enabled`
+    both build off this so the "provision" and "toggle" paths can never
+    drift apart."""
+    return {
+        "finger": f"{robot_prim_path}/{GRIPPER_RELATIVE_PATH}",
+        "palm": f"{robot_prim_path}/{PALM_RELATIVE_PATH}",
+    }
+
+
+def _wants_gripper_colliders(kinematic: bool, contact_hold: bool) -> bool:
+    """Pure gate (task brief: "physics mode + spec.contact_hold only").
+    Physics-mode robots are exactly the ones spawned with `kinematic=False`
+    (`_spawn_robots`'s `kinematic=(spec.locomotion == "kinematic")`) -- kept
+    as an Isaac-free decision helper (mirrors `_terminal_recovery_reason`
+    below) so `__init__`'s gate is unit-testable without a running sim.
+    """
+    return (not kinematic) and bool(contact_hold)
+
+
+def provision_gripper_colliders(robot_prim_path):
+    """Colliders on the two gripper prims: convex hull, DISABLED, high
+    friction, self-collision-filtered against the robot (spec Sec3). Physics
+    mode + contact_hold robots only (caller gates via
+    `_wants_gripper_colliders`).
+
+    pxr API verified against the installed 6.0.1 `pxr` package
+    (task-1-report.md):
+      - `UsdPhysics.FilteredPairsAPI`'s rel is `CreateFilteredPairsRel()` /
+        `physics:filteredPairs` (UsdPhysics/__init__.pyi + usdPhysics's
+        generated schema.usda); the schema's doc explicitly allows the
+        target to be "a body or collision or even an articulation", so
+        filtering against the whole robot root prim is valid.
+      - `UsdShade.MaterialBindingAPI.Apply(prim).Bind(material,
+        materialPurpose="physics")` (a plain string, not a `UsdShade.Tokens`
+        member -- no physics-purpose token exists there) is the exact call
+        Isaac's own `isaacsim.core` prims code uses for physics material
+        bindings (e.g. `geometry_prim.py`'s `apply_physics_materials`).
+    """
+    import omni.usd
+    from pxr import UsdPhysics, UsdShade
+
+    stage = omni.usd.get_context().get_stage()
+    paths = gripper_collider_paths_for(robot_prim_path)
+    # High-friction material shared by both prims.
+    mat_path = f"{robot_prim_path}/gripper_phys_material"
+    material = UsdShade.Material.Define(stage, mat_path)
+    phys_mat = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+    phys_mat.CreateStaticFrictionAttr(GRIPPER_FRICTION_STATIC)
+    phys_mat.CreateDynamicFrictionAttr(GRIPPER_FRICTION_DYNAMIC)
+
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    for key, path in paths.items():
+        prim = stage.GetPrimAtPath(path)
+        if not prim.IsValid():
+            raise RuntimeError(f"gripper collider prim missing: {path}")
+        col = UsdPhysics.CollisionAPI.Apply(prim)
+        UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr("convexHull")
+        col.CreateCollisionEnabledAttr(False)          # starts disabled
+        UsdShade.MaterialBindingAPI.Apply(prim).Bind(
+            material, materialPurpose="physics")
+        # Belt-and-braces: never collide with the robot's own links.
+        filtered = UsdPhysics.FilteredPairsAPI.Apply(prim)
+        filtered.CreateFilteredPairsRel().AddTarget(robot_prim.GetPath())
+    return paths
+
+
+def set_gripper_colliders_enabled(paths, enabled):
+    """Toggle both gripper colliders on/off (Task 2 flips this around the
+    CARRY window). `paths` is whatever `provision_gripper_colliders`
+    returned (== `robot.gripper_collider_paths`)."""
+    import omni.usd
+    from pxr import UsdPhysics
+
+    stage = omni.usd.get_context().get_stage()
+    for path in paths.values():
+        UsdPhysics.CollisionAPI(
+            stage.GetPrimAtPath(path)).GetCollisionEnabledAttr().Set(bool(enabled))
+
 
 def _terminal_recovery_reason(nan_tripped: bool, is_fallen: bool):
     """Pure decision helper (Task 9 review fix): NaN-tripped and physically-
@@ -156,6 +268,17 @@ class SpotSimRobot:
 
         self._xform = XFormPrim(self.prim_path)
         self._gripper_xform = XFormPrim(f"{self.prim_path}/{GRIPPER_RELATIVE_PATH}")
+
+        # Task 1 (G2 contact-hold, spec Sec3): provision (disabled) gripper
+        # colliders for physics-mode + contact_hold robots only -- every
+        # other robot (kinematic tier, or physics-mode without the flag,
+        # i.e. every pre-Task-1 scenario) leaves `gripper_collider_paths`
+        # None and is bit-for-bit unaffected. Colliders start DISABLED
+        # (`provision_gripper_colliders`); Task 2 owns turning them on for
+        # the CARRY window via `set_gripper_colliders_enabled`.
+        self.gripper_collider_paths = None
+        if _wants_gripper_colliders(kinematic, spec.contact_hold):
+            self.gripper_collider_paths = provision_gripper_colliders(self.prim_path)
 
         self.base_pose = np.array([spec.x, spec.y, spec.z, spec.yaw], dtype=float)
         # Intentional ONE-TIME pre-reset spawn placement (runs before
