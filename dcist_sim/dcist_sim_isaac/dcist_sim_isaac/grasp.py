@@ -195,6 +195,64 @@ class ObjectRegistry:
         contact report by this actor path)."""
         return self._entries[object_id].prim_path
 
+    def mesh_world(self, object_id):
+        """Triangle mesh of `object_id` in WORLD coordinates as
+        ``(points Nx3, triangles Mx3)`` numpy arrays, or ``None`` if the prim
+        has no readable mesh geometry (JEG Task 3: `jaw_fit.fit_grasp_level`
+        slices this to pick the jaw descend depth).
+
+        Reads every `UsdGeom.Mesh` under the object's prim, fan-triangulates
+        n-gon faces (FaceVertexCounts/Indices), and applies each mesh's
+        local->world transform so the result is in the frame the backend scans
+        in (world, Z up)."""
+        import numpy as np
+        import omni.usd
+        from pxr import Usd, UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        root = stage.GetPrimAtPath(self._entries[object_id].prim_path)
+        if not root or not root.IsValid():
+            return None
+        all_pts = []
+        all_tris = []
+        offset = 0
+        for prim in Usd.PrimRange(root):
+            if not prim.IsA(UsdGeom.Mesh):
+                continue
+            mesh = UsdGeom.Mesh(prim)
+            pts_attr = mesh.GetPointsAttr().Get()
+            counts = mesh.GetFaceVertexCountsAttr().Get()
+            indices = mesh.GetFaceVertexIndicesAttr().Get()
+            if not pts_attr or not counts or not indices:
+                continue
+            local = np.asarray([[p[0], p[1], p[2]] for p in pts_attr],
+                               dtype=float)
+            # local -> world (USD row-vector convention: v' = [v,1] @ M).
+            # Build the 4x4 explicitly from Gf.Matrix4d elements (do not rely on
+            # a numpy buffer protocol for the Gf type).
+            gm = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default())
+            xf = np.array([[gm[r][c] for c in range(4)] for r in range(4)],
+                          dtype=float)
+            homog = np.hstack([local, np.ones((local.shape[0], 1))])
+            world = (homog @ xf)[:, :3]
+            # fan-triangulate each face
+            idx = list(indices)
+            cursor = 0
+            for c in counts:
+                if c >= 3:
+                    fan = idx[cursor:cursor + c]
+                    for k in range(1, c - 1):
+                        all_tris.append((offset + fan[0],
+                                         offset + fan[k],
+                                         offset + fan[k + 1]))
+                cursor += c
+            all_pts.append(world)
+            offset += world.shape[0]
+        if not all_pts or not all_tris:
+            return None
+        return np.vstack(all_pts), np.asarray(all_tris, dtype=int)
+
     def set_held_by(self, object_id, robot_name):
         self._entries[object_id].held_by = robot_name
 
