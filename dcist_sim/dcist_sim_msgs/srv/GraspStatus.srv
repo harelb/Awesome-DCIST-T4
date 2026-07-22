@@ -1,9 +1,0 @@
-# Poll the terminal/non-terminal state of this robot's most recent
-# grasp/place request. Magic backends answer grasp/place synchronously
-# and this service mirrors that last result so SimSpot can poll it the
-# same way it polls a physics backend (task-11-brief.md).
-string robot_name
----
-string state      # idle | in_progress | succeeded | failed
-string message
-string object_id  # set when succeeded (grasp) / the released id (place)
