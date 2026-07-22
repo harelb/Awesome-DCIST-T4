@@ -96,6 +96,7 @@ frontend:
       num_orientation_bins: 20
       use_diagonal_connectivity: false
       min_connection_width_voxels: 2
+      fill_enclosed_unknown_max_voxels: 2000
     sinks:
       - type: TraversabilityVisualizer
 sub_keyframe:
