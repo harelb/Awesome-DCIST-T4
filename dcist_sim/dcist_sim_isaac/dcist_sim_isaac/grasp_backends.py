@@ -26,21 +26,32 @@ TIER G2 -- CONTACT-BASED HOLD (Task 14, ``RobotSpec.contact_hold``) -- EXPERIMEN
     the shipped tier. Contact holding is sensitive to grip geometry / friction
     and is documented as unstable; see task-14-report.md for the GPU findings.
 
-    TIME-BOXED STOP (2026-07-20, GPU-measured -- THIS TIER IS NON-FUNCTIONAL ON
-    THE CURRENT ASSET): grasp_smoke.py --contact-hold always fails "no contact".
-    Root cause: the Spot arm links carry NO PhysX collider in this phase
-    (floating Spot, no arm collision -- by design; see the P4 status notes), so
-    pressing the finger into the object drives the finger link clear THROUGH the
-    floor (gripper z -> -0.08 m) while
-    ``get_physx_simulation_interface().get_contact_report()`` stays EMPTY every
-    poll -- there is simply no finger contact for PhysX to report. The machinery
-    below (finger close, press, contact poll, friction hold, carry drop-monitor,
-    place-open) is implemented + unit-tested at the fake seam, and the
-    contact-report API path is verified correct on Isaac 6.0.1; it is left
-    behind the flag for a future collision-enabled arm asset. FOLLOW-UP: give
-    the arm/finger links PhysX colliders (or a fixed jaw collider) so contacts
-    are generated, then re-tune CONTACT_PRESS_M / CONTACT_POLL_S and re-run
-    grasp_smoke.py --contact-hold. G1 remains the shipped grasp tier (spec §6.2).
+    STATUS (2026-07-22, GPU-measured, task-3-g2-report.md -- UNBLOCKED FROM
+    TASK 14 BUT STILL NOT A WORKING HOLD): Task 1 provisioned real PhysX
+    colliders on the finger + palm meshes, so the Task-14 root cause ("arm links
+    carry NO collider -> contact report always empty") is GONE. On GPU the finger
+    now reports contact with cone, bag, AND pipe (actor path
+    ``/World/hilbert/arm0_link_fngr`` <-> ``/World/objects/<id>``); the contact
+    report API + filter are confirmed correct live. TWO things were retuned here:
+      * COLLIDER ENABLE TIMING (Task 3): enabling the high-friction colliders at
+        grasp *accept* (Task 2) drags the finger on the ground through the deploy
+        and shoves the floating base back ~0.43 m (vs ~0.02 m for G1), failing
+        the reach servo before contact. Enabling one tick before the press (at
+        validate) reports 0 contacts -- a runtime collisionEnabled toggle does
+        not register in PhysX for a few sim steps. So the enable now fires at the
+        REACH->DESCEND transition (see _step_grasp): deploy + reach stay
+        collider-free (no recoil, clean convergence), and the short descend gives
+        PhysX time to register the shape before the press.
+    REMAINING BLOCKER (physical, not software): a SINGLE finger contacting a
+    light DYNAMIC object shoves it out of position (cone fled 0.79 m laterally,
+    bag 0.63 m) -- there is no opposing jaw to trap it -- so the descend servo
+    chasing the fleeing object never converges into a stable friction hold. The
+    pipe is separately unpickable: its 1.2 m length keeps the base >= ~0.85 m
+    away (own-body collision), leaving the pipe at the arm's reach edge so the
+    descend cannot reach down to it. FOLLOW-UP: a proper two-contact pinch
+    (close the f1x finger toward the palm to TRAP the object between finger+palm
+    colliders, rather than pressing a single finger down onto it), and/or heavier
+    / fixed-until-gripped objects. G1 remains the shipped grasp tier (spec §6.2).
 
     ARM OWNERSHIP DURING A CONTACT CARRY (critical, differs from G1): the grip
     is held ONLY by the finger's PhysX position drive (f1x -> 0) plus the 6
@@ -514,13 +525,16 @@ class _ArmInterface:
         headers = report[0]
         finger = self._finger_path
         obj = object_prim_path
-        # NOTE (GPU-measured 2026-07-20, task-14-report.md): on this asset the
-        # report is EMPTY every poll even while the finger link is driven well
-        # below the floor (gripper z -> -0.08) into the object -- the arm links
-        # carry no PhysX collider in this phase (floating Spot, no arm collision
-        # by design), so no finger contact is EVER generated. This filter is
-        # correct but structurally cannot detect a hold on this asset; kept for
-        # a future collision-enabled setup. logger.debug leaves a trace.
+        # NOTE (GPU-measured 2026-07-22, task-3-g2-report.md -- SUPERSEDES the
+        # Task-14 "0 headers ever" note): with the Task-1 gripper colliders
+        # provisioned + enabled at the REACH->DESCEND transition, the report is
+        # NO LONGER empty -- this exact filter fires `actor0/actor1 ==
+        # /World/hilbert/arm0_link_fngr` paired with `/World/objects/<id>` for
+        # cone, bag, AND pipe (all three confirmed live). Contact reporting and
+        # the finger<->object pairing are correct. The remaining G2 blocker is
+        # physical, not reporting: a SINGLE finger contacting a light dynamic
+        # object shoves it laterally (cone fled 0.79 m, bag 0.63 m) so the
+        # descend servo never converges into a stable hold -- see the report.
         for h in headers:
             if h.type == ContactEventType.CONTACT_LOST:
                 continue
@@ -531,9 +545,31 @@ class _ArmInterface:
             o_hit = any(p == obj or p.startswith(obj + "/") for p in pair)
             if f_hit and o_hit:
                 return True
-        logger.debug("contact poll: %d headers, no finger<->object pair",
-                     len(headers))
+        if headers:
+            logger.debug(
+                "contact poll: %d headers; actors=%s (finger=%s obj=%s)",
+                len(headers),
+                [(str(PhysicsSchemaTools.intToSdfPath(h.actor0)),
+                  str(PhysicsSchemaTools.intToSdfPath(h.actor1))) for h in headers][:8],
+                finger, obj)
+        else:
+            logger.debug("contact poll: 0 headers (finger=%s)", finger)
         return False
+
+    def diag_dump_contacts(self, tag=""):
+        """DIAGNOSTIC (Task 3): log the raw global contact report -- total header
+        count + all actor pairs -- regardless of the object filter. Used to
+        determine whether the finger collider reports ANY PhysX contact at all
+        (e.g. finger<->ground while the arm deploys)."""
+        from omni.physx import get_physx_simulation_interface
+        from pxr import PhysicsSchemaTools
+        report = get_physx_simulation_interface().get_contact_report()
+        headers = report[0]
+        actors = [(str(PhysicsSchemaTools.intToSdfPath(h.actor0)),
+                   str(PhysicsSchemaTools.intToSdfPath(h.actor1)))
+                  for h in headers]
+        logger.info("DIAG[%s] contacts: total=%d actors=%s finger=%s",
+                    tag, len(headers), actors[:12], self._finger_path)
 
 
 def _default_arm_factory(robot):
@@ -638,13 +674,20 @@ class PhysicsGraspBackend:
             return False, "", msg
         contact_hold = bool(getattr(robot.spec, "contact_hold", False))
         arm.take_ownership()
-        if contact_hold:
-            # G2 (Task 2): enable the gripper colliders at the same seam arm
-            # ownership is taken -- they must be live before CONTACT_CLOSE
-            # presses/closes the finger, and a successful contact grasp keeps
-            # them enabled through the whole carry (see _finish/_succeed_grasp;
-            # they are the hold). Gated on contact_hold so G1 is untouched.
-            arm.set_gripper_colliders(True)
+        # NOTE (Task 3 GPU finding): the gripper colliders are NOT enabled here
+        # at accept. Enabling the high-friction finger/palm colliders before the
+        # arm deploys makes them DRAG ON THE GROUND during the ~1.5 s deploy
+        # (the deploy pose reaches ~0.28 m below the base), which shoves the
+        # floating policy base BACKWARD ~0.43 m -- GPU-measured vs a ~0.02 m
+        # recoil for G1 (no colliders) -- pushing the object clear out of the
+        # fixed-jacobian servo's short-reach envelope so the reach_pregrasp
+        # servo fails before contact is ever attempted. Instead they are enabled
+        # in the VALIDATE phase, right before CONTACT_CLOSE presses/closes the
+        # finger (deploy/reach/descend run collider-free, identical to G1), and a
+        # successful contact grasp keeps them enabled through the whole carry
+        # (they ARE the hold; see _finish/_succeed_grasp). All disable paths
+        # (drop/fail/place/reset) are unchanged. Gated on contact_hold so G1 is
+        # untouched.
         self._ops[robot_name] = _Op("grasp", arm, contact_hold=contact_hold)
         self._set_last(robot_name, IN_PROGRESS, "grasp started", "")
         logger.info("'%s' physics grasp accepted", robot_name)
@@ -804,6 +847,12 @@ class PhysicsGraspBackend:
 
     def _step_grasp(self, robot_name, op):
         arm = op.arm
+        if (op.contact_hold and getattr(arm, "_contact_ready", False)
+                and __import__("os").environ.get("DCIST_CONTACT_DIAG")):
+            try:
+                arm.diag_dump_contacts(op.phase)
+            except Exception:                              # noqa: BLE001
+                pass
         if op.phase == _Op.SELECTING:
             target_id = self._select_target(robot_name, arm)
             if target_id is None:
@@ -924,6 +973,36 @@ class PhysicsGraspBackend:
             if op.phase == _Op.REACH_PREGRASP:
                 obj_pos, _ = self.registry.world_pose(op.object_id)
                 op.target = np.array(obj_pos, dtype=float)
+                if op.contact_hold:
+                    # Enable the gripper colliders + contact reporting HERE, at
+                    # the REACH->DESCEND transition (Task 3 GPU finding), NOT at
+                    # accept / deploy / validate:
+                    #  * NOT at accept or deploy-end: the high-friction colliders
+                    #    then drag on the ground during the ~1.5 s deploy (deploy
+                    #    pose is at floor level) and/or during the reach-UP servo,
+                    #    shoving the floating base back ~0.43 m OR bumping the
+                    #    light dynamic object out of position -> the reach servo
+                    #    never converges (GPU-measured: base-frame x 0.63->0.06,
+                    #    object fled sideways 0.30 m).
+                    #  * NOT at validate: a collisionEnabled False->True toggle
+                    #    one tick before the press does not re-activate the shape
+                    #    in the running PhysX scene in time -> the press reported
+                    #    0 contacts, whereas the same collider enabled a couple
+                    #    seconds earlier DID report finger<->object contacts.
+                    # At this transition the gripper has converged at pregrasp
+                    # (obj + pregrasp_z, ABOVE the object), so enabling now keeps
+                    # the big reach-up motion collider-free (clean convergence)
+                    # and gives the short vertical DESCEND (~1-2 s) for PhysX to
+                    # register the shape before the CONTACT_CLOSE press polls;
+                    # the finger engages the object from directly above (a
+                    # downward press/pin) rather than sideways. Disable paths
+                    # (fail/drop/place/reset) unchanged.
+                    arm.set_gripper_colliders(True)
+                    try:
+                        arm.enable_contact_reporting()
+                    except Exception:                      # noqa: BLE001
+                        logger.exception(
+                            "'%s' enable_contact_reporting failed", robot_name)
                 op.phase = _Op.DESCEND
                 op.servo = self._new_servo(op)
             elif op.phase == _Op.DESCEND:
@@ -967,6 +1046,13 @@ class PhysicsGraspBackend:
                              "gripper_world=%s obj_world=%s", d,
                              tuple(round(float(v), 3) for v in gwp),
                              tuple(round(float(v), 3) for v in obj_pos))
+                # Colliders + contact reporting were already enabled at the end
+                # of DEPLOY (see that phase for why: PhysX needs several steps
+                # after a collisionEnabled toggle before it reports contacts, so
+                # enabling one tick before this press reported 0 contacts). Here
+                # we only close the finger and start the contact poll window.
+                # enable_* are idempotent, so re-affirm defensively.
+                arm.set_gripper_colliders(True)
                 arm.enable_contact_reporting()
                 arm.close_gripper()
                 op.contact_until = op.t + CONTACT_POLL_S

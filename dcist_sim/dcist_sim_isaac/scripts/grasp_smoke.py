@@ -172,11 +172,30 @@ class Smoke(Node):
         return last
 
 
+# Known graspable objects in field_smoke_physics.yaml / field_smoke_contact_hold.yaml
+# by id -> world (x, y). `--target <id>` sets BOTH the assertion object-id and the
+# approach coordinate from this table in one shot (Task 3: the backend's
+# `_select_target` picks the NEAREST graspable, so "targeting" an object is really
+# "approach it so it becomes nearest" -- this navigates there and asserts on it).
+SCENARIO_OBJECTS = {
+    "cone_0": (4.0, 1.6),
+    "bag_0": (5.0, 0.6),
+    "pipe_0": (5.6, -1.6),
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--robot", default="hilbert")
+    ap.add_argument("--target", choices=sorted(SCENARIO_OBJECTS),
+                    help="named scenario object to approach + assert held "
+                         "(sets --object-id AND --cone from SCENARIO_OBJECTS). "
+                         "The physics backend grasps the NEAREST graspable, so "
+                         "this drives the base adjacent to <target> to make it "
+                         "the selected object. Overrides --object-id/--cone.")
     ap.add_argument("--cone", nargs=2, type=float, default=[4.0, 1.6],
-                    help="cone_0 world x y (field_smoke_physics.yaml)")
+                    help="target world x y (default cone_0 in "
+                         "field_smoke_physics.yaml); ignored if --target given")
     ap.add_argument("--object-id", default="cone_0")
     ap.add_argument("--approach-dist", type=float, default=0.7,
                     help="stop this far (m) short of the cone along the "
@@ -199,6 +218,9 @@ def main():
                     help="contact-hold carry distance (m) away from the cone")
     ap.add_argument("--carry-timeout", type=float, default=240.0)
     args = ap.parse_args()
+    if args.target:
+        args.object_id = args.target
+        args.cone = list(SCENARIO_OBJECTS[args.target])
 
     rclpy.init()
     s = Smoke(args.robot)

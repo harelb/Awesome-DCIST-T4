@@ -91,7 +91,9 @@ def main():
         _h._dcist_grasp_trace = True
         _h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
         _pkg_log.addHandler(_h)
-        _pkg_log.setLevel(logging.INFO)
+        import os as _os
+        _pkg_log.setLevel(
+            logging.DEBUG if _os.environ.get("DCIST_SIM_DEBUG") else logging.INFO)
         _pkg_log.propagate = False
 
     from dcist_sim_isaac.scenario import load_scenario

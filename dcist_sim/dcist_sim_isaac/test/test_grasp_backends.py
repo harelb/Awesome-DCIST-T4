@@ -727,9 +727,12 @@ def test_contact_hold_place_opens_gripper_no_kinematic():
 # -- gripper collider toggle + CARRY re-verify (Task 2) --------------------
 
 
-def test_gripper_colliders_enabled_at_accept_stay_through_carry_disabled_after_place():
-    # Case 1: colliders enabled at accept (arm taken), still enabled after
-    # _succeed_grasp (carry), disabled after place detach.
+def test_gripper_colliders_enabled_during_grasp_stay_through_carry_disabled_after_place():
+    # Case 1: colliders NOT enabled at accept (Task 3 GPU finding: enabling them
+    # before the arm deploys drags them on the ground and shoves the base back,
+    # and enabling one tick before the press does not register in PhysX in time);
+    # enabled during the grasp at the REACH->DESCEND transition, still enabled
+    # after _succeed_grasp (carry), disabled after place detach.
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
@@ -737,11 +740,11 @@ def test_gripper_colliders_enabled_at_accept_stay_through_carry_disabled_after_p
     backend, _reg = _make(objs, {"hilbert": arm})
 
     backend.grasp("hilbert")
-    assert arm.collider_calls == [True]           # enabled right at accept
+    assert arm.collider_calls == []               # NOT enabled at accept
 
     state, _msg, _oid = _run(backend, "hilbert")
     assert state == "succeeded"
-    assert True in arm.collider_calls
+    assert True in arm.collider_calls             # enabled during the run (validate)
     assert arm.collider_calls[-1] is True         # still enabled through carry
 
     accepted, _msg = backend.place("hilbert")
@@ -763,7 +766,7 @@ def test_gripper_colliders_disabled_on_contact_close_failure():
     state, msg, _ = _run(backend, "hilbert")
     assert state == "failed"
     assert "no contact" in msg.lower()
-    assert True in arm.collider_calls              # was enabled at accept
+    assert True in arm.collider_calls              # enabled at validate (pre-press)
     assert arm.collider_calls[-1] is False          # and disabled on failure
     assert reg._o["cone_0"]["held_by"] is None
 
@@ -797,7 +800,7 @@ def test_gripper_colliders_disabled_on_exception_mid_phase():
                        "held_by": None}}
     backend, reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
-    assert arm.collider_calls == [True]
+    assert arm.collider_calls == []               # Task 3: not enabled at accept
 
     def _boom():
         raise RuntimeError("deploy blew up")
@@ -823,9 +826,9 @@ def test_gripper_colliders_disabled_on_reset_inflight_and_held_carry():
     backend1.grasp("hilbert")
     backend1.step(0.1)
     assert "hilbert" in backend1._ops              # still in-flight (ALIGN)
-    assert arm1.collider_calls == [True]
+    assert arm1.collider_calls == []               # Task 3: not enabled until validate
     assert backend1.reset() is True
-    assert arm1.collider_calls[-1] is False
+    assert arm1.collider_calls[-1] is False        # reset still disables (belt-and-braces)
 
     # contact-held (carry finished, no in-flight op) case
     robot2 = _FakeRobot("hilbert", contact_hold=True)

@@ -637,19 +637,75 @@ the RAW costmap before inflation, so the LocalPlanner keeps the robot body clear
 of objects during goto-poi; `LocalPlanner.set_goal` snaps an occupied goal to the
 nearest free cell within `nav.snap_bound_m` (default off preserves BLOCKED).
 
-### 12.6 contact_hold (G2) — EXPERIMENTAL, non-functional
+### 12.6 contact_hold (G2) — EXPERIMENTAL, UNBLOCKED but not a working hold
 
-`grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`,
-Task 14) swaps the kinematic attach for a real PhysX friction hold (close the
-`arm0_f1x` finger, poll finger<->object contact, ride on friction). It is
-**non-functional on the current asset**: the Spot arm/finger links carry NO
-PhysX colliders (floating-Spot design), so the closing finger sails through the
-object/floor and `get_contact_report()` stays empty — `grasp_smoke.py
---contact-hold` always fails "no contact". The machinery is implemented +
-unit-tested behind the flag and G1 is provably untouched. FOLLOW-UPS: add
-colliders to the arm/finger links, then retune `CONTACT_PRESS_M` /
-`CONTACT_POLL_S` (see `.superpowers/sdd/task-14-report.md`). G1 is the shipped
-tier; do NOT use G2 on any default path.
+`grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`)
+swaps the kinematic attach for a real PhysX friction hold (close the `arm0_f1x`
+finger, poll finger<->object contact, ride on friction). **Status after G2
+Tasks 1–3 (2026-07-22, `.superpowers/sdd/task-3-g2-report.md`):**
+
+- **Task-14 blocker RESOLVED.** Task 1 provisioned real convex-hull PhysX
+  colliders on the finger (`arm0_link_fngr/visuals`) + palm
+  (`arm0_link_wr1/visuals`) meshes. On GPU the finger now **reports contact**
+  with the object — `get_contact_report()` yields `actor0/actor1 ==
+  /World/hilbert/arm0_link_fngr` paired with `/World/objects/<id>` for cone,
+  bag, AND pipe. Contact reporting + the actor-path filter are confirmed correct
+  live (Task 14's "0 headers ever" is gone).
+- **Collider ENABLE TIMING retuned (Task 3, `grasp_backends`).** The
+  high-friction colliders are now enabled at the **REACH→DESCEND transition**,
+  not at grasp accept (Task 2). Enabling at accept drags the finger on the
+  ground through the ~1.5 s deploy and shoves the floating base back **~0.43 m**
+  (vs ~0.02 m for G1) → reach servo fails before contact. Enabling one tick
+  before the press (at validate) reports 0 contacts — a runtime
+  `collisionEnabled` toggle needs several sim steps to register in PhysX.
+  Enable-at-REACH→DESCEND keeps deploy+reach collider-free (no recoil, clean
+  convergence) and gives the descend ~1–2 s for PhysX to register the shape.
+- **Still NOT a working hold — remaining blocker is PHYSICAL, not software.** A
+  **single finger contacting a light dynamic object shoves it out of position**
+  (GPU: cone fled 0.79 m laterally, bag 0.63 m) — no opposing jaw traps it, so
+  the descend servo chasing the fleeing object never converges. The **pipe is
+  separately unpickable**: its 1.2 m length keeps the base ≥ ~0.85 m away
+  (own-body collision with the pipe), leaving the pipe at the arm's reach edge
+  (0.96 m) so the descend can't reach down to it. Gait sanity PASSES
+  (provisioned-but-disabled colliders are inert to locomotion — 10 m walk, 0
+  falls).
+
+FOLLOW-UPS: (1) a proper **two-contact pinch** — close the f1x finger toward the
+palm to TRAP the object between the finger + palm colliders, rather than
+pressing a single finger down onto it; (2) heavier / fixed-until-gripped objects
+or a smaller reachable target; (3) the pipe needs a shorter asset or an end-on
+grasp strategy. G1 (kinematic pin) is the shipped tier; do NOT use G2 on any
+default path. Evidence table: §12.6a.
+
+### 12.6a G2 contact-hold GPU evidence (Task 3, 2026-07-22)
+
+RTX 3090 Ti headless, Isaac 6.0.1, zenoh router + `sim_app`
+(`field_smoke_contact_hold.yaml`), `grasp_smoke.py --contact-hold --target`.
+`DCIST_SIM_DEBUG=1` enables the `dcist_sim_isaac` debug trace;
+`DCIST_CONTACT_DIAG=1` dumps the raw contact report each grasp step.
+
+| run | target | enable point | deploy recoil | reached phase | contact reported | outcome |
+|-----|--------|--------------|---------------|---------------|------------------|---------|
+| G1 control | cone | (none) | 0.73→0.75 m (0.02) | attach | n/a | **PASS** (pin) |
+| baseline | cone | accept | 0.71→1.13 m (0.43) | reach servo FAIL | — | recoil blocks |
+| fix v1 | cone | validate | 0.71→0.81 m (0.10) | CONTACT_CLOSE | **0 headers** | toggle too late |
+| fix v2 | cone | reach→descend | 0.75→0.65 m (~0) | descend servo FAIL | finger↔cone_0 ✓ | cone fled 0.79 m |
+| fix v2 | pipe | reach→descend | — | descend servo FAIL | finger↔pipe_0 ✓ | pipe at reach edge 0.96 m |
+| fix v2 | bag  | reach→descend | — | descend servo FAIL | finger↔bag_0 ✓ | bag fled 0.63 m |
+
+Gait sanity (contact_hold robot, colliders provisioned+disabled, 10 m walk):
+`nav=reached, travelled 10.08 m, 0 falls → PASS`.
+
+Reproduce (both suites stay green: 159 isaac / 23 ros):
+```
+ros2 run rmw_zenoh_cpp rmw_zenohd &
+DCIST_SIM_DEBUG=1 OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
+  PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH ADT4_ROBOT_NAME=hilbert \
+  ~/environments/dcist/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
+    --scenario dcist_sim/scenarios/field_smoke_contact_hold.yaml --headless &
+~/environments/dcist/spark_env/bin/python \
+  dcist_sim/dcist_sim_isaac/scripts/grasp_smoke.py --contact-hold --target pipe_0
+```
 
 ### 12.7 Physics-mode object localization — FRAME DEFECT FOUND + FIXED (Task 15b)
 
