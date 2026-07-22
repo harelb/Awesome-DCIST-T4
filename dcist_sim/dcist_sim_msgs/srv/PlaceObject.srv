@@ -1,5 +1,0 @@
-# Detach whatever this robot is holding at the gripper's current location.
-string robot_name
----
-bool success
-string message
