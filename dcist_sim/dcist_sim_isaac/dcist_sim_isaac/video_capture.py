@@ -68,13 +68,15 @@ def third_person_pose(robot_xy, objects_centroid_xy, back_m=3.5, up_m=2.0):
 class RateGate:
     """Absolute-timestamp, remainder-carrying frame-rate gate.
 
-    ``.ready(sim_t)`` returns True at most once per ``1/fps`` window. The
-    next-emit time advances by exactly one period per emit (phase-locked to
-    the first call), so over a long fine-grained timestamp stream there is
-    zero accumulated drift -- the drift bug ros_bridge's publish accumulator
-    documents and fixes the same way. After a stall (sim_t jumps more than a
-    period ahead) the gate emits once and resyncs rather than machine-gunning
-    catch-up frames.
+    ``.ready(sim_t)`` returns True at most once per ``1/fps`` window. This is
+    an ABSOLUTE-TIMESTAMP schedule gate, the same family as gt_capture's
+    ``_next_t`` next-emit-time comparison (NOT ros_bridge's dt-accumulator,
+    which sums per-frame dt and carries a remainder). The one refinement over
+    gt_capture: it advances ``_next`` by exactly one period per emit
+    (phase-locked to the first call) instead of re-anchoring to the current
+    ``sim_t``, so over a long fine-grained timestamp stream there is zero
+    accumulated drift. After a stall (sim_t jumps more than a period ahead) the
+    gate emits once and resyncs rather than machine-gunning catch-up frames.
     """
 
     def __init__(self, fps):
@@ -111,7 +113,16 @@ class VideoCapture:
     HEIGHT = 720
 
     def __init__(self, out_dir, fps, camera_pose):
-        """`camera_pose` is ``((px,py,pz), (lx,ly,lz))`` from third_person_pose."""
+        """`camera_pose` is ``((px,py,pz), (lx,ly,lz))`` from third_person_pose.
+
+        NOT never-fatal: `os.makedirs` below can raise (e.g. `out_dir` collides
+        with an existing FILE, or an unwritable path). That is deliberate -- a
+        bad `--video-out` is an operator error worth surfacing -- so the CALL
+        SITE (sim_app) wraps construction in try/except and degrades to
+        video=None, matching how the rest of the video path fails soft. (For
+        the record: GtCapture.__init__ has this same pre-existing gap in its
+        `os.makedirs` + `open(manifest)`; NOT fixed here -- out of scope.)
+        """
         self._out = out_dir
         self._fps = fps
         self._pose = camera_pose
@@ -160,7 +171,14 @@ class VideoCapture:
             data = self._annotator.get_data()
             if getattr(data, "ndim", 0) != 3 or getattr(data, "shape", (0,))[0] == 0:
                 # annotator buffer not populated yet (post-attach warm-up):
-                # don't burn the rate slot, retry next frame.
+                # don't burn the rate slot, retry next frame. This rewind
+                # assumes `_gate.ready()` returned True on THIS call and did
+                # exactly one `_next += period` (its only advance) -- so
+                # subtracting one period restores the pre-call schedule
+                # precisely. Valid because ready() is called once per
+                # maybe_capture and only reached here after it returned True;
+                # the rewind is inert if the same warm-up frame keeps failing
+                # (it just keeps re-offering the slot).
                 self._gate._next -= self._gate.period
                 return False
             import imageio.v2 as imageio

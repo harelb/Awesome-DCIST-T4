@@ -2,15 +2,18 @@
 
 Covers the two module-scope helpers that carry the framing + timing
 contract: `third_person_pose` (static third-person camera geometry) and
-`RateGate` (drift-free, remainder-carrying frame-rate gate mirroring
-ros_bridge's publish accumulator). The Isaac-only `VideoCapture` class is
-deferred-import and GPU-verified separately (baseline clips), not here.
+`RateGate` (drift-free, phase-locked absolute-timestamp schedule gate, the
+gt_capture `_next_t` family). Plus the one pure part of `VideoCapture`
+(`__init__`'s os.makedirs) that documents why the sim_app call site must wrap
+construction. The Isaac-only rendering path of `VideoCapture` is deferred-import
+and GPU-verified separately (baseline clips), not here.
 """
 import math
 
 import pytest
 
-from dcist_sim_isaac.video_capture import RateGate, third_person_pose
+from dcist_sim_isaac.video_capture import (
+    RateGate, VideoCapture, third_person_pose)
 
 
 # ---------------------------------------------------------------------------
@@ -120,3 +123,33 @@ def test_large_gap_does_not_machine_gun():
     period = 1.0 / 24.0
     assert g.ready(10.0 + period * 0.1) is False
     assert g.ready(10.0 + period * 1.01) is True
+
+
+# ---------------------------------------------------------------------------
+# VideoCapture.__init__: the ONE pure (non-Isaac) part. It is intentionally
+# NOT never-fatal -- os.makedirs raises on a bad out_dir -- which is exactly
+# why sim_app wraps construction in try/except and degrades to video=None.
+# ---------------------------------------------------------------------------
+POSE = ((0.0, 0.0, 2.0), (1.0, 0.0, 0.5))
+
+
+def test_init_makes_out_dir(tmp_path):
+    out = tmp_path / "vids"
+    VideoCapture(str(out), 24, POSE)
+    assert out.is_dir()
+
+
+def test_init_raises_on_file_collision(tmp_path):
+    # out_dir path already exists as a FILE -> os.makedirs raises. This is the
+    # gap the sim_app call-site wrapper covers; asserting it documents the
+    # contract (the wrapper is otherwise Isaac-coupled and untestable here).
+    clash = tmp_path / "not_a_dir"
+    clash.write_text("i am a file")
+    with pytest.raises((FileExistsError, NotADirectoryError, OSError)):
+        VideoCapture(str(clash), 24, POSE)
+
+
+def test_close_no_frames_returns_none(tmp_path):
+    # close() before any frame captured -> None (nothing to encode), no raise.
+    vc = VideoCapture(str(tmp_path / "v"), 24, POSE)
+    assert vc.close() is None

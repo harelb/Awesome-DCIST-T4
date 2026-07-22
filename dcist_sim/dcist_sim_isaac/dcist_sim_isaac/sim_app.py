@@ -266,22 +266,35 @@ def main():
     # --video-out is passed. Never-fatal (all methods swallow + log).
     video = None
     if args.video_out and not args.smoke:
-        from dcist_sim_isaac.video_capture import VideoCapture, third_person_pose
-
+        # Whole construction is wrapped: VideoCapture.__init__ is NOT
+        # never-fatal (its os.makedirs raises on a bad --video-out path), so a
+        # bad flag would otherwise kill the run. Degrade to video=None + log,
+        # matching how the rest of the video path (attach/capture/close) fails
+        # soft.
         try:
-            bx, by, _, _ = robots[0].base_pose
-            robot_xy = (float(bx), float(by))
-        except Exception:  # noqa: BLE001
-            robot_xy = (float(scenario.robots[0].x), float(scenario.robots[0].y))
-        if scenario.objects:
-            cx = sum(o.x for o in scenario.objects) / len(scenario.objects)
-            cy = sum(o.y for o in scenario.objects) / len(scenario.objects)
-        else:
-            cx, cy = robot_xy  # no objects -> degenerate +X framing fallback
-        pose = third_person_pose(
-            robot_xy, (cx, cy), back_m=args.video_back, up_m=args.video_up)
-        video = VideoCapture(args.video_out, args.video_fps, pose)
-        video.attach()
+            from dcist_sim_isaac.video_capture import (
+                VideoCapture, third_person_pose)
+
+            try:
+                bx, by, _, _ = robots[0].base_pose
+                robot_xy = (float(bx), float(by))
+            except Exception:  # noqa: BLE001
+                robot_xy = (float(scenario.robots[0].x),
+                            float(scenario.robots[0].y))
+            if scenario.objects:
+                cx = sum(o.x for o in scenario.objects) / len(scenario.objects)
+                cy = sum(o.y for o in scenario.objects) / len(scenario.objects)
+            else:
+                cx, cy = robot_xy  # no objects -> degenerate +X framing fallback
+            pose = third_person_pose(
+                robot_xy, (cx, cy), back_m=args.video_back, up_m=args.video_up)
+            video = VideoCapture(args.video_out, args.video_fps, pose)
+            video.attach()
+        except Exception:  # noqa: BLE001 -- video must never kill the sim
+            logger.exception(
+                "video_capture: construction failed (bad --video-out %r?); "
+                "disabling video for this run", args.video_out)
+            video = None
 
     frames = 60 if args.smoke else None
     n = 0
