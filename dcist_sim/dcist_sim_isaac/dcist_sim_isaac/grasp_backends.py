@@ -321,6 +321,63 @@ CONTACT_DROP_DIST_M = 0.3      # gripper<->object dist > this while carrying = d
 # physically contacts the object before we poll (GPU-measured, task-14-report).
 CONTACT_PRESS_M = 0.10
 
+# ---------------------------------------------------------------------------
+# Jaw-Entry Grasp (JEG) plan, Task 2 -- jaw window measurement + acceptance
+# target. Measured by `scripts/measure_jaw.py` on GPU (RTX 3090 Ti, Isaac
+# 6.0.1), 2026-07-22, `field_smoke_contact_hold.yaml`-shaped scratch scenario
+# (deploy pose, f1x open/closed limits read off the live articulation). Full
+# table + derivation in `task-2-report.md`. All figures are in the
+# `arm0_link_wr1` (palm) LOCAL frame, re-derived there specifically because a
+# raw WORLD-frame comparison across the multi-second f1x settle windows is
+# confounded by the standing policy's own base/arm sway (~0.45 m, amplified
+# through the ~0.85 m arm reach) -- see the report for the diagnostic
+# (`_drift_diag.py`) that caught this. `arm0_f1x`'s measured limits are
+# lower=-1.5708 rad / upper=0.0000 rad; commanding each and comparing the
+# finger<->palm LOCAL-frame center distance found lower (0.0804 m gap) is
+# OPEN, upper (0.0264 m gap) is CLOSED -- independently confirming
+# GRIPPER_OPEN_RAD/GRIPPER_CLOSE_RAD above (which pre-date this measurement,
+# inherited unverified from POLICY_ARM_STOW_BY_SUFFIX's f1x value).
+JAW_WINDOW_DEPTH_M = 0.3268    # along the mouth axis (union of open finger +
+                               # palm boxes, palm plate -> finger-tip arc)
+JAW_WINDOW_HEIGHT_M = 0.2803   # perpendicular to the mouth axis, in the
+                               # finger's swing plane (palm face -> finger
+                               # underside at open, same union-extent method)
+JAW_MOUTH_AXIS_GRIPPER = (-0.0769, 0.0000, 0.9970)   # unit vector, wr1/
+                               # gripper LOCAL frame (palm-center ->
+                               # finger-center @ open) -- almost exactly
+                               # local +Z: the f1x hinge sweeps the finger in
+                               # the local XZ plane.
+JAW_TARGET_OBJECT = "cone_0"  # USER DECISION (2026-07-22, task-2-report.md):
+                               # cone_0's full BASE footprint (0.3368 x
+                               # 0.3346 m) does NOT clear the window even
+                               # with margin -- but the cone TAPERS, and at
+                               # JAW_GRASP_HEIGHT_M below its base the shrunk
+                               # cross-section does. bag_0 (0.7507 x 0.8394 m
+                               # footprint) exceeds the window by 2-3x at
+                               # every height on its body (no comparable
+                               # taper -- a duffel bag doesn't narrow) and is
+                               # UNPINCHABLE with this gripper; pipe_0 was
+                               # already ruled out (G2 task-3-g2-report.md:
+                               # its 1.2 m length keeps the base >= ~0.85 m
+                               # away via its own-body collision, leaving it
+                               # at the arm's reach edge) -- both kept here as
+                               # archaeology for any future target swap.
+JAW_GRASP_HEIGHT_M = 0.1030    # height (m) above cone_0's base/origin at
+                               # which its LINEARLY-TAPERED cross-section
+                               # (measured base 0.3368 x 0.3346 m, measured
+                               # total height 0.4640 m, idealized straight
+                               # taper down to a point apex) first clears
+                               # BOTH window dims (0.02 m margin each):
+                               # cross-section there measures (0.2620,
+                               # 0.2603) m: <= JAW_WINDOW_DEPTH_M/HEIGHT_M
+                               # minus margin by construction. 0.3610 m of
+                               # cone remains ABOVE this height (comfortably
+                               # over the >=0.05 m sanity floor needed to
+                               # actually pinch something) -- see
+                               # `measure_jaw.py`'s `cone_taper` block for
+                               # the exact computation re-run for this
+                               # citation.
+
 # External status vocabulary (GraspStatus.srv: sim_spot polls these strings).
 IDLE = "idle"
 IN_PROGRESS = "in_progress"
