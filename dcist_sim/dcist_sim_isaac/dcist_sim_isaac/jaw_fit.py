@@ -148,7 +148,7 @@ def _fits(ext, window_small, window_big):
 
 
 def fit_grasp_level(points, triangles, window_depth, window_height,
-                    margin=0.02, step=0.01):
+                    margin=0.02, step=0.01, min_level=0.0):
     """Lowest level at which the horizontal cross-section fits the margined jaw
     window, returned WITH the mesh's base (scan-axis minimum) coordinate.
 
@@ -166,6 +166,13 @@ def fit_grasp_level(points, triangles, window_depth, window_height,
     4 z-origin fix): because ``mesh_world`` passes the mesh in world coordinates,
     ``base_z + level`` is directly the world Z of the fit cross-section, correct
     even for assets whose registry origin is NOT at the mesh base.
+
+    ``min_level`` (JEG Task 4) is a GROUND / base-flange CLEARANCE floor: levels
+    below it are skipped, so the returned fit height is at least this far above
+    the mesh base. GPU tuning found the raw lowest-fitting level for a traffic
+    cone is ~0.02 m -- right at the wide base flange, where the closing finger
+    sweeps into the ground BELOW the graspable body. A clearance floor grasps
+    higher up the narrower cone body, clear of the ground.
 
     Pure geometry; the caller maps the window's ``(depth, height)`` onto this
     function and interprets the returned level in the scan frame.
@@ -188,9 +195,12 @@ def fit_grasp_level(points, triangles, window_depth, window_height,
         return None
 
     step = float(step)
+    min_level = max(0.0, float(min_level))
     n_steps = int(np.floor(total / step)) + 1
     for k in range(n_steps + 1):
         level = min(k * step, total)
+        if level + 1e-9 < min_level:
+            continue                    # below the ground/flange clearance floor
         plane_value = z_min + level
         ext = slice_extents(P, tris, 2, plane_value)
         if ext is None:

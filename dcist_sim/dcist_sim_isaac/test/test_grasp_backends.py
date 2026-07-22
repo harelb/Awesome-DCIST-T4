@@ -752,8 +752,8 @@ def test_object_in_jaw_window_pure_cases():
 def test_jaw_phase_walk_succeeds_holds_by_friction():
     # contact_hold + finger contact + object tracks the lift -> the four jaw
     # phases run in order and the grasp succeeds; friction hold (no kinematic
-    # suspend); arm ownership RETAINED through carry; colliders enabled exactly
-    # at the VALIDATE->JAW_STAGE transition and kept enabled through carry.
+    # suspend); arm ownership RETAINED through carry; colliders enabled at the
+    # STAGE->ADVANCE transition (JEG Task 4) and kept enabled through carry.
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
@@ -781,21 +781,26 @@ def test_jaw_phase_walk_succeeds_holds_by_friction():
     assert arm.collider_calls[-1] is True
 
 
-def test_colliders_enable_exactly_at_validate_to_jaw_stage():
-    # No collider toggle through align/deploy/reach/descend; the FIRST enable
-    # fires as the op leaves VALIDATE for JAW_STAGE (JEG enable point).
+def test_colliders_enable_exactly_at_stage_to_advance():
+    # JEG Task 4 (GPU): the collider enable moved from VALIDATE->JAW_STAGE to the
+    # STAGE->ADVANCE transition. Enabling while the (collider-free) finger still
+    # OVERLAPS the just-descended object made PhysX launch the object (cone flung
+    # to z=1 m on GPU). So no collider toggle through align/deploy/reach/descend
+    # AND none while JAW_STAGE retracts the open jaw clear of the object; the
+    # FIRST enable fires only as the op leaves JAW_STAGE for JAW_ADVANCE.
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, _reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
-    # step through to just before validate exits: no collider calls yet
     _run_to_phase(backend, "hilbert", "validate")
-    assert arm.collider_calls == []
-    op = _run_to_phase(backend, "hilbert", "jaw_stage")
+    assert arm.collider_calls == []              # not at validate
+    _run_to_phase(backend, "hilbert", "jaw_stage")
+    assert arm.collider_calls == []              # still off while staging
+    op = _run_to_phase(backend, "hilbert", "jaw_advance")
     assert op is not None
-    assert arm.collider_calls == [True]          # enabled exactly here
+    assert arm.collider_calls == [True]          # enabled exactly at stage->advance
 
 
 # (no-fit-height) --------------------------------------------------------------

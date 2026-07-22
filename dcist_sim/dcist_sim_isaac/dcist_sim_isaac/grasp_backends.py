@@ -420,8 +420,16 @@ JAW_STAGE_STANDOFF_M = 0.18    # standoff (m) BEYOND the finger-tip end of the
                                # window and the advance is a real motion).
 JAW_ADVANCE_ALONG_M = 0.16     # target along-mouth coordinate (m) the advance
                                # drives the fit point to -- mid-slot (~half of
-                               # JAW_WINDOW_DEPTH_M) so the pinch cross-section
-                               # sits centered between palm and finger tip.
+                               # JAW_WINDOW_DEPTH_M). NOT pushed to the finger-tip
+                               # end: with SERVO_TOL_M (0.08) slack, a seat depth
+                               # near the window depth (0.327) flips the fit point
+                               # OUT of the window on servo imprecision (JEG Task
+                               # 4 measured -> jaw advance timeout).
+JAW_GROUND_CLEARANCE_M = 0.10  # min grasp height above the object base (m): the
+                               # slicer's lowest-fitting level for a traffic cone
+                               # is ~0.02 (the wide base flange, where the finger
+                               # hits the ground) -- clear it and grasp the
+                               # narrower body higher up (~Task 2's h_fit 0.103).
 JAW_SHOVE_TOL_M = 0.08         # object XY displacement (m) from a jaw phase's
                                # entry position, while NOT in-window, that
                                # counts as a shove -> back off + retry once.
@@ -438,6 +446,14 @@ JAW_LIFT_MIN_RISE_M = 0.03     # gripper must rise at least this (< the servo's
                                # guaranteed >=0.04 m at convergence) to judge.
 JAW_LIFT_TRACK_FRAC = 0.5      # object rise must be >= this fraction of the
                                # gripper's actual rise to count as held.
+JAW_PINCH_SETTLE_S = 0.6       # dwell (m: s) the finger keeps closing after the
+                               # object is first contacted + in-window, BEFORE
+                               # attaching + lift-verifying: gives f1x time to
+                               # drive to its clamp equilibrium against the
+                               # object so a real friction grip can build,
+                               # rather than lifting on the first grazing touch
+                               # (JEG Task 4; a sanctioned "slow the phase"
+                               # lever, NOT a force/friction cheat).
 JAW_STAGE_TIMEOUT_S = 8.0
 JAW_ADVANCE_TIMEOUT_S = 8.0
 CLOSE_PINCH_TIMEOUT_S = 4.0
@@ -828,6 +844,8 @@ class _Op:
         self.fit_level = None
         self.fit_base_z = None
         self.jaw_obj0 = None
+        self.jaw_diag_t = -1.0    # last DCIST_JAW_DIAG emit (op-time throttle)
+        self.pinch_since = None   # op-time the object first went contact+in-win
         self.lift_gz0 = None
         self.lift_objz0 = None
 
@@ -1239,19 +1257,21 @@ class PhysicsGraspBackend:
                 # (level above the mesh base, world Z of that base) -- pairing
                 # them keeps the fit plane origin-independent (JEG Task 4).
                 op.fit_level, op.fit_base_z = float(fit[0]), float(fit[1])
-                # Colliders + contact reporting enable HERE, at the VALIDATE->
-                # JAW_STAGE transition (JEG enable point). The jaw STAGE+ADVANCE
-                # motions give PhysX ample sim steps to register the shapes
-                # before CLOSE_PINCH polls contact, so enabling here -- unlike
-                # the deleted press path's one-tick-before-poll enable that read
-                # 0 contacts -- is in time, while REACH+DESCEND stayed collider-
-                # free (no ground drag / no shove).
-                arm.set_gripper_colliders(True)
-                try:
-                    arm.enable_contact_reporting()
-                except Exception:                          # noqa: BLE001
-                    logger.exception(
-                        "'%s' enable_contact_reporting failed", robot_name)
+                logger.debug(
+                    "JEG fit: level=%.4f base_z=%.4f -> fit_world_z=%.4f "
+                    "(obj_origin_z=%.4f)", op.fit_level, op.fit_base_z,
+                    op.fit_base_z + op.fit_level, float(obj_pos[2]))
+                # Colliders stay DISABLED here (JEG Task 4 GPU fix). REACH +
+                # DESCEND drive the (collider-free) gripper right onto the object
+                # (validate distance ~0.07 m -- the finger geometry OVERLAPS the
+                # object). Enabling the convex-hull finger collider at that
+                # instant made PhysX resolve the overlap with a launch impulse
+                # (GPU DCIST_JAW_DIAG: cone flung to z=1.0 m and 1.03 m away the
+                # tick STAGE began). Instead JAW_STAGE first retracts the open jaw
+                # to the standoff pose with colliders off (no interaction), and
+                # the enable happens at the STAGE->ADVANCE transition once the
+                # jaw is clear of the object -- then ADVANCE descends the open
+                # mouth over it with live, already-registered colliders.
                 self._enter_jaw_stage(robot_name, op, reopen=True)
                 return
             op.phase = _Op.ATTACH
@@ -1266,6 +1286,15 @@ class PhysicsGraspBackend:
             if op.t >= op.phase_deadline:
                 self._fail(robot_name, op, "jaw stage timeout")
                 return
+            # Still-stand the base through the whole jaw sequence (JEG Task 4):
+            # the floating standing policy's residual roll/pitch swings the palm
+            # laterally through the ~0.85 m arm (GPU DCIST_JAW_DIAG: palm y
+            # drifted 0.16 m off the cone during the pinch), and the fixed-base
+            # jacobian servo cannot fight a moving base. Zeroing the base command
+            # every jaw tick damps that drift so the open mouth stays seated over
+            # the object. The align machinery already owns the base; a still-stand
+            # here is legitimate + realistic (spec/brief lever).
+            arm.stop_base()
             # Per-tick target REFRESH (JEG Task 4): the staging target is
             # fit_pt - (depth + standoff) * m, and BOTH the live mouth axis m
             # AND the object fit point drift while we converge -- the GPU probe
@@ -1279,8 +1308,24 @@ class PhysicsGraspBackend:
             m = self._jaw_world_mouth_axis(op)
             fit_pt = self._jaw_fit_point(op)
             op.target = fit_pt - (JAW_WINDOW_DEPTH_M + JAW_STAGE_STANDOFF_M) * m
+            self._jaw_diag(robot_name, op)
             if self._advance_servo(op) != IkServo.CONVERGED:
                 return
+            # Enable colliders + contact reporting HERE (JEG Task 4 enable
+            # point), at STAGE->ADVANCE: the open jaw is now retracted to the
+            # standoff pose, CLEAR of the object, so enabling the convex-hull
+            # colliders does not resolve an overlap into a launch impulse (the
+            # bug when it was enabled at VALIDATE->STAGE with the finger still on
+            # the object). ADVANCE then descends the open mouth over the object;
+            # the several-second advance gives PhysX ample steps to register the
+            # shapes before CLOSE_PINCH polls contact. Idempotent across a
+            # shove-retry re-stage.
+            arm.set_gripper_colliders(True)
+            try:
+                arm.enable_contact_reporting()
+            except Exception:                              # noqa: BLE001
+                logger.exception(
+                    "'%s' enable_contact_reporting failed", robot_name)
             op.jaw_obj0 = np.asarray(
                 self.registry.world_pose(op.object_id)[0], dtype=float)[:2]
             op.servo = self._new_servo(op)
@@ -1295,9 +1340,11 @@ class PhysicsGraspBackend:
             # point is inside the jaw window. Shove (object shoved out of place
             # while NOT yet in-window) -> back off + retry once; timeout ->
             # fail "jaw advance timeout".
+            arm.stop_base()                  # hold station (see JAW_STAGE note)
             palm_pos, palm_quat = arm.gripper_frame_pose()
             m = self._jaw_world_mouth_axis(op)
             fit_pt = self._jaw_fit_point(op)
+            self._jaw_diag(robot_name, op)
             if object_in_jaw_window(palm_pos, palm_quat, fit_pt):
                 op.phase = _Op.CLOSE_PINCH
                 op.phase_deadline = op.t + CLOSE_PINCH_TIMEOUT_S
@@ -1322,9 +1369,11 @@ class PhysicsGraspBackend:
             # object contact is reported AND the fit point is still in-window.
             # Contact but slipped OUT of the window -> shove-retry (same
             # counter). Timeout with no qualifying contact -> "no pinch contact".
+            arm.stop_base()                  # hold station (see JAW_STAGE note)
             arm.close_gripper()
             palm_pos, palm_quat = arm.gripper_frame_pose()
             fit_pt = self._jaw_fit_point(op)
+            self._jaw_diag(robot_name, op, note="/closing")
             in_window = object_in_jaw_window(palm_pos, palm_quat, fit_pt)
             contact = False
             try:
@@ -1333,6 +1382,15 @@ class PhysicsGraspBackend:
             except Exception:                              # noqa: BLE001
                 logger.exception("'%s' contact query failed", robot_name)
             if contact and in_window:
+                # DWELL: keep closing f1x for JAW_PINCH_SETTLE_S after the first
+                # contact+in-window tick so the finger reaches its clamp
+                # equilibrium before we commit to the lift (JEG Task 4). Lifting
+                # on the first grazing touch measured obj_rise=0 across the full
+                # gripper rise -- the finger had not yet clamped.
+                if op.pinch_since is None:
+                    op.pinch_since = op.t
+                if op.t - op.pinch_since < JAW_PINCH_SETTLE_S:
+                    return                       # still settling; finger closing
                 # Grip achieved: record the friction hold, then verify a lift.
                 self._contact_attach(robot_name, op)
                 op.lift_gz0 = float(palm_pos[2])
@@ -1346,6 +1404,7 @@ class PhysicsGraspBackend:
                 self._set_last(robot_name, IN_PROGRESS,
                                f"lift-verifying '{op.object_id}'", op.object_id)
                 return
+            op.pinch_since = None            # lost the seat -> restart the dwell
             if contact and not in_window:
                 self._jaw_shove_retry(robot_name, op, "pinch")
                 return
@@ -1373,6 +1432,10 @@ class PhysicsGraspBackend:
                     self.registry.prim_path(op.object_id))
             except Exception:                              # noqa: BLE001
                 logger.exception("'%s' contact query failed", robot_name)
+            if os.environ.get("DCIST_JAW_DIAG"):
+                logger.debug("LIFTDIAG t=%.1f status=%s g_rise=%.3f obj_rise="
+                             "%.3f contact=%s held=%s", op.t, status, g_rise,
+                             obj_rise, contact, held)
             if not (status == IkServo.CONVERGED or op.t >= op.phase_deadline):
                 return
             if contact and held:
@@ -1421,7 +1484,8 @@ class PhysicsGraspBackend:
         points, triangles = mesh
         try:
             return jaw_fit.fit_grasp_level(
-                points, triangles, JAW_WINDOW_DEPTH_M, JAW_WINDOW_HEIGHT_M)
+                points, triangles, JAW_WINDOW_DEPTH_M, JAW_WINDOW_HEIGHT_M,
+                min_level=JAW_GROUND_CLEARANCE_M)
         except Exception:                                  # noqa: BLE001
             logger.exception("'%s' jaw fit-height slice failed", robot_name)
             return None
@@ -1463,6 +1527,40 @@ class PhysicsGraspBackend:
         op.phase_deadline = op.t + JAW_STAGE_TIMEOUT_S
         self._set_last(robot_name, IN_PROGRESS,
                        f"staging jaw at '{op.object_id}'", op.object_id)
+
+    def _jaw_diag(self, robot_name, op, note=""):
+        """Throttled per-tick jaw geometry dump (env DCIST_JAW_DIAG=1 only), the
+        GPU tuning instrument: object vs palm world pose, the live fit point +
+        mouth axis, in-window, shove distance from the phase-entry reference, and
+        the servo target error. Never raises."""
+        if not os.environ.get("DCIST_JAW_DIAG"):
+            return
+        if op.t - op.jaw_diag_t < 0.3:
+            return
+        op.jaw_diag_t = op.t
+        try:
+            arm = op.arm
+            palm_pos, palm_quat = arm.gripper_frame_pose()
+            obj_pos = np.asarray(self.registry.world_pose(op.object_id)[0],
+                                 dtype=float)
+            m = self._jaw_world_mouth_axis(op)
+            fit_pt = self._jaw_fit_point(op)
+            inw = object_in_jaw_window(palm_pos, palm_quat, fit_pt)
+            shove = (float(np.linalg.norm(obj_pos[:2] - op.jaw_obj0))
+                     if op.jaw_obj0 is not None else float("nan"))
+            terr = (float(np.linalg.norm(
+                arm.to_servo_frame(op.target) - arm.gripper_pos()))
+                if op.target is not None else float("nan"))
+            logger.debug(
+                "JAWDIAG[%s%s] t=%.1f obj=(%.3f,%.3f,%.3f) palm=(%.3f,%.3f,"
+                "%.3f) fit=(%.3f,%.3f,%.3f) m=(%.2f,%.2f,%.2f) in_win=%s "
+                "shove=%.3f targ_err=%.3f", op.phase, note, op.t,
+                obj_pos[0], obj_pos[1], obj_pos[2],
+                palm_pos[0], palm_pos[1], palm_pos[2],
+                fit_pt[0], fit_pt[1], fit_pt[2], m[0], m[1], m[2],
+                inw, shove, terr)
+        except Exception:                                  # noqa: BLE001
+            pass
 
     def _jaw_shove_retry(self, robot_name, op, where):
         """Back off + retry ONCE on a shove/slip (shared by JAW_ADVANCE and

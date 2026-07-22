@@ -169,6 +169,22 @@ def test_fit_level_returns_base_z_for_offset_mesh():
     assert abs((base_z + level) - 1.803) <= 0.01 + 1e-9  # fit plane world Z
 
 
+def test_fit_level_min_level_clearance_floor():
+    # JEG Task 4 ground/flange clearance: a box that fits at every level would
+    # return 0.0, but min_level forces the scan to skip below the floor, so the
+    # returned level is exactly the clearance (base_z unchanged).
+    pts, tris = _box(0.20, 0.20, 0.40)
+    h = fit_grasp_level(pts, tris, 0.30, 0.30, margin=0.0, step=0.01,
+                        min_level=0.10)
+    assert h is not None
+    level, base_z = h
+    assert abs(level - 0.10) <= 1e-9, level
+    assert base_z == 0.0
+    # a clearance taller than the mesh finds no fitting level -> None
+    assert fit_grasp_level(pts, tris, 0.30, 0.30, margin=0.0, step=0.01,
+                           min_level=0.50) is None
+
+
 def test_fit_level_box_that_fits_everywhere_is_zero():
     pts, tris = _box(0.20, 0.20, 0.40)
     h = fit_grasp_level(pts, tris, 0.30, 0.30, margin=0.0, step=0.01)
