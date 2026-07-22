@@ -1549,6 +1549,31 @@ integrator. Median+MAD is O(n log n), robust to ~50 % one-sided contamination
 | `depth_mad_floor_m` | `0.15` | minimum reject band (m); protects legitimately thick objects when MAD is tiny |
 | `depth_filter_min_pixels` | `10` | clusters with fewer valid pixels skip the filter (median meaningless) |
 
+> **Real-bag validation is a REQUIRED follow-up before real deployments trust
+> these defaults.** The `k=3.0` / `floor=0.15 m` / `min_pixels=10` defaults above
+> are validated **in SIM ONLY** (synthetic Isaac depth, §13 evidence table). No
+> real depth image has been run through this filter — real depth carries
+> failure modes sim doesn't reproduce: NaN speckle, motion-blur edges,
+> glass/reflective returns, and black/IR-absorbing objects (weak or missing
+> stereo/ToF returns). Until a real-bag validation pass is done,
+> `enable_depth_mode_filter: false` is the per-deployment escape hatch back to
+> legacy (unfiltered) behavior. Two watch-items the final review named,
+> specifically because they are not simply "worse" but *differently wrong*:
+> 1. **Majority-contaminated masks (>50% background) flip the median onto the
+>    background.** The filter is a robust *mode* filter, not a background
+>    rejecter per se — if most of a mask's pixels are background, the object
+>    localizes **AT the background**, not merely with degraded accuracy. This is
+>    a different failure signature than the pre-filter behavior (biased-outward
+>    centroid), not necessarily worse in expectation, but distinct enough that
+>    real-bag contamination rates need to be characterized before trusting it.
+> 2. **Low-depth-validity masks (black objects, strong sunlight/IR washout) may
+>    now drop below `min_cluster_size`** where the legacy (unfiltered) path kept
+>    them, because the filter can reject most of a cluster's pixels as invalid
+>    ranges before the size gate is checked. This is likely the *correct*
+>    behavior (better to drop an object than mislocalize it), but it is a
+>    **behavior delta** from legacy that has not been observed on real sensor
+>    data and should be confirmed, not assumed.
+
 A knob change is a **launch-time** param (no khronos rebuild, no config regen) —
 but the C++ filter itself only takes effect after a workspace build
 (`colcon build --packages-select khronos hydra hydra_ros`).
