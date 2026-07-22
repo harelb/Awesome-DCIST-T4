@@ -411,6 +411,20 @@ class _ArmInterface:
     def release(self):
         self._drive.set_arm_hold(True)
 
+    def set_gripper_colliders(self, enabled):
+        """Toggle this robot's gripper colliders (Task 2, G2 contact-hold
+        window). No-op if the robot has none provisioned -- Task 1 only
+        provisions them for physics-mode + `RobotSpec.contact_hold` robots
+        (`spot_robot._wants_gripper_colliders`); defensive belt-and-braces
+        since every call site in `PhysicsGraspBackend` already gates the
+        call itself on `op.contact_hold` before reaching here."""
+        paths = getattr(self._robot, "gripper_collider_paths", None)
+        if not paths:
+            return
+        from dcist_sim_isaac.spot_robot import set_gripper_colliders_enabled
+
+        set_gripper_colliders_enabled(paths, bool(enabled))
+
     # -- base yaw-align (Task 15f) -------------------------------------------
 
     def base_pose_xyzyaw(self):
@@ -624,6 +638,13 @@ class PhysicsGraspBackend:
             return False, "", msg
         contact_hold = bool(getattr(robot.spec, "contact_hold", False))
         arm.take_ownership()
+        if contact_hold:
+            # G2 (Task 2): enable the gripper colliders at the same seam arm
+            # ownership is taken -- they must be live before CONTACT_CLOSE
+            # presses/closes the finger, and a successful contact grasp keeps
+            # them enabled through the whole carry (see _finish/_succeed_grasp;
+            # they are the hold). Gated on contact_hold so G1 is untouched.
+            arm.set_gripper_colliders(True)
         self._ops[robot_name] = _Op("grasp", arm, contact_hold=contact_hold)
         self._set_last(robot_name, IN_PROGRESS, "grasp started", "")
         logger.info("'%s' physics grasp accepted", robot_name)
@@ -653,7 +674,14 @@ class PhysicsGraspBackend:
             return False, msg
         held = self._held[robot_name]
         arm.take_ownership()
-        op = _Op("place", arm, contact_hold=(held["mode"] == "contact"))
+        op_contact_hold = held["mode"] == "contact"
+        if op_contact_hold:
+            # Already enabled since the grasp (a successful contact carry
+            # never disables them) -- idempotent re-affirmation at the same
+            # "arm ownership taken" seam grasp() uses. Gated on the held
+            # mode so a G1 pin place never touches this.
+            arm.set_gripper_colliders(True)
+        op = _Op("place", arm, contact_hold=op_contact_hold)
         op.object_id = held["object_id"]
         self._ops[robot_name] = op
         self._set_last(robot_name, IN_PROGRESS, "place started",
@@ -712,6 +740,47 @@ class PhysicsGraspBackend:
         new_quat = _quat_mul(g_quat, off_quat)
         self.registry.set_world_pose(object_id, new_pos, new_quat)
 
+    def _contact_gripper_object_dist(self, robot_name, object_id):
+        """Live gripper<->object world distance (Task 2/14): shared by the
+        async carry-time monitor and the CARRY-phase re-verify so both use
+        the identical measurement."""
+        robot = self.robots[robot_name]
+        g_pos, _ = robot.gripper_world_pose()
+        obj_pos, _ = self.registry.world_pose(object_id)
+        return _dist3(np.asarray(g_pos, dtype=float)[:3], obj_pos)
+
+    def _contact_still_held(self, robot_name, object_id):
+        """True iff the gripper<->object distance is still within
+        CONTACT_DROP_DIST_M (Task 2 CARRY re-verify -- see the CARRY phase
+        in `_step_grasp`)."""
+        return (self._contact_gripper_object_dist(robot_name, object_id)
+                <= CONTACT_DROP_DIST_M)
+
+    def _drop_contact_hold(self, robot_name, arm, object_id, reason):
+        """Shared G2 drop path (Task 2): clear the contact hold, disable the
+        gripper colliders, hand the arm back to the policy, and mark the
+        robot's status failed with `reason`. Used both by the async
+        carry-time monitor (`_monitor_contact_hold`, no in-flight op) and the
+        CARRY re-verify (`_step_grasp`, in-flight op popped by the caller
+        just before this runs) so a slip is handled identically either way.
+        Deliberately does NOT call `arm.stop_base()` (unlike `_finish`): a
+        pure carry-time drop (the monitor's case) can coincide with an
+        unrelated in-flight nav goal driving the base post-grasp, and
+        `stop_base` -> `set_cmd_vel` cancels that goal (see `set_base_cmd`'s
+        docstring) -- out of scope for a drop to touch."""
+        self._held.pop(robot_name, None)
+        self.registry.clear_held(object_id)
+        try:
+            arm.set_gripper_colliders(False)
+        except Exception:                                  # noqa: BLE001
+            logger.exception("'%s' gripper collider disable on drop failed",
+                             robot_name)
+        try:
+            arm.release()   # hand the arm back to the policy (re-stow)
+        except Exception:                                  # noqa: BLE001
+            logger.exception("'%s' arm release after drop failed", robot_name)
+        self._set_last(robot_name, FAILED, reason, object_id)
+
     def _monitor_contact_hold(self, robot_name, held):
         """G2 (Task 14) carry-time drop detection. Only runs when NO op is in
         flight for this robot -- i.e. during a pure carry (grasp finished, place
@@ -722,23 +791,14 @@ class PhysicsGraspBackend:
         if robot_name in self._ops:
             return
         object_id = held["object_id"]
-        robot = self.robots[robot_name]
-        g_pos, _ = robot.gripper_world_pose()
-        obj_pos, _ = self.registry.world_pose(object_id)
-        d = _dist3(np.asarray(g_pos, dtype=float)[:3], obj_pos)
+        d = self._contact_gripper_object_dist(robot_name, object_id)
         if d <= CONTACT_DROP_DIST_M:
             return
         logger.info("'%s' DROPPED contact-held '%s' (gripper %.3f m away > "
                     "%.2f m)", robot_name, object_id, d, CONTACT_DROP_DIST_M)
-        self._held.pop(robot_name, None)
-        self.registry.clear_held(object_id)
-        try:
-            held["arm"].release()   # hand the arm back to the policy (re-stow)
-        except Exception:                                  # noqa: BLE001
-            logger.exception("'%s' arm release after drop failed", robot_name)
-        self._set_last(robot_name, FAILED,
-                       f"dropped '{object_id}' during carry (contact lost)",
-                       object_id)
+        self._drop_contact_hold(
+            robot_name, held["arm"], object_id,
+            f"dropped '{object_id}' during carry (contact lost)")
 
     # -- grasp state machine -------------------------------------------------
 
@@ -869,6 +929,24 @@ class PhysicsGraspBackend:
             elif op.phase == _Op.DESCEND:
                 op.phase = _Op.VALIDATE
             elif op.phase == _Op.CARRY:
+                # Task 2 CARRY re-verify: the carry-lift servo converging is
+                # not proof the grip is still on -- a slip could have already
+                # happened by this exact tick. Re-check the same gripper<->
+                # object distance `_monitor_contact_hold` polices during an
+                # ongoing carry BEFORE ever reporting succeeded, so a
+                # contact hold can never sneak through a one-tick optimistic
+                # success. Gated on contact_hold: G1 pin mode has no
+                # friction to slip, so the check is trivially true there and
+                # this whole branch is byte-identical dead code for G1.
+                if op.contact_hold and not self._contact_still_held(
+                        robot_name, op.object_id):
+                    object_id = op.object_id
+                    self._ops.pop(robot_name, None)
+                    self._drop_contact_hold(
+                        robot_name, op.arm, object_id,
+                        f"dropped '{object_id}' during carry (contact lost "
+                        "before succeed)")
+                    return
                 self._succeed_grasp(robot_name, op)
             return
 
@@ -1042,6 +1120,11 @@ class PhysicsGraspBackend:
                 # Its collision was never disabled (friction needs it), so
                 # nothing to re-enable here.
                 arm.open_gripper()
+                # Task 2: disable the gripper colliders right here at the
+                # detach terminal (the carry is now over) -- belt-and-braces
+                # with _finish's release_arm-gated disable a couple phases
+                # later at STOW; idempotent either way.
+                arm.set_gripper_colliders(False)
             else:
                 # Task 15i: re-enable the collider BEFORE restoring dynamics, so
                 # the placed object collides + settles normally the moment PhysX
@@ -1201,6 +1284,20 @@ class PhysicsGraspBackend:
                 op.arm.release()
             except Exception:                              # noqa: BLE001
                 logger.exception("'%s' arm release failed", robot_name)
+            if op.contact_hold:
+                # Disable the gripper colliders in lockstep with releasing
+                # the arm: release_arm is False ONLY for a successful
+                # contact grasp (carry keeps both arm ownership and the
+                # colliders -- they ARE the hold). Every other terminal
+                # (failure, exception-funnel, or the eventual place STOW)
+                # releases the arm and must also drop the colliders. Gated
+                # on op.contact_hold so G1 never calls this.
+                try:
+                    op.arm.set_gripper_colliders(False)
+                except Exception:                          # noqa: BLE001
+                    logger.exception(
+                        "'%s' gripper collider disable on finish failed",
+                        robot_name)
         self._ops.pop(robot_name, None)
         self._set_last(robot_name, state, message, object_id)
 
@@ -1223,12 +1320,31 @@ class PhysicsGraspBackend:
                 op.arm.release()
             except Exception:                              # noqa: BLE001
                 logger.exception("arm release during reset failed")
+            if op.contact_hold:
+                # Task 2: an in-flight contact-hold op may have already
+                # enabled the gripper colliders (enabled right where arm
+                # ownership is taken, in grasp()/place()) -- reset must drop
+                # them along with the arm, same as every other terminal.
+                try:
+                    op.arm.set_gripper_colliders(False)
+                except Exception:                          # noqa: BLE001
+                    logger.exception(
+                        "gripper collider disable during reset failed "
+                        "(in-flight op)")
         for held in self._held.values():
             if held["mode"] == "contact":
                 try:
                     held["arm"].release()
                 except Exception:                          # noqa: BLE001
                     logger.exception("contact-hold arm release on reset failed")
+                # Task 2: a pure carry (no in-flight op) still owns enabled
+                # colliders -- disable them here too (mirrors the drop path).
+                try:
+                    held["arm"].set_gripper_colliders(False)
+                except Exception:                          # noqa: BLE001
+                    logger.exception(
+                        "gripper collider disable during reset failed "
+                        "(held carry)")
         # Restore dynamics on anything we kinematic-held (the shared
         # GraspBackend.reset re-poses objects to spawn + clears held_by, but
         # only THIS backend flipped set_kinematic(True), so only it can undo).
