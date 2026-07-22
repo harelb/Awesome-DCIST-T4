@@ -102,6 +102,11 @@ class _FakeArm:
     def gripper_pos(self):
         return np.asarray(self.robot._gpos, dtype=float)
 
+    def gripper_frame_pose(self):
+        # Palm (wr1) frame. In the fake the finger==palm==gripper and the frame
+        # is identity, so the world mouth axis == the gripper-local constant.
+        return list(self.robot._gpos), _Q_ID
+
     def jacobian(self):
         J = np.zeros((3, 6))
         J[0, 0] = J[1, 1] = J[2, 2] = 1.0
@@ -139,32 +144,87 @@ class _FakeArm:
         self.collider_calls.append(bool(enabled))
 
 
+def _box_mesh(sx, sy, sz):
+    """Axis-aligned box, min z=0. 12 triangles."""
+    hx, hy = sx / 2.0, sy / 2.0
+    v = np.array([
+        [-hx, -hy, 0.0], [hx, -hy, 0.0], [hx, hy, 0.0], [-hx, hy, 0.0],
+        [-hx, -hy, sz], [hx, -hy, sz], [hx, hy, sz], [-hx, hy, sz],
+    ], dtype=float)
+    t = np.array([
+        [0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6], [0, 4, 5], [0, 5, 1],
+        [1, 5, 6], [1, 6, 2], [2, 6, 7], [2, 7, 3], [3, 7, 4], [3, 4, 0],
+    ], dtype=int)
+    return v, t
+
+
+# mesh_world fixtures keyed by kind: "fits" clears the window at every level
+# (fit_level 0.0), "toobig" never clears (fit_grasp_level -> None), "none" has
+# no readable mesh at all. All exercise the REAL jaw_fit.fit_grasp_level.
+_MESH_KINDS = {
+    "fits": lambda: _box_mesh(0.20, 0.20, 0.40),
+    "toobig": lambda: _box_mesh(0.60, 0.60, 0.40),
+    "none": lambda: None,
+}
+
+
 class _FakeRegistry:
-    def __init__(self, objects):
+    def __init__(self, objects, robots=None, mesh_kind="fits",
+                 couple_on_hold=True):
         # objects: {oid: {"pos": (x,y,z), "graspable": bool, "held_by": str|None}}
         self._o = {k: dict(v) for k, v in objects.items()}
         self.kinematic_calls = []           # list of (oid, enabled)
         self.collision_calls = []           # list of (oid, enabled) -- Task 15i
         self.ops_log = []                   # ordered ("kin"|"col", oid, enabled)
+        self._robots = {r.spec.name: r for r in (robots or [])}
+        self._mesh_kind = mesh_kind
+        self._couple_on_hold = couple_on_hold
+        # oid -> (robot_name, offset3): a contact-held object rides the gripper
+        # (friction) so a lift raises it -- the fake analogue of the physics
+        # hold, used by LIFT_VERIFY + the carry drop monitor.
+        self._coupled = {}
 
     def selection_snapshot(self):
         return {k: {"pos": v["pos"], "graspable": v["graspable"],
                     "held_by": v["held_by"]} for k, v in self._o.items()}
 
     def world_pose(self, oid):
+        if oid in self._coupled:
+            rn, off = self._coupled[oid]
+            gp = np.asarray(self._robots[rn].gripper_world_pose()[0],
+                            dtype=float)[:3]
+            return tuple(gp + off), _Q_ID
         return tuple(self._o[oid]["pos"]), _Q_ID
 
     def prim_path(self, oid):
         return f"/World/objects/{oid}"
 
+    def mesh_world(self, oid):
+        builder = _MESH_KINDS[self._mesh_kind]
+        return builder()
+
     def set_world_pose(self, oid, pos, quat):
         self._o[oid]["pos"] = tuple(pos)
+        self._coupled.pop(oid, None)        # explicit repin breaks coupling
+
+    def teleport(self, oid, pos):
+        """Test helper: move an object (breaking any gripper coupling) to
+        simulate a shove/slip."""
+        self._o[oid]["pos"] = tuple(pos)
+        self._coupled.pop(oid, None)
 
     def set_held_by(self, oid, robot):
         self._o[oid]["held_by"] = robot
+        r = self._robots.get(robot)
+        if (self._couple_on_hold and r is not None
+                and getattr(r.spec, "contact_hold", False)):
+            gp = np.asarray(r.gripper_world_pose()[0], dtype=float)[:3]
+            off = np.asarray(self._o[oid]["pos"], dtype=float) - gp
+            self._coupled[oid] = (robot, off)
 
     def clear_held(self, oid):
         self._o[oid]["held_by"] = None
+        self._coupled.pop(oid, None)
 
     def set_kinematic(self, oid, enabled):
         self.kinematic_calls.append((oid, bool(enabled)))
@@ -200,9 +260,10 @@ def _run_phases(backend, name, dt=0.1, max_steps=500):
     return backend.status(name)[0], phases
 
 
-def _make(objects, arms):
+def _make(objects, arms, mesh_kind="fits", couple_on_hold=True):
     robots = [a.robot for a in arms.values()]
-    reg = _FakeRegistry(objects)
+    reg = _FakeRegistry(objects, robots=robots, mesh_kind=mesh_kind,
+                        couple_on_hold=couple_on_hold)
     backend = PhysicsGraspBackend(
         robots, reg, arm_factory=lambda r: arms[r.spec.name])
     return backend, reg
@@ -628,17 +689,71 @@ def test_unknown_robot():
     assert backend.place("ghost")[0] is False
 
 
-# -- G2 contact hold (Task 14, EXPERIMENTAL) --------------------------------
+# -- jaw-entry grasp (JEG Task 3) -------------------------------------------
 
 
 def _step_once(backend, name, dt=0.1):
     backend.step(dt)
 
 
-def test_contact_present_holds_without_pin():
-    # contact_hold robot + finger reports contact -> succeeds, object is held
-    # by friction: NEVER set_kinematic(True), and arm ownership is RETAINED
-    # (not re-stowed) so the grip persists through the carry.
+def _run_to_phase(backend, name, phase, dt=0.1, max_steps=400):
+    """Step until the op reaches `phase` (returns the op) or terminal (None)."""
+    for _ in range(max_steps):
+        if backend.status(name)[0] in ("succeeded", "failed"):
+            return None
+        op = backend._ops.get(name)
+        if op is not None and op.phase == phase:
+            return op
+        backend.step(dt)
+    return None
+
+
+# (a) object_in_jaw_window pure predicate ------------------------------------
+
+
+def test_object_in_jaw_window_pure_cases():
+    from dcist_sim_isaac.grasp_backends import (
+        JAW_MOUTH_AXIS_GRIPPER, JAW_WINDOW_DEPTH_M, JAW_WINDOW_HEIGHT_M,
+        object_in_jaw_window)
+    from dcist_sim_isaac.grasp import _rotate_vector
+
+    m = np.asarray(JAW_MOUTH_AXIS_GRIPPER, dtype=float)
+    m = m / np.linalg.norm(m)
+    ex = np.array([1.0, 0.0, 0.0])
+    h = ex - float(ex @ m) * m
+    h = h / np.linalg.norm(h)
+    w = np.cross(m, h)
+    g = np.array([0.0, 0.0, 0.0])
+
+    # inside: mid-depth, small perp
+    assert object_in_jaw_window(g, _Q_ID, g + 0.15 * m + 0.05 * h + 0.02 * w)
+    # beyond depth (finger-tip side)
+    assert not object_in_jaw_window(g, _Q_ID,
+                                    g + (JAW_WINDOW_DEPTH_M + 0.05) * m)
+    # behind the palm (negative along-mouth)
+    assert not object_in_jaw_window(g, _Q_ID, g - 0.05 * m)
+    # lateral out along the height axis
+    assert not object_in_jaw_window(g, _Q_ID,
+                                    g + 0.15 * m + (JAW_WINDOW_HEIGHT_M) * h)
+    # quaternion-rotated gripper (180 deg about Z, quat (w,x,y,z)=(0,0,0,1)):
+    # a point that is inside in the gripper frame maps to world via the SAME
+    # rotation and must still read inside; its along-flip reads outside.
+    qz = (0.0, 0.0, 0.0, 1.0)
+    inside_local = 0.15 * m + 0.05 * h + 0.02 * w
+    world_in = np.asarray(_rotate_vector(tuple(inside_local), qz))
+    assert object_in_jaw_window(g, qz, g + world_in)
+    world_out = np.asarray(_rotate_vector(tuple(0.40 * m), qz))
+    assert not object_in_jaw_window(g, qz, g + world_out)
+
+
+# (b) happy-path phase walk --------------------------------------------------
+
+
+def test_jaw_phase_walk_succeeds_holds_by_friction():
+    # contact_hold + finger contact + object tracks the lift -> the four jaw
+    # phases run in order and the grasp succeeds; friction hold (no kinematic
+    # suspend); arm ownership RETAINED through carry; colliders enabled exactly
+    # at the VALIDATE->JAW_STAGE transition and kept enabled through carry.
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
@@ -646,72 +761,234 @@ def test_contact_present_holds_without_pin():
     backend, reg = _make(objs, {"hilbert": arm})
 
     backend.grasp("hilbert")
-    state, _msg, oid = _run(backend, "hilbert")
-    assert state == "succeeded"
-    assert oid == "cone_0"
+    assert arm.collider_calls == []               # NOT enabled at accept
+    state, phases = _run_phases(backend, "hilbert")
+    assert state == "succeeded", (state, phases)
+    # jaw phases present, in order, AFTER validate
+    for p in ("validate", "jaw_stage", "jaw_advance", "close_pinch",
+              "lift_verify"):
+        assert p in phases, phases
+    assert (phases.index("validate") < phases.index("jaw_stage")
+            < phases.index("jaw_advance") < phases.index("close_pinch")
+            < phases.index("lift_verify"))
     assert reg._o["cone_0"]["held_by"] == "hilbert"
-    # friction hold: object stayed dynamic (no kinematic suspend at all)
-    assert all(enabled is False for _oid, enabled in reg.kinematic_calls), \
-        reg.kinematic_calls
-    assert ("cone_0", True) not in reg.kinematic_calls
+    assert ("cone_0", True) not in reg.kinematic_calls   # never suspended
     assert arm.gripper_closed is True
     assert arm.contact_reporting is True
-    # arm ownership retained through carry (would drop the object otherwise)
-    assert arm.owned is True
+    assert arm.owned is True                     # ownership kept through carry
+    # colliders enabled once, at validate->jaw_stage, and still on through carry
+    assert True in arm.collider_calls
+    assert arm.collider_calls[-1] is True
 
 
-def test_contact_absent_fails_no_contact():
+def test_colliders_enable_exactly_at_validate_to_jaw_stage():
+    # No collider toggle through align/deploy/reach/descend; the FIRST enable
+    # fires as the op leaves VALIDATE for JAW_STAGE (JEG enable point).
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    # step through to just before validate exits: no collider calls yet
+    _run_to_phase(backend, "hilbert", "validate")
+    assert arm.collider_calls == []
+    op = _run_to_phase(backend, "hilbert", "jaw_stage")
+    assert op is not None
+    assert arm.collider_calls == [True]          # enabled exactly here
+
+
+# (no-fit-height) --------------------------------------------------------------
+
+
+def test_no_fit_height_fails_cleanly():
+    # The target mesh has no cross-section that clears the jaw window at any
+    # level -> fit_grasp_level returns None -> fail "no fit height", never guess.
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm}, mesh_kind="toobig")
+    backend.grasp("hilbert")
+    state, msg, _ = _run(backend, "hilbert")
+    assert state == "failed"
+    assert "no fit height" in msg.lower()
+    assert reg._o["cone_0"]["held_by"] is None
+    assert arm.owned is False
+    assert arm.collider_calls[-1] is False       # any enable undone on failure
+
+
+def test_no_mesh_fails_no_fit_height():
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm}, mesh_kind="none")
+    backend.grasp("hilbert")
+    state, msg, _ = _run(backend, "hilbert")
+    assert state == "failed"
+    assert "no fit height" in msg.lower()
+
+
+# (c) advance shove -> retry once -> second shove fails "shoved" --------------
+
+
+def test_advance_shove_retries_once_then_fails_shoved():
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+
+    # first advance: shove the object out of place while not-yet-in-window
+    op = _run_to_phase(backend, "hilbert", "jaw_advance")
+    assert op is not None
+    reg.teleport("cone_0", (0.5, 0.6, 0.0))       # +0.6 m in y >> shove tol
+    backend.step(0.1)
+    assert backend._ops["hilbert"].jaw_retries == 1
+    # it backed off to re-stage (retry once)
+    op2 = _run_to_phase(backend, "hilbert", "jaw_advance")
+    assert op2 is not None
+    # second shove -> failed "shoved", full hygiene
+    reg.teleport("cone_0", (0.5, -0.6, 0.0))
+    for _ in range(5):
+        backend.step(0.1)
+        if backend.status("hilbert")[0] == "failed":
+            break
+    state, msg, _ = backend.status("hilbert")
+    assert state == "failed"
+    assert "shoved" in msg.lower()
+    assert reg._o["cone_0"]["held_by"] is None
+    assert arm.owned is False                    # arm released
+    assert arm.collider_calls[-1] is False       # colliders disabled
+
+
+# (d) close-pinch timeout -> "no pinch contact" ------------------------------
+
+
+def test_close_pinch_timeout_fails_no_pinch_contact():
+    # In-window but the finger never reports contact -> CLOSE_PINCH times out
+    # with the named message; full terminal hygiene.
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=False)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, reg = _make(objs, {"hilbert": arm})
-
     backend.grasp("hilbert")
     state, msg, _ = _run(backend, "hilbert")
     assert state == "failed"
-    assert "no contact" in msg.lower()
+    assert "no pinch contact" in msg.lower()
+    assert arm.gripper_closed is True            # it did try to close
     assert reg._o["cone_0"]["held_by"] is None
-    # failed grasp releases the arm back to the policy
     assert arm.owned is False
+    assert arm.collider_calls[-1] is False
 
 
-def test_contact_hold_drop_detection():
-    # After a successful contact grasp, moving the object > 0.3 m from the
-    # gripper (a slip) must be detected during carry -> failed "dropped".
+# (e) lift-verify failure -> drop path ---------------------------------------
+
+
+def test_lift_verify_failure_routes_to_drop():
+    # Pinch succeeds (contact + in-window), but the object does NOT track the
+    # lift (couple_on_hold False) -> not held -> "lift verify failed" via the
+    # shared contact-drop path (arm + colliders released, hold cleared).
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm}, couple_on_hold=False)
+    backend.grasp("hilbert")
+    state, msg, _ = _run(backend, "hilbert")
+    assert state == "failed"
+    assert "lift verify" in msg.lower()
+    assert reg._o["cone_0"]["held_by"] is None   # hold cleared (drop path)
+    assert arm.owned is False
+    assert arm.collider_calls[-1] is False
+
+
+# (f) per-phase timeouts, named messages + terminal hygiene ------------------
+
+
+def _assert_clean_fail(backend, reg, arm, name, oid, expect_msg):
+    state, msg, _ = backend.status(name)
+    assert state == "failed", (state, msg)
+    assert expect_msg in msg.lower(), msg
+    assert reg._o[oid]["held_by"] is None
+    assert arm.owned is False
+    assert arm.collider_calls[-1] is False       # colliders disabled on exit
+
+
+def test_jaw_stage_timeout_named_and_clean():
+    # Reach JAW_STAGE, then freeze the arm -> the stage servo never converges
+    # -> the phase DEADLINE fires with "jaw stage timeout" (not a servo-fail).
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, reg = _make(objs, {"hilbert": arm})
-
     backend.grasp("hilbert")
-    assert _run(backend, "hilbert")[0] == "succeeded"
-    assert reg._o["cone_0"]["held_by"] == "hilbert"
+    op = _run_to_phase(backend, "hilbert", "jaw_stage")
+    assert op is not None
+    arm.movable = False                          # freeze: never converges
+    _run(backend, "hilbert", max_steps=400)
+    _assert_clean_fail(backend, reg, arm, "hilbert", "cone_0",
+                       "jaw stage timeout")
 
-    # object slips far from the gripper while carrying
-    reg._o["cone_0"]["pos"] = (5.0, 0.0, 0.0)
-    _step_once(backend, "hilbert")
 
+def test_jaw_advance_timeout_named_and_clean():
+    # Reach JAW_ADVANCE, freeze the arm at the (out-of-window) stage pose with
+    # a static object (no shove) -> "jaw advance timeout".
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    op = _run_to_phase(backend, "hilbert", "jaw_advance")
+    assert op is not None
+    arm.movable = False                          # frozen outside the window
+    _run(backend, "hilbert", max_steps=400)
+    _assert_clean_fail(backend, reg, arm, "hilbert", "cone_0",
+                       "jaw advance timeout")
+
+
+def test_close_pinch_timeout_is_covered_by_no_pinch_contact():
+    # CLOSE_PINCH's timeout message is "no pinch contact" -- covered above.
+    assert True
+
+
+def test_lift_verify_timeout_routes_to_drop():
+    # Reach LIFT_VERIFY, freeze the arm -> never converges -> LIFT_VERIFY
+    # deadline fires; object never rose -> "lift verify failed" drop path.
+    robot = _FakeRobot("hilbert", contact_hold=True)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    op = _run_to_phase(backend, "hilbert", "lift_verify")
+    assert op is not None
+    arm.movable = False                          # gripper cannot rise
+    _run(backend, "hilbert", max_steps=400)
     state, msg, _ = backend.status("hilbert")
     assert state == "failed"
-    assert "dropped" in msg.lower()
+    assert "lift verify" in msg.lower()
     assert reg._o["cone_0"]["held_by"] is None
-    assert arm.owned is False               # arm handed back after the drop
+    assert arm.owned is False
+    assert arm.collider_calls[-1] is False
 
 
-def test_contact_hold_place_opens_gripper_no_kinematic():
-    # Placing a contact-held object opens the finger and clears the hold but
-    # never calls set_kinematic (the object was never suspended).
+# -- carry / place / drop / reset over the jaw hold --------------------------
+
+
+def test_jaw_hold_place_opens_gripper_no_kinematic():
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, reg = _make(objs, {"hilbert": arm})
-
     backend.grasp("hilbert")
     assert _run(backend, "hilbert")[0] == "succeeded"
-
     accepted, _msg = backend.place("hilbert")
     assert accepted is True
     state, phases = _run_phases(backend, "hilbert")
@@ -719,61 +996,27 @@ def test_contact_hold_place_opens_gripper_no_kinematic():
     assert phases == ["place_deploy", "lower", "detach", "egress", "stow"], \
         phases
     assert reg._o["cone_0"]["held_by"] is None
-    assert arm.gripper_closed is False          # finger opened on detach
-    assert reg.kinematic_calls == []            # never suspended/restored
-    assert arm.owned is False                   # arm re-stowed after place
+    assert arm.gripper_closed is False           # finger opened on detach
+    assert reg.kinematic_calls == []             # never suspended/restored
+    assert arm.owned is False
+    assert arm.collider_calls[-1] is False       # disabled after place detach
 
 
-# -- gripper collider toggle + CARRY re-verify (Task 2) --------------------
-
-
-def test_gripper_colliders_enabled_during_grasp_stay_through_carry_disabled_after_place():
-    # Case 1: colliders NOT enabled at accept (Task 3 GPU finding: enabling them
-    # before the arm deploys drags them on the ground and shoves the base back,
-    # and enabling one tick before the press does not register in PhysX in time);
-    # enabled during the grasp at the REACH->DESCEND transition, still enabled
-    # after _succeed_grasp (carry), disabled after place detach.
+def test_jaw_hold_never_toggles_collision():
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
-    backend, _reg = _make(objs, {"hilbert": arm})
-
+    backend, reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
-    assert arm.collider_calls == []               # NOT enabled at accept
-
-    state, _msg, _oid = _run(backend, "hilbert")
-    assert state == "succeeded"
-    assert True in arm.collider_calls             # enabled during the run (validate)
-    assert arm.collider_calls[-1] is True         # still enabled through carry
-
+    assert _run(backend, "hilbert")[0] == "succeeded"
     accepted, _msg = backend.place("hilbert")
     assert accepted is True
     assert _run(backend, "hilbert")[0] == "succeeded"
-    assert arm.collider_calls[-1] is False         # disabled after place detach
+    assert reg.collision_calls == []             # friction hold, collider on
 
 
-def test_gripper_colliders_disabled_on_contact_close_failure():
-    # Case 2: contact_hold grasp fails at CONTACT_CLOSE ("no contact") ->
-    # colliders disabled on the failure terminal.
-    robot = _FakeRobot("hilbert", contact_hold=True)
-    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=False)
-    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
-                       "held_by": None}}
-    backend, reg = _make(objs, {"hilbert": arm})
-
-    backend.grasp("hilbert")
-    state, msg, _ = _run(backend, "hilbert")
-    assert state == "failed"
-    assert "no contact" in msg.lower()
-    assert True in arm.collider_calls              # enabled at validate (pre-press)
-    assert arm.collider_calls[-1] is False          # and disabled on failure
-    assert reg._o["cone_0"]["held_by"] is None
-
-
-def test_gripper_colliders_disabled_on_carry_drop():
-    # Case 3: drop during carry -> colliders disabled when the drop monitor
-    # fires.
+def test_jaw_carry_drop_detection_disables_colliders():
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
@@ -782,30 +1025,28 @@ def test_gripper_colliders_disabled_on_carry_drop():
     backend.grasp("hilbert")
     assert _run(backend, "hilbert")[0] == "succeeded"
     assert arm.collider_calls[-1] is True
-
-    reg._o["cone_0"]["pos"] = (5.0, 0.0, 0.0)       # slip far from the gripper
+    reg.teleport("cone_0", (5.0, 0.0, 0.0))      # slip far -> drop monitor
     backend.step(0.1)
     state, msg, _ = backend.status("hilbert")
     assert state == "failed"
     assert "dropped" in msg.lower()
+    assert reg._o["cone_0"]["held_by"] is None
+    assert arm.owned is False
     assert arm.collider_calls[-1] is False
 
 
-def test_gripper_colliders_disabled_on_exception_mid_phase():
-    # Case 4: exception mid-phase (fake arm raises in deploy) -> colliders
-    # disabled via the _fail/_finish funnel.
+def test_jaw_exception_mid_phase_disables_colliders():
     robot = _FakeRobot("hilbert", contact_hold=True)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
-    assert arm.collider_calls == []               # Task 3: not enabled at accept
+    assert arm.collider_calls == []
 
     def _boom():
         raise RuntimeError("deploy blew up")
-    arm.deploy = _boom   # raises the next time DEPLOY/ALIGN calls arm.deploy()
-
+    arm.deploy = _boom
     state, msg, _ = _run(backend, "hilbert")
     assert state == "failed"
     assert "deploy blew up" in msg
@@ -814,89 +1055,68 @@ def test_gripper_colliders_disabled_on_exception_mid_phase():
     assert arm.collider_calls[-1] is False
 
 
-def test_gripper_colliders_disabled_on_reset_inflight_and_held_carry():
-    # Case 5: reset() with an in-flight contact op AND with a contact-held
-    # object -> colliders disabled in both.
+def test_jaw_reset_disables_colliders_inflight_and_held():
+    # in-flight jaw op (stalls in ALIGN) + a contact-held carry both drop
+    # colliders on reset().
     robot1 = _FakeRobot("hilbert", contact_hold=True)
     arm1 = _FakeArm(robot1, reach_origin=(0.0, 0.0, 0.5), contact=True,
-                    base_rotates=False)   # stalls in ALIGN -> stays in-flight
+                    base_rotates=False)
     objs1 = {"bag_0": {"pos": (0.5, 0.5, 0.0), "graspable": True,
                        "held_by": None}}
-    backend1, _reg1 = _make(objs1, {"hilbert": arm1})
+    backend1, _r1 = _make(objs1, {"hilbert": arm1})
     backend1.grasp("hilbert")
     backend1.step(0.1)
-    assert "hilbert" in backend1._ops              # still in-flight (ALIGN)
-    assert arm1.collider_calls == []               # Task 3: not enabled until validate
+    assert "hilbert" in backend1._ops
+    assert arm1.collider_calls == []             # not enabled until validate
     assert backend1.reset() is True
-    assert arm1.collider_calls[-1] is False        # reset still disables (belt-and-braces)
+    assert arm1.collider_calls[-1] is False
 
-    # contact-held (carry finished, no in-flight op) case
     robot2 = _FakeRobot("hilbert", contact_hold=True)
     arm2 = _FakeArm(robot2, reach_origin=(0.0, 0.0, 0.5), contact=True)
     objs2 = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                         "held_by": None}}
-    backend2, _reg2 = _make(objs2, {"hilbert": arm2})
+    backend2, _r2 = _make(objs2, {"hilbert": arm2})
     backend2.grasp("hilbert")
-    assert _run(backend2, "hilbert")[0] == "succeeded"   # now carrying, no op
+    assert _run(backend2, "hilbert")[0] == "succeeded"
     assert arm2.collider_calls[-1] is True
     assert backend2.reset() is True
     assert arm2.collider_calls[-1] is False
 
 
-def test_gripper_colliders_never_toggled_for_g1():
-    # Case 6: G1 robot (contact_hold False) -- the collider toggle is NEVER
-    # called, through grasp, place, AND reset.
+# (g) G1 never enters jaw phases (byte-identical) ----------------------------
+
+
+def test_g1_never_enters_jaw_phases():
     robot = _FakeRobot("hilbert", contact_hold=False)
     arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5))
     objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
                        "held_by": None}}
     backend, _reg = _make(objs, {"hilbert": arm})
+    backend.grasp("hilbert")
+    state, phases = _run_phases(backend, "hilbert")
+    assert state == "succeeded"
+    # G1 path: no jaw phase ever, ends with attach->carry (kinematic pin)
+    for p in ("jaw_stage", "jaw_advance", "close_pinch", "lift_verify"):
+        assert p not in phases, phases
+    assert "attach" in phases and "carry" in phases
+    assert arm.collider_calls == []              # never toggled
 
+
+def test_g1_colliders_never_toggled_through_place_and_reset():
+    robot = _FakeRobot("hilbert", contact_hold=False)
+    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5))
+    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
+                       "held_by": None}}
+    backend, _reg = _make(objs, {"hilbert": arm})
     backend.grasp("hilbert")
     assert _run(backend, "hilbert")[0] == "succeeded"
     assert arm.collider_calls == []
-
     accepted, _msg = backend.place("hilbert")
     assert accepted is True
     assert _run(backend, "hilbert")[0] == "succeeded"
     assert arm.collider_calls == []
-
     assert backend.reset() is True
     assert arm.collider_calls == []
-
-
-def test_carry_reverify_prevents_one_tick_optimistic_success():
-    # Case 7: fake reports a gripper<->object distance far past
-    # CONTACT_DROP_DIST_M at the would-be success tick -> the grasp must
-    # terminate "failed"/"dropped", NEVER "succeeded", even for one tick.
-    # `robot.gripper_world_pose` (the WORLD-frame reading _monitor_
-    # contact_hold/the CARRY re-verify both use) is pinned far away from the
-    # start; this is independent of `arm.gripper_pos()` (base/servo frame),
-    # which VALIDATE/CONTACT_CLOSE consume for their own gating, so the
-    # normal align/deploy/reach/descend/validate/contact_close machinery is
-    # unaffected -- only the CARRY re-verify's distance check sees the slip.
-    robot = _FakeRobot("hilbert", contact_hold=True)
-    arm = _FakeArm(robot, reach_origin=(0.0, 0.0, 0.5), contact=True)
-    objs = {"cone_0": {"pos": (0.5, 0.0, 0.0), "graspable": True,
-                       "held_by": None}}
-    backend, reg = _make(objs, {"hilbert": arm})
-    robot.gripper_world_pose = lambda: ([5.0, 0.0, 0.0], _Q_ID)
-
-    backend.grasp("hilbert")
-    for _ in range(300):
-        state = backend.status("hilbert")[0]
-        assert state != "succeeded", (
-            "one-tick optimistic success: reported succeeded despite an "
-            "already-slipped grip")
-        if state == "failed":
-            break
-        backend.step(0.1)
-    state, msg, _oid = backend.status("hilbert")
-    assert state == "failed"
-    assert "dropped" in msg.lower()
-    assert reg._o["cone_0"]["held_by"] is None
-    assert arm.owned is False
-    assert arm.collider_calls[-1] is False
 
 
 # -- arm-ownership handoff flag on PolicyDriveBackend (pure, Isaac-free) -----

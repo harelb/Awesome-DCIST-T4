@@ -53,6 +53,29 @@ TIER G2 -- CONTACT-BASED HOLD (Task 14, ``RobotSpec.contact_hold``) -- EXPERIMEN
     colliders, rather than pressing a single finger down onto it), and/or heavier
     / fixed-until-gripped objects. G1 remains the shipped grasp tier (spec §6.2).
 
+    JAW-ENTRY GRASP (JEG plan, Task 3 -- 2026-07-22, task-3-jeg-report.md):
+    the single-finger PRESS-FROM-ABOVE path above (old CONTACT_CLOSE phase:
+    servo the closed finger CONTACT_PRESS_M below the object origin and poll)
+    was DELETED and REPLACED, for contact_hold grasps, by four jaw phases that
+    seat the object INSIDE the finger<->palm slot before closing:
+    JAW_STAGE -> JAW_ADVANCE -> CLOSE_PINCH -> LIFT_VERIFY (see _step_grasp and
+    the JAW_* constants). The measured jaw window (Task 2: depth 0.3268 x height
+    0.2803, mouth axis (-0.0769,0,0.9970) in the palm/wr1-LOCAL frame) anchors a
+    pure containment predicate (`object_in_jaw_window`), and the depth the open
+    jaw descends is chosen at grasp time by slicing the target's live USD mesh
+    (`jaw_fit.fit_grasp_level`) rather than a static height. The phases are
+    ORIENTATION-AGNOSTIC: the world approach axis is the wr1-local mouth-axis
+    constant rotated by the LIVE palm orientation each tick. WHY orientation-
+    agnostic (Task 3 GPU axis probe): the floating standing policy's base
+    roll/pitch wobble swings the whole gripper assembly, so the WORLD mouth axis
+    is NOT stable -- three probe reads gave palm-frame world axes with X
+    +0.99/-0.58/+0.72 and Z -0.16/-0.81/-0.69 (only a consistent downward bias),
+    confirming Task 2's sway caveat and refuting any fixed "slot opens straight
+    down" assumption. The press-from-above history is preserved in this
+    docstring + task-3-g2-report.md / runbook §12.6a; the physical viability of
+    the pinch (and whether the axis wobble defeats it) is Task 4's honest-stop
+    GPU question, not proven here. G1 remains the shipped grasp tier.
+
     ARM OWNERSHIP DURING A CONTACT CARRY (critical, differs from G1): the grip
     is held ONLY by the finger's PhysX position drive (f1x -> 0) plus the 6
     servo joints holding their last targets. If the op released arm ownership
@@ -124,10 +147,12 @@ import os
 
 import numpy as np
 
+from dcist_sim_isaac import jaw_fit
 from dcist_sim_isaac.arm_ik import IkServo, dls_step
 from dcist_sim_isaac.drive_backends import wrap_angle
 from dcist_sim_isaac.grasp import (
     PLACE_DROP_OFFSET,
+    _quat_conjugate,
     _quat_mul,
     _rotate_vector,
     _to_local_frame,
@@ -309,17 +334,15 @@ DEPLOY_SETTLE_S = 1.5
 # Gripper/finger link relative path (mirrors spot_robot.GRIPPER_RELATIVE_PATH;
 # duplicated here to keep grasp_backends Isaac-import-free at module load).
 GRIPPER_LINK_RELATIVE = "arm0_link_fngr"
+# Palm link (upstream of the f1x hinge) -- the STABLE frame the jaw window +
+# mouth axis were measured in (task-2-report.md). The finger link rotates with
+# f1x, so it is NOT a valid frame for the orientation-agnostic jaw geometry;
+# the palm is (see gripper_frame_pose / the JEG note in the module docstring).
+PALM_LINK_RELATIVE = "arm0_link_wr1"
 GRIPPER_CLOSE_RAD = 0.0        # arm0_f1x closed position target (grip)
 GRIPPER_OPEN_RAD = -1.5        # arm0_f1x open target (== POLICY_ARM_STOW f1x)
 CONTACT_THRESHOLD_N = 0.1      # PhysxContactReportAPI force threshold (N)
-CONTACT_POLL_S = 2.5           # dwell pressing+closing+polling before deciding
 CONTACT_DROP_DIST_M = 0.3      # gripper<->object dist > this while carrying = drop
-# The G1 servo converges with the gripper ~7 cm ABOVE a ground object (the 8 cm
-# servo tol + validate gate), i.e. the closed finger hovers in the air and never
-# touches. So contact hold PRESSES the gripper this far below the object origin
-# (best-effort; the object/ground stalls the descent) so the closing finger
-# physically contacts the object before we poll (GPU-measured, task-14-report).
-CONTACT_PRESS_M = 0.10
 
 # ---------------------------------------------------------------------------
 # Jaw-Entry Grasp (JEG) plan, Task 2 -- jaw window measurement + acceptance
@@ -358,25 +381,109 @@ JAW_TARGET_OBJECT = "cone_0"  # USER DECISION (2026-07-22, task-2-report.md):
                                # taper -- a duffel bag doesn't narrow) and is
                                # UNPINCHABLE with this gripper; pipe_0 was
                                # already ruled out (G2 task-3-g2-report.md:
-                               # its 1.2 m length keeps the base >= ~0.85 m
+                               # its 1.2 m length keeps the base >= ~0.96 m
                                # away via its own-body collision, leaving it
-                               # at the arm's reach edge) -- both kept here as
-                               # archaeology for any future target swap.
-JAW_GRASP_HEIGHT_M = 0.1030    # height (m) above cone_0's base/origin at
-                               # which its LINEARLY-TAPERED cross-section
-                               # (measured base 0.3368 x 0.3346 m, measured
-                               # total height 0.4640 m, idealized straight
-                               # taper down to a point apex) first clears
-                               # BOTH window dims (0.02 m margin each):
-                               # cross-section there measures (0.2620,
-                               # 0.2603) m: <= JAW_WINDOW_DEPTH_M/HEIGHT_M
-                               # minus margin by construction. 0.3610 m of
-                               # cone remains ABOVE this height (comfortably
-                               # over the >=0.05 m sanity floor needed to
-                               # actually pinch something) -- see
-                               # `measure_jaw.py`'s `cone_taper` block for
-                               # the exact computation re-run for this
-                               # citation.
+                               # at the arm's reach edge 0.96 m) -- both kept
+                               # here as archaeology for any future target swap.
+JAW_GRASP_HEIGHT_M = 0.1030    # DOCUMENTATION / FALLBACK CROSS-CHECK ONLY --
+                               # NOT the runtime source (JEG Task 3). The
+                               # actual descend depth is chosen at grasp time
+                               # by slicing the target's live USD mesh with
+                               # `jaw_fit.fit_grasp_level` (triangle-edge/plane
+                               # cross-sections, the geometric truth), so a
+                               # blunt / flat-topped asset is handled correctly
+                               # where this figure is not. This value is the
+                               # Task-2 ALGEBRAIC estimate for cone_0: the
+                               # height (m) above its base/origin at which its
+                               # LINEARLY-TAPERED cross-section (measured base
+                               # 0.3368 x 0.3346 m, total height 0.4640 m,
+                               # idealized straight taper to a POINT apex) first
+                               # clears both margined window dims -- cross-
+                               # section there (0.2620, 0.2603) m; 0.3610 m of
+                               # cone remains above (>=0.05 m pinch floor). The
+                               # slicer reproduces this within its step on a
+                               # true right cone (test_jaw_fit); they diverge
+                               # only for blunt shapes, where the slicer wins.
+                               # Kept for the runbook citation + as a sanity
+                               # bound if a future mesh read ever regresses.
+
+# -- Jaw-Entry Grasp phases (JEG plan, Task 3; contact_hold ONLY) -----------
+# The open jaw is staged at a standoff along the LIVE world mouth axis (the
+# wr1-local JAW_MOUTH_AXIS_GRIPPER rotated by the current palm orientation --
+# orientation-agnostic, since the base wobble swings the world axis; see the
+# module docstring's JEG note), advanced until the object's fit-height point
+# sits inside the finger<->palm slot (`object_in_jaw_window`), pinched, and
+# lift-verified. All four are timeboxed; the constants are Task-4 tuning knobs.
+JAW_STAGE_STANDOFF_M = 0.18    # standoff (m) BEYOND the finger-tip end of the
+                               # slot at which the open jaw stages before
+                               # advancing (so staging is safely OUTSIDE the
+                               # window and the advance is a real motion).
+JAW_ADVANCE_ALONG_M = 0.16     # target along-mouth coordinate (m) the advance
+                               # drives the fit point to -- mid-slot (~half of
+                               # JAW_WINDOW_DEPTH_M) so the pinch cross-section
+                               # sits centered between palm and finger tip.
+JAW_SHOVE_TOL_M = 0.08         # object XY displacement (m) from a jaw phase's
+                               # entry position, while NOT in-window, that
+                               # counts as a shove -> back off + retry once.
+JAW_LIFT_M = 0.12              # lift height (m) LIFT_VERIFY commands the gripper
+                               # to raise before checking the grip held.
+# Held test = DELTA TRACKING (spec 3.4: "the object's displacement tracks the
+# gripper's"), NOT a fixed absolute rise. WHY: the IK servo only converges to
+# within SERVO_TOL_M (0.08 m) of the +JAW_LIFT_M (0.12 m) target, so it stops
+# after raising the gripper anywhere in ~[0.04, 0.12] m -- a fixed "object rose
+# >= JAW_LIFT_M*0.5 = 0.06 m" would false-NEGATIVE a perfectly good grip when
+# the servo lands short. So: the gripper must have actually risen (>= floor)
+# and the object must have followed most of that rise.
+JAW_LIFT_MIN_RISE_M = 0.03     # gripper must rise at least this (< the servo's
+                               # guaranteed >=0.04 m at convergence) to judge.
+JAW_LIFT_TRACK_FRAC = 0.5      # object rise must be >= this fraction of the
+                               # gripper's actual rise to count as held.
+JAW_STAGE_TIMEOUT_S = 8.0
+JAW_ADVANCE_TIMEOUT_S = 8.0
+CLOSE_PINCH_TIMEOUT_S = 4.0
+LIFT_VERIFY_TIMEOUT_S = 4.0
+
+
+def object_in_jaw_window(gripper_pos, gripper_quat_wxyz, obj_pos,
+                         mouth_axis_gripper=JAW_MOUTH_AXIS_GRIPPER,
+                         depth_m=JAW_WINDOW_DEPTH_M,
+                         height_m=JAW_WINDOW_HEIGHT_M,
+                         half_width_m=JAW_WINDOW_HEIGHT_M / 2):
+    """True iff `obj_pos` lies inside the jaw slot volume anchored at the
+    gripper (palm) frame. PURE + orientation-agnostic: rotate the world obj<->
+    gripper delta into the gripper frame (reuse grasp.py's `_rotate_vector`/
+    `_quat_conjugate`), decompose along an orthonormal (mouth, height, width)
+    basis built from the mouth axis, and gate:
+      * 0 <= along-mouth <= depth_m            (palm plate -> finger-tip arc)
+      * |height component| <= height_m / 2     (finger swing plane)
+      * |width component|  <= half_width_m      (hinge axis)
+    The along range is one-sided (the slot opens on the +mouth / finger-tip
+    side): objects behind the palm (along < 0) are OUT. The height/width axes
+    are derived from the mouth axis the same way `measure_jaw.py` did (Gram-
+    Schmidt of gripper-local +X against the mouth axis for height; their cross
+    for width), so no extra measured constants are needed here."""
+    m = np.asarray(mouth_axis_gripper, dtype=float)
+    m = m / np.linalg.norm(m)
+    # height axis: gripper-local +X with the mouth-axis component removed
+    # (matches task-2-report.md's height axis ~ local +X).
+    ex = np.array([1.0, 0.0, 0.0])
+    h = ex - float(ex @ m) * m
+    hn = float(np.linalg.norm(h))
+    if hn < 1e-9:  # degenerate (mouth ~ +X): fall back to +Y
+        ey = np.array([0.0, 1.0, 0.0])
+        h = ey - float(ey @ m) * m
+        hn = float(np.linalg.norm(h))
+    h = h / hn
+    w = np.cross(m, h)
+    delta = tuple(float(o) - float(g) for o, g in zip(obj_pos, gripper_pos))
+    local = np.asarray(_rotate_vector(delta, _quat_conjugate(gripper_quat_wxyz)),
+                       dtype=float)
+    along = float(local @ m)
+    h_comp = float(local @ h)
+    w_comp = float(local @ w)
+    return (0.0 <= along <= depth_m
+            and abs(h_comp) <= height_m / 2.0
+            and abs(w_comp) <= half_width_m)
 
 # External status vocabulary (GraspStatus.srv: sim_spot polls these strings).
 IDLE = "idle"
@@ -424,6 +531,12 @@ class _ArmInterface:
         # Finger link prim path + lazily-applied PhysX contact reporting (G2).
         self._finger_path = f"{robot.prim_path}/{GRIPPER_LINK_RELATIVE}"
         self._contact_ready = False
+        # Palm (wr1) link -- the stable frame the jaw window/mouth axis were
+        # measured in (JEG Task 3). Lazily-built XFormPrim (Isaac import
+        # deferred), read by gripper_frame_pose for the orientation-agnostic
+        # jaw geometry.
+        self._palm_path = f"{robot.prim_path}/{PALM_LINK_RELATIVE}"
+        self._palm_xform = None
         suffixes = tuple(n.rsplit("_", 1)[-1] for n in self._arm6_names)
         # Fail loud if the asset's servoed arm-DOF set/order ever changes: the
         # hardcoded deploy pose + base-frame jacobian are keyed to THIS order.
@@ -453,6 +566,21 @@ class _ArmInterface:
         """Gripper position in the base (servo) frame."""
         pos, _ = self._robot.gripper_world_pose()
         return self.to_servo_frame(np.asarray(pos, dtype=float)[:3])
+
+    def gripper_frame_pose(self):
+        """World `(position[3], quaternion_wxyz[4])` of the PALM (wr1) link --
+        the frame the jaw window + mouth axis were measured in (JEG Task 3, the
+        stable frame immune to the f1x hinge angle). Used to rotate the
+        wr1-local mouth-axis constant into the LIVE world approach axis and to
+        anchor `object_in_jaw_window`. Distinct from `robot.gripper_world_pose`
+        (the finger link, which swings with f1x)."""
+        from isaacsim.core.prims import XFormPrim
+
+        if self._palm_xform is None:
+            self._palm_xform = XFormPrim(self._palm_path)
+        pos, quat = self._palm_xform.get_world_poses()
+        return (tuple(float(v) for v in pos[0]),
+                tuple(float(v) for v in quat[0]))
 
     def jacobian(self):
         return ARM_JACOBIAN_BASE
@@ -651,8 +779,12 @@ class _Op:
     DESCEND = "descend"
     VALIDATE = "validate"
     ATTACH = "attach"
-    # G2 (Task 14): close finger + poll PhysX contact instead of ATTACH's pin.
-    CONTACT_CLOSE = "contact_close"
+    # G2/JEG (Task 3): jaw-entry phases replace the old single-finger
+    # press-from-above (deleted CONTACT_CLOSE) for contact_hold grasps.
+    JAW_STAGE = "jaw_stage"
+    JAW_ADVANCE = "jaw_advance"
+    CLOSE_PINCH = "close_pinch"
+    LIFT_VERIFY = "lift_verify"
     CARRY = "carry"
     # place phases (PLACE_DEPLOY re-deploys the arm from stow so the fixed
     # base-frame jacobian is valid again before LOWER servos -- see
@@ -682,8 +814,18 @@ class _Op:
         # pin. For a grasp, from RobotSpec.contact_hold; for a place, inherited
         # from the held object's recorded mode.
         self.contact_hold = bool(contact_hold)
-        self.contact_until = None  # sim-time to keep closing+polling until
-        self.contact_seen = False  # any finger<->object contact observed yet
+        # JEG jaw-entry phases (Task 3). phase_deadline: per-phase sim-time
+        # timeout (set on entering each jaw phase); jaw_retries: shove/slip
+        # back-off count (one retry allowed); fit_level: mesh-sliced descend
+        # depth (m above the object base) from jaw_fit; jaw_obj0: object XY at
+        # the current jaw-phase entry (shove reference); lift baselines record
+        # the gripper + object z at LIFT_VERIFY entry.
+        self.phase_deadline = None
+        self.jaw_retries = 0
+        self.fit_level = None
+        self.jaw_obj0 = None
+        self.lift_gz0 = None
+        self.lift_objz0 = None
 
 
 class PhysicsGraspBackend:
@@ -740,13 +882,14 @@ class PhysicsGraspBackend:
         # recoil for G1 (no colliders) -- pushing the object clear out of the
         # fixed-jacobian servo's short-reach envelope so the reach_pregrasp
         # servo fails before contact is ever attempted. Instead they are enabled
-        # at the REACH_PREGRASP->DESCEND transition (see _step_grasp), so the
-        # deploy + reach-up motions stay collider-free (no recoil) while the
-        # DESCEND onto the object and the CONTACT_CLOSE press run with the
-        # colliders live; a successful contact grasp keeps them enabled through
-        # the whole carry (they ARE the hold; see _finish/_succeed_grasp). All
-        # disable paths (drop/fail/place/reset) are unchanged. Gated on
-        # contact_hold so G1 is untouched.
+        # at the VALIDATE->JAW_STAGE transition (JEG Task 3; see _step_grasp), so
+        # deploy + reach + descend all stay collider-free (no recoil) while the
+        # jaw STAGE+ADVANCE+CLOSE_PINCH run with the colliders live and give
+        # PhysX ample steps to register them before the pinch polls contact; a
+        # successful contact grasp keeps them enabled through the whole carry
+        # (they ARE the hold; see _finish/_succeed_grasp). All disable paths
+        # (drop/fail/place/reset) are unchanged. Gated on contact_hold so G1 is
+        # untouched.
         self._ops[robot_name] = _Op("grasp", arm, contact_hold=contact_hold)
         self._set_last(robot_name, IN_PROGRESS, "grasp started", "")
         logger.info("'%s' physics grasp accepted", robot_name)
@@ -1032,36 +1175,13 @@ class PhysicsGraspBackend:
             if op.phase == _Op.REACH_PREGRASP:
                 obj_pos, _ = self.registry.world_pose(op.object_id)
                 op.target = np.array(obj_pos, dtype=float)
-                if op.contact_hold:
-                    # Enable the gripper colliders + contact reporting HERE, at
-                    # the REACH->DESCEND transition (Task 3 GPU finding), NOT at
-                    # accept / deploy / validate:
-                    #  * NOT at accept or deploy-end: the high-friction colliders
-                    #    then drag on the ground during the ~1.5 s deploy (deploy
-                    #    pose is at floor level) and/or during the reach-UP servo,
-                    #    shoving the floating base back ~0.43 m OR bumping the
-                    #    light dynamic object out of position -> the reach servo
-                    #    never converges (GPU-measured: base-frame x 0.63->0.06,
-                    #    object fled sideways 0.30 m).
-                    #  * NOT at validate: a collisionEnabled False->True toggle
-                    #    one tick before the press does not re-activate the shape
-                    #    in the running PhysX scene in time -> the press reported
-                    #    0 contacts, whereas the same collider enabled a couple
-                    #    seconds earlier DID report finger<->object contacts.
-                    # At this transition the gripper has converged at pregrasp
-                    # (obj + pregrasp_z, ABOVE the object), so enabling now keeps
-                    # the big reach-up motion collider-free (clean convergence)
-                    # and gives the short vertical DESCEND (~1-2 s) for PhysX to
-                    # register the shape before the CONTACT_CLOSE press polls;
-                    # the finger engages the object from directly above (a
-                    # downward press/pin) rather than sideways. Disable paths
-                    # (fail/drop/place/reset) unchanged.
-                    arm.set_gripper_colliders(True)
-                    try:
-                        arm.enable_contact_reporting()
-                    except Exception:                      # noqa: BLE001
-                        logger.exception(
-                            "'%s' enable_contact_reporting failed", robot_name)
+                # NOTE (JEG Task 3): the gripper colliders are NOT enabled here
+                # anymore. For contact_hold they now enable at the VALIDATE->
+                # JAW_STAGE transition (see the VALIDATE branch): the jaw
+                # STAGE+ADVANCE motions give PhysX ample sim steps to register
+                # the shape before CLOSE_PINCH polls contact, so REACH + DESCEND
+                # (like deploy) stay collider-free and cannot drag on the ground
+                # or shove the light object. G1 never enabled them at all.
                 op.phase = _Op.DESCEND
                 op.servo = self._new_servo(op)
             elif op.phase == _Op.DESCEND:
@@ -1097,73 +1217,152 @@ class PhysicsGraspBackend:
                            f"validate failed: gripper {d:.3f} m from "
                            f"'{op.object_id}' (tol {self.validate_tol} m)")
                 return
-            # G2 (contact hold): close the finger + poll PhysX contact instead
-            # of the G1 kinematic pin.
+            # JEG (contact hold): seat the object inside the finger<->palm jaw
+            # slot, then pinch -- replaces the old single-finger press.
             if op.contact_hold:
                 gwp, _ = self.robots[robot_name].gripper_world_pose()
                 logger.debug("contact-hold validate ok: gripper<->obj %.4f m; "
                              "gripper_world=%s obj_world=%s", d,
                              tuple(round(float(v), 3) for v in gwp),
                              tuple(round(float(v), 3) for v in obj_pos))
-                # Colliders + contact reporting were already enabled at the
-                # REACH_PREGRASP->DESCEND transition (see that branch for why:
-                # PhysX needs several sim steps after a collisionEnabled toggle
-                # before it reports contacts, so enabling only one tick before
-                # this press reported 0 contacts). Here we only close the finger
-                # and start the contact poll window; the set_gripper_colliders /
-                # enable_contact_reporting calls below are idempotent
-                # belt-and-braces re-asserts, not the primary enable point.
+                # Shape-adaptive fit height: slice the target's live USD mesh to
+                # find the depth the open jaw descends. ANY failure (no mesh, no
+                # level fits) -> fail cleanly, never guess (JEG scope A).
+                fit = self._jaw_fit_level(robot_name, op)
+                if fit is None:
+                    self._fail(robot_name, op, "no fit height")
+                    return
+                op.fit_level = float(fit)
+                # Colliders + contact reporting enable HERE, at the VALIDATE->
+                # JAW_STAGE transition (JEG enable point). The jaw STAGE+ADVANCE
+                # motions give PhysX ample sim steps to register the shapes
+                # before CLOSE_PINCH polls contact, so enabling here -- unlike
+                # the deleted press path's one-tick-before-poll enable that read
+                # 0 contacts -- is in time, while REACH+DESCEND stayed collider-
+                # free (no ground drag / no shove).
                 arm.set_gripper_colliders(True)
-                arm.enable_contact_reporting()
-                arm.close_gripper()
-                op.contact_until = op.t + CONTACT_POLL_S
-                op.contact_seen = False
-                op.servo = None       # CONTACT_CLOSE builds the press servo
-                op.phase = _Op.CONTACT_CLOSE
-                self._set_last(robot_name, IN_PROGRESS,
-                               f"closing gripper on '{op.object_id}'",
-                               op.object_id)
+                try:
+                    arm.enable_contact_reporting()
+                except Exception:                          # noqa: BLE001
+                    logger.exception(
+                        "'%s' enable_contact_reporting failed", robot_name)
+                self._enter_jaw_stage(robot_name, op, reopen=True)
                 return
             op.phase = _Op.ATTACH
             return
 
-        if op.phase == _Op.CONTACT_CLOSE:
-            # Press the gripper DOWN into the object (target CONTACT_PRESS_M below
-            # its origin; the object/ground stalls the descent -- best-effort, a
-            # stall is expected and fine) while the finger closes, and poll PhysX
-            # contact. First finger<->object contact within the window = grip.
-            if op.servo is None:
-                obj_pos, _ = self.registry.world_pose(op.object_id)
-                op.target = np.array([obj_pos[0], obj_pos[1],
-                                      obj_pos[2] - CONTACT_PRESS_M], dtype=float)
-                op.servo = self._new_servo(op)
-            self._advance_servo(op)          # press (ignore convergence/stall)
+        if op.phase == _Op.JAW_STAGE:
+            # Servo the OPEN jaw to the staging pose (standoff BEYOND the finger-
+            # tip end of the slot, along the live world mouth axis). The phase
+            # DEADLINE is authoritative (like ALIGN): a servo stall/timeout does
+            # not fail the op here -- only the named "jaw stage timeout" does --
+            # so the failure message is always phase-named. Converged -> advance.
+            if op.t >= op.phase_deadline:
+                self._fail(robot_name, op, "jaw stage timeout")
+                return
+            if self._advance_servo(op) != IkServo.CONVERGED:
+                return
+            op.jaw_obj0 = np.asarray(
+                self.registry.world_pose(op.object_id)[0], dtype=float)[:2]
+            op.servo = self._new_servo(op)
+            op.phase = _Op.JAW_ADVANCE
+            op.phase_deadline = op.t + JAW_ADVANCE_TIMEOUT_S
+            self._set_last(robot_name, IN_PROGRESS,
+                           f"advancing jaw onto '{op.object_id}'", op.object_id)
+            return
+
+        if op.phase == _Op.JAW_ADVANCE:
+            # Servo forward along the live mouth axis until the object's fit
+            # point is inside the jaw window. Shove (object shoved out of place
+            # while NOT yet in-window) -> back off + retry once; timeout ->
+            # fail "jaw advance timeout".
+            palm_pos, palm_quat = arm.gripper_frame_pose()
+            m = self._jaw_world_mouth_axis(op)
+            fit_pt = self._jaw_fit_point(op)
+            if object_in_jaw_window(palm_pos, palm_quat, fit_pt):
+                op.phase = _Op.CLOSE_PINCH
+                op.phase_deadline = op.t + CLOSE_PINCH_TIMEOUT_S
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"pinching '{op.object_id}'", op.object_id)
+                return
+            obj_xy = np.asarray(
+                self.registry.world_pose(op.object_id)[0], dtype=float)[:2]
+            if (op.jaw_obj0 is not None and float(np.linalg.norm(
+                    obj_xy - op.jaw_obj0)) > JAW_SHOVE_TOL_M):
+                self._jaw_shove_retry(robot_name, op, "advance")
+                return
+            if op.t >= op.phase_deadline:
+                self._fail(robot_name, op, "jaw advance timeout")
+                return
+            op.target = fit_pt - JAW_ADVANCE_ALONG_M * m
+            self._advance_servo(op)          # incremental; ignore convergence
+            return
+
+        if op.phase == _Op.CLOSE_PINCH:
+            # Close f1x (reuse the existing close machinery) until finger<->
+            # object contact is reported AND the fit point is still in-window.
+            # Contact but slipped OUT of the window -> shove-retry (same
+            # counter). Timeout with no qualifying contact -> "no pinch contact".
             arm.close_gripper()
+            palm_pos, palm_quat = arm.gripper_frame_pose()
+            fit_pt = self._jaw_fit_point(op)
+            in_window = object_in_jaw_window(palm_pos, palm_quat, fit_pt)
+            contact = False
             try:
-                if arm.finger_object_contact(
-                        self.registry.prim_path(op.object_id)):
-                    op.contact_seen = True
+                contact = arm.finger_object_contact(
+                    self.registry.prim_path(op.object_id))
             except Exception:                              # noqa: BLE001
                 logger.exception("'%s' contact query failed", robot_name)
-            if not op.contact_seen and op.t < op.contact_until:
+            if contact and in_window:
+                # Grip achieved: record the friction hold, then verify a lift.
+                self._contact_attach(robot_name, op)
+                op.lift_gz0 = float(palm_pos[2])
+                op.lift_objz0 = float(
+                    self.registry.world_pose(op.object_id)[0][2])
+                op.target = np.array([palm_pos[0], palm_pos[1],
+                                      palm_pos[2] + JAW_LIFT_M], dtype=float)
+                op.servo = self._new_servo(op)
+                op.phase = _Op.LIFT_VERIFY
+                op.phase_deadline = op.t + LIFT_VERIFY_TIMEOUT_S
+                self._set_last(robot_name, IN_PROGRESS,
+                               f"lift-verifying '{op.object_id}'", op.object_id)
                 return
-            if not op.contact_seen:
-                self._fail(robot_name, op,
-                           f"no contact: gripper closed on '{op.object_id}' "
-                           f"but PhysX reported no finger contact in "
-                           f"{CONTACT_POLL_S:.1f} s")
+            if contact and not in_window:
+                self._jaw_shove_retry(robot_name, op, "pinch")
                 return
-            self._contact_attach(robot_name, op)
-            # carry: lift back to the pregrasp height above the (now gripped)
-            # object; it rides on friction (dynamic), no re-pin.
-            obj_pos, _ = self.registry.world_pose(op.object_id)
-            op.target = np.array([obj_pos[0], obj_pos[1],
-                                  obj_pos[2] + self.pregrasp_z], dtype=float)
-            op.phase = _Op.CARRY
-            op.servo = self._new_servo(op)
-            self._set_last(robot_name, IN_PROGRESS,
-                           f"carrying '{op.object_id}' (contact hold)",
-                           op.object_id)
+            if op.t >= op.phase_deadline:
+                self._fail(robot_name, op, "no pinch contact")
+                return
+            return
+
+        if op.phase == _Op.LIFT_VERIFY:
+            # Raise the gripper JAW_LIFT_M; held iff contact persists AND the
+            # object rose with the gripper (>= half the lift). Held ->
+            # _succeed_grasp (keeps arm + colliders through carry). Not held ->
+            # the shared contact-drop path ("lift verify failed").
+            status = self._advance_servo(op)
+            palm_pos, _pq = arm.gripper_frame_pose()
+            obj_z = float(self.registry.world_pose(op.object_id)[0][2])
+            g_rise = float(palm_pos[2]) - op.lift_gz0
+            obj_rise = obj_z - op.lift_objz0
+            # delta-tracking held test (see JAW_LIFT_* constants)
+            held = (g_rise >= JAW_LIFT_MIN_RISE_M
+                    and obj_rise >= JAW_LIFT_TRACK_FRAC * g_rise)
+            contact = False
+            try:
+                contact = arm.finger_object_contact(
+                    self.registry.prim_path(op.object_id))
+            except Exception:                              # noqa: BLE001
+                logger.exception("'%s' contact query failed", robot_name)
+            if not (status == IkServo.CONVERGED or op.t >= op.phase_deadline):
+                return
+            if contact and held:
+                self._succeed_grasp(robot_name, op)
+                return
+            object_id = op.object_id
+            self._ops.pop(robot_name, None)
+            self._drop_contact_hold(robot_name, op.arm, object_id,
+                                    "lift verify failed")
             return
 
         if op.phase == _Op.ATTACH:
@@ -1177,6 +1376,77 @@ class PhysicsGraspBackend:
             self._set_last(robot_name, IN_PROGRESS,
                            f"carrying '{op.object_id}'", op.object_id)
             return
+
+    # -- jaw-entry helpers (JEG Task 3) --------------------------------------
+
+    def _jaw_fit_level(self, robot_name, op):
+        """Shape-adaptive descend depth (m above the object base) from slicing
+        the target's live USD mesh, or None on any failure (no mesh / no fit).
+        Never raises -- a failure funnels to the caller's clean "no fit height"
+        fail (JEG scope A: never guess)."""
+        try:
+            mesh = self.registry.mesh_world(op.object_id)
+        except Exception:                                  # noqa: BLE001
+            logger.exception("'%s' jaw mesh read failed for '%s'",
+                             robot_name, op.object_id)
+            return None
+        if mesh is None:
+            logger.info("'%s' no readable mesh for '%s' -> no fit height",
+                        robot_name, op.object_id)
+            return None
+        points, triangles = mesh
+        try:
+            return jaw_fit.fit_grasp_level(
+                points, triangles, JAW_WINDOW_DEPTH_M, JAW_WINDOW_HEIGHT_M)
+        except Exception:                                  # noqa: BLE001
+            logger.exception("'%s' jaw fit-height slice failed", robot_name)
+            return None
+
+    def _jaw_world_mouth_axis(self, op):
+        """The LIVE world-frame jaw mouth axis: the wr1-local mouth-axis
+        constant rotated by the current palm orientation (orientation-agnostic;
+        recomputed each tick because the base wobble swings it -- GPU probe,
+        task-3-jeg-report.md)."""
+        _pp, palm_quat = op.arm.gripper_frame_pose()
+        m = np.asarray(_rotate_vector(JAW_MOUTH_AXIS_GRIPPER, palm_quat),
+                       dtype=float)
+        n = float(np.linalg.norm(m))
+        return m / n if n > 1e-9 else m
+
+    def _jaw_fit_point(self, op):
+        """The world point on the object driven into the slot: the live object
+        pose lifted by the mesh-sliced fit level along the scan axis (world
+        +Z), i.e. the fit-height cross-section the jaw pinches."""
+        obj_pos, _ = self.registry.world_pose(op.object_id)
+        return np.array([obj_pos[0], obj_pos[1],
+                         obj_pos[2] + float(op.fit_level)], dtype=float)
+
+    def _enter_jaw_stage(self, robot_name, op, reopen=False):
+        """(Re)enter JAW_STAGE: optionally reopen the jaw, aim the open gripper
+        at the staging pose (standoff BEYOND the finger-tip end of the slot,
+        along the live mouth axis), and arm the stage servo + timeout."""
+        if reopen:
+            op.arm.open_gripper()
+        m = self._jaw_world_mouth_axis(op)
+        fit_pt = self._jaw_fit_point(op)
+        op.target = fit_pt - (JAW_WINDOW_DEPTH_M + JAW_STAGE_STANDOFF_M) * m
+        op.servo = self._new_servo(op)
+        op.phase = _Op.JAW_STAGE
+        op.phase_deadline = op.t + JAW_STAGE_TIMEOUT_S
+        self._set_last(robot_name, IN_PROGRESS,
+                       f"staging jaw at '{op.object_id}'", op.object_id)
+
+    def _jaw_shove_retry(self, robot_name, op, where):
+        """Back off + retry ONCE on a shove/slip (shared by JAW_ADVANCE and
+        CLOSE_PINCH -- same `op.jaw_retries` counter). Second event -> fail
+        "shoved" through the standard funnel (arm + colliders released)."""
+        op.jaw_retries += 1
+        if op.jaw_retries > 1:
+            self._fail(robot_name, op, "shoved")
+            return
+        logger.info("'%s' jaw %s shove on '%s' -> back off + retry",
+                    robot_name, where, op.object_id)
+        self._enter_jaw_stage(robot_name, op, reopen=True)
 
     def _base_range_bearing_to(self, arm, object_id):
         """(range_m, bearing_rad) from the robot base to the object's LIVE
