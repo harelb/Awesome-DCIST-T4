@@ -637,83 +637,100 @@ the RAW costmap before inflation, so the LocalPlanner keeps the robot body clear
 of objects during goto-poi; `LocalPlanner.set_goal` snaps an occupied goal to the
 nearest free cell within `nav.snap_bound_m` (default off preserves BLOCKED).
 
-### 12.6 contact_hold (G2) — EXPERIMENTAL, UNBLOCKED but not a working hold
+### 12.6 contact_hold (G2 / JEG jaw-entry) — EXPERIMENTAL, HONEST STOP (not a working hold)
 
 `grasping: physics` + `contact_hold: true` (`field_smoke_contact_hold.yaml`)
-swaps the kinematic attach for a real PhysX friction hold (close the `arm0_f1x`
-finger, poll finger<->object contact, ride on friction). **Status after G2
-Tasks 1–3 (2026-07-22, `.superpowers/sdd/task-3-g2-report.md`):**
+swaps the kinematic attach for a real PhysX friction hold. The **jaw-entry
+grasp (JEG) redesign** (2026-07-22, replacing the deleted single-finger
+press-from-above) drives, for `contact_hold` only, after VALIDATE:
 
-- **Task-14 blocker RESOLVED.** Task 1 provisioned real convex-hull PhysX
-  colliders on the finger (`arm0_link_fngr/visuals`) + palm
-  (`arm0_link_wr1/visuals`) meshes. On GPU the finger now **reports contact**
-  with the object — `get_contact_report()` yields `actor0/actor1 ==
-  /World/hilbert/arm0_link_fngr` paired with `/World/objects/<id>` for cone,
-  bag, AND pipe. Contact reporting + the actor-path filter are confirmed correct
-  live (Task 14's "0 headers ever" is gone).
-- **Collider ENABLE TIMING retuned (Task 3, `grasp_backends`).** The
-  high-friction colliders are now enabled at the **REACH→DESCEND transition**,
-  not at grasp accept (Task 2). Enabling at accept drags the finger on the
-  ground through the ~1.5 s deploy and shoves the floating base back **~0.43 m**
-  (vs ~0.02 m for G1) → reach servo fails before contact. Enabling one tick
-  before the press (at validate) reports 0 contacts — a runtime
-  `collisionEnabled` toggle needs several sim steps to register in PhysX.
-  Enable-at-REACH→DESCEND keeps deploy+reach collider-free (no recoil, clean
-  convergence) and gives the descend ~1–2 s for PhysX to register the shape.
-- **Still NOT a working hold — remaining blocker is PHYSICAL, not software.** A
-  **single finger contacting a light dynamic object shoves it out of position**
-  (GPU: cone fled 0.79 m laterally, bag 0.63 m) — no opposing jaw traps it, so
-  the descend servo chasing the fleeing object never converges. The **pipe is
-  separately unpickable**: its 1.2 m length keeps the base ≥ ~0.85 m away
-  (own-body collision with the pipe), leaving the pipe at the arm's reach edge
-  (0.96 m) so the descend can't reach down to it. Gait sanity PASSES
-  (provisioned-but-disabled colliders are inert to locomotion — 10 m walk, 0
-  falls).
+**JAW_STAGE → JAW_ADVANCE → CLOSE_PINCH → LIFT_VERIFY** (`grasp_backends.py`
+`JAW_*` constants; G1/magic/kinematic are byte-identical — everything gates on
+`op.contact_hold`).
 
-FOLLOW-UPS: (1) a proper **two-contact pinch** — close the f1x finger toward the
-palm to TRAP the object between the finger + palm colliders, rather than
-pressing a single finger down onto it; (2) heavier / fixed-until-gripped objects
-or a smaller reachable target; (3) the pipe needs a shorter asset or an end-on
-grasp strategy. G1 (kinematic pin) is the shipped tier; do NOT use G2 on any
-default path. Evidence table: §12.6a.
+- **Shape-adaptive fit height** (`jaw_fit.py`): slice the target's live USD mesh
+  at grasp time (triangle-edge/plane intersection, pure numpy) to find the
+  lowest cross-section that fits the measured jaw window (depth 0.3268 × height
+  0.2803, Task 2), returned as `(level, base_z)` so the fit plane world-Z is
+  `base_z + level` — origin-independent. A **ground/base-flange clearance floor**
+  `JAW_GROUND_CLEARANCE_M=0.10` skips levels below it (the raw lowest-fitting
+  level for the traffic cone is ~0.02 m — the wide base flange).
+- **Orientation-agnostic mouth axis**: the wr1-local mouth-axis constant rotated
+  by the LIVE palm quaternion every tick (the floating standing policy swings
+  the world axis; GPU probe, task-3-jeg-report.md). JAW_STAGE re-aims its
+  standoff target per tick for the same reason.
+- **Base still-stand** (`arm.stop_base()`) through STAGE/ADVANCE/CLOSE_PINCH: the
+  policy wobble drifts the palm laterally through the ~0.85 m arm.
+- **Collider enable point = STAGE→ADVANCE** (JEG Task 4 GPU fix). Enabling the
+  convex-hull finger collider earlier (at VALIDATE→STAGE, when the finger still
+  overlaps the just-descended cone) makes PhysX resolve the overlap into a
+  **launch impulse** — the cone was flung to z=1.0 m. Enabling once JAW_STAGE has
+  retracted the open jaw clear of the cone eliminates that.
 
-### 12.6a G2 contact-hold GPU evidence (Task 3, 2026-07-22)
+**Status after JEG Task 4 (2026-07-22, `.superpowers/sdd/task-4-jeg-report.md`)
+— HONEST STOP. The pinch positions + contacts but does NOT HOLD.** Measured on
+GPU (RTX 3090 Ti, `DCIST_JAW_DIAG=1`), the jaw redesign fixed the two prior
+blockers but a third, physical one remains:
+
+- ✅ no launch (cone stays within 0.002–0.014 m — vs the fling to z=1.0 m before
+  the enable-timing fix), ✅ no shove (vs Task 3's single-finger press that shoved
+  the cone 0.79 m), ✅ **contact + in-window + attach achieved** (the fit point
+  holds in the jaw window ~0.7 s; the cone is briefly grasped, holder=hilbert).
+- ❌ **but the grip does not lift the cone.** LIFT_VERIFY measured `obj_rise =
+  0.000 m across the full 0.126 m gripper rise` — the cone never leaves the
+  ground — and the finger↔cone contact only **flickers** (never sustains through
+  the `JAW_PINCH_SETTLE_S=0.6` dwell, even while in-window). Terminal:
+  `lift verify failed` (attach then slip) or `no pinch contact` (graze only).
+
+**Root cause (physical, not software; NOT fixable by tuning without a cheat):**
+the Spot **single finger + palm cannot clamp** the smooth ~0.26 m-wide cone hard
+enough to lift it — there is no true opposing second jaw, so the finger grazes
+rather than clamps. Honest-stop contract honored: NO kinematic-pin fake, NO
+friction inflation, NO gate softening. G1 (kinematic pin) remains the shipped
+tier; do NOT use G2 on any default path.
+
+FOLLOW-UPS (if funded): a gripper asset with a true **two-jaw clamp** (or a
+tendon/underactuated finger that wraps), a compliant/​deformable or
+fixed-until-gripped target, or a suction end-effector. The bag (0.75 × 0.84 m)
+does not fit the jaw window; the pipe (1.2 m) is unreachable (base self-collision
+holds it at the reach edge). Tuning table + reproduce: §12.6a.
+
+### 12.6a G2 jaw-entry GPU tuning (JEG Task 4, 2026-07-22)
 
 RTX 3090 Ti headless, Isaac 6.0.1, zenoh router + `sim_app`
-(`field_smoke_contact_hold.yaml`), `grasp_smoke.py --contact-hold --target`.
-`DCIST_SIM_DEBUG=1` enables the `dcist_sim_isaac` debug trace;
-`DCIST_CONTACT_DIAG=1` dumps the raw contact report each grasp step.
+(`field_smoke_contact_hold.yaml`), `grasp_smoke.py --contact-hold --target
+cone_0`. `DCIST_JAW_DIAG=1` dumps per-tick jaw geometry (`JAWDIAG[...]`: object
+vs palm world pose, live fit point + mouth axis, in-window, shove, servo error)
+AND the `LIFTDIAG` lift dynamics (g_rise/obj_rise/contact/held) — the Task-4
+tuning instrument. `DCIST_SIM_DEBUG=1` enables the base debug trace.
 
-NOTE on the raw contact dump: `diag_dump_contacts` only fires once
-`_contact_ready` is set, i.e. AFTER the colliders + report API are enabled. Under
-the **shipped** enable point (REACH_PREGRASP→DESCEND) the first dump therefore
-appears in `DIAG[descend]` — the reproduce command below shows
-`DIAG[descend] ... finger↔<object>` (there is NO `DIAG[deploy]` line). The
-`DIAG[deploy] ... finger↔Ground` line quoted in `task-3-g2-report.md` decisive
-measurement #1 is from the earlier **enable-at-accept baseline** probe (row
-"baseline" below), not from the shipped code — do not expect it here.
+| iter | change | result |
+|------|--------|--------|
+| baseline | Task-3 code (enable at VALIDATE→STAGE) | cone **LAUNCHED** to z=1.0 m / 1.03 m away → jaw stage timeout |
+| enable-fix | enable at STAGE→ADVANCE | no launch (cone stays); palm drifts 0.16 m off in CLOSE_PINCH → no pinch contact |
+| base-hold | + `stop_base` in jaw phases | cone stays (shove 0.014 m); in-window held ~3 s but finger never contacts (mouth too low) → no pinch contact |
+| clearance | + `JAW_GROUND_CLEARANCE_M=0.10` (fit z 0.022→0.102) | **contact + in-window + ATTACH**; but LIFT_VERIFY obj_rise=0.000 across 0.126 m rise → lift verify failed |
+| dwell | + `JAW_PINCH_SETTLE_S=0.6` (don't lift on a graze) | contact never sustains 0.6 s even while in-window → no pinch contact (**honest stop**) |
 
-| run | target | enable point | deploy recoil | reached phase | contact reported | outcome |
-|-----|--------|--------------|---------------|---------------|------------------|---------|
-| G1 control | cone | (none) | 0.73→0.75 m (0.02) | attach | n/a | **PASS** (pin) |
-| baseline | cone | accept | 0.71→1.13 m (0.43) | reach servo FAIL | — | recoil blocks |
-| fix v1 | cone | validate | 0.71→0.81 m (0.10) | CONTACT_CLOSE | **0 headers** | toggle too late |
-| fix v2 | cone | reach→descend | 0.75→0.65 m (~0) | descend servo FAIL | finger↔cone_0 ✓ | cone fled 0.79 m |
-| fix v2 | pipe | reach→descend | — | descend servo FAIL | finger↔pipe_0 ✓ | pipe at reach edge 0.96 m |
-| fix v2 | bag  | reach→descend | — | descend servo FAIL | finger↔bag_0 ✓ | bag fled 0.63 m |
+Decisive measurement (LIFTDIAG, clearance iter): gripper rose 0.126 m, `obj_rise`
+stayed `0.000` every tick, `contact` dropped to False on the first lift tick.
 
-Gait sanity (contact_hold robot, colliders provisioned+disabled, 10 m walk):
-`nav=reached, travelled 10.08 m, 0 falls → PASS`.
+Historical note: the **deleted** single-finger press-from-above design (pre-JEG,
+`task-3-g2-report.md`) shoved the cone 0.79 m / bag 0.63 m with the descend
+servo chasing the fleeing object; its collider-enable timing was REACH→DESCEND.
+The JEG jaw phases replace all of that — do not expect the old `CONTACT_CLOSE` /
+`DIAG[descend]` traces.
 
-Reproduce (both suites stay green: 159 isaac / 23 ros):
+Reproduce (both suites stay green: 198 isaac / 23 ros):
 ```
 ros2 run rmw_zenoh_cpp rmw_zenohd &
-DCIST_SIM_DEBUG=1 OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
+DCIST_JAW_DIAG=1 DCIST_SIM_DEBUG=1 OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
   PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH ADT4_ROBOT_NAME=hilbert \
   ~/environments/dcist/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
-    --scenario dcist_sim/scenarios/field_smoke_contact_hold.yaml --headless &
+    --scenario dcist_sim/scenarios/field_smoke_contact_hold.yaml --headless \
+    --video-out ~/adt4_output/g2_videos/after/grasp_attempt --video-fps 24 &
 ~/environments/dcist/spark_env/bin/python \
-  dcist_sim/dcist_sim_isaac/scripts/grasp_smoke.py --contact-hold --target pipe_0
+  dcist_sim/dcist_sim_isaac/scripts/grasp_smoke.py --contact-hold --target cone_0
 ```
 
 ### 12.7 Physics-mode object localization — FRAME DEFECT FOUND + FIXED (Task 15b)
@@ -1552,10 +1569,13 @@ kinematic tier).**
   perception `map` group; nothing in the P4 work altered the kinematic perception
   path.
 
-**G2 (contact_hold friction grasp) — EXPERIMENTAL, non-functional** (§12.6,
-unchanged): the Spot arm/finger links carry no PhysX colliders, so the friction
-hold cannot form. Machinery is implemented behind the `contact_hold` flag and
-G1 is provably untouched. Not on any default path.
+**G2 (contact_hold friction grasp) — EXPERIMENTAL, honest stop** (§12.6): the
+jaw-entry redesign (finger+palm colliders, mesh-sliced fit height, base
+still-stand) now positions the open jaw over the cone, contacts it, and briefly
+attaches — but the Spot single finger + palm cannot CLAMP the smooth cone hard
+enough to lift it (LIFT_VERIFY obj_rise=0.000 across the full gripper rise).
+Physical limit, not software; NO pin fake. Machinery is behind the
+`contact_hold` flag and G1 is provably untouched. Not on any default path.
 
 **Consolidated P4 follow-ups (deferred, none blocking the shipped tiers):**
 1. **Real-perception object localization** (closes A1 for real hardware): mask-
@@ -1568,9 +1588,10 @@ G1 is provably untouched. Not on any default path.
    goal — spec §8-reserved, human decision). Fall-non-fatal would also make the
    physics mapping tour cover the rack aisles (the open-floor-only A2 tour was
    chosen to avoid the fall-prone rack-detour navigation).
-3. **G2 colliders**: add PhysX colliders to the arm/finger links, then retune
-   `CONTACT_PRESS_M`/`CONTACT_POLL_S`; single finger can't pincer a cone (use
-   bag/pipe); CARRY should re-check gripper-object distance (§12.6, task-14).
+3. **G2 hold**: colliders + jaw-entry pinch are done (§12.6); the residual
+   blocker is a true two-jaw CLAMP — the single finger + palm grazes but can't
+   clamp the smooth cone to lift it. Needs a two-jaw / underactuated-wrap gripper
+   asset, a compliant/fixed-until-gripped target, or a suction end-effector.
 4. **`local_planner.astar` start-snap**: snap an OCCUPIED start cell to the
    nearest free cell (mirrors the Task-15i goal-snap) so a base that parks in
    inflation can recover instead of latching BLOCKED (worked around in A2 by the
