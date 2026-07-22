@@ -77,6 +77,32 @@ def main():
                              "write costmap.npz + costmap_raw.npz, exit 0 "
                              "(no ROS bridge, no tour). Used to bake a fresh "
                              "costmap for tour authoring (see render_costmap.py)")
+    parser.add_argument("--video-out", metavar="DIR",
+                        help="record a static third-person clip of the run to "
+                             "<DIR>/capture.mp4 (JEG Task 1). Any tier; "
+                             "flag-gated, so kinematic is unaffected by default. "
+                             "Frames are JPEGs kept on disk if ffmpeg is absent "
+                             "or the encode fails.")
+    parser.add_argument("--video-fps", type=float, default=24.0,
+                        help="third-person capture/encode frame rate "
+                             "(default 24)")
+    parser.add_argument("--video-back", type=float, default=3.5,
+                        help="third-person camera distance behind the robot "
+                             "(m); increase to frame a longer path (default 3.5)")
+    parser.add_argument("--video-up", type=float, default=2.0,
+                        help="third-person camera height above ground (m); "
+                             "increase to frame a wider scene (default 2.0)")
+    parser.add_argument("--max-seconds", type=float, default=None,
+                        help="stop the main loop after this many wall-clock "
+                             "seconds and tear down cleanly (used to bound a "
+                             "--video-out capture to a fixed duration; the mp4 "
+                             "is always encoded on exit)")
+    parser.add_argument("--stop-file", metavar="PATH",
+                        help="stop the main loop cleanly (and encode the video) "
+                             "as soon as this file exists -- lets an external "
+                             "driver end the run exactly when its work is done. "
+                             "Isaac traps SIGINT/SIGTERM and hard-exits, so this "
+                             "sentinel is the reliable graceful-stop hook.")
     args = parser.parse_args()
 
     # Surface dcist_sim_isaac INFO (esp. the physics grasp/place state machine's
@@ -234,6 +260,29 @@ def main():
                     n_labeled, gt_out)
         gt.attach(robots[0].camera)
 
+    # Third-person video capture (JEG Task 1). Static camera framed behind the
+    # robot's spawn pose, looking over it at the midpoint with the scenario
+    # objects' centroid. Flag-gated -> zero effect on any tier unless
+    # --video-out is passed. Never-fatal (all methods swallow + log).
+    video = None
+    if args.video_out and not args.smoke:
+        from dcist_sim_isaac.video_capture import VideoCapture, third_person_pose
+
+        try:
+            bx, by, _, _ = robots[0].base_pose
+            robot_xy = (float(bx), float(by))
+        except Exception:  # noqa: BLE001
+            robot_xy = (float(scenario.robots[0].x), float(scenario.robots[0].y))
+        if scenario.objects:
+            cx = sum(o.x for o in scenario.objects) / len(scenario.objects)
+            cy = sum(o.y for o in scenario.objects) / len(scenario.objects)
+        else:
+            cx, cy = robot_xy  # no objects -> degenerate +X framing fallback
+        pose = third_person_pose(
+            robot_xy, (cx, cy), back_m=args.video_back, up_m=args.video_up)
+        video = VideoCapture(args.video_out, args.video_fps, pose)
+        video.attach()
+
     frames = 60 if args.smoke else None
     n = 0
     # Kinematic mode: robot kinematics integrate against *wall-clock* dt
@@ -258,37 +307,62 @@ def main():
     # defaults) -- Task 8 pins the real values; until then this yields a
     # default-derived frame_dt, which is fine for Task 7's purposes.
     last_time = time.monotonic()
-    while sim_app.is_running():
-        if scenario.physics_mode:
-            dt = world.get_rendering_dt()
-        else:
-            now = time.monotonic()
-            dt = min(now - last_time, 0.25)
-            last_time = now
+    loop_start = last_time
+    # Teardown (gt/video close + ros shutdown) is wrapped so it always runs --
+    # on a clean --max-seconds stop, a frame-count stop, OR a Ctrl-C. Encoding
+    # the video before ros_bridge.shutdown()/sim_app.close() means the mp4 is
+    # safe even if a flaky rmw_zenoh teardown aborts afterward (ledger §e2e).
+    try:
+        while sim_app.is_running():
+            if scenario.physics_mode:
+                dt = world.get_rendering_dt()
+            else:
+                now = time.monotonic()
+                dt = min(now - last_time, 0.25)
+                last_time = now
 
-        for robot in robots:
-            robot.step(dt)
-        world.step(render=True)
-        if ros_bridge is not None:
-            ros_bridge.step(dt)
-        if gt is not None:
-            try:
-                bx, by, _, byaw = robots[0].base_pose
-                gt.maybe_capture(
-                    time.monotonic(), (float(bx), float(by), float(byaw)))
-            except Exception:  # noqa: BLE001 -- GT must never kill the sim
-                logger.exception(
-                    "gt_capture failed; disabling GT for the rest of the run "
-                    "(map continues; spec §3.4)")
-                gt.close()
-                gt = None
+            for robot in robots:
+                robot.step(dt)
+            world.step(render=True)
+            if ros_bridge is not None:
+                ros_bridge.step(dt)
+            if gt is not None:
+                try:
+                    bx, by, _, byaw = robots[0].base_pose
+                    gt.maybe_capture(
+                        time.monotonic(), (float(bx), float(by), float(byaw)))
+                except Exception:  # noqa: BLE001 -- GT must never kill the sim
+                    logger.exception(
+                        "gt_capture failed; disabling GT for the rest of the "
+                        "run (map continues; spec §3.4)")
+                    gt.close()
+                    gt = None
+            if video is not None:
+                # never-fatal internally; timestamp is wall-clock so the
+                # encoded clip plays back at the speed the run was watched.
+                video.maybe_capture(time.monotonic())
 
-        n += 1
-        if frames is not None and n >= frames:
-            break
+            n += 1
+            if frames is not None and n >= frames:
+                break
+            if (args.max_seconds is not None
+                    and time.monotonic() - loop_start >= args.max_seconds):
+                logger.info("--max-seconds %.1f reached; stopping cleanly",
+                            args.max_seconds)
+                break
+            if args.stop_file and os.path.exists(args.stop_file):
+                logger.info("--stop-file %s present; stopping cleanly",
+                            args.stop_file)
+                break
+    except KeyboardInterrupt:
+        logger.info("interrupted; tearing down + encoding video")
 
     if gt is not None:
         gt.close()
+    if video is not None:
+        mp4 = video.close()
+        if mp4:
+            logger.info("video_capture: wrote %s", mp4)
     if ros_bridge is not None:
         ros_bridge.shutdown()
     sim_app.close()
