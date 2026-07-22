@@ -243,17 +243,15 @@ def build_stage(scenario) -> SimStage:
 
     world.reset()
 
-    # Settle (Task 6, moved here from sim_app.py in the P4 final fix): let
-    # dynamic objects fall/settle onto the environment colliders BEFORE the
-    # costmap bake below, so object footprints are stamped at their settled
-    # (resting) poses rather than their spawn poses. render=False keeps this
-    # cheap and deterministic (no camera pipeline touched yet). Physics mode
-    # only -- kinematic scenarios have no dynamics to settle. Doing this inside
-    # build_stage also makes `--bake-only` bake against settled poses.
-    if scenario.physics_mode:
-        SETTLE_FRAMES = 120
-        for _ in range(SETTLE_FRAMES):
-            world.step(render=False)      # objects fall + settle (spec §5)
+    # Boot order is load-bearing (GPU-verified for Tasks 8-17):
+    #   world.reset() -> initialize loop -> settle 120 frames -> costmap bake.
+    # The initialize loop MUST run before the settle: it sets the arm to its
+    # stowed pose, applies the articulation gains, and activates each policy
+    # robot's walking-policy physics callback. If we settled first, the
+    # articulation would step ~2 sim-seconds with an uninitialized policy and
+    # the default deployed-forward arm -- the Task-9 topple regime. Settling
+    # AFTER init lets the active policy own the articulation during settle,
+    # exactly as it did before this loop was moved out of sim_app.py.
 
     # Camera.initialize() (Task 8) needs a valid physics sim view, which
     # only exists after world.reset() -- see spot_robot.py's comment at
@@ -265,6 +263,19 @@ def build_stage(scenario) -> SimStage:
         robot.camera.initialize()
         if robot.drive_backend is not None:
             robot.drive_backend.initialize(world)
+
+    # Settle (Task 6, moved here from sim_app.py in the P4 final fix): with the
+    # policy/arm now initialized (above), let dynamic objects fall/settle onto
+    # the environment colliders BEFORE the costmap bake below, so object
+    # footprints are stamped at their settled (resting) poses rather than their
+    # spawn poses. render=False keeps this cheap and deterministic. Physics mode
+    # only -- kinematic scenarios have no dynamics to settle. Doing this inside
+    # build_stage (after init, before bake) reproduces the old sim_app boot
+    # regime exactly and makes `--bake-only` bake against settled poses too.
+    if scenario.physics_mode:
+        SETTLE_FRAMES = 120
+        for _ in range(SETTLE_FRAMES):
+            world.step(render=False)      # objects fall + settle (spec §5)
 
     # Costmap bake (Task 6): must run AFTER world.reset() -- the PhysX
     # scene query interface needs an initialized physics scene (see
