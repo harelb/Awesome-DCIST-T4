@@ -1518,3 +1518,76 @@ G1 is provably untouched. Not on any default path.
    grasping=="physics" branch untested in scenario.py, `_articulation_view`
    private access, duplicated test fakes, nearest_free vs nearest_free_with_margin
    near-duplicate scan) — non-blocking cleanups.
+
+
+## 13. Perception depth-mode filter (real-perception object localization)
+
+The khronos active-window object detector (`InstanceForwarding`, isaac_sim
+`object_detector`) now applies a **per-cluster depth-mode filter** that rejects
+mask pixels whose range is an outlier for their cluster, before the 3D object
+centroid is computed. This is the "mask-centroid depth filtering (reject
+background pixels)" candidate named in the §12 P4 follow-up #1: on synthetic RGB
+the closed-set frontend's masks bleed onto the background *behind* the object, so
+the un-filtered centroid is pulled to a farther, biased range — the
+range-dependent mislocalization root-caused in §12.11.
+
+**Algorithm** (`khronos/khronos/src/active_window/object_detection/instance_forwarding.cpp`):
+per semantic cluster, take the valid pixel ranges, compute the **median** and
+**MAD** (median absolute deviation), and reject any pixel with
+`|range − median| > max(depth_mad_k · MAD, depth_mad_floor_m)`. Rejected pixels
+are zeroed in the (cloned) `object_image` so they no longer feed the object
+integrator. Median+MAD is O(n log n), robust to ~50 % one-sided contamination
+(background beyond the object), and degenerates safely (MAD=0 → the floor governs).
+
+**Knobs** (hydra yaml, `active_window.object_detector`; base_params →
+`config/*/hydra.yaml`; classic labelspace correctly skips them):
+
+| knob | default | meaning |
+|------|--------:|---------|
+| `enable_depth_mode_filter` | `true` | master switch; `false` = exact pre-filter behavior (object_image is the shallow label-image copy, no pixels removed) |
+| `depth_mad_k` | `3.0` | MAD multiplier; scales the reject band with cluster spread |
+| `depth_mad_floor_m` | `0.15` | minimum reject band (m); protects legitimately thick objects when MAD is tiny |
+| `depth_filter_min_pixels` | `10` | clusters with fewer valid pixels skip the filter (median meaningless) |
+
+A knob change is a **launch-time** param (no khronos rebuild, no config regen) —
+but the C++ filter itself only takes effect after a workspace build
+(`colcon build --packages-select khronos hydra hydra_ros`).
+
+**Evidence — before vs after** (GPU, `field_smoke_physics.yaml`, real-perception
+`spot_isaac-isaac_sim` session `-s`, robot PARKED at spawn viewing the objects at
+4–6 m; `localization_probe.py --scenario field_smoke_physics.yaml`):
+
+| object | filter OFF | filter ON | bar 0.30 m |
+|--------|-----------:|----------:|:----------:|
+| cone_0 | 2.592 m | 0.041 m | PASS |
+| bag_0 (frontend labels it `box`) | 1.159 m | 0.128 m | PASS |
+| pipe_0 | UNMATCHED (never detected) | UNMATCHED (never detected) | n/a |
+
+Worst detected-object error **2.592 m → 0.128 m** with the committed defaults (no
+tuning needed). `pipe_0` is never detected (absent from the 25-class YOLOE prompt
++ labelspace) — a pre-existing detection gap, orthogonal to this filter, so the
+probe's OVERALL line still prints FAIL (one unmatched GT object); the filter's
+objective — localization error of every DETECTED object under the bar — is met.
+
+**Re-run recipe:**
+1. Build once: `cd ~/dcist_ws && colcon build --packages-select khronos hydra hydra_ros && source install/setup.zsh`.
+2. Bring up per §12.1: Isaac `sim_app --scenario field_smoke_physics.yaml --headless`,
+   then `run-adt4 -n hilbert -c topaz -o "$OUT" -y -f -s --tmuxp-args="-d -L <sock>" spot_isaac-isaac_sim`.
+3. Probe (spark_env + ROS + workspace sourced, robot left parked):
+   ```
+   PYTHONPATH=dcist_sim/dcist_sim_isaac ~/environments/dcist/spark_env/bin/python \
+     dcist_sim/dcist_sim_isaac/scripts/localization_probe.py \
+     --scenario dcist_sim/scenarios/field_smoke_physics.yaml --robot hilbert --json out.json
+   ```
+4. Baseline (filter OFF) = temporarily set `enable_depth_mode_filter: false` in the
+   generated `config/isaac_sim/hydra.yaml` (git-tracked; restore with `git checkout`
+   — do NOT commit), no rebuild needed for the flag flip.
+
+The probe's label bridge treats the duffel's YOLOE `box` (id 17) label as `bag`
+(`LABEL_ALIASES` in `localization_probe.py`) — the frontend calls the duffel a
+box (runbook §5), and no scenario authors a `box_<n>` object, so the alias is safe.
+
+**ctest note (khronos gtests, PDF Task 1):** run the khronos depth-filter tests
+from a **bash** subshell after `source install/setup.bash` — a zsh shell with the
+ambient `LD_LIBRARY_PATH` fails to load `libteaser`. E.g.
+`bash -c 'source ~/dcist_ws/install/setup.bash && cd ~/dcist_ws/build/khronos && ctest --output-on-failure'`.
