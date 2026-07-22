@@ -63,16 +63,48 @@ MAX_TARGET_ANGULAR_SPEED = 1.0  # rad/s (task-7-brief.md Step 2)
 # disambiguation.
 PALM_RELATIVE_PATH = "arm0_link_wr1/visuals"
 
-# GRIPPER_RELATIVE_PATH (the finger LINK, not its own `visuals` mesh child)
-# is reused as-is for the finger collider -- deliberately, for continuity
-# with `gripper_world_pose()` and `grasp_backends.py`'s `_finger_path` /
-# contact-reporting target, which already key off this exact path. GPU-
-# verified (task-1-report.md, paired `overlap_sphere` probe with an
-# identical robot pose in both runs) that applying `UsdPhysics.CollisionAPI`
-# to the bare link Xform cooks a real PhysX shape belonging to that link's
-# rigid body -- IDENTICAL to applying it to the `visuals` mesh child (both:
-# 1 hit, body=arm0_link_fngr; a no-collider control at the same pose: 0
-# hits) -- so reusing the link path here has no correctness gap.
+# FIX (review round): the finger collider MUST be the `visuals` MESH CHILD
+# of `GRIPPER_RELATIVE_PATH`, not the bare link Xform. `PhysicsMeshCollisionAPI`
+# is documented (usdPhysics schema.usda:308-315) as "Can be applied to only a
+# USDGeomMesh in addition to its PhysicsCollisionAPI" -- applying it to a
+# plain Xform (as the original Task 1 pass did, defending the choice with an
+# `overlap_sphere` HIT at a single point) does not actually establish that a
+# correct convex hull was cooked from the descendant mesh; it only proves
+# *some* shape exists near that point. `stage.py`'s `_make_dynamic` already
+# established the codebase convention of applying collision APIs to
+# `IsA(UsdGeom.Mesh)` prims specifically -- this brings the gripper in line
+# with it, same as `PALM_RELATIVE_PATH` above.
+#
+# Re-verified with a stronger probe (task-1-report.md "Fix round"): after
+# provisioning+enabling CollisionAPI/MeshCollisionAPI(convexHull) on
+# `arm0_link_fngr/visuals`, a 7-point `overlap_sphere` sweep across the
+# mesh's known USD world AABB (from `UsdGeom.BBoxCache`) hit `arm0_link_fngr`
+# at 6/7 interior points (the 7th interior point -- the box's bottom face --
+# missed `arm0_link_fngr` specifically while still hitting the overlapping
+# `arm0_link_wr1` collider, which is itself evidence of a real, non-box-
+# shaped convex hull following the mesh's actual contours rather than a
+# crude full-AABB shape), and all 3 points clearly outside the AABB (two
+# >5x-half-extent past the box on different axes, one a (100,100,100)
+# sentinel) scored a clean 0 hits. This is the AABB-bounded signature of a
+# genuinely-cooked mesh collider, not a single lucky point.
+#
+# Reconciled with `grasp_backends.py`'s contact reporting (Task 14):
+# `ContactEventHeader` (omni.physx 110.1.13 `_physx.pyi:573`) has SEPARATE
+# `actor0`/`actor1` ("use PhysicsSchemaTools::intToSdfPath") vs `collider0`/
+# `collider1` fields -- i.e. PhysX reports contacts at the RIGID BODY level
+# (actor) distinctly from the specific collision SHAPE (collider) that
+# touched. `_ArmInterface.finger_object_contact` (grasp_backends.py) reads
+# `h.actor0`/`h.actor1`, NOT `collider0`/`collider1` -- so moving the
+# collider shape one level down to `visuals` does not change what appears
+# there: the body is still `arm0_link_fngr` (RigidBodyAPI stays on the
+# link), so `_finger_path` (== `GRIPPER_RELATIVE_PATH`, the link) remains
+# the exactly-correct polling target, unchanged. No filter change was
+# needed there in fact: its existing `p == finger or p.startswith(finger +
+# "/")` match was already prefix-tolerant of a collider/mesh sub-path
+# appearing in that position too, belt-and-braces even though actor0/actor1
+# won't ever produce one.
+GRIPPER_MESH_RELATIVE_PATH = f"{GRIPPER_RELATIVE_PATH}/visuals"
+
 GRIPPER_FRICTION_STATIC = 1.2   # rubber-pad-like; convex-on-convex pinches
 GRIPPER_FRICTION_DYNAMIC = 1.1  # shed objects without high friction
 
@@ -82,9 +114,12 @@ def gripper_collider_paths_for(robot_prim_path):
     robot spawned at `robot_prim_path`. No Isaac import here -- unit-tested
     directly; `provision_gripper_colliders`/`set_gripper_colliders_enabled`
     both build off this so the "provision" and "toggle" paths can never
-    drift apart."""
+    drift apart. Both are Mesh prims (`GRIPPER_MESH_RELATIVE_PATH`,
+    `PALM_RELATIVE_PATH`) -- see the module comment above `GRIPPER_MESH_
+    RELATIVE_PATH` for why the finger collider is the `visuals` mesh child
+    rather than the `GRIPPER_RELATIVE_PATH` link itself."""
     return {
-        "finger": f"{robot_prim_path}/{GRIPPER_RELATIVE_PATH}",
+        "finger": f"{robot_prim_path}/{GRIPPER_MESH_RELATIVE_PATH}",
         "palm": f"{robot_prim_path}/{PALM_RELATIVE_PATH}",
     }
 

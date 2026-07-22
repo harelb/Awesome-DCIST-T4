@@ -456,7 +456,20 @@ class _ArmInterface:
         PhysX emits contact events for it. Verified on Isaac 6.0.1 (omni.physx
         110.1.13): PhysxSchema.PhysxContactReportAPI.Apply(prim) +
         CreateThresholdAttr(N); events read via
-        get_physx_simulation_interface().get_contact_report()."""
+        get_physx_simulation_interface().get_contact_report().
+
+        Task 1 (spot_robot.py) now provisions the actual PhysX collider
+        shape one level down at `arm0_link_fngr/visuals` (a Mesh, per
+        usdPhysics schema.usda's "MeshCollisionAPI ... only a USDGeomMesh"
+        restriction), NOT on `self._finger_path` (`arm0_link_fngr`, the
+        link) itself. This link/mesh split does not affect contact
+        reporting here: `ContactEventHeader.actor0`/`actor1` (the fields
+        `finger_object_contact` below reads) are RIGID-BODY paths, distinct
+        from the separate `collider0`/`collider1` shape fields (both
+        documented in the installed `_physx.pyi:573`) -- so a contact
+        against the `visuals` collider still reports `actor{0,1}` ==
+        `arm0_link_fngr` (RigidBodyAPI stays on the link), exactly matching
+        `self._finger_path` unchanged. No filter change was required."""
         if self._contact_ready:
             return
         import omni.usd
