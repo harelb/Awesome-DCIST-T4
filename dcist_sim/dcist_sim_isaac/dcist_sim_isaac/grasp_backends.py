@@ -597,7 +597,13 @@ class PhysicsGraspBackend:
         if robot_name in self._ops:
             msg = f"'{robot_name}' already has a grasp/place in progress"
             return False, "", msg
-        arm = self._arm_factory(robot)
+        try:
+            arm = self._arm_factory(robot)
+        except Exception as exc:  # e.g. DOF-order guard -- must FAIL the grasp,
+            # not propagate out of the service callback and kill the sim process.
+            logger.exception("'%s' arm factory raised during grasp", robot_name)
+            self._set_last(robot_name, FAILED, str(exc), "")
+            return False, "", str(exc)
         if arm is None:
             msg = ("physics grasping requires locomotion: policy in this "
                    f"phase ('{robot_name}' has no arm drive backend)")
@@ -620,7 +626,13 @@ class PhysicsGraspBackend:
             return False, msg
         if robot_name in self._ops:
             return False, f"'{robot_name}' already has an op in progress"
-        arm = self._arm_factory(robot)
+        try:
+            arm = self._arm_factory(robot)
+        except Exception as exc:  # e.g. DOF-order guard -- must FAIL the place,
+            # not propagate out of the service callback and kill the sim process.
+            logger.exception("'%s' arm factory raised during place", robot_name)
+            self._set_last(robot_name, FAILED, str(exc), "")
+            return False, str(exc)
         if arm is None:
             msg = ("physics placing requires locomotion: policy in this "
                    f"phase ('{robot_name}' has no arm drive backend)")
@@ -1005,7 +1017,11 @@ class PhysicsGraspBackend:
             return
 
         if op.phase == _Op.DETACH:
-            held = self._held.pop(robot_name, None)
+            # Read (do NOT pop yet): the object must stay in _held until it has
+            # been fully restored to a collidable dynamic state, so that if any
+            # step below raises, reset() still sees it in _held and can repair
+            # it. Only pop once the restore has succeeded.
+            held = self._held.get(robot_name)
             object_id = held["object_id"] if held else op.object_id
             if op.contact_hold:
                 # G2: object was never suspended (still dynamic) -- just open
@@ -1019,6 +1035,8 @@ class PhysicsGraspBackend:
                 # owns it again (pairs with the disable in _attach).
                 self.registry.set_collision_enabled(object_id, True)
                 self.registry.set_kinematic(object_id, False)   # -> dynamic
+            # Restore succeeded -- now it is safe to drop the object from _held.
+            self._held.pop(robot_name, None)
             self.registry.clear_held(object_id)
             op.object_id = object_id
             op.phase = _Op.EGRESS

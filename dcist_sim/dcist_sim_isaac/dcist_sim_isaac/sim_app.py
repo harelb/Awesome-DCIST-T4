@@ -107,17 +107,13 @@ def main():
     world = stage.world
     robots = stage.robots
 
-    # Physics mode (Task 6): let dynamic objects fall/settle onto the
-    # environment colliders before anything else runs -- world.step()
-    # with render=False (no camera pipeline touched yet) is cheap and
-    # keeps this deterministic regardless of headless/gui. Then persist
-    # the GT costmap baked by build_stage (spec §4.1/§7): `costmap.npz`
-    # is the inflated map local_planner.py navigates against;
-    # `costmap_raw.npz` is the pre-inflation map (Task-10 diagnostics).
+    # Physics mode (Task 6): objects were already settled (and the costmap
+    # baked against their settled poses) inside build_stage -- see the settle
+    # loop there, moved earlier in the P4 final fix so footprints match resting
+    # poses. Here we only persist the GT costmap (spec §4.1/§7): `costmap.npz`
+    # is the inflated map local_planner.py navigates against; `costmap_raw.npz`
+    # is the pre-inflation map (Task-10 diagnostics).
     if scenario.physics_mode:
-        SETTLE_FRAMES = 120
-        for _ in range(SETTLE_FRAMES):
-            world.step(render=False)      # objects fall + settle (spec §5)
         if stage.costmap is not None:
             costmap_out = args.costmap_out or (
                 os.path.join(os.path.dirname(args.gt_out), "costmap.npz")
@@ -163,6 +159,17 @@ def main():
         import omni.usd
         from dcist_sim_isaac.gt_capture import GtCapture
 
+        # Teleport replay is KINEMATIC-ONLY (spec §7): deterministic kinematic
+        # poses reproduce the mapping run's views, whereas teleporting a physics
+        # robot fights PhysX. The YAML `gt.mode: replay` path is schema-rejected
+        # on a physics robot; this guards the equivalent CLI entry point.
+        if scenario.physics_mode:
+            logger.error("--gt-replay requires a kinematic scenario "
+                         "(locomotion: kinematic); '%s' is physics-mode. "
+                         "Replay is kinematic-only (spec §7); use a kinematic "
+                         "twin scenario for the GT pass.", args.scenario)
+            sim_app.close()
+            return 1
         if not scenario.gt.enabled:
             logger.error("--gt-replay but scenario has no enabled gt section")
             sim_app.close()

@@ -68,7 +68,8 @@ class Costmap2D:
         ny, nx = self.grid.shape
         if cell is not None and self.grid[cell[1], cell[0]] == self.FREE:
             return self.grid_to_world(*cell)
-        # spiral out by rings from the (possibly OOB-clamped) seed cell
+        # bounded box scan (+/- r_cells) around the (possibly OOB-clamped) seed
+        # cell, keeping the nearest FREE cell within max_dist_m by euclidean d^2
         sx = int(np.clip((x - self.origin_xy[0]) / self.resolution, 0, nx - 1))
         sy = int(np.clip((y - self.origin_xy[1]) / self.resolution, 0, ny - 1))
         best = None

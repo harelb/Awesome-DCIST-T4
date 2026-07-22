@@ -243,6 +243,18 @@ def build_stage(scenario) -> SimStage:
 
     world.reset()
 
+    # Settle (Task 6, moved here from sim_app.py in the P4 final fix): let
+    # dynamic objects fall/settle onto the environment colliders BEFORE the
+    # costmap bake below, so object footprints are stamped at their settled
+    # (resting) poses rather than their spawn poses. render=False keeps this
+    # cheap and deterministic (no camera pipeline touched yet). Physics mode
+    # only -- kinematic scenarios have no dynamics to settle. Doing this inside
+    # build_stage also makes `--bake-only` bake against settled poses.
+    if scenario.physics_mode:
+        SETTLE_FRAMES = 120
+        for _ in range(SETTLE_FRAMES):
+            world.step(render=False)      # objects fall + settle (spec §5)
+
     # Camera.initialize() (Task 8) needs a valid physics sim view, which
     # only exists after world.reset() -- see spot_robot.py's comment at
     # the SimZedCamera construction site. Task 8 (P4): policy robots' drive
@@ -266,8 +278,9 @@ def build_stage(scenario) -> SimStage:
             bake_costmap, object_footprint_radius)
         # Task 15i: stamp each object's footprint into the costmap so the
         # planner keeps clearance from objects (they're excluded from the env
-        # overlap bake by design). Positions are the live post-reset object
-        # poses from the registry (settled at spawn).
+        # overlap bake by design). Positions are the live object poses from the
+        # registry AFTER the settle loop above, so footprints use settled
+        # (resting) poses, not spawn poses.
         # Task 15k: derive each footprint radius from the object's live USD
         # world bounds (so a wide/flat asset like the duffel bag gets a disc
         # that covers its true XY extent, not an undersized global 0.25 m --
