@@ -26,12 +26,23 @@ Scenario objects carry a string `label` (e.g. "bag", "cone") and an
 `id: <label>_<n>` naming convention (dcist_sim_isaac/scenario.py's
 ObjectSpec; every scenario YAML under dcist_sim/scenarios/ follows this).
 Live DSG object nodes only carry an integer `attributes.semantic_label` --
-the instance_seg labelspace id hydra's mesh_segmenter stamps from the
-GT/FastSAM label image (gt_semantics.py). `mesh_delta_clustering.cpp`
-computes the class as `raw_label >> 16` BEFORE hydra ever constructs the
-node (hydra/src/frontend/mesh_delta_clustering.cpp:57-60), so
-`semantic_label` is already the bare category id (e.g. 3 for "bag"), never
-the packed `(category << 16) | instance` value.
+the instance_seg labelspace id khronos's active-window object pipeline
+stamps from the GT/FastSAM label image (gt_semantics.py). This deployment
+runs objects through khronos active_window, NOT hydra's (dead-for-us)
+MeshSegmenter path: isaac_sim's hydra.yaml sets
+`frontend.enable_mesh_objects: false`, so hydra/src/frontend/graph_builder.cpp
+never constructs a MeshSegmenter at all. The live unpacking is
+`khronos/khronos/src/active_window/object_detection/instance_forwarding.cpp`
+(~line 202: `category_id = (id >> 16) & 0xFFFF`, gated on
+`config.instance_id` -- isaac_sim's hydra.yaml active_window
+`object_detector.instance_id: true`), which then flows through
+`mesh_object_extractor.cpp:106` / `active_window.cpp`'s
+`createObjectAttributes` (`object->semantic_label =
+track.semantics->category_id`). So, same as before: `semantic_label` is
+already the bare category id (e.g. 3 for "bag"), never the packed
+`(category << 16) | instance` value -- only the file that computes it was
+misidentified in an earlier revision of this docstring (it cited hydra's
+mesh_segmenter.cpp/mesh_delta_clustering.cpp, which is compiled out here).
 
 This script reverses `gt_semantics.LABELSPACE_NAME_TO_ID` (id -> name) to
 turn a node's `semantic_label` back into a class-name string, builds
@@ -79,7 +90,11 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 
 from dcist_sim_isaac.gt_semantics import LABELSPACE_NAME_TO_ID
-from dcist_sim_isaac.localization_probe_lib import match_objects, summarize
+from dcist_sim_isaac.localization_probe_lib import (
+    _label_from_object_id,
+    match_objects,
+    summarize,
+)
 from dcist_sim_isaac.scenario import load_scenario
 
 STABILITY_S = 15.0  # object-node count must be unchanged this long to "settle"
@@ -253,6 +268,27 @@ def main():
 
     scenario = load_scenario(args.scenario)
     gt = {o.object_id: (o.x, o.y) for o in scenario.objects}
+
+    # match_objects derives each GT object's required label from its
+    # object_id's `<label>_<n>` prefix (localization_probe_lib's naming
+    # rule), NOT from ObjectSpec.label directly. Every scenario YAML in
+    # dcist_sim/scenarios/ happens to follow that convention, but nothing
+    # enforces it -- a scenario author who breaks it (e.g. `id: box_7` with
+    # `label: pallet`) would silently corrupt matching (the GT object gets
+    # compared against DSG nodes of the WRONG class, either matching
+    # nothing or matching the wrong object) with no error, just a
+    # confusing FAIL or a wrong-looking PASS. Cross-check and warn loudly
+    # rather than fail the run -- Task 4 needs to see this if it happens.
+    for o in scenario.objects:
+        derived = _label_from_object_id(o.object_id)
+        if derived != o.label:
+            print(
+                f"[loc_probe] WARN: object '{o.object_id}' has label "
+                f"'{o.label}' but its id implies label '{derived}' -- "
+                f"matching uses the id-derived label, so this object's "
+                f"GT match may be silently wrong. Rename the object id to "
+                f"'{o.label}_<n>' to fix."
+            )
 
     rclpy.init()
     node = LocalizationProbe(args.robot)
