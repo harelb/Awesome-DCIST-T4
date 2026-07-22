@@ -14,13 +14,14 @@ input:
       sensor:
         type: camera_info
         min_range: 0.2
-        max_range: 10.0
+        max_range: 5.0
         extrinsics: {type: ros}
 active_window:
   type: ActiveWindow
   volumetric_map: {voxels_per_side: 16, voxel_size: 0.15, truncation_distance: 0.3, with_semantics: true}
   projective_integrator:
     semantic_integrator: {type: SingleLabelIntegrator}
+    interpolation_method: {type: adaptive, max_depth_difference_m: 0.1}
   min_output_separation: 0.5
   object_detector:
     type: ConnectedSemantics
