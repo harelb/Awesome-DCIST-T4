@@ -72,9 +72,19 @@ TIER G2 -- CONTACT-BASED HOLD (Task 14, ``RobotSpec.contact_hold``) -- EXPERIMEN
     +0.99/-0.58/+0.72 and Z -0.16/-0.81/-0.69 (only a consistent downward bias),
     confirming Task 2's sway caveat and refuting any fixed "slot opens straight
     down" assumption. The press-from-above history is preserved in this
-    docstring + task-3-g2-report.md / runbook §12.6a; the physical viability of
-    the pinch (and whether the axis wobble defeats it) is Task 4's honest-stop
-    GPU question, not proven here. G1 remains the shipped grasp tier.
+    docstring + task-3-g2-report.md / runbook §12.6a.
+
+    FINAL VERDICT (Task 4, 2026-07-22, GPU-measured, task-4-jeg-report.md --
+    HONEST STOP, not proven-viable): the axis-wobble question above IS
+    answered. STAGE/ADVANCE/CONTACT/ATTACH all work -- the jaw seats the
+    object in-window and the finger contacts it without launching or shoving.
+    LIFT does not: `obj_rise = 0.000` across the full 0.126 m gripper rise,
+    reproduced twice. The single finger + palm only grazes the smooth cone and
+    cannot clamp it -- an END-EFFECTOR limit (no true opposing jaw), not a
+    tuning problem. `contact_hold` therefore remains
+    experimental/non-lifting pending a two-jaw/underactuated gripper asset (or
+    an alternative grasp target); G1 remains the shipped grasp tier. See
+    runbook §12.6 / §12.6a for the full tuning table and reproduce steps.
 
     ARM OWNERSHIP DURING A CONTACT CARRY (critical, differs from G1): the grip
     is held ONLY by the finger's PhysX position drive (f1x -> 0) plus the 6
@@ -1865,8 +1875,8 @@ class PhysicsGraspBackend:
                 logger.exception("arm release during reset failed")
             if op.contact_hold:
                 # Task 2: an in-flight contact-hold op may have already
-                # enabled the gripper colliders (enabled right where arm
-                # ownership is taken, in grasp()/place()) -- reset must drop
+                # enabled the gripper colliders (enabled at the JAW_STAGE ->
+                # JAW_ADVANCE transition, JEG Task 4) -- reset must drop
                 # them along with the arm, same as every other terminal.
                 try:
                     op.arm.set_gripper_colliders(False)

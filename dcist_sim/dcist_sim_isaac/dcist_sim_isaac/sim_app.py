@@ -82,7 +82,8 @@ def main():
                              "<DIR>/capture.mp4 (JEG Task 1). Any tier; "
                              "flag-gated, so kinematic is unaffected by default. "
                              "Frames are JPEGs kept on disk if ffmpeg is absent "
-                             "or the encode fails.")
+                             "or the encode fails. Ignored under --smoke (no "
+                             "robot pose to frame from, nothing worth recording).")
     parser.add_argument("--video-fps", type=float, default=24.0,
                         help="third-person capture/encode frame rate "
                              "(default 24)")

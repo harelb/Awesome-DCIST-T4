@@ -733,6 +733,44 @@ DCIST_JAW_DIAG=1 DCIST_SIM_DEBUG=1 OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
   dcist_sim/dcist_sim_isaac/scripts/grasp_smoke.py --contact-hold --target cone_0
 ```
 
+### 12.6b Video capture tool (`--video-out`) — permanent debugging aid
+
+The static third-person capture used for the G2 evidence above (§12.6a) is a
+general-purpose `sim_app` flag, not a one-off for this task — it is the
+standard way to get a watchable clip of any run.
+
+- **Flags** (`sim_app.py`): `--video-out DIR` records to `DIR/capture.mp4`;
+  `--video-fps` sets the capture/encode frame rate (default 24). `--video-back`
+  and `--video-up` tune the fixed third-person camera's distance behind and
+  height above the robot (defaults 3.5 m / 2.0 m) — increase `--video-back` to
+  frame a longer path, `--video-up` for a wider scene. The camera is a single
+  **static** pose framed behind + above the robot at attach time (JEG Task 1);
+  it does not track the robot, so pick `--video-back`/`--video-up` to keep the
+  whole tour inside frame rather than expecting the shot to follow.
+- **Bounding a capture — `--max-seconds` / `--stop-file`**: Isaac Sim traps
+  SIGINT/SIGTERM and hard-exits instead of unwinding cleanly, so `Ctrl-C` alone
+  will NOT flush a video (or anything else torn down on exit). `--max-seconds N`
+  stops the main loop after N wall-clock seconds and tears down (encode
+  included) cleanly; `--stop-file PATH` does the same the instant `PATH`
+  exists, letting an external driver end the run exactly when its own work is
+  done rather than on a guessed duration. Both are honored by the same
+  teardown path as a clean exit, so the mp4 is always encoded before the
+  process exits.
+- **`locomotion_clip_driver.py`** (`dcist_sim/dcist_sim_isaac/scripts/`): a
+  throwaway (not a smoke test) ROS2 driver that walks a `locomotion: policy`
+  robot through a short scripted tour (goto `target_pose`s) so a `--video-out`
+  capture has something worth watching — includes the boot-settle wait and
+  fall/auto-recovery re-send handling from §12.14 (15g) so a transient tip
+  right after spawn doesn't abort the tour.
+- **Output**: frames are captured as JPEGs on disk and encoded to `capture.mp4`
+  via `ffmpeg` on close; if `ffmpeg` is absent or the encode fails, the JPEG
+  frames are simply left on disk instead — video capture is **never fatal** to
+  the run (all of attach/capture/close swallow + log their own exceptions).
+- **`--smoke` disables it**: `--video-out` is silently ignored whenever
+  `--smoke` is also passed (`sim_app.py`: `if args.video_out and not
+  args.smoke`) — the smoke test only steps 60 frames and exits, so there is
+  nothing worth recording and no camera/robot pose to frame from.
+
 ### 12.7 Physics-mode object localization — FRAME DEFECT FOUND + FIXED (Task 15b)
 
 **Symptom (Task 15):** under physics locomotion the DSG localized scenario
