@@ -218,7 +218,7 @@ The perception frontend for `spot_isaac` is **YOLOE instance-segmentation**
 | Hop | Value | Where |
 |-----|-------|-------|
 | scenario object | `label: bag` (metadata for magic-grasp only; does **not** reach hydra) | `scenarios/field_smoke.yaml` |
-| frontend YOLOE | duffel classified as **`box`** (id 17), cone as `cone` (id 2); `pipe` **absent** from the 25-class prompt | `config/isaac_sim/instance_seg.yaml`, `labelspaces/instance_seg.yaml` |
+| frontend YOLOE | duffel classified as **`box`** (id 17), cone as `cone` (id 2); `pipe` **absent** from the deployed prompt (no `pipe` class in `instance_seg.yaml` or the labelspace) | `config/isaac_sim/instance_seg.yaml`, `labelspaces/instance_seg.yaml` |
 | DSG object node | `semantic_label = 17` → category string **`box`** | hydra `SingleLabelIntegrator` + labelspace |
 | PDDL/plan | `Pick.object_class = "box"`, `object_id = "o1"` | `pddl_planner_ros.py:169-184` |
 | executor YOLOE query | synonym `box → "cement bag"` → queried with **`cement bag`** (Task-6-tuned prompt) | `detector_class_synonyms` (isaac_sim overlay) |
@@ -1563,11 +1563,16 @@ but the C++ filter itself only takes effect after a workspace build
 | bag_0 (frontend labels it `box`) | 1.159 m | 0.128 m | PASS |
 | pipe_0 | UNMATCHED (never detected) | UNMATCHED (never detected) | n/a |
 
-Worst detected-object error **2.592 m → 0.128 m** with the committed defaults (no
-tuning needed). `pipe_0` is never detected (absent from the 25-class YOLOE prompt
-+ labelspace) — a pre-existing detection gap, orthogonal to this filter, so the
-probe's OVERALL line still prints FAIL (one unmatched GT object); the filter's
-objective — localization error of every DETECTED object under the bar — is met.
+> **Literal spec bar NOT met; exception controller-ratified.** The spec bar is
+> "all GT objects matched AND worst < 0.30 m", so the probe's OVERALL line prints
+> **FAIL**: `pipe_0` can never match because **the deployed YOLOE prompt +
+> `instance_seg` labelspace have no `pipe` class at all** — the detector never
+> emits a pipe node, so this is a pre-existing detector *coverage* gap (the
+> long-standing bag/pipe-detection follow-up), NOT a localization-filter failure
+> and NOT spec §7 tracker-residue. The **controller ratifies this exception**:
+> the filter's objective — localization accuracy under the bar for **every
+> object the detector actually produces** — is PROVEN (worst detected-object
+> error **2.592 m → 0.128 m** with the committed defaults, no tuning).
 
 **Re-run recipe:**
 1. Build once: `cd ~/dcist_ws && colcon build --packages-select khronos hydra hydra_ros && source install/setup.zsh`.

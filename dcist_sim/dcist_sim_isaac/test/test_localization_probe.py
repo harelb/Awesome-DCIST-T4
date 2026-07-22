@@ -71,3 +71,28 @@ def test_summarize_bar_is_strict():
     # worst_m exactly AT the bar must fail (script contract: "error < bar").
     rows = [{"object_id": "a", "error_m": 0.3}]
     assert summarize(rows, bar_m=0.3)["ok"] is False
+
+
+def test_match_surfaces_raw_label_from_4tuple():
+    # A 4-tuple node carries a RAW pre-alias label (element 3). The matched
+    # row must report both the display label it matched on and that raw label
+    # -- so a bag matched via a `box` detection is visible.
+    gt = {"bag_0": (4.0, 0.0)}
+    nodes = [("bag", 4.1, 0.0, "box")]  # display "bag", raw "box"
+    row = match_objects(gt, nodes, max_match_m=3.0)[0]
+    assert row["label"] == "bag"
+    assert row["raw_label"] == "box"
+    assert abs(row["error_m"] - 0.1) < 1e-6
+
+
+def test_match_3tuple_raw_label_mirrors_display():
+    # A plain 3-tuple (no raw element) still works; raw_label mirrors label.
+    gt = {"cone_0": (5.0, 1.0)}
+    row = match_objects(gt, [("cone", 5.0, 1.0)], max_match_m=3.0)[0]
+    assert row["label"] == "cone" and row["raw_label"] == "cone"
+
+
+def test_unmatched_row_has_null_labels():
+    row = match_objects({"pipe_0": (9.0, 9.0)}, [], max_match_m=3.0)[0]
+    assert row["error_m"] is None
+    assert row["label"] is None and row["raw_label"] is None

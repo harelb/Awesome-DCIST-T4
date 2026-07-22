@@ -136,7 +136,15 @@ class LocalizationProbe(Node):
             self.dsg = dsg
 
     def object_nodes(self):
-        """`(label_or_None, x, y)` per live DSG object node."""
+        """`(display_label, x, y, raw_label)` per live DSG object node.
+
+        ``raw_label`` is the bare labelspace name for the node's
+        ``semantic_label`` (e.g. ``"box"`` for the duffel); ``display_label``
+        is that name after LABEL_ALIASES canonicalization (e.g. ``"bag"``).
+        Matching uses ``display_label`` (element 0); ``raw_label`` (element 3)
+        is carried through so match rows can report WHICH raw detection an
+        object matched. Both may be None for an unknown ``semantic_label``.
+        """
         with self._lock:
             g = self.dsg
         if g is None:
@@ -144,9 +152,9 @@ class LocalizationProbe(Node):
         out = []
         for n in g.get_layer(spark_dsg.DsgLayers.OBJECTS).nodes:
             p = n.attributes.position
-            label = ID_TO_LABEL.get(n.attributes.semantic_label)
-            label = LABEL_ALIASES.get(label, label)
-            out.append((label, p[0], p[1]))
+            raw_label = ID_TO_LABEL.get(n.attributes.semantic_label)
+            display_label = LABEL_ALIASES.get(raw_label, raw_label)
+            out.append((display_label, p[0], p[1], raw_label))
         return out
 
 
@@ -248,13 +256,21 @@ def wait_for_stable_objects(node, settle_s, stability_s=STABILITY_S, poll=0.5):
 
 
 def print_table(rows, bar_m):
-    print(f"[loc_probe] {'object_id':<20} {'error_m':>10}  status")
+    print(f"[loc_probe] {'object_id':<20} {'error_m':>10}  status  matched_as")
     for r in sorted(rows, key=lambda r: r["object_id"]):
         if r["error_m"] is None:
             print(f"[loc_probe] {r['object_id']:<20} {'--':>10}  UNMATCHED")
         else:
             status = "PASS" if r["error_m"] < bar_m else "FAIL"
-            print(f"[loc_probe] {r['object_id']:<20} {r['error_m']:>10.3f}  {status}")
+            # Show the raw detected label so an aliased match (e.g. a bag
+            # matched via a `box` detection) is visible, not hidden.
+            raw = r.get("raw_label")
+            disp = r.get("label")
+            matched_as = raw if raw == disp else f"{raw}->{disp}"
+            print(
+                f"[loc_probe] {r['object_id']:<20} {r['error_m']:>10.3f}  "
+                f"{status}    {matched_as or ''}"
+            )
 
 
 def main():
@@ -295,6 +311,13 @@ def main():
     # nothing or matching the wrong object) with no error, just a
     # confusing FAIL or a wrong-looking PASS. Cross-check and warn loudly
     # rather than fail the run -- Task 4 needs to see this if it happens.
+    # LABEL_ALIASES canonicalizes detected node labels (e.g. box -> bag). If a
+    # scenario object's id-derived label is on the SHADOWED side of an alias
+    # (a key of LABEL_ALIASES, e.g. `box_<n>`), that object could never match a
+    # node of its own raw class -- every such node was canonicalized to the
+    # alias target (bag) before matching -- so it would silently go UNMATCHED
+    # or steal a differently-classed detection. No current scenario authors such
+    # ids (all are bag_/cone_/pipe_), so this is a guard for a future author.
     for o in scenario.objects:
         derived = _label_from_object_id(o.object_id)
         if derived != o.label:
@@ -304,6 +327,15 @@ def main():
                 f"matching uses the id-derived label, so this object's "
                 f"GT match may be silently wrong. Rename the object id to "
                 f"'{o.label}_<n>' to fix."
+            )
+        if derived in LABEL_ALIASES:
+            print(
+                f"[loc_probe] WARN: object '{o.object_id}' has an id-derived "
+                f"label '{derived}' that LABEL_ALIASES canonicalizes away "
+                f"(-> '{LABEL_ALIASES[derived]}'). Detected '{derived}' nodes "
+                f"are relabeled '{LABEL_ALIASES[derived]}' before matching, so "
+                f"this object can never match its own class and will look "
+                f"UNMATCHED. Rename the object or revisit LABEL_ALIASES."
             )
 
     rclpy.init()

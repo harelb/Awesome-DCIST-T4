@@ -32,7 +32,11 @@ def match_objects(gt, nodes, max_match_m):
     """Greedy nearest-neighbor match of each GT object to a same-label node.
 
     ``gt``: ``{object_id: (x, y)}`` -- the scenario ground truth.
-    ``nodes``: ``[(label, x, y), ...]`` -- live DSG object nodes.
+    ``nodes``: ``[(label, x, y), ...]`` -- live DSG object nodes. An optional
+    4th tuple element carries the node's RAW (pre-alias) detected label for
+    diagnostics; when present it is surfaced as the matched row's
+    ``raw_label`` (matching itself still uses ``label`` = element 0). A plain
+    3-tuple is accepted unchanged (``raw_label`` then mirrors ``label``).
     ``max_match_m``: candidates farther than this from their GT object are
     not eligible (the GT object is reported unmatched instead).
 
@@ -46,8 +50,13 @@ def match_objects(gt, nodes, max_match_m):
     unmatched).
 
     Returns a list of dicts, one per GT object (order follows ``gt``'s
-    iteration order): ``{"object_id": ..., "error_m": float or None}``.
-    ``error_m`` is None when no eligible node remains for that GT object.
+    iteration order): ``{"object_id": ..., "error_m": float or None,
+    "label": str or None, "raw_label": str or None}``. ``error_m`` is None
+    when no eligible node remains for that GT object; ``label`` /
+    ``raw_label`` are then also None. ``label`` is the matched node's
+    (possibly alias-canonicalized) display label, ``raw_label`` its raw
+    pre-alias detected label -- both let a caller see WHICH detection an
+    object matched (e.g. a bag matched via a ``box`` detection).
     """
     candidates = {}
     for object_id, gt_xy in gt.items():
@@ -74,14 +83,28 @@ def match_objects(gt, nodes, max_match_m):
                 best_oid, best_dist, best_idx = oid, d, i
         if best_oid is None:
             break  # nobody has any remaining eligible candidate
-        assigned[best_oid] = best_dist
+        assigned[best_oid] = (best_dist, best_idx)
         used_nodes.add(best_idx)
         unresolved.discard(best_oid)
 
-    return [
-        {"object_id": object_id, "error_m": assigned.get(object_id)}
-        for object_id in gt
-    ]
+    rows = []
+    for object_id in gt:
+        info = assigned.get(object_id)
+        if info is None:
+            rows.append(
+                {"object_id": object_id, "error_m": None,
+                 "label": None, "raw_label": None}
+            )
+            continue
+        dist, idx = info
+        node = nodes[idx]
+        display = node[0]
+        raw = node[3] if len(node) > 3 else node[0]
+        rows.append(
+            {"object_id": object_id, "error_m": dist,
+             "label": display, "raw_label": raw}
+        )
+    return rows
 
 
 def summarize(rows, bar_m):
