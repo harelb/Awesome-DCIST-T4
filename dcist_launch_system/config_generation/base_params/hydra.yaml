@@ -32,6 +32,10 @@ active_window:
     min_range: 0.05
     instance_id: true
     verbosity: 1
+    enable_depth_mode_filter: true
+    depth_mad_k: 3.0
+    depth_mad_floor_m: 0.15
+    depth_filter_min_pixels: 10
   tracker:
     type: MaxIouTracker
     track_by: pixels
