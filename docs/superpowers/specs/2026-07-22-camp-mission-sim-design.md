@@ -4,6 +4,24 @@
 **Branch:** `feature/isaac_sim_camp_mission` (off `feature/isaac_sim_g2_contact`; all pushes to harelb forks)
 **Status:** user-approved design (brainstorming 2026-07-22)
 
+**Status 2026-07-23: Phases A-C COMPLETE** (runbook §13; task reports
+`task-A3-report.md`/`task-B4-report.md`/`task-B5-report.md`/
+`task-C2-report.md`). Gate C/D (strict verifier) MET: two consecutive
+full-mission passes, cone released in-region tied to the robot's own pose at
+the held→released instant. Two accepted caveats (both hydra object-tracking
+limitations, not scenario/script-fixable): (1) cone fusion (<~3 m spacing)
+and, once spread wider, a cone-duplication artifact instead — `camp_sim_a`
+ships 4 object nodes (3 cone + 1 bag) instead of the ideal 3; (2)
+`heracles_publisher_node` stamps the served DSG `frame_id="map"` while its
+coordinates are actually `<robot>/map` — worked around (parameterized +
+identity for single-robot Isaac in `hydra_isaac.yaml`), deeper fix flagged
+against the pinned `heracles` submodule. The real-perception
+`spot_isaac_mission` variant (§4.3) is **not** the operative camp-mapping
+path — FastSAM/instance_seg is unusable outdoors here (0-1 cone nodes, 0 bag
+detections, spurious grass/road blobs across 4 iterations); GT semantics
+(`spot_isaac_gt`/`spot_isaac_mission_gt`, P4 A1 precedent) is what all Phase
+A-C gates above ran against. Phase D (live NL) next.
+
 ## 1. Problem & goal
 
 DCIST field missions run multi-agent Spot teams on natural-language commands ("Hamilton, block the intersection with a cone") grounded through omniplanner to PDDL over the Hydra scene graph, with Neo4j (heracles) as the authoritative graph store. The Isaac Sim simulator (P1–P4 complete) does indoor/field pick-and-place e2e, but has:
@@ -100,14 +118,17 @@ Same camp scenario on physics G1 (walking policy + IK + validated attach), light
 
 ## 5. Phases & gates
 
-| Phase | Deliverable | Gate |
-|---|---|---|
-| A | camp_a env + camp_smoke.yaml (probe-vetted) | `build_map.py --orchestrate` exit 0 on `camp_sim_a`; PDDL smoke |
-| B | mission experiment configs + ingest handoff + region_injector + labelspace | intersection Room visible in omniplanner's grounded problem |
-| C | mission_cli scripted + single-Spot camp mission e2e (kinematic) | cone placed at a place in the intersection region; GPU-verified ×2; outputs = adt4_output map folder + 3rd-person video |
-| D | live NL via gpt-mini | same mission from "Hamilton, block the intersection with a cone" |
-| E | physics G1 flip (single robot) | mission passes on physics tier (accepted-caveat reliability) |
-| F | fleet 2–3 Spots + dispatch guard + robots[0] fixes | concurrent independent missions, no cross-talk |
+Status 2026-07-23: **A, B, C complete** (DONE_WITH_CONCERNS on A3's cone
+gate-3 sub-metric; B and C gates strictly MET — see runbook §13.3). D next.
+
+| Phase | Deliverable | Gate | Status |
+|---|---|---|---|
+| A | camp_a env + camp_smoke.yaml (probe-vetted) | `build_map.py --orchestrate` exit 0 on `camp_sim_a`; PDDL smoke | DONE_WITH_CONCERNS (cone fusion/duplication, §13.3 caveat 1) |
+| B | mission experiment configs + ingest handoff + region_injector + labelspace | intersection Room visible in omniplanner's grounded problem | PASS |
+| C | mission_cli scripted + single-Spot camp mission e2e (kinematic) | cone placed at a place in the intersection region; GPU-verified ×2; outputs = adt4_output map folder + 3rd-person video | GATE MET (strict verifier, gateC/gateD) |
+| D | live NL via gpt-mini | same mission from "Hamilton, block the intersection with a cone" | NEXT |
+| E | physics G1 flip (single robot) | mission passes on physics tier (accepted-caveat reliability) | not started |
+| F | fleet 2–3 Spots + dispatch guard + robots[0] fixes | concurrent independent missions, no cross-talk | not started |
 
 ## 6. Error handling
 

@@ -1642,3 +1642,259 @@ Physical limit, not software; NO pin fake. Machinery is behind the
    grasping=="physics" branch untested in scenario.py, `_articulation_view`
    private access, duplicated test fakes, nearest_free vs nearest_free_with_margin
    near-duplicate scan) — non-blocking cleanups.
+
+---
+
+## 13. Camp mission pipeline (Phases A-C)
+
+Outdoor camp env + NL-commanded mission e2e: map → Neo4j (heracles) → PDDL
+goal → execute, single Spot, kinematic tier. Spec:
+`docs/superpowers/specs/2026-07-22-camp-mission-sim-design.md`. Branch
+`feature/isaac_sim_camp_mission` (+ `dcist_sim` `feature/camp_mission`).
+Phases A-C **complete** (2026-07-23, two accepted caveats — see 13.3).
+
+### 13.1 Quickstart
+
+**1. Build the camp map** (GT semantics — real-perception is unusable
+outdoors here, see 13.3):
+
+```bash
+source /opt/ros/jazzy/setup.zsh && source ~/dcist_ws/install/setup.zsh
+PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH \
+~/environments/dcist/spark_env/bin/python \
+  dcist_sim/dcist_sim_isaac/scripts/build_map.py \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml \
+  --orchestrate --session spot_isaac_gt-isaac_sim --min-places 5
+```
+Same `--orchestrate`/`--attach`/exit-code contract as §11. Output:
+`~/adt4_output/camp_sim_a/` (`dsg_with_mesh.json`, `mesh.ply`,
+`provenance.yaml`, `trajectory.jsonl`, `gt/`).
+
+**2. Ingest the saved map into Neo4j** (standalone; wipes the DB, injects the
+scenario's `regions:` as Room nodes, asserts CONTAINS >= 1 per region):
+
+```bash
+source ~/dcist_ws/install/setup.zsh && source $ADT4_ENV/spark_env/bin/activate
+export PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH
+python3 dcist_sim/dcist_sim_isaac/scripts/ingest_map.py \
+  --dsg ~/adt4_output/camp_sim_a/dsg_with_mesh.json \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml
+```
+`--uri/--user/--password` override `$HERACLES_NEO4J_URI` /
+`_USERNAME` / `_PASSWORD`; `--image-folder-root` is passthrough (unused for
+sim maps). Exit 1 on zero-member region or missing labelspace (fail loud, no
+DB left half-wiped silently).
+
+**3. `mission_cli` standalone** (against a live `isaac_mission_base` +
+robot-with-executor session, same venv as above, ROS sourced):
+
+```bash
+# scripted PDDL (fast FD domain; the default, no --nl)
+python3 dcist_sim/dcist_sim_isaac/scripts/mission_cli.py \
+  "block the intersection with a cone" --robot hilbert
+
+# preview the resolved symbols/topic without touching ROS
+python3 dcist_sim/dcist_sim_isaac/scripts/mission_cli.py \
+  "block the intersection with a cone" --robot hilbert --dry-run
+
+# live NL -> LanguageGoalMsg (nlu_interface grounds the block-verb; Phase D)
+python3 dcist_sim/dcist_sim_isaac/scripts/mission_cli.py \
+  "Hilbert, block the intersection with a cone" --robot hilbert --nl
+```
+`--dry-run` short-circuits before any ROS init/publish — safe to use to sanity
+check a scenario/DB combination. `--nl` publishes `LanguageGoalMsg` to
+`.../language_planner/language_goal` instead of resolving+publishing
+`PddlGoalMsg` to `.../rearrange_objects_pddl/pddl_goal`; both wait on
+`get_subscription_count() >= 1` before publishing (13.3, poll-don't-hold).
+
+**4. Full e2e (capstone)** — `camp_mission_smoke.py` drives all of the above
+plus the mapping tour, planning session, and verified pick+place, from one
+command:
+
+```bash
+source ~/dcist_ws/install/setup.zsh && source $ADT4_ENV/spark_env/bin/activate
+export PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH
+python3 dcist_sim/dcist_sim_isaac/scripts/camp_mission_smoke.py \
+  --output-dir ~/adt4_output/camp_mission_run1
+```
+One venv the whole way (spark_env + ROS + workspace sourced has rclpy, neo4j,
+omniplanner_msgs, hydra_ros, spark_dsg, heracles, and `dcist_sim_isaac` all at
+once — no venv-hopping needed). Defaults: robot(mapping) session
+`spot_isaac_mission_gt-isaac_sim`, planning session
+`isaac_mission_base-isaac_sim`, mission `"block the intersection with a
+cone"`, 3rd-person video via `--video-out`/`--video-fps` (permanent tool,
+§12.6b) at `<output-dir>/mission_video/capture.mp4`. Exit 0 iff the verify
+phase confirms a cone held→released with the robot's own pose in-region AND
+the video file exists non-empty.
+
+### 13.2 Architecture (one paragraph)
+
+A scenario YAML's `regions:` block (parsed by `scenario.py`, ignored by
+`sim_app`/stage) seeds the mission: `build_map.py`/`camp_mission_smoke.py`
+drive Isaac's `sim_app` through a mapping tour while hydra builds the DSG
+live (GT semantics feeding object detection, ROMAN off); a hydra
+SIGINT-triggered shutdown save (never dsg_saver alone, §11) produces
+`dsg_with_mesh.json`; `ingest_map.py` loads that DSG, calls
+`region_injector.augment_dsg_with_regions` to add a Room node per scenario
+region (membership by radius to MESH_PLACES) **before** calling heracles'
+`load_dsg_to_db` — which **wipes** the target Neo4j DB and re-populates it
+schema-correct (rooms-parent-places, CONTAINS edges) in one shot, so
+pre-ingest augmentation is the only ordering that survives; the freshly-up
+`isaac_mission_base` session's `heracles_publisher_node` then polls Neo4j
+every ~5 s and republishes the graph as `/{robot}/heracles/dsg_out`, which
+omniplanner subscribes to as its planning DSG (distinct from — and, per
+13.3's frame defect, NOT frame-consistent with — the live hydra DSG that
+`goto_points`/`e2e_smoke` ground against); `mission_cli.py` resolves a
+`"block <region> with <class>"` sentence against that graph (Room by label →
+member MeshPlaces → nearest place to region center; nearest **non-ghost**
+object of class, 13.3) and publishes a `PddlGoalMsg`
+`(object-in-place <obj> <place>)` (region-domain PDDL avoided — 2+ min
+planning, §12/global-constraints) to omniplanner's fast rearrangement domain,
+which plans and drives the same `spot_executor` pick/place used by §2/§11.
+
+### 13.3 Gate evidence
+
+- **Map** `camp_sim_a` (GT semantics, final scenario iteration): exit 0,
+  `dsg_with_mesh.json` 2.91 MB, `mesh.ply` 2.12 MB, 28 MESH_PLACES, 4 OBJECTS
+  (1 bag 0.29 m err + 1 cone 0.15 m err + 2 cone_0 duplicate nodes 0.24 m
+  apart, 0 spurious ground-plane blobs). PDDL smoke A+B+C full PASS, first
+  try, both final rebuilds (`task-A3-report.md` attempt 6).
+- **Gate B** (omniplanner sees the injected Room): PASS — exactly 1
+  publisher/1 subscriber on `/hilbert/heracles/dsg_out`, DSG arrives ~5 s
+  cadence, `goto_points` to `'R(0)'` grounds first try → real FOLLOW plan;
+  independent `DsgSubscriber` check confirms ROOMS=1/OBJECTS=4/MESH_PLACES=28
+  over the wire matches the DB (`task-B5-report.md`, 2026-07-23).
+  **Environment gaps found here** (not B-series bugs, see 13.4): broken
+  `ADT4_DLS_PKG`, `isaac_mission_base` has no zenoh router by design (pairs
+  with a `main`-having session), no robot TF without a running sim.
+  Note (2026-07-23): the `hydra_isaac` component's single-robot identity-TF
+  override (13.3's frame fix) also applies to `spot_isaac_gt` (the A1-style
+  mapping session) — believed harmless since live hydra is self-consistent
+  either way, but untested; flag if a mapping-session TF issue ever surfaces.
+- **Gate C/D** (strict verifier — the operative evidence; supersedes the
+  pre-strict gateA/B passes below): `phase_verify` ties the robot's own odom
+  pose AT the instant a cone transitions held→released to the region
+  (radius check), not just "some cone happens to be in region" — closes a
+  found false-PASS shape (`task-C2-report.md` "Strict-verifier regate").
+  Two fresh consecutive full-mission passes, 2026-07-23:
+  - `~/adt4_output/camp_mission_gateC/`: `cone_0` released at (6.805, 2.152),
+    2.46 m from center (radius 4.0 m); `verified=True video_ok=True`; exit 0.
+  - `~/adt4_output/camp_mission_gateD/`: `cone_0` released at (6.723,
+    -1.141), 1.71 m from center; `verified=True video_ok=True`; exit 0.
+  (Pre-strict gateA/B (`~/adt4_output/camp_mission_gate{A,B}/`, videos 5.49 MB
+  / 5.41 MB) were video-audited afterward and found real-but-lucky —
+  outcomes were genuine carries into the region both times, but the check
+  itself didn't tie the release to the carried cone specifically; see the
+  report for the reprojection evidence. Superseded by gate C/D, not
+  re-cited as primary evidence.)
+
+**Two accepted caveats** (both hydra object-tracking limitations,
+independent of the perception frontend — not fixable from scenario/script
+scope):
+1. **Cone fusion/duplication artifact**: two same-class cones closer than
+   ~3 m fuse into one oversized-bbox node (attempt 5, `camp_smoke.yaml`'s
+   original 1.58 m spacing); spread past ~4.7 m and fusion resolves, but the
+   spread cone's own single instance then sometimes **duplicates** into two
+   nodes ~0.2 m apart when viewed from different tour angles (attempt 6,
+   confirmed hydra-internal via two independent rebuilds, not tour-fixable).
+   Net: `camp_sim_a` ships with 4 object nodes (3 cone + 1 bag) instead of
+   the ideal 3. Follow-up: tune/guard khronos object clusterer merge-distance
+   and/or widen its track-continuity window (`task-A3-report.md`).
+2. **heracles frame_id workaround**: `heracles_publisher_node` stamps the
+   served DSG `frame_id="map"`, but the coordinates it serves are actually in
+   `<robot>/map` — harmless for a real multi-robot/bag deployment (where
+   `map` and `<robot>/map` genuinely differ and downstream consumers know
+   it), but for a **single-robot Isaac GT mission** `map` and `<robot>/map`
+   are the SAME frame, and the stack's deliberately non-identity
+   `map -> <robot>/map = (10,20,90°)` verification TF (kept for real-robot/bag
+   fidelity) then makes omniplanner read the robot's pose ~24 m away from
+   where objects are actually plotted — 0/18 picks failed before this was
+   found (`task-C2-report.md` "Mechanism 1"). **Workaround** (shipped,
+   in-scope): `master.launch.yaml`'s `map -> <robot>/map` offset is now
+   parameterized (defaults unchanged for real-robot/bag/multi-robot) and set
+   to identity (0/0/0) only in single-robot Isaac's `hydra_isaac.yaml`
+   component. **Deeper fix, flagged, NOT applied** (belongs in the pinned
+   `heracles` submodule): `heracles_publisher_node` should stamp `frame_id`
+   as the actual robot map frame it's serving, not a hardcoded `"map"`; see
+   the pointer comments left at both workaround sites.
+
+The `spot_isaac_mission` (real-perception) experiment variant exists in
+`experiment_manifest.yaml` but is **not** the operative camp-mapping path —
+FastSAM/instance_seg proved unusable outdoors here (0-1 cone nodes ever, 0
+bag detections, 2-3 spurious grass/road blobs mislabeled cone/table across 4
+scenario iterations, `task-A3-report.md` attempts 1-4). `spot_isaac_gt` /
+`spot_isaac_mission_gt` (GT semantics, P4 A1 precedent, §12.11-§12.12) is the
+GT variant actually used for all Phase A-C gates above.
+
+### 13.4 Troubleshooting (camp-mission-specific; cross-ref §11/§12)
+
+- **Real-perception unusable outdoors → GT semantics.** FastSAM/instance_seg
+  misclassifies grass/road texture into the warehouse-indoor vocabulary
+  (spurious "cone"/"table" ground-plane blobs at scale, regardless of tour
+  design) and fuses/degenerates nearby same-class real objects instead of
+  separating them. Switched camp mapping to Isaac's ground-truth semantic
+  segmentation feeding hydra (`gt_semantics_pub: true` in the scenario YAML +
+  `--session spot_isaac_gt-isaac_sim` / `spot_isaac_mission_gt` experiment),
+  same mechanism as the P4 A1 precedent (§12.11-§12.12). This eliminated
+  100% of the spurious blobs and fixed bag detection 0-for-4 → 1-for-1; see
+  13.3 caveat 1 for the residual cone fusion/duplication gap GT semantics
+  does NOT fix (it's downstream, in hydra's object tracker, not the
+  perception frontend).
+- **Cone fusion (<~3 m apart) + duplication artifacts.** See 13.3 caveat 1.
+  Same-class objects within ~1.5-3 m risk fusing into one oversized-bbox
+  node; a single object viewed from sufficiently different angles across a
+  tour can also spawn a **second**, ~0.2 m-offset duplicate track even with
+  no occlusion gap. Neither is scenario/tour-fixable (two independent
+  rebuilds each defeated one failure mode and reproduced the other). If a
+  mission's resolved object is implausible, check its `bbox_dim` first (see
+  next item).
+- **Ghost-object bbox filter.** `mission_cli.py`'s `resolve_block_goal`
+  rejects matching-class objects whose larger horizontal bbox dimension
+  exceeds `MAX_OBJECT_FOOTPRINT_M = 1.5` before applying the
+  nearest-to-region-center heuristic — closes a real failure mode where the
+  nearest "cone" to the region center was a hydra fusion-ghost node (a 4.90 m
+  bbox sliver with no physical cone at its centroid), which the
+  class-agnostic proximity magic-grasp then found nothing to grab
+  (`task-C2-report.md` "Mechanism 2"). Falls back to the unfiltered nearest
+  match if nothing passes the filter (zero regression on small/synthetic
+  test fixtures).
+- **heracles `frame_id="map"` defect + workaround.** See 13.3 caveat 2 for
+  the full mechanism/fix; the practical symptom to recognize is a mission
+  that navigates the robot **tens of meters** from every real object despite
+  a graph that looks correct in Neo4j — check
+  `tf2_echo map <robot>/map` for a non-identity offset first.
+- **run-adt4 teardown orphans `static_transform_publisher`s — reap between
+  runs.** `tmux kill-server` on a run-adt4 socket does not reliably kill every
+  launch child; stray `static_transform_publisher` processes (and
+  occasionally a lone `omniplanner_node`) from a prior attempt were found
+  still running minutes into the next one, in the same robot namespace,
+  across A3/B5/C2. Between GPU attempts: `pgrep -af
+  "static_transform_publisher|omniplanner_node|heracles_publisher_node"` and
+  `kill -9` anything not from the current run before trusting a fresh
+  `nvidia-smi`/topic-list check. (Same class of orphan as §11's mapping
+  harness; distinct from the pre-existing 2026-07-21 `/hilbert`-namespace
+  orphans A3/B5 both also had to route around.)
+- **`PYTHONPATH` append, never overwrite** (repeat of §11's rule — worth
+  re-flagging since every camp script hits it): `PYTHONPATH=$PWD/dcist_sim/
+  dcist_sim_isaac:$PYTHONPATH`, never a bare assignment — overwriting drops
+  the ROS-sourced `rclpy` and crashes on import (Task A2's original gotcha,
+  re-confirmed by every later camp script).
+- **`ADT4_DLS_PKG` breakage in `~/.zshrc`.** Was set to
+  `/src/awesome_dcist_t4/dcist_launch_system` (missing the `$ADT4_WS/`
+  prefix), crashing any omniplanner launch that resolves
+  `$(env ADT4_DLS_PKG)` (e.g. `llm_config.yaml`'s path) —
+  `FileNotFoundError` on a nonexistent absolute path. Bit two independent
+  tasks (B5 worked around it per-shell; C2 fixed it at the source in
+  `~/.zshrc` itself, verified in a fresh `zsh -ic` shell) since tmux panes
+  are interactive zsh and re-source `~/.zshrc` on start, clobbering any
+  override passed only at the invoking-shell/subprocess level. Already fixed
+  on this machine; re-check if `~/.zshrc` is ever regenerated/re-cloned.
+- **Poll, don't hold.** Every camp script (`ingest_map.py`, `mission_cli.py`,
+  `camp_mission_smoke.py`) uses bounded polling with timeouts (subscription
+  counts, `/sim/status`, DSG arrival) rather than blocking waits/event holds —
+  consistent with `global-constraints.md`'s rule and needed in practice: the
+  rmw_zenoh discovery race that silently dropped `mission_cli`'s first
+  publish (13.3's bugs; goal published before `omniplanner_node`'s
+  subscription had matched, no error either side) is exactly the failure
+  mode a bounded `get_subscription_count() >= 1` wait (15 s) catches that a
+  fire-and-forget publish cannot.
