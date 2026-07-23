@@ -1645,7 +1645,7 @@ Physical limit, not software; NO pin fake. Machinery is behind the
 
 ---
 
-## 13. Camp mission pipeline (Phases A-D)
+## 13. Camp mission pipeline (Phases A-E)
 
 Outdoor camp env + NL-commanded mission e2e: map → Neo4j (heracles) → PDDL
 goal → execute, single Spot, kinematic tier. Spec:
@@ -1655,6 +1655,8 @@ goal → execute, single Spot, kinematic tier. Spec:
 Phases A-C **complete** (2026-07-23, two accepted caveats — see 13.3).
 Phase D (live NL via gpt-4.1-mini) **complete, GATE MET** (2026-07-23,
 one accepted caveat — see 13.3's D row and 13.5).
+Phase E (physics G1 flip) **complete, GATE MET** (2026-07-23, on live
+PhysX physics — see 13.6).
 
 ### 13.1 Quickstart
 
@@ -2103,3 +2105,166 @@ has nowhere to resolve them).
   `llm_response.txt` (verbatim LLM dict, e.g.
   `data: '{''hilbert'': ''(object-in-region O1 R0)''}'`) +
   the usual `dsg_with_mesh.json`/`trajectory.jsonl`/etc.
+
+### 13.6 Physics tier (Phase E)
+
+Phase E flips the camp mission from the kinematic Spot (Phases A-D) to the
+**physics-tier G1 robot** used by P4 (§12): `locomotion: policy` (PhysX
+walking policy) + `grasping: physics` (G1 IK-reach), same camp map/mission
+pipeline otherwise. Plan: `docs/superpowers/plans/2026-07-23-camp-mission-
+phaseE-physics.md`. **GATE MET** on live physics with the strict verifier
+unchanged (13.3's Gate C/D semantics carry over unmodified).
+
+#### Scenario deltas + why
+
+New scenario `dcist_sim/scenarios/camp_smoke_physics.yaml` (camp_smoke.yaml
+untouched), deltas from the kinematic scenario:
+- `locomotion: policy`, `grasping: physics`, spawn `z: 0.55`
+  (`POLICY_STANDING_Z`, §12/global constraints — non-negotiable, not a
+  camp-specific tune).
+- `gt.enabled: false` — live multi-annotator GT capture SIGSEGVs under
+  PhysX (P4-known, global constraints); `gt_semantics_pub: true` stays on
+  (single-annotator publish is safe and is how the camp map gets its object
+  semantics without the real-perception frontend, same as the kinematic
+  tier's `spot_isaac_mission_gt`).
+- Cones relocated to `(14.5, ±6.5)` (kinematic tier's D-fix cones sit at
+  `(11.5, ±6.5)`, 13.5) — **9.19 m** from the region center (8,0) (object-
+  in-region degeneracy margin), **13.0 m** inter-cone (anti-fusion, caveat
+  1 margin unchanged from D), pile clearance **2.55 m** (was 0.71 m at the
+  original camp_smoke.yaml spacing — this is why the cones moved further
+  than D's fix alone would require), dwell-aim **7.38 m** at 0° (thinner
+  than the 8 m ZED-visibility contract but proven live, §13.5's dwell
+  rationale) — off the road strips.
+- New `map_name: camp_sim_a_physics` (separate saved map from the
+  kinematic `camp_sim_a`, warehouse-tier precedent, §12).
+- `test_camp_geometry.py` lints all four invariants (region ≥ 6.5 m,
+  inter-cone ≥ 4.7 m, dwell ≤ 8 m, roads/piles ≥ 2 m clearance) so a future
+  scenario edit fails fast instead of silently reproducing a D-class
+  degeneracy or a P4-class pile collision.
+
+#### Object mass (E1) — the physics-tier cone
+
+New optional scenario key `objects[i].mass:` (float, > 0; kinematic tier
+parses-but-ignores it). Flow: YAML `mass:` → `scenario.load_scenario`
+validates → `ObjectSpec.mass` → `stage._spawn_objects`, when
+`physics_mode` is True, calls `_make_dynamic(prim, obj.mass)` →
+`_make_dynamic` applies `UsdPhysics.MassAPI.Apply(prim).CreateMassAttr
+(float(mass))` right after the prim is marked non-kinematic, independent
+of the convex-hull collider setup. `camp_smoke_physics.yaml`'s cones carry
+`mass: 0.5` (kg, "light inflatable cone" per the spec's Phase-E note,
+§4.1) — **validated live** in E5: carried in the scripted-2 and NL-3 gate
+runs with no carry destabilization and no fall. No mass retune was needed.
+
+#### Harness physics behavior (E3 + E5)
+
+`camp_mission_smoke.py` auto-detects `scenario.physics_mode` and adapts
+without any new CLI flag:
+- **`-s`** (sim-time) is appended to **both** `run-adt4` invocations
+  (robot session + planning session) automatically when physics mode is
+  on — kinematic path is a byte-identical no-op (traced; same list-literal
+  order as before E3).
+- **×2 timeout scaling**: the three wall-clock budgets that matter under
+  physics RTF (`--waypoint-timeout`, `--verify-timeout`,
+  `--stack-up-timeout`) are doubled — effective **180/600/600 s** (from
+  the kinematic 90/300/300) — via `apply_physics_timeout_scaling`, which
+  compares each CLI value to `parser.get_default(name)`: still-default
+  values get scaled, explicit overrides are left alone. **Known,
+  documented limitation** (value-based, not true argv provenance): an
+  explicit override whose value happens to equal the kinematic default is
+  indistinguishable from "not passed" and gets scaled anyway — asserted by
+  its own test rather than left a silent gap.
+- A startup **banner** prints the tier and the three effective budgets,
+  e.g. `TIER: PHYSICS (scenario.physics_mode=True); effective wall-clock
+  budgets -- waypoint=180s verify=600s stack_up=600s (auto-scaled x2 for
+  RTF~=0.57, explicit overrides respected)` — confirmed live in every E5
+  run.
+- **Goal-ack + auto-retry (E5 race fix, `b5ff649`)**: a DSG-propagation
+  race was found live under physics (below) — `phase_planning_up`'s
+  original dsg_out-delivered-plus-3s-buffer guard was not enough at
+  physics timing, silently dropping the mission goal on 4 of 5 E5 gate
+  runs. Fix: before each publish attempt, the harness starts a fresh
+  VOLATILE-aware ack listener on `compiled_plan_out` (QoS + message type
+  verified against omniplanner source) and waits up to `GOAL_ACK_TIMEOUT_S
+  = 60` s for the ack; if it times out, it auto-retries the
+  `mission_cli` publish, up to `MAX_PUBLISH_ATTEMPTS = 3` total. Verifier
+  and its budget are untouched by this — retries are additive, and the
+  verify clock only starts after the publish phase.
+
+#### Gate evidence + attempt statistics
+
+All runs on live physics (PhysX walking policy + G1 physics grasp), strict
+verifier unmodified:
+
+| mode | attempts | result | release distance | notes |
+|---|---|---|---|---|
+| scripted | 2 | PASS (attempt 2) | **0.45 m**, cone `cone_1` | attempt 1: DSG race + lost verify budget, no carry (honest FAIL, not a fall) |
+| NL | 3 | PASS (attempt 3) | **2.61 m**, `(object-in-region O4 R0)` | attempts 1-2: traverse/carry stalls, no carry |
+| NL, hands-free confirmation | 1 | PASS (attempt 1) | **2.40 m**, `(object-in-region O4 R0)` | goal ACKED on publish attempt 1/3, **zero manual interventions** — confirms the E5 ack mechanism live |
+
+**GATE MET**: ≥1 strict-verifier PASS in both scripted and NL mode, plus
+the hands-free confirmation re-proving the automated race fix end-to-end.
+Evidence dirs (each: `dsg_with_mesh.json` + `mission_video/capture.mp4` +
+`llm_response.txt` for NL runs + `panes/`):
+`~/adt4_output/camp_mission_phys_scripted_{1,2}/`,
+`camp_mission_phys_nl_{1,2,3}/`, `camp_mission_phys_nl_confirm/`.
+
+**Falls: 0 across every physics run this phase** (2 scripted + 3 NL + 1
+hands-free confirmation missions, plus their mapping tours). Every failed
+attempt was a **walking-policy traverse stall** (oscillating short of a
+waypoint, sometimes self-recovering, sometimes not) rather than a fall —
+a different manifestation of the same accepted ~1/3-reliability caveat
+carried from P4 (§12, global constraints: do not chase fall/stall
+reduction, user-reserved). Observed clean-traverse rate ~2 of 5 mission
+executions across the E5 gate set; one mapping-tour stall (hands-free
+confirmation run, ~3 min at a waypoint) **self-recovered** and the tour
+finished 9/9.
+
+#### Kinematic regression (E4)
+
+The pre-existing kinematic scripted path was re-verified on the
+D-relocated cone geometry after the Phase-E scenario/harness changes
+landed: `camp_mission_kinE2` **PASS** (release **2.00 m**), full healthy
+execution trace archived (61 tmux-pane snapshots in
+`~/adt4_output/camp_mission_kinE2/panes/`) as a reference trace for future
+kinematic debugging. An earlier `camp_mission_kinE` attempt hit a
+non-reproducing flake (pick step never completed); it is documented, not
+silently dropped, and superseded by kinE2 as the passing/reference run.
+E3's kinematic no-op (unscaled 90/300/300 budgets, no `-s`) was also
+confirmed live in this pass.
+
+#### Caveats + follow-ups carried out of Phase E
+
+1. **DSG-propagation race — fix shipped, retry path not yet exercised
+   live.** Hit 4 of 5 E5 gate runs pre-fix (goal published before
+   omniplanner held its DSG, silently dropped, worked around by manually
+   re-issuing `mission_cli`). The E5 harness fix (ack listener + auto-
+   retry, above) is shipped and its **ack mechanism** is proven live
+   (every gate run since acked on publish attempt 1/3) — but because the
+   race is timing-variable and did not recur in the runs made after the
+   fix landed, the **`RE-ISSUING ...` auto-retry branch itself has not yet
+   fired in a live run**. A future physics run that hits the race would be
+   the first live exercise of that branch.
+2. **No goal-correlation ID on the ack path.** `compiled_plan_out` has no
+   per-goal ID, so a slow (>60 s) planning cycle could in principle let a
+   retry double-submit before the first publish's plan lands —
+   omniplanner's `plan_handler` has no re-entrancy guard against this.
+   Documented, non-gating follow-up (not observed in any E5 run).
+3. **Measured RTF ~0.25-0.4 this phase** — lower than P4's ~0.57 baseline
+   (§12.2). The camp scenario runs the full stack plus continuous mission
+   video capture on top of P4's field_smoke_physics conditions, which
+   plausibly explains the lower observed throughput; the budget scaling
+   above (×2, tuned to the 0.57 baseline) still held across all gate
+   runs, but a future physics scenario that is heavier still should
+   re-measure RTF rather than assume 0.57.
+4. **Walking-policy traverse stalls** — accepted, user-reserved carry-over
+   follow-up from P4 (§12); this phase's failures are a fresh data point
+   on the same caveat, not a new defect.
+5. **Dwell-aim margin 7.38 m vs the 8 m ZED contract** — thinner than the
+   nominal contract (13.5) but worked live in every Phase-E run; flagged
+   here again since it's the first knob to revisit if a future rebuild
+   ever misses a cone from the tour.
+
+Cross-refs: §12 (P4 physics bible — RTF, nav_status vocabulary, async
+grasp states, Jacobian/stand-off envelope, video capture tool) and §13.5
+(live-NL flow, degeneracy hazard, artifact-cone caveat — all unchanged
+and reused as-is by the physics tier).

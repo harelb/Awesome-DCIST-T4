@@ -118,8 +118,9 @@ Same camp scenario on physics G1 (walking policy + IK + validated attach), light
 
 ## 5. Phases & gates
 
-Status 2026-07-23: **A, B, C, D complete** (DONE_WITH_CONCERNS on A3's cone
-gate-3 sub-metric; B, C, D gates strictly MET — see runbook §13.3/§13.5). E next.
+Status 2026-07-23: **A, B, C, D, E complete** (DONE_WITH_CONCERNS on A3's
+cone gate-3 sub-metric; B, C, D, E gates strictly MET — see runbook
+§13.3/§13.5/§13.6). F next.
 
 | Phase | Deliverable | Gate | Status |
 |---|---|---|---|
@@ -127,7 +128,7 @@ gate-3 sub-metric; B, C, D gates strictly MET — see runbook §13.3/§13.5). E 
 | B | mission experiment configs + ingest handoff + region_injector + labelspace | intersection Room visible in omniplanner's grounded problem | PASS |
 | C | mission_cli scripted + single-Spot camp mission e2e (kinematic) | cone placed at a place in the intersection region; GPU-verified ×2; outputs = adt4_output map folder + 3rd-person video | GATE MET (strict verifier, gateC/gateD) |
 | D | live NL via gpt-mini | same mission from "Hamilton, block the intersection with a cone" | GATE MET (strict verifier, gateF/gateG; §13.3 caveat 3) |
-| E | physics G1 flip (single robot) | mission passes on physics tier (accepted-caveat reliability) | not started |
+| E | physics G1 flip (single robot) | mission passes on physics tier (accepted-caveat reliability) | GATE MET (strict verifier, scripted+NL+hands-free NL; runbook §13.6) |
 | F | fleet 2–3 Spots + dispatch guard + robots[0] fixes | concurrent independent missions, no cross-talk | not started |
 
 **Phase D close-out (2026-07-23):** live NL now grounds "Hilbert, block the
@@ -158,6 +159,34 @@ hydra-tracker root cause as caveat 1) plus one non-gating follow-up
 (assert the LLM-grounded goal is non-empty before executing, for a
 prompt-adherence-independent guarantee). Full run log:
 `.superpowers/sdd/task-D6-report.md`.
+
+**Phase E close-out (2026-07-23):** the camp mission runs end-to-end on
+the physics tier — PhysX walking-policy locomotion + G1 physics grasp
+(§4.5's flip), same scenario/mission pipeline as A-D otherwise. **GATE
+MET**, strict verifier unmodified: scripted PASS (attempt 2/2, release
+0.45 m, cone `cone_1`), NL PASS (attempt 3/3, release 2.61 m,
+`(object-in-region O4 R0)`), and a hands-free NL confirmation run PASS
+(release 2.40 m, goal ACKED on publish attempt 1/3, zero manual
+interventions). **Zero falls** across every physics run this phase;
+failures were walking-policy traverse stalls (~2/5 clean-traverse rate),
+a different manifestation of the same accepted ~1/3-reliability caveat
+carried from P4, not a new defect. What shipped: an optional object
+`mass:` scenario key (E1, `UsdPhysics.MassAPI`, cones at 0.5 kg validated
+live with no carry destabilization); `camp_smoke_physics.yaml` (E2, `z
+0.55`, `gt.enabled: false` — live GT capture SIGSEGVs under PhysX,
+`gt_semantics_pub: true` kept — relocated/re-spaced cones, plus a
+scenario-geometry lint); harness physics support (E3: auto `-s`, ×2
+timeout scaling with override detection, tier banner) and a goal-ack +
+auto-retry fix (E5: a DSG-propagation race dropped the mission goal on
+4/5 gate runs pre-fix; the fix's ack mechanism is proven live end-to-end,
+though the retry branch itself has not yet fired in a live run since the
+race is timing-variable); and a kinematic scripted regression re-pass
+(E4) on the D-relocated geometry. Non-gating follow-ups: the auto-retry
+branch's live exercise, a goal-correlation ID for the ack path (no
+re-entrancy guard against a slow-cycle double-submit), and the same
+walking-policy stall/fall caveat carried from P4 (user-reserved, not
+chased this phase). Full run log: `.superpowers/sdd/task-E5-report.md`;
+runbook detail: §13.6.
 
 ## 6. Error handling
 
