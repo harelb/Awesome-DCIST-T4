@@ -1645,13 +1645,16 @@ Physical limit, not software; NO pin fake. Machinery is behind the
 
 ---
 
-## 13. Camp mission pipeline (Phases A-C)
+## 13. Camp mission pipeline (Phases A-D)
 
 Outdoor camp env + NL-commanded mission e2e: map → Neo4j (heracles) → PDDL
 goal → execute, single Spot, kinematic tier. Spec:
 `docs/superpowers/specs/2026-07-22-camp-mission-sim-design.md`. Branch
-`feature/isaac_sim_camp_mission` (+ `dcist_sim` `feature/camp_mission`).
+`feature/isaac_sim_camp_mission` (+ `dcist_sim` `feature/camp_mission`,
+`omniplanner`/`nlu_interface` `feature/camp_mission_nl`, harelb forks).
 Phases A-C **complete** (2026-07-23, two accepted caveats — see 13.3).
+Phase D (live NL via gpt-4.1-mini) **complete, GATE MET** (2026-07-23,
+one accepted caveat — see 13.3's D row and 13.5).
 
 ### 13.1 Quickstart
 
@@ -1787,8 +1790,19 @@ which plans and drives the same `spot_executor` pick/place used by §2/§11.
   itself didn't tie the release to the carried cone specifically; see the
   report for the reprojection evidence. Superseded by gate C/D, not
   re-cited as primary evidence.)
+- **Gate D** (live NL, `mission_cli.py --nl` → `gpt-4.1-mini-2025-04-14` →
+  `(object-in-region <obj> <region>)` → same strict verifier; full flow in
+  13.5): **GATE MET** — two consecutive strict-verifier passes, gateF
+  (release 3.61 m, cone `O2`) + gateG (release 3.03 m, cone `O1`); gateE
+  also passed (release 3.67 m, cone `O1`), attempt-1 (superseded, see
+  `task-D6-report.md`) diagnosed and fixed a scenario-geometry degeneracy
+  before these ran. FD (`goal_relevant` scope) 0.18-0.19 s live, matching
+  offline, well under the 30 s budget. Evidence:
+  `~/adt4_output/camp_mission_gate{E,F,G}/` (+ `gateF_attempt1/`, a
+  preserved failing map used to validate the caveat-3 prompt hardening
+  below).
 
-**Two accepted caveats** (both hydra object-tracking limitations,
+**Three accepted caveats** (1-2 are hydra object-tracking limitations,
 independent of the perception frontend — not fixable from scenario/script
 scope):
 1. **Cone fusion/duplication artifact**: two same-class cones closer than
@@ -1817,6 +1831,24 @@ scope):
    `heracles` submodule): `heracles_publisher_node` should stamp `frame_id`
    as the actual robot map frame it's serving, not a hardcoded `"map"`; see
    the pointer comments left at both workaround sites.
+3. **Spurious in-region hydra artifact cone (Phase D, live-NL path only)**:
+   ~1/3 of live rebuilds spawn an extra cone-class node sitting *inside* the
+   mission region even though both scenario-authored cones are placed
+   >=6.5 m out — the same duplication/fusion class as caveat 1, just landing
+   on the centerline between the two real cones instead of near one of them.
+   Because it is already in-region, `(object-in-region <that-cone> R0)` is
+   true at init, so if the LLM names it FD returns an empty plan → no carry
+   → honest strict-verifier FAIL (this is exactly what happened on
+   gateF-attempt-1, preserved at `~/adt4_output/camp_mission_gateF_attempt1/`).
+   Two layered defenses (13.5): the offline `--require-nondegenerate`
+   precondition (honest-fail path, catches the all-degenerate case) and a
+   hardened nlu_interface prompt (`43905fd`, correct-pick path) that makes
+   the LLM prefer a real out-of-region cone when one exists — gateG proved
+   the hardened prompt live against a rebuild containing this exact
+   artifact. Not fixable from scenario/script scope (hydra-internal, same
+   root cause as caveat 1). Follow-up (non-gating): assert the
+   LLM-grounded goal is non-empty (non-degenerate) before executing, making
+   the guarantee independent of prompt adherence.
 
 The `spot_isaac_mission` (real-perception) experiment variant exists in
 `experiment_manifest.yaml` but is **not** the operative camp-mapping path —
@@ -1898,3 +1930,164 @@ GT variant actually used for all Phase A-C gates above.
   subscription had matched, no error either side) is exactly the failure
   mode a bounded `get_subscription_count() >= 1` wait (15 s) catches that a
   fire-and-forget publish cannot.
+
+### 13.5 Live NL mode (Phase D)
+
+Branches: `omniplanner` `feature/camp_mission_nl` (harelb, `1ce4764`),
+`nlu_interface` `feature/camp_mission_nl` (harelb fork, `43905fd`),
+`dcist_sim` `feature/camp_mission`. Phase D complete, **GATE MET** — see
+13.3's D row for the evidence summary and `task-D6-report.md` for the full
+run-by-run log (attempt-1 blocker, attempt-2 fragility, gateG resolution).
+
+#### Flow
+
+```
+mission_cli.py --nl "Hilbert, block the intersection with a cone" --robot hilbert
+  -> publishes LanguageGoalMsg to /hilbert/omniplanner_node/language_planner/language_goal
+  -> language_planner_ros.language_callback() calls the OpenAI model
+     (gpt-4.1-mini-2025-04-14, isaac_sim-only overlay, below)
+  -> model returns {"hilbert": "(object-in-region <ObjectID> <RegionID>)"}
+     (echoed, non-latched, on /hilbert/rviz2_node/llm_response — NOT
+     /hilbert/omniplanner_node/llm_response, a naming trap attempt-1 hit;
+     camp_mission_smoke.py's --nl mode now discovers the actual topic name
+     at runtime instead of hardcoding it)
+  -> dsg_pddl_grounding.generate_goal_relevant_pddl grounds the object's
+     current place (argmin distance over ALL MESH_PLACES) and the region's
+     member places, emitting `(object-in-region ?o ?r)` as a NEW derived
+     predicate in RegionObjectRearrangementDomain.pddl (no new PDDL action —
+     spec's "no new actions" honored)
+  -> Fast Downward, goal_relevant scope, ~0.18 s live (matches offline;
+     30 s budget never in danger)
+  -> spot_executor runs the resulting pick+place (or, if degenerate, an
+     EMPTY plan and zero actions — see the hazard below)
+```
+
+#### The robot-name-in-sentence dispatch rule
+
+The NL sentence must **name the robot that should act**, not just be sent
+to that robot's topic: `LanguageGoalMsg.robot_id` is **ignored** in
+omniplanner's `Pddl` branch — the acting robot comes from the *key* of the
+LLM's returned dict (`language_planner.py:54-56`), and the LLM reads the
+robot name out of the sentence text. `mission_cli.py`'s `--nl` path
+enforces this with a guard: it prefixes the sentence with the `--robot`
+name if the name isn't already present (`"Hilbert, block the intersection
+with a cone"`, not just `"block the intersection with a cone"`), and logs
+`[mission_cli] NL: prefixed robot name -> '...'` when it does. Both
+"Hamilton" (the spec's real-robot placeholder) and "Hilbert" (the sim
+robot, used for all Phase D gates) are in the prompt roster and the
+omniplanner adaptor list — get the sentence's name right or dispatch goes
+to the wrong robot (or no robot).
+
+#### Model overlay
+
+`gpt-4.1-mini-2025-04-14` is scoped to isaac_sim only, via
+`experiment_overrides/isaac_sim/llm_config_overlay.yaml` (superproject
+`dcist_launch_system/config_generation/`) — regenerated into
+`dcist_launch_system/config/isaac_sim/llm_config.yaml` (model line only;
+`check_configs.sh` confirms every other generated config is untouched).
+Real-robot configs stay on base `gpt-4.1`. Generated configs are never
+hand-edited directly — change the overlay source and re-run
+`generate_configs.sh` (see the repo `adt4-config-generation` skill).
+
+#### Offline iteration loop — `nl_grounding_check.py`
+
+`dcist_sim/dcist_sim_isaac/scripts/nl_grounding_check.py` validates the
+language-goal path against a **saved** DSG with **no GPU/ROS** (loads
+`dsg_with_mesh.json`, applies the same region augmentation
+`ingest_map.py` performs, then grounds+plans):
+
+```bash
+source ~/dcist_ws/install/setup.zsh && source $ADT4_ENV/spark_env/bin/activate
+export PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH
+
+# skip the LLM entirely -- ground + FD-plan a hand-written goal
+python3 dcist_sim/dcist_sim_isaac/scripts/nl_grounding_check.py \
+  --dsg ~/adt4_output/camp_sim_a/dsg_with_mesh.json \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml \
+  --goal-only "(object-in-region o1 r0)"
+
+# full path incl. the live OpenAI call (needs ADT4_OPENAI_API_KEY)
+python3 dcist_sim/dcist_sim_isaac/scripts/nl_grounding_check.py \
+  --dsg ~/adt4_output/camp_sim_a/dsg_with_mesh.json \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml \
+  --sentence "Hilbert, block the intersection with a cone" --runs 5
+
+# per-cone degeneracy table (which cones would yield an empty plan)
+python3 dcist_sim/dcist_sim_isaac/scripts/nl_grounding_check.py \
+  --dsg ~/adt4_output/camp_sim_a/dsg_with_mesh.json \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml --degeneracy-report
+
+# fail-fast precondition: exit 3 iff ZERO non-degenerate <class> objects
+# exist vs. the scenario's region -- this is what camp_mission_smoke.py's
+# --nl mode runs automatically, post-save/pre-planning (see below)
+python3 dcist_sim/dcist_sim_isaac/scripts/nl_grounding_check.py \
+  --dsg <output-dir>/dsg_with_mesh.json \
+  --scenario dcist_sim/scenarios/camp_smoke.yaml \
+  --require-nondegenerate cone
+```
+`--runs N` repeats the LLM call N times at temperature 0 for stability
+checks. `camp_mission_smoke.py --nl` wires the `--require-nondegenerate`
+check in as `phase_degeneracy_precondition`, run immediately after the DSG
+save and before ingest/planning-up/the LLM call — it parses the mission's
+object class via `mission_cli.parse_mission` and raises a loud
+`RuntimeError` (aborting the whole run before burning the 300 s verify
+timeout) if the freshly-saved graph has zero non-degenerate candidates.
+
+#### The degeneracy hazard + scenario geometry rationale
+
+`object-in-region` is a **derived** predicate (no new PDDL action, per the
+spec) satisfied by *any* in-region place — it cannot express "move to the
+center," only "end up somewhere in the region." If the LLM names an
+object whose *current* nearest place is already an in-region member, FD's
+goal is true at init and returns plan `[]`: zero actions, no held→released
+transition, honest strict-verifier FAIL (this is not a bug in the
+verifier — see §12/global-constraints, the verifier must not be weakened).
+This bit gateE-attempt-1: a fresh rebuild's 4.0 m-radius region happened to
+capture 3 member MESH_PLACES including both cone-adjacent ones, so **every**
+cone node's nearest place was in-region — no cone choice could have
+produced a carry (`task-D6-report.md`'s root-cause table). Fix: the
+scenario's two cones were moved to `(11.5, +/-6.5)` — **7.38 m** from the
+region center (8,0), r=4.0, i.e. comfortably outside even after
+place-grid drift between rebuilds — while keeping the tour dwell
+geometry (13 m inter-cone spacing for anti-fusion per caveat 1, ~4.95 m
+from the nearest re-aimed crossroad waypoint for visibility). Always
+re-check with `--degeneracy-report` after any scenario or mapping-tour
+edit; region-place membership is a live-rebuild property, not a fixed
+scenario property (the D2 concern this fix closes).
+
+#### Artifact-cone caveat + defenses
+
+See 13.3 caveat 3 for the full writeup: hydra sometimes (~1/3 of rebuilds
+observed) spawns a spurious cone-class node already inside the region,
+independent of the two real cones being placed far out, and gpt-4.1-mini
+(pre-hardening) reliably picked it — reading "block the intersection with
+a cone" as "use the cone already there" — reproducing the exact same
+empty-plan failure via a different mechanism (gateF-attempt-1). Two
+layered, both-proven-live defenses: the `--require-nondegenerate`
+precondition above (honest-fail if literally every candidate is
+degenerate) and a hardened nlu_interface prompt (`43905fd` — hard
+NEVER-pick-an-already-in-region-object rule + a counter-example few-shot,
+offline-validated 5/5 against the preserved failing map before being
+GPU-proven in gateG) that steers the LLM to a real out-of-region object
+when one exists. Non-gating follow-up: assert the LLM-grounded goal is
+non-degenerate before executing at all, which would make the guarantee
+independent of prompt adherence rather than relying on the model
+following the rule.
+
+#### Gate evidence paths
+
+- `~/adt4_output/camp_mission_gateE/` — PASS, release 3.67 m, cone `O1`.
+- `~/adt4_output/camp_mission_gateF_attempt1/` — FAIL (preserved
+  on purpose): the LLM picked the degenerate in-region artifact cone
+  `O3`; this is the map later replayed offline to validate the prompt
+  hardening, and reproduced live in gateG.
+- `~/adt4_output/camp_mission_gateF/` — PASS (attempt 4), release 3.61 m,
+  cone `O2`.
+- `~/adt4_output/camp_mission_gateG/` — PASS, release 3.03 m, cone `O1`;
+  this rebuild reproduced the exact artifact-cone scenario and the
+  hardened prompt correctly avoided it. **gateF + gateG are the two
+  consecutive strict-verifier passes constituting GATE MET.**
+- Each evidence dir: `mission_video/capture.mp4` (non-empty, §12.6b) +
+  `llm_response.txt` (verbatim LLM dict, e.g.
+  `data: '{''hilbert'': ''(object-in-region O1 R0)''}'`) +
+  the usual `dsg_with_mesh.json`/`trajectory.jsonl`/etc.

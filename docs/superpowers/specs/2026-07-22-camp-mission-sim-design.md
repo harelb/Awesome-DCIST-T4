@@ -118,17 +118,46 @@ Same camp scenario on physics G1 (walking policy + IK + validated attach), light
 
 ## 5. Phases & gates
 
-Status 2026-07-23: **A, B, C complete** (DONE_WITH_CONCERNS on A3's cone
-gate-3 sub-metric; B and C gates strictly MET — see runbook §13.3). D next.
+Status 2026-07-23: **A, B, C, D complete** (DONE_WITH_CONCERNS on A3's cone
+gate-3 sub-metric; B, C, D gates strictly MET — see runbook §13.3/§13.5). E next.
 
 | Phase | Deliverable | Gate | Status |
 |---|---|---|---|
 | A | camp_a env + camp_smoke.yaml (probe-vetted) | `build_map.py --orchestrate` exit 0 on `camp_sim_a`; PDDL smoke | DONE_WITH_CONCERNS (cone fusion/duplication, §13.3 caveat 1) |
 | B | mission experiment configs + ingest handoff + region_injector + labelspace | intersection Room visible in omniplanner's grounded problem | PASS |
 | C | mission_cli scripted + single-Spot camp mission e2e (kinematic) | cone placed at a place in the intersection region; GPU-verified ×2; outputs = adt4_output map folder + 3rd-person video | GATE MET (strict verifier, gateC/gateD) |
-| D | live NL via gpt-mini | same mission from "Hamilton, block the intersection with a cone" | NEXT |
+| D | live NL via gpt-mini | same mission from "Hamilton, block the intersection with a cone" | GATE MET (strict verifier, gateF/gateG; §13.3 caveat 3) |
 | E | physics G1 flip (single robot) | mission passes on physics tier (accepted-caveat reliability) | not started |
 | F | fleet 2–3 Spots + dispatch guard + robots[0] fixes | concurrent independent missions, no cross-talk | not started |
+
+**Phase D close-out (2026-07-23):** live NL now grounds "Hilbert, block the
+intersection with a cone" all the way to a real cone carry, on the sim
+robot's actual name (the spec's "Hamilton" sentence names the real-robot
+placeholder; both names are in the prompt roster — see runbook §13.5's
+robot-name-in-sentence rule). `(object-in-region ?o ?r)` shipped as a new
+**derived** predicate (no new PDDL action, per the locked design decision)
+in `RegionObjectRearrangementDomain.pddl`, grounded by
+`generate_goal_relevant_pddl`'s existing `goal_relevant` scope (FD 0.18 s
+live, matching offline, well under the 30 s budget). The path surfaced and
+resolved a genuine degeneracy lesson, not an infra flake: `object-in-region`
+is satisfiable by *any* in-region place, so if the LLM names an object
+already sitting at one, FD returns an empty plan and the honest strict
+verifier fails — this happened twice, via two different mechanisms
+(gateE-attempt-1: the scenario's cones were close enough to the region that
+a rebuild's place-grid drift put every cone's nearest place in-region, fixed
+by relocating both cones to 7.38 m out; gateF-attempt-1: a hydra-spawned
+spurious in-region artifact cone that the LLM picked over two genuinely
+out-of-region choices, fixed by hardening the nlu_interface prompt with a
+hard NEVER-pick-in-region rule + counter-example few-shot). **GATE MET**:
+gateF (release 3.61 m, cone O2) + gateG (release 3.03 m, cone O1) are two
+consecutive strict-verifier passes; gateE also passed (3.67 m); gateG's own
+rebuild reproduced the exact artifact-cone worst case and the hardened
+prompt avoided it live, proving the fragility resolved rather than merely
+patched. One residual, accepted, non-gating caveat (§13.3 caveat 3, same
+hydra-tracker root cause as caveat 1) plus one non-gating follow-up
+(assert the LLM-grounded goal is non-empty before executing, for a
+prompt-adherence-independent guarantee). Full run log:
+`.superpowers/sdd/task-D6-report.md`.
 
 ## 6. Error handling
 
