@@ -125,6 +125,13 @@ experiments:
   spot_isaac_mission:
     launch_config: [main, hydra, spot_isaac]
     config: [isaac_sim]
+  # GT-semantics variant of spot_isaac_mission -- roman-off (same GPU savings
+  # rationale) but hydra ingests dcist_sim's GT labels (map_isaac's hydra_isaac
+  # group) instead of FastSAM, for camp mapping/mission scenarios where
+  # real-perception produced 0 usable objects outdoors (task-A3-report.md).
+  spot_isaac_mission_gt:
+    launch_config: [main, hydra_isaac, spot_isaac]
+    config: [isaac_sim]
   # Planning side: omniplanner + rviz reading the Neo4j-served graph
   # (heracles/dsg_out), NOT live hydra. Start AFTER map ingest.
   isaac_mission_base:
