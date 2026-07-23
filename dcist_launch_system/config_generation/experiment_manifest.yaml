@@ -120,3 +120,13 @@ experiments:
   spot_isaac_gt:
     launch_config: [map_isaac, spot_isaac]
     config: [isaac_sim]
+  # Camp mission (spec 2026-07-22): robot side = spot_isaac WITHOUT roman
+  # (GPU savings; sim GT localization makes relocalization unnecessary).
+  spot_isaac_mission:
+    launch_config: [main, hydra, spot_isaac]
+    config: [isaac_sim]
+  # Planning side: omniplanner + rviz reading the Neo4j-served graph
+  # (heracles/dsg_out), NOT live hydra. Start AFTER map ingest.
+  isaac_mission_base:
+    launch_config: [heracles_mission, planning_heracles_mission]
+    config: [isaac_sim]
