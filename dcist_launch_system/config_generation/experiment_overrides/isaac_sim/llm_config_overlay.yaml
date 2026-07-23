@@ -1,0 +1,5 @@
+# isaac_sim: Phase D live-NL uses a mini model (fast + cheap; block-verb
+# grounding validated 5/5 offline via nl_grounding_check.py, 2026-07-23).
+# Real-robot configs keep the base gpt-4.1. Model string must be in
+# OpenAIWrapper.valid_model_names (nlu_interface/src/nlu_interface/interface.py).
+model: gpt-4.1-mini-2025-04-14
