@@ -415,6 +415,10 @@ launch:
   # mismatch that drives the robot ~24 m off the target. See task-C2-report.md
   # "Root-cause investigation". Defaults unchanged (10/20/1.57) so every
   # existing real-robot / bag / multi-robot session keeps the verification TF.
+  # The eventual REAL fix (this static-TF is a workaround) belongs in
+  # heracles_publisher_node's hardcoded `frame_id="map"`
+  # (heracles/heracles_ros/src/heracles_ros/heracles_publisher_node.py) --
+  # it should republish under the robot's own map frame instead.
   - arg: {name: launch_static_map_to_robot_map, default: 'false'}
   - arg: {name: static_map_to_robot_map_x, default: '10'}
   - arg: {name: static_map_to_robot_map_y, default: '20'}

@@ -29,4 +29,7 @@ windows:
       # default (10/20/1.57) verification offset would make the omniplanner
       # read object coords in the wrong frame and drive the robot ~24 m off
       # the cone -- the C2-mission pick blocker (see task-C2-report.md).
+      # Eventual real fix belongs in heracles_publisher_node's hardcoded
+      # frame_id="map" (heracles_ros/src/heracles_ros/heracles_publisher_node.py),
+      # not this identity-offset workaround.
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_static_map_to_robot_map:=true static_map_to_robot_map_x:=0 static_map_to_robot_map_y:=0 static_map_to_robot_map_yaw:=0
