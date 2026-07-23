@@ -323,6 +323,7 @@ launch:
 
   # Omniplanner
   - arg: {name: launch_omniplanner, default: 'false'}
+  - arg: {name: omniplanner_dsg_topic, default: hydra/backend/dsg}
   - pyenv_node:
       if: $(var launch_omniplanner)
       pkg: omniplanner_ros
@@ -334,7 +335,7 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/omniplanner_node.yaml, allow_substs: true}
       remap:
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
-        - {from: ~/dsg_in, to: hydra/backend/dsg}
+        - {from: ~/dsg_in, to: $(var omniplanner_dsg_topic)}
         - {from: ~/llm_response, to: rviz2_node/llm_response}
 
   # Scene Graph Publisher
@@ -423,6 +424,7 @@ launch:
 
   # Heracles scene graph publisher
   - arg: {name: launch_heracles_publisher, default: 'false'}
+  - arg: {name: heracles_dsg_out_topic, default: hydra/backend/dsg}
   - pyenv_node:
       if: $(var launch_heracles_publisher)
       pkg: heracles_ros
@@ -434,7 +436,7 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/heracles_publisher_node.yaml, allow_substs: true}
       remap:
         - from: ~/dsg_out
-          to: hydra/backend/dsg
+          to: $(var heracles_dsg_out_topic)
 
   # State updater for heracles
   - arg: {name: launch_heracles_state_updater, default: 'false'}
