@@ -87,7 +87,7 @@ frontend:
       type: HeightTraversabilityEstimator
       height_below: 0
       height_above: 0.5
-      min_confidence: 1.0
+      min_confidence: 0.5
       min_traversability: 1.0
       pessimistic: true
     clustering:
@@ -96,7 +96,7 @@ frontend:
       num_orientation_bins: 20
       use_diagonal_connectivity: false
       min_connection_width_voxels: 2
-      fill_enclosed_unknown_max_voxels: 8000
+      fill_enclosed_unknown_max_voxels: 0
     sinks:
       - type: TraversabilityVisualizer
 sub_keyframe:
