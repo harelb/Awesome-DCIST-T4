@@ -2074,6 +2074,18 @@ non-degenerate before executing at all, which would make the guarantee
 independent of prompt adherence rather than relying on the model
 following the rule.
 
+**Scope note:** the prompt changes above (object-in-region paragraph, the
+counter-example few-shot, the NEVER-pick-in-region rule) live in the
+shared `nlu_interface/.../resources/prompt_pnp_pddl_planner.yaml` and are
+therefore **GLOBAL to every config that references `prompt:
+prompt_pnp_pddl_planner`**, not isaac_sim-scoped — unlike the model
+overlay above (only the `model:` line is isaac_sim-only, per
+`llm_config_overlay.yaml`'s comment). Any deployment that pairs this
+prompt with a PDDL domain lacking the `object-in-region` derived
+predicate would fail grounding on block-verb commands (the LLM would
+still emit `(object-in-region ...)` goals per the prompt, but grounding
+has nowhere to resolve them).
+
 #### Gate evidence paths
 
 - `~/adt4_output/camp_mission_gateE/` — PASS, release 3.67 m, cone `O1`.
