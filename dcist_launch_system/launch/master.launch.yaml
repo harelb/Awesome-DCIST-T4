@@ -405,13 +405,25 @@ launch:
       args: --frame-id $(var robot_name)/body --child-frame-id $(var robot_name)/base_link
 
   # Static TF to replace Hydra multi map->robot/map TF.
-  # Non-identity transform for verification.
+  # Non-identity transform for verification by default. The offset is
+  # parameterized so single-robot deployments that ingest the robot's OWN
+  # hydra map AS the global "map" frame (e.g. the Isaac camp mission: hydra
+  # maps in <robot>/map, ingest_map stores those coords, heracles republishes
+  # them tagged frame_id="map") can set it to identity -- otherwise the
+  # omniplanner reads object coords (in <robot>/map) as if they were "map"
+  # while looking the robot pose up through this offset, an uncorrected frame
+  # mismatch that drives the robot ~24 m off the target. See task-C2-report.md
+  # "Root-cause investigation". Defaults unchanged (10/20/1.57) so every
+  # existing real-robot / bag / multi-robot session keeps the verification TF.
   - arg: {name: launch_static_map_to_robot_map, default: 'false'}
+  - arg: {name: static_map_to_robot_map_x, default: '10'}
+  - arg: {name: static_map_to_robot_map_y, default: '20'}
+  - arg: {name: static_map_to_robot_map_yaw, default: '1.57'}
   - node:
       if: $(var launch_static_map_to_robot_map)
       pkg: tf2_ros
       exec: static_transform_publisher
-      args: --frame-id map --child-frame-id $(var robot_name)/map --x 10 --y 20 --yaw 1.57
+      args: --frame-id map --child-frame-id $(var robot_name)/map --x $(var static_map_to_robot_map_x) --y $(var static_map_to_robot_map_y) --yaw $(var static_map_to_robot_map_yaw)
 
   # Static TF to replace Hydra backend TF with non-identity transform for verification
   # This node is used to replace the backend TF from hydra, when we are running planning offline.
