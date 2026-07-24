@@ -26,6 +26,7 @@ RViz scene-graph views for both phases.
 | Scene graph during execution | Static saved DSG served through Neo4j/Heracles; live Hydra disabled by default |
 | Planner | One omniplanner hosted by Willow/base station; robot-scoped assignments route to the two executors |
 | Task | Each robot picks a distinct cone and releases it at a distinct MeshPlace contained by `intersection` |
+| Goal entry | Harness-authored PDDL goals first; language-to-PDDL grounding is a separate follow-on smoke after direct routing passes |
 | Future extension | An explicit config switch may enable live Hydra execution later without changing the static-map topology |
 | Evidence | Map artifacts, planner/robot logs, third-person simulation video, and RViz recordings for mapping and execution |
 
@@ -81,6 +82,12 @@ map while replacing only relocalization with deterministic GT alignment.
 - Before publishing, resolve two distinct `{robot, cone, MeshPlace}` triples;
   both places must be members of `intersection`, each cone must start outside
   the room's goal satisfaction region, and no object/place may be reused.
+- The first fleet smoke publishes those resolved `PddlGoalMsg` goals directly
+  to Willow. This proves saved-map ingestion, static-DSG delivery, planning
+  assignment, and executor routing without conflating them with LLM language
+  grounding. A later language smoke may publish the two robot-named commands
+  through Willow's language interface and must produce the same resolved
+  assignments; it is not a prerequisite for the direct-PDDL acceptance gate.
 
 ### 4.4 RViz recording
 
@@ -101,7 +108,7 @@ The GPU acceptance run passes only when all conditions hold:
 2. Both Hamilton and Euclid start in the saved-map frame with fresh GT
    odometry/TF; no live Hydra execution node is running.
 3. Willow receives the static DSG and emits independently addressed plans for
-   Hamilton and Euclid.
+   Hamilton and Euclid from harness-authored direct PDDL goals.
 4. Each executor acts only for its assigned robot; both robots pick distinct
    cones and release them at distinct `intersection` MeshPlaces.
 5. The run directory contains mapping and execution RViz videos, a
@@ -124,7 +131,8 @@ The GPU acceptance run passes only when all conditions hold:
   `robots[0]` paths.
 - Generated configuration is regenerated and checked from its source files.
 - A non-GPU smoke verifies map ingest, Willow static-DSG delivery, and both
-  robot namespaces before the GPU run.
+  robot namespaces before the GPU run. It sends direct PDDL goals first; a
+  language-grounding smoke is a separate follow-on check.
 - The GPU run validates the full acceptance gate and asserts non-empty RViz
   recording outputs.
 
