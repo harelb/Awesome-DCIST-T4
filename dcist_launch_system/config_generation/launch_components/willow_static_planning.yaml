@@ -12,6 +12,10 @@ nodes_to_monitor:
   omniplanner: {}
   nlu_rviz_instruction_panel: {}
 windows:
+  - window_name: fleet_transport
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    panes:
+      - ros2 run rmw_zenoh_cpp rmw_zenohd
   - window_name: willow_heracles
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled

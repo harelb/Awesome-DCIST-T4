@@ -38,6 +38,7 @@ def test_static_executor_excludes_mapping_and_camera_frontends():
     panes = _panes(executor)
 
     assert "launch_spot_executor:=true" in panes
+    assert "--frame-id map --child-frame-id ${ADT4_ROBOT_NAME}/odom" in panes
     for forbidden in (
         "launch_hydra",
         "launch_roman",
@@ -56,6 +57,7 @@ def test_willow_uses_one_absolute_shared_dsg_and_two_holding_inputs():
     panes = _panes(willow)
 
     assert panes.count("launch_omniplanner:=true") == 1
+    assert panes.count("ros2 run rmw_zenoh_cpp rmw_zenohd") == 1
     assert "heracles_dsg_out_topic:=/heracles/dsg_out" in panes
     assert "omniplanner_dsg_topic:=/heracles/dsg_out" in panes
     assert "robot_name:=hamilton launch_heracles_state_updater:=true" in panes

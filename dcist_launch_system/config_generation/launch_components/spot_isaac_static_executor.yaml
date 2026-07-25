@@ -12,4 +12,5 @@ windows:
     panes:
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_executor:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_state_publisher:=true launch_calibration_publisher:=true launch_spot_base_link:=true
+      - ros2 run tf2_ros static_transform_publisher --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 --frame-id map --child-frame-id ${ADT4_ROBOT_NAME}/odom
       - ros2 run dcist_sim_ros auto_approver --ros-args -r __ns:=/$ADT4_ROBOT_NAME -r manipulation_request:=/$ADT4_ROBOT_NAME/spot_executor_node/manipulation_request -r pick_confirmation:=/$ADT4_ROBOT_NAME/spot_executor_node/pick_confirmation
