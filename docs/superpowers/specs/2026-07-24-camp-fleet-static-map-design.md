@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-24  
 **Branch:** `feature/isaac_sim_camp_mission` / `dcist_sim: feature/camp_mission`  
-**Status:** user-approved design
+**Status:** implementation complete; GPU acceptance pending
 
 ## 1. Goal
 

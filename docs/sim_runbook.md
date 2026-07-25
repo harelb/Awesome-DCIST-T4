@@ -2268,3 +2268,58 @@ Cross-refs: §12 (P4 physics bible — RTF, nav_status vocabulary, async
 grasp states, Jacobian/stand-off envelope, video capture tool) and §13.5
 (live-NL flow, degeneracy hazard, artifact-cone caveat — all unchanged
 and reused as-is by the physics tier).
+
+### 13.7 Phase F: Hamilton/Euclid static-map fleet
+
+Phase F makes the mapping/execution lifecycle boundary explicit: Hamilton
+maps alone, that map is ingested into Neo4j, Willow serves and plans from the
+static Heracles DSG, and a fresh Isaac process exposes Hamilton and Euclid
+through GT odometry/TF without execution-time Hydra or camera frontends.
+
+Build and validate the generated session sources first:
+
+```bash
+cd ~/dcist_ws
+source /opt/ros/jazzy/setup.zsh
+source ~/environments/dcist/spark_env/bin/activate
+source install/setup.zsh
+cd src/awesome_dcist_t4
+bash dcist_launch_system/scripts/generate_configs.sh
+python -m pytest dcist_launch_system/tests/test_config_generation.py -q
+```
+
+With a clean GPU, the bounded acceptance harness owns mapping, ingest, the
+three isolated tmux sessions, the fresh two-robot simulator, direct-PDDL
+publication, verification, pane snapshots, recordings, and shutdown:
+
+```bash
+python dcist_sim/dcist_sim_isaac/scripts/fleet_static_map_smoke.py \
+  --scenario dcist_sim/scenarios/camp_fleet_execution.yaml \
+  --mapping-robot hamilton \
+  --robots hamilton euclid \
+  --planner willow \
+  --output-dir ~/adt4_output/camp_fleet_static_20260724
+```
+
+Expected readiness evidence is `/heracles/dsg_out`, fresh
+`/hamilton/odom` and `/euclid/odom`, and both robot dynamic TF chains. The
+preflight rejects any node whose name contains `hydra` before either goal is
+published. Willow receives both goals on
+`/willow/omniplanner_node/rearrange_objects_pddl/pddl_goal`; each message
+`robot_id` selects Hamilton or Euclid.
+
+Acceptance requires all of these non-empty files:
+
+- `rviz_mapping/capture.mp4`
+- `rviz_execution/capture.mp4`
+- `mission_video/capture.mp4`
+- `fleet_assignments.json`
+- `phase_status.json`
+
+Logs live beside those artifacts, and the final 300 lines of every tmux pane
+are retained under `panes/`. A failed phase is recorded in
+`phase_status.json`. To recover manually, capture panes first, then kill the
+isolated sockets `fleet_hamilton`, `fleet_euclid`, `fleet_willow`, and
+`fleet_mapping`; finally stop Isaac (the harness writes
+`stop_execution_sim`, waits 90 seconds, and only then terminates it). Never
+tear down Neo4j before the two release positions have been read back.
