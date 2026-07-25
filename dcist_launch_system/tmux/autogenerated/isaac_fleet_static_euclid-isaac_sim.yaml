@@ -1,0 +1,27 @@
+nodes_to_monitor:
+  spot_executor: {}
+session_name: adt4_system
+suppress_history: false
+environment:
+  sim_time: $ADT4_SIM_TIME
+  ADT4_PRIOR_MAP: $ADT4_PRIOR_MAP
+  ADT4_OUTPUT_DIR: $ADT4_OUTPUT_DIR
+  HERACLES_NEO4J_USERNAME: $ADT4_NEO4J_USERNAME
+  HERACLES_NEO4J_PASSWORD: $ADT4_NEO4J_PASSWORD
+  HERACLES_OPENAI_API_KEY: $ADT4_OPENAI_API_KEY
+  HERACLES_EVALUATION_PATH: $ADT4_HERACLES_AGENTS_PATH
+  ADT4_ORIGIN_UTM: $ADT4_ORIGIN_UTM
+  ADT4_MONITOR_CONFIG: "{nodes_to_track: {spot_executor: {}}}"
+  ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
+  config: isaac_sim
+  logging_key: isaac_fleet_static_euclid-isaac_sim
+options:
+  default-command: /bin/zsh
+windows:
+  - window_name: isaac_static_executor
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_executor:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_state_publisher:=true launch_calibration_publisher:=true launch_spot_base_link:=true
+      - ros2 run dcist_sim_ros auto_approver --ros-args -r __ns:=/$ADT4_ROBOT_NAME -r manipulation_request:=/$ADT4_ROBOT_NAME/spot_executor_node/manipulation_request -r pick_confirmation:=/$ADT4_ROBOT_NAME/spot_executor_node/pick_confirmation

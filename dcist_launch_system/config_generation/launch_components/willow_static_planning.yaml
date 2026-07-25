@@ -1,0 +1,27 @@
+---
+# Willow base-station side for static-map fleet execution. Heracles serves the
+# already-ingested graph once; a single omniplanner routes robot-scoped
+# direct-PDDL goals to Hamilton and Euclid. Willow is not a Spot executor.
+#
+# The state updater is deliberately launched once per executor namespace. Each
+# instance consumes that robot's /<robot>/update_holding_state stream, allowing
+# the static DSG to reflect both pick and place transitions for verification.
+nodes_to_monitor:
+  heracles_publisher: {}
+  heracles_state_updater: {}
+  omniplanner: {}
+  nlu_rviz_instruction_panel: {}
+windows:
+  - window_name: willow_heracles
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_heracles_publisher:=true heracles_dsg_out_topic:=/heracles/dsg_out
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=hamilton launch_heracles_state_updater:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=euclid launch_heracles_state_updater:=true
+  - window_name: willow_planning
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_rviz:=true ${ADT4_RVIZ_CONFIG:+rviz_config:=$ADT4_RVIZ_CONFIG}
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_omniplanner:=true omniplanner_dsg_topic:=/heracles/dsg_out

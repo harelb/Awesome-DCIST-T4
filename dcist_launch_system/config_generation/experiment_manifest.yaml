@@ -137,3 +137,16 @@ experiments:
   isaac_mission_base:
     launch_config: [heracles_mission, planning_heracles_mission]
     config: [isaac_sim]
+
+  # Static-map fleet execution starts three independent sessions: one per
+  # Isaac executor and one Willow base station. Do not use a combined session:
+  # it would start a planner alongside an executor and duplicate fleet roles.
+  isaac_fleet_static_hamilton:
+    launch_config: [spot_isaac_static_executor]
+    config: [isaac_sim]
+  isaac_fleet_static_euclid:
+    launch_config: [spot_isaac_static_executor]
+    config: [isaac_sim]
+  isaac_fleet_static_willow:
+    launch_config: [willow_static_planning]
+    config: [isaac_sim]
