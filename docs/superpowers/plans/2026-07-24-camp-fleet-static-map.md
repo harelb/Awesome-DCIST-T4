@@ -37,7 +37,7 @@
 - Modify: `dcist_sim/dcist_sim_isaac/test/test_scenario.py`
 - Create: `dcist_sim/dcist_sim_isaac/test/test_ros_bridge.py`
 
-- [ ] **Step 1: Write failing pure schema tests**
+- [x] **Step 1: Write failing pure schema tests**
 
 ```python
 def test_execution_mode_accepts_two_gt_initialized_robots(tmp_path):
@@ -52,13 +52,13 @@ def test_static_execution_rejects_live_hydra_without_opt_in(tmp_path):
                                         static_map=False))
 ```
 
-- [ ] **Step 2: Run the schema tests and verify they fail**
+- [x] **Step 2: Run the schema tests and verify they fail**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_scenario.py -q`
 
 Expected: FAIL because `Scenario.execution` and `RobotSpec.camera_enabled` do not exist.
 
-- [ ] **Step 3: Add minimal scenario types and validation**
+- [x] **Step 3: Add minimal scenario types and validation**
 
 ```python
 @dataclass
@@ -76,7 +76,7 @@ Parse `execution.static_map` and `execution.live_hydra_execution`; reject a
 live-Hydra request unless static-map execution is enabled. Parse each robot's
 optional `camera_enabled`, preserving `True` as the old default.
 
-- [ ] **Step 4: Write failing service-ownership tests**
+- [x] **Step 4: Write failing service-ownership tests**
 
 ```python
 def test_service_owner_matches_same_robot():
@@ -86,13 +86,13 @@ def test_service_owner_rejects_other_robot():
     assert not service_request_is_owned("hamilton", "euclid")
 ```
 
-- [ ] **Step 5: Run the ownership tests and verify they fail**
+- [x] **Step 5: Run the ownership tests and verify they fail**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_ros_bridge.py -q`
 
 Expected: FAIL because `service_request_is_owned` does not exist.
 
-- [ ] **Step 6: Implement owner-bound service callbacks**
+- [x] **Step 6: Implement owner-bound service callbacks**
 
 ```python
 def service_request_is_owned(endpoint_robot: str, requested_robot: str) -> bool:
@@ -112,13 +112,13 @@ Create grasp/place/teleport/status callback closures per robot name in
 `RosBridge.__init__`; each closure invokes `_reject_wrong_endpoint` before
 calling its current backend. Keep the global reset service unchanged.
 
-- [ ] **Step 7: Run focused tests**
+- [x] **Step 7: Run focused tests**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_scenario.py dcist_sim/dcist_sim_isaac/test/test_ros_bridge.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git -C dcist_sim add dcist_sim_isaac/dcist_sim_isaac/scenario.py \
@@ -135,7 +135,7 @@ git -C dcist_sim commit -m "feat(sim): validate fleet execution ownership"
 - Modify: `dcist_sim/dcist_sim_isaac/test/test_scenario.py`
 - Create: `dcist_sim/dcist_sim_isaac/test/test_sim_app_helpers.py`
 
-- [ ] **Step 1: Write failing helpers tests**
+- [x] **Step 1: Write failing helpers tests**
 
 ```python
 def test_robot_by_name_returns_requested_robot():
@@ -146,13 +146,13 @@ def test_robot_by_name_rejects_unknown_name():
         robot_by_name([FakeRobot("hamilton")], "euclid")
 ```
 
-- [ ] **Step 2: Run the helper tests and verify they fail**
+- [x] **Step 2: Run the helper tests and verify they fail**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_sim_app_helpers.py -q`
 
 Expected: FAIL because `robot_by_name` does not exist.
 
-- [ ] **Step 3: Implement explicit robot selection and camera disablement**
+- [x] **Step 3: Implement explicit robot selection and camera disablement**
 
 ```python
 def robot_by_name(robots, name):
@@ -168,7 +168,7 @@ camera/render product for `camera_enabled: false`, and make ros_bridge skip
 image publishers for that robot while continuing odometry, TF, joints, and
 services. Preserve single-robot defaults unchanged.
 
-- [ ] **Step 4: Add the execution scenario**
+- [x] **Step 4: Add the execution scenario**
 
 Create `dcist_sim/scenarios/camp_fleet_execution.yaml` with Hamilton and
 Euclid, `locomotion: kinematic`, `grasping: magic`, `camera_enabled: false`,
@@ -183,7 +183,7 @@ execution:
 Use the established camp environment/region geometry and retain objects outside
 the intersection's goal-satisfaction region.
 
-- [ ] **Step 5: Run focused tests and parse the real scenario**
+- [x] **Step 5: Run focused tests and parse the real scenario**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_scenario.py dcist_sim/dcist_sim_isaac/test/test_sim_app_helpers.py -q`
 
@@ -191,7 +191,7 @@ Run: `python3 -c "from dcist_sim_isaac.scenario import load_scenario; s=load_sce
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git -C dcist_sim add dcist_sim_isaac/dcist_sim_isaac/stage.py \
@@ -209,7 +209,7 @@ git -C dcist_sim commit -m "feat(sim): add static-map fleet execution scenario"
 - Modify: `dcist_sim/dcist_sim_isaac/scripts/mission_cli.py`
 - Modify: `dcist_sim/dcist_sim_isaac/test/test_mission_cli.py`
 
-- [ ] **Step 1: Write failing assignment tests**
+- [x] **Step 1: Write failing assignment tests**
 
 ```python
 def test_assignments_require_distinct_robot_object_and_place():
@@ -224,13 +224,13 @@ def test_assignments_reject_duplicate_place():
         build_assignments(["hamilton", "euclid"], ["o1", "o2"], ["p10", "p10"])
 ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [x] **Step 2: Run the tests and verify they fail**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_fleet_static_map_smoke.py -q`
 
 Expected: FAIL because `build_assignments` does not exist.
 
-- [ ] **Step 3: Implement pure assignment and direct-PDDL publication**
+- [x] **Step 3: Implement pure assignment and direct-PDDL publication**
 
 Define an immutable `FleetAssignment(robot, object_symbol, place_symbol)` and
 `build_assignments`. Query Neo4j once for Room-contained candidate places and
@@ -246,20 +246,20 @@ publish_pddl_goal(planner_robot="willow", target_robot=assignment.robot, goal=go
 Do not call the language planner in this harness. Save resolved assignments,
 goal topics, and goals in `<output>/fleet_assignments.json`.
 
-- [ ] **Step 4: Add fail-fast static-map checks**
+- [x] **Step 4: Add fail-fast static-map checks**
 
 Implement checks in order: map files non-empty; Neo4j ingest verifies Room has
 at least two MeshPlaces; Willow has received static Heracles DSG; both robot
 TF/odom streams are fresh; no execution Hydra node exists; assignment symbols
 are distinct. Each failure raises `RuntimeError` before publishing any goal.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 5: Run focused tests**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_fleet_static_map_smoke.py dcist_sim/dcist_sim_isaac/test/test_mission_cli.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git -C dcist_sim add dcist_sim_isaac/scripts/fleet_static_map_smoke.py \
@@ -276,7 +276,7 @@ git -C dcist_sim commit -m "feat(sim): add direct-PDDL fleet mission smoke"
 - Create: `dcist_sim/dcist_sim_isaac/test/test_rviz_capture.py`
 - Modify: `dcist_sim/dcist_sim_isaac/scripts/fleet_static_map_smoke.py`
 
-- [ ] **Step 1: Write failing recorder command tests**
+- [x] **Step 1: Write failing recorder command tests**
 
 ```python
 def test_capture_commands_use_isolated_display_and_output(tmp_path):
@@ -286,13 +286,13 @@ def test_capture_commands_use_isolated_display_and_output(tmp_path):
     assert commands.ffmpeg[-1] == str(tmp_path / "capture.mp4")
 ```
 
-- [ ] **Step 2: Run the recorder tests and verify they fail**
+- [x] **Step 2: Run the recorder tests and verify they fail**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_rviz_capture.py -q`
 
 Expected: FAIL because `build_capture_commands` does not exist.
 
-- [ ] **Step 3: Implement bounded Xvfb/RViz/ffmpeg capture**
+- [x] **Step 3: Implement bounded Xvfb/RViz/ffmpeg capture**
 
 Create a `RvizCapture` context manager that starts `Xvfb`, then `rviz2 -d`,
 then `ffmpeg -f x11grab` against the isolated display. On stop, send SIGINT to
@@ -301,20 +301,20 @@ always reap RViz and Xvfb. The context manager writes `rviz.log` and
 `ffmpeg.log` beside the video and raises `RuntimeError` with those paths if
 startup or output validation fails.
 
-- [ ] **Step 4: Wire two captures into the harness**
+- [x] **Step 4: Wire two captures into the harness**
 
 Use `<output>/rviz_mapping/` around Hamilton map build/save and
 `<output>/rviz_execution/` around static-map planning/execution. Pass the
 repository RViz config path explicitly. Do not make either recording optional
 for an acceptance invocation.
 
-- [ ] **Step 5: Run recorder and harness unit tests**
+- [x] **Step 5: Run recorder and harness unit tests**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_rviz_capture.py dcist_sim/dcist_sim_isaac/test/test_fleet_static_map_smoke.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git -C dcist_sim add dcist_sim_isaac/scripts/rviz_capture.py \
@@ -332,7 +332,7 @@ git -C dcist_sim commit -m "feat(sim): record RViz fleet artifacts"
 - Modify: `dcist_launch_system/config_generation/base_params/omniplanner_plugins.yaml`
 - Create: `dcist_launch_system/tests/test_config_generation.py`
 
-- [ ] **Step 1: Write a failing manifest-source test**
+- [x] **Step 1: Write a failing manifest-source test**
 
 ```python
 def test_fleet_manifest_composes_two_static_executors_and_one_willow_planner():
@@ -341,13 +341,13 @@ def test_fleet_manifest_composes_two_static_executors_and_one_willow_planner():
         "spot_isaac_static_executor", "willow_static_planning"]
 ```
 
-- [ ] **Step 2: Run the configuration test and verify it fails**
+- [x] **Step 2: Run the configuration test and verify it fails**
 
 Run: `zsh -lc 'source /home/harel/dcist_ws/install/setup.zsh && python3 -m pytest dcist_launch_system/tests/test_config_generation.py -q'`
 
 Expected: FAIL because the fleet experiment is absent.
 
-- [ ] **Step 3: Author source-owned launch components**
+- [x] **Step 3: Author source-owned launch components**
 
 Create a static executor component from `spot_isaac.yaml` containing only the
 SimSpot executor, state/calibration publishers, and auto approver—no Hydra,
@@ -360,7 +360,7 @@ Add `isaac_fleet_static` to `experiment_manifest.yaml` so generated sessions
 are invoked independently as Hamilton executor, Euclid executor, and Willow
 base station with isolated tmux sockets and output directories.
 
-- [ ] **Step 4: Regenerate and validate configuration**
+- [x] **Step 4: Regenerate and validate configuration**
 
 Run: `dcist_launch_system/scripts/generate_configs.sh`
 
@@ -369,7 +369,7 @@ Run: `dcist_launch_system/scripts/check_configs.sh`
 Expected: generated sessions include the fleet sources and config validation
 passes. Inspect generated files but do not hand-edit them.
 
-- [ ] **Step 5: Commit source and generated outputs required by repository policy**
+- [x] **Step 5: Commit source and generated outputs required by repository policy**
 
 ```bash
 git add dcist_launch_system/config_generation/launch_components/spot_isaac_static_executor.yaml \
@@ -387,7 +387,7 @@ git commit -m "feat(launch): add static-map Isaac fleet sessions"
 - Modify: `docs/sim_runbook.md`
 - Modify: `docs/superpowers/specs/2026-07-24-camp-fleet-static-map-design.md`
 
-- [ ] **Step 1: Write failing artifact-verification tests**
+- [x] **Step 1: Write failing artifact-verification tests**
 
 ```python
 def test_verify_artifacts_requires_both_rviz_videos(tmp_path):
@@ -395,13 +395,13 @@ def test_verify_artifacts_requires_both_rviz_videos(tmp_path):
         verify_artifacts(tmp_path)
 ```
 
-- [ ] **Step 2: Run the test and verify it fails**
+- [x] **Step 2: Run the test and verify it fails**
 
 Run: `python3 -m pytest dcist_sim/dcist_sim_isaac/test/test_fleet_static_map_smoke.py::test_verify_artifacts_requires_both_rviz_videos -q`
 
 Expected: FAIL because `verify_artifacts` does not validate both RViz outputs.
 
-- [ ] **Step 3: Implement phase orchestration**
+- [x] **Step 3: Implement phase orchestration**
 
 Make `fleet_static_map_smoke.py` run these bounded phases: preflight GPU and
 stray-process check; Hamilton map build/save; map ingest; Willow static
@@ -411,14 +411,14 @@ two-release verification; recorder shutdown; artifact verification. Persist
 `fleet_assignments.json`, `phase_status.json`, and pane snapshots under the
 output directory.
 
-- [ ] **Step 4: Document exact operations and recovery**
+- [x] **Step 4: Document exact operations and recovery**
 
 Add a Phase-F runbook section with exact source/build command, mapping and
 execution session commands, expected topics, static-Hydra-off assertion, direct
 PDDL smoke command, RViz artifact paths, and safe shutdown order. Update the
 design status from approved to implemented only after the GPU gate succeeds.
 
-- [ ] **Step 5: Run full non-GPU verification**
+- [x] **Step 5: Run full non-GPU verification**
 
 Run: `zsh -lc 'source /home/harel/dcist_ws/install/setup.zsh && python3 -m pytest /home/harel/dcist_ws/src/awesome_dcist_t4/dcist_sim/dcist_sim_isaac/test -q'`
 
@@ -426,7 +426,7 @@ Run: `zsh -lc 'source /home/harel/dcist_ws/install/setup.zsh && python3 -m pytes
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git -C dcist_sim add dcist_sim_isaac/scripts/fleet_static_map_smoke.py \
@@ -442,13 +442,13 @@ git commit -m "docs(sim): add static-map fleet runbook"
 - Verify only: `dcist_sim/scenarios/camp_fleet_execution.yaml`
 - Verify only: `dcist_sim/dcist_sim_isaac/scripts/fleet_static_map_smoke.py`
 
-- [ ] **Step 1: Confirm a clean GPU**
+- [x] **Step 1: Confirm a clean GPU**
 
 Run: `nvidia-smi --query-gpu=memory.used,utilization.gpu --format=csv,noheader`
 
 Expected: no stray SAM3, Isaac, or prior ROS simulation process using the GPU.
 
-- [ ] **Step 2: Run the fleet smoke**
+- [x] **Step 2: Run the fleet smoke**
 
 Run: `zsh -lc 'source /home/harel/dcist_ws/install/setup.zsh && /home/harel/environments/dcist/spark_env/bin/python dcist_sim/dcist_sim_isaac/scripts/fleet_static_map_smoke.py --scenario dcist_sim/scenarios/camp_fleet_execution.yaml --mapping-robot hamilton --robots hamilton euclid --planner willow --output-dir /home/harel/adt4_output/camp_fleet_static_20260724'`
 
@@ -456,14 +456,14 @@ Expected: exit 0; direct PDDL plans are addressed to both robots; both cones
 are released at distinct intersection MeshPlaces; no execution Hydra node is
 present.
 
-- [ ] **Step 3: Verify acceptance artifacts**
+- [x] **Step 3: Verify acceptance artifacts**
 
 Run: `test -s /home/harel/adt4_output/camp_fleet_static_20260724/rviz_mapping/capture.mp4 && test -s /home/harel/adt4_output/camp_fleet_static_20260724/rviz_execution/capture.mp4 && test -s /home/harel/adt4_output/camp_fleet_static_20260724/mission_video/capture.mp4`
 
 Expected: all three commands succeed; inspect `fleet_assignments.json` to
 confirm distinct Hamilton/Euclid object and place symbols.
 
-- [ ] **Step 4: Record results and commit pointers/docs**
+- [x] **Step 4: Record results and commit pointers/docs**
 
 Update `docs/sim_runbook.md` and the design status with the evidence path,
 RTF, map artifact counts, assigned symbols, and any accepted caveat. Commit

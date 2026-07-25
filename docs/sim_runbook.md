@@ -2323,3 +2323,23 @@ isolated sockets `fleet_hamilton`, `fleet_euclid`, `fleet_willow`, and
 `fleet_mapping`; finally stop Isaac (the harness writes
 `stop_execution_sim`, waits 90 seconds, and only then terminates it). Never
 tear down Neo4j before the two release positions have been read back.
+
+
+#### Verified fresh-map acceptance (2026-07-25)
+
+The complete bounded run passed at `~/adt4_output/camp_fleet_static_final5`.
+Hamilton rebuilt `camp_sim_a` from the real USD assets, completed 9/9 mapping
+waypoints, and saved a 3.55 MB DSG plus a 2.58 MB mesh. The copied mapping
+scenario must retain absolute USD paths: relocating a YAML with relative
+`assets/...` entries makes Isaac skip the environment and every object. The
+mapping driver also hands authored terminal yaw to `/<robot>/sim/target_pose`
+after positional arrival because a Follow command alone stops on positional
+tolerance and does not preserve the observation heading.
+
+The saved map passed artifact validation and Neo4j ingest. Willow then assigned
+`(object-in-place o2 t20)` to Hamilton and `(object-in-place o3 t3)` to Euclid.
+Both executor logs contain `Pick skill success: True`, a completed place command,
+and a finished action sequence; `verify_executor_evidence` and the final
+`complete` phase passed. Evidence includes 1.4 MB mapping RViz, 1.5 MB execution
+RViz, and 776 KB third-person mission recordings. No GPU compute process remained
+after teardown.

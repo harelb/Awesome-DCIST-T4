@@ -141,3 +141,14 @@ The GPU acceptance run passes only when all conditions hold:
 ROMAN relocalization, live Hydra fusion during fleet execution, distributed
 multi-robot map merging, three-robot operation, team-decomposition planning,
 and physics locomotion/grasping for the fleet execution phase.
+
+
+## 9. Validation status
+
+Accepted on 2026-07-25 with a fresh Hamilton-built map and a fresh two-robot
+execution simulator. Evidence is archived under
+`~/adt4_output/camp_fleet_static_final5`: all phases passed, Willow produced
+distinct Hamilton/Euclid assignments, both executors physically completed pick
+and place, and all three required videos are non-empty. The implementation also
+rebases mapping-scenario USD paths when cloning the source YAML and explicitly
+settles each authored mapping yaw before dwell.
