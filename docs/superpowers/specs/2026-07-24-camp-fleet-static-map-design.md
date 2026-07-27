@@ -188,3 +188,23 @@ no wall-clock budget could have closed the mission. Root cause, measurements,
 and the constant-time fix are recorded in runbook §13.8. Any future change to
 the fleet capture path must keep the per-section cost flat across profiler
 windows — a rising `video_pose` or `world.step` is the regression signature.
+
+
+### 10.4 Validation status
+
+**Accepted 2026-07-26.** Two consecutive passing runs of the unmodified
+acceptance harness and verifier:
+
+| run | scope | result |
+|---|---|---|
+| `camp_fleet_physics_navfix1` | execution only (reused `camp_sim_a_physics`) | all phases passed; Hamilton 58 s, Euclid finished 74 s later; execution 3 min 9 s |
+| `camp_fleet_physics_fresh3` | **full gate** -- Hamilton maps from scratch, ingest, then fleet execution | all phases passed incl. `hamilton_map_build`; 11.2 MB DSG + 8.1 MB mesh built live; end to end 2 min 25 s |
+
+In both, each robot physically picked and placed a distinct cone at a
+distinct `intersection` MeshPlace under PhysX locomotion and G1 grasping,
+running concurrently, with all five required artifacts non-empty. Real-time
+factor held flat at 0.40-0.42 throughout.
+
+The five defects that blocked this are recorded in runbook 13.8; four of them
+had been carried since P4 as an accepted "walking-policy stall" caveat, and
+none of them was the walking policy.
