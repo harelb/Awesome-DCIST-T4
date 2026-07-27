@@ -2427,3 +2427,67 @@ and 20 s/m in the `isaac_sim` overlay (6 / 0.52 ~= 12, plus margin). It was
 briefly 180 s/m — sized for the collapsed RTF, which only delayed honest
 failures. Mission capture likewise returned to 10 fps (RTF 0.45, +15% cost
 over 2 fps) now that tracking is constant-time.
+
+#### The four stall defects (2026-07-26)
+
+With RTF restored, the fleet still failed on what Phase E recorded as
+"walking-policy traverse stalls" (~2 of 5 clean traverses, §13.6, carried
+from P4 as user-reserved). It was **not** the policy. Four independent
+software defects, each decided by approach geometry -- which is exactly why
+it presented as flakiness, and why the accepted-caveat label kept anyone
+from looking:
+
+1. **The goal was a function of the robot's pose.** The executor's follower
+   re-publishes its target at 10 Hz (`navigation_utils.follow_path`), and
+   every republication re-ran `LocalPlanner.set_goal` -- including the
+   approach-aware snap, which takes `robot_xy`. As the robot moved, the
+   robot->object ray rotated and "first free cell along it" resolved to a
+   different 0.1 m cell, so the target hopped and the follower never
+   converged. The same call reset `_progress_anchor`, making
+   `now - anchor_t > stuck_timeout` unreachable: **STUCK was dead code**.
+   Fixed by ignoring an identical re-published goal (`GOAL_EPS`).
+
+2. **The arrival tolerance was geometrically impossible.** `follow_path`
+   measures the base against the REQUESTED endpoint (the object centre),
+   but the planner parks the base outside the object's inflated footprint.
+   Measured over 24 approach angles at `inflation_radius_m` 0.45, the snap
+   lands **0.74-0.79 m** out; plus the planner's hard-coded 0.25 m terminal
+   tolerance the base parked up to **1.04 m** away, against an executor
+   `goal_tolerance` of 0.8 -- and past the arm's 0.984 m reach. The planner
+   reported `reached` and commanded zero velocity while the executor kept
+   commanding, until its wall-clock timeout. Fixed by exposing
+   `nav.goal_tol_m` (0.10 for the fleet -> worst park 0.89 m) and raising
+   the overlay `goal_tolerance` to 0.95.
+
+3. **`BLOCKED` was a permanent freeze.** `astar` rejects an occupied START
+   cell, but costmap occupancy is INFLATED -- a margin around real geometry,
+   not the geometry -- so a base that walks up to an obstacle legally stands
+   in an "occupied" cell. From that moment planning failed forever: zero
+   velocity, no recovery. `_plan_from` now escapes via the nearest free cell
+   within `escape_bound_m` and prepends the current pose.
+
+4. **Unreachable place targets were assignable.** `select_fleet_candidates`
+   took MeshPlaces in symbol order with no traversability test, so a place
+   inside an inflated footprint could be assigned; the goal then snapped
+   >1.5 m away and the robot drove into the obstacle. Now filtered against
+   the baked `costmap.npz` beside the map artifacts.
+
+Diagnostic note: `/sim/nav_status` is the fastest discriminator -- it
+distinguishes `reached` (planner satisfied, executor disagrees -> defect 2)
+from `blocked` (defect 3) from `active` (genuinely moving). Query the
+robot's `/odom` twice a few seconds apart to tell "slow" from "frozen".
+Beware that the executor's 10 Hz `Navigating to waypoint` logging floods the
+tmux scrollback and destroys the history you need; prefer
+`isaac_execution.log` and live `/odom`.
+
+#### Physics-tier fleet acceptance (2026-07-26)
+
+`~/adt4_output/camp_fleet_physics_navfix1` -- all phases passed including
+`verify_two_releases`, `verify_executor_evidence`, and `complete`. Both
+robots physically picked and placed distinct cones at distinct
+`intersection` MeshPlaces, running concurrently: Hamilton's full sequence
+58 s (22:49:26 -> 22:50:24), Euclid finishing 22:51:38; whole execution
+phase 3 min 9 s at a flat **RTF 0.41-0.42**. All five required artifacts
+non-empty (24 MB mission video, 4.9 MB execution RViz). This run reused the
+`camp_sim_a_physics` map to isolate execution; the fresh-map run is the
+separate full gate.
