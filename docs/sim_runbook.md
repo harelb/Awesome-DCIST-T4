@@ -740,7 +740,9 @@ general-purpose `sim_app` flag, not a one-off for this task — it is the
 standard way to get a watchable clip of any run.
 
 - **Flags** (`sim_app.py`): `--video-out DIR` records to `DIR/capture.mp4`;
-  `--video-fps` sets the capture/encode frame rate (default 24). `--video-back`
+  `--video-fps` sets the capture/encode frame rate (default **12**, as of
+  2026-07-27 — see the RTF-cost note below; `build_map.py --video-fps` and
+  `fleet_static_map_smoke.py --mission-video-fps` match). `--video-back`
   and `--video-up` tune the fixed third-person camera's distance behind and
   height above the robot (defaults 3.5 m / 2.0 m) — increase `--video-back` to
   frame a longer path, `--video-up` for a wider scene. The camera is framed
@@ -751,6 +753,20 @@ standard way to get a watchable clip of any run.
   **tracks** the fleet centroid: `update_pose` re-aims it every step through a
   rate gate that, as of 2026-07-27, runs at the capture rate (it was
   hard-coded to 2 Hz, which made the shot step rather than pan).
+- **`--video-fps` costs real-time factor — measured 2026-07-27.** Capture is
+  rate-gated but not free: the loop profiler showed `video_capture` at
+  18.8 ms/it (38% of the loop) at 24 fps, vs. `world.step` 27.2 ms/it (55%).
+  That cut RTF by roughly a quarter across every physics run measured
+  (camp fleet 0.40-0.42 → 0.31-0.32 at 10→24 fps; mit_floor3 mapping 0.34 at
+  24 fps). RTF sets how far a robot can walk inside a fixed per-waypoint
+  timeout, so this is not just an aesthetic cost — it timed out every
+  waypoint on a long-legged tour. The default was raised from 10 to 24 fps
+  earlier the same day to fix visibly choppy footage, then dropped to **12**
+  once it was clear the choppiness had two causes: frame rate, and the
+  camera re-aim stepping bug fixed above. 12 fps recovers most of the RTF
+  10 fps would (both fixes are now in effect, so 12 no longer looks choppy)
+  while still being noticeably smoother than 10. Raise it only for short-leg
+  demo captures where a smoother clip matters more than RTF.
 - **Bounding a capture — `--max-seconds` / `--stop-file`**: Isaac Sim traps
   SIGINT/SIGTERM and hard-exits instead of unwinding cleanly, so `Ctrl-C` alone
   will NOT flush a video (or anything else torn down on exit). `--max-seconds N`
