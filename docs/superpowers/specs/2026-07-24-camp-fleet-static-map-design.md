@@ -152,3 +152,39 @@ distinct Hamilton/Euclid assignments, both executors physically completed pick
 and place, and all three required videos are non-empty. The implementation also
 rebases mapping-scenario USD paths when cloning the source YAML and explicitly
 settles each authored mapping yaw before dwell.
+
+
+## 10. Physics-tier extension (2026-07-26)
+
+§8 scopes the accepted gate to kinematic locomotion and magic grasping. This
+section records the physics-tier extension of the same mission: both fleet
+robots walk under the PhysX policy and pick/place with the G1 arm, with every
+other element of §3-§7 unchanged (static saved map, GT initialization, one
+Willow-hosted omniplanner, direct PDDL goals, strict verifier).
+
+### 10.1 Decisions
+
+| Topic | Decision |
+|---|---|
+| Locomotion / grasping | `policy` + `physics` for both robots (`camp_fleet_execution.yaml`) |
+| Map | `camp_sim_a_physics`, built by the same Hamilton mapping path |
+| Geometry | Spawns on the inner approach (12, ±4); cones at (14.5, ±6.5) matching `camp_smoke_physics.yaml`, clear of the SupplyDump piles that pin a policy-controlled Spot |
+| Grasp reach | `goal_tolerance` 0.8 m — inside the G1 arm's measured 0.984 m workspace |
+| Wall-clock budgets | Derived from measured RTF, not guessed (see runbook §13.8) |
+| Walking-policy stalls | Out of scope, user-reserved; the accepted ~2-of-5 clean-traverse rate from P4/Phase E carries over |
+
+### 10.2 Acceptance gate
+
+Identical to §5, evaluated by the unmodified verifier: both robots pick
+distinct cones and release them within 1.5 m of distinct `intersection`
+MeshPlaces, with mapping/execution RViz and third-person mission recordings
+present and non-empty.
+
+### 10.3 Throughput is a first-class constraint
+
+The first attempt failed purely on real-time factor: an unbounded
+`rep.modify.pose` leak in the fleet tracking camera decayed RTF to ~0.005, so
+no wall-clock budget could have closed the mission. Root cause, measurements,
+and the constant-time fix are recorded in runbook §13.8. Any future change to
+the fleet capture path must keep the per-section cost flat across profiler
+windows — a rising `video_pose` or `world.step` is the regression signature.
