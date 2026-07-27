@@ -22,7 +22,8 @@
     fake_spot_z: 0.01
     fake_spot_yaw: 0.01
     follower_lookahead: 2.1
-    goal_tolerance: 1.0
+    goal_tolerance: 0.8
+    follow_timeout_per_meter: 180.0
     detector_model_path: $(env ADT4_WS)/weights/yoloe-26m-seg.pt
     spot_interface: sim
     sim_rgb_topic: /$(var robot_name)/$(var robot_name)_zed/rgb/image_rect_color

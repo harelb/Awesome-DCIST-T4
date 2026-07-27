@@ -6,16 +6,21 @@
     body_frame: $(var robot_name)/body
     mid_level_planner_type: identity   # P1: derisk; astar+live-occupancy is a stretch goal
     detector_confidence: 0.02
-    # goal_tolerance 1.0 (base_params default is 2.8): the pick-object action
+    # goal_tolerance 0.8 (base_params default is 2.8): the pick-object action
     # sends the robot to the object's DSG position, but the magic-grasp backend
     # only attaches an object within grasp_radius (1.5 m, field_smoke.yaml) of the
     # gripper -- it does NOT walk-in to the detected centroid like the real BD
     # grasp does. With the 2.8 m default the follower stops up to 2.8 m short, so
     # the gripper is beyond the 1.5 m reach and the grasp service returns failure
-    # even though YOLOE detected the object. 1.0 m makes the robot approach inside
-    # the grasp radius so pick is reliable. Detection range is unaffected (YOLOE
-    # sees the object well before the robot arrives). See task-12-report.md.
-    goal_tolerance: 1.0
+    # even though YOLOE detected the object. The G1 physics arm's measured
+    # workspace is 0.984 m, so the fleet execution scene uses an open approach
+    # and a 0.8 m handoff to put both cones inside physical reach before pick.
+    # Detection range is unaffected. See task-12-report.md.
+    goal_tolerance: 0.8
+    # Two-policy fleet execution plus tracked RGB/RViz capture can run far
+    # below wall-clock real time. Scale the wall-time follow budget without
+    # changing single-robot/default deployments (base default remains 6 s/m).
+    follow_timeout_per_meter: 180.0
     # Single-quoted keys/values (not double-quoted JSON): the generated params
     # file is loaded via `allow_substs: true` (master.launch.yaml), whose
     # substitution pass strips backslash-escaped double quotes ANYWHERE in the

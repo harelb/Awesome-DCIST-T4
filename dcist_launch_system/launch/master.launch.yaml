@@ -115,6 +115,7 @@ launch:
 
   # Hydra Visualizer
   - arg: {name: launch_hydra_visualizer, default: 'false'}
+  - arg: {name: hydra_visualizer_dsg_topic, default: hydra/backend/dsg}
   - node:
       if: $(var launch_hydra_visualizer)
       pkg: hydra_visualizer
@@ -123,7 +124,7 @@ launch:
       param:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
-        - {from: ~/dsg, to: hydra/backend/dsg}
+        - {from: ~/dsg, to: $(var hydra_visualizer_dsg_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra_visualizer.yaml
