@@ -744,11 +744,13 @@ standard way to get a watchable clip of any run.
   and `--video-up` tune the fixed third-person camera's distance behind and
   height above the robot (defaults 3.5 m / 2.0 m) — increase `--video-back` to
   frame a longer path, `--video-up` for a wider scene. The camera is framed
-  behind + above the robot at attach time (JEG Task 1) and then **tracks** it:
-  `update_pose` re-aims through a rate gate that, as of 2026-07-27, runs at
-  the capture rate (it was hard-coded to 2 Hz, which made the shot step
-  rather than pan). `--video-back`/`--video-up` still set the framing
-  distance.
+  behind + above the robot at attach time (JEG Task 1). In a **single-robot**
+  run it stays there for the whole capture — static — so pick
+  `--video-back`/`--video-up` to keep the whole tour inside frame rather than
+  expecting the shot to follow. In a **multi-robot (fleet)** run it instead
+  **tracks** the fleet centroid: `update_pose` re-aims it every step through a
+  rate gate that, as of 2026-07-27, runs at the capture rate (it was
+  hard-coded to 2 Hz, which made the shot step rather than pan).
 - **Bounding a capture — `--max-seconds` / `--stop-file`**: Isaac Sim traps
   SIGINT/SIGTERM and hard-exits instead of unwinding cleanly, so `Ctrl-C` alone
   will NOT flush a video (or anything else torn down on exit). `--max-seconds N`
