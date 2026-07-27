@@ -12,11 +12,22 @@
     # gripper -- it does NOT walk-in to the detected centroid like the real BD
     # grasp does. With the 2.8 m default the follower stops up to 2.8 m short, so
     # the gripper is beyond the 1.5 m reach and the grasp service returns failure
-    # even though YOLOE detected the object. The G1 physics arm's measured
-    # workspace is 0.984 m, so the fleet execution scene uses an open approach
-    # and a 0.8 m handoff to put both cones inside physical reach before pick.
-    # Detection range is unaffected. See task-12-report.md.
-    goal_tolerance: 0.8
+    # even though YOLOE detected the object. Detection range is unaffected.
+    # See task-12-report.md.
+    #
+    # 0.95, not 0.8: follow_path's arrival test measures the base against the
+    # REQUESTED endpoint (the object centre), but the sim planner parks the
+    # base outside the object's inflated footprint -- measured 0.74-0.79 m,
+    # plus the planner's own terminal tolerance (nav.goal_tol_m, 0.10 in
+    # camp_fleet_execution.yaml) = up to 0.89 m. With 0.8 the follower could
+    # never break: the planner reported "reached" and commanded zero velocity
+    # while the executor kept re-publishing waypoints until its wall-clock
+    # timeout. That deadlock -- not the walking policy -- is what produced the
+    # fleet "traverse stalls" (Euclid ~410 s vs Hamilton's 64 s full mission);
+    # it only cleared when the approach angle happened to snap closer.
+    # 0.95 clears the 0.89 m worst case and stays under the arm's 0.984 m
+    # reach (actual parked distance is <= 0.89, so the grasp stays in range).
+    goal_tolerance: 0.95
     # The follower's budget is wall-clock but the robot walks in sim time, so
     # it must be divided by the real-time factor. Measured RTF for two-policy
     # fleet execution is ~0.52 (dcist_sim 8cb4772; sim_app logs it every
