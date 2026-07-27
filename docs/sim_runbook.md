@@ -2505,3 +2505,115 @@ the hour the pre-fix configuration needed. Note the historical ~2-of-5
 clean-traverse rate is **void** -- it measured the four defects above, not the
 policy. A current stall rate would need re-measuring across repeat runs; the
 two runs to date both passed first time.
+
+
+## §14 Realistic environments (2026-07-27)
+
+Four new environments beyond camp_a/field_a/warehouse_a, covering the two real
+deployment settings. All measured, not assumed.
+
+| environment | source | size | RTF | notes |
+|---|---|---|---|---|
+| `mit_floor3_a` | real Hydra scan (`mit_infinite3_loop_clousure`) | 191 x 183 m, 1.62M faces | **0.69** | real corridor, 0.8-1.2 m clearances |
+| `campus_a` | procedurally authored | 60 m corridor + rooms, 31 meshes | **0.67** | deliberate doorway/dead-end/occlusion cases |
+| `buckner_dem_a` | USGS 3DEP 1 m DEM | **1 x 1 km**, 100 tiles, 498k tris | **0.69** | 88 m relief, georeferenced EPSG:32618 |
+| `buckner_a` | DEM + 13 camp props | as above + 17 prop meshes | **0.66** | composed USD |
+
+Large assets live OUTSIDE the repo in a git-lfs store at `$ADT4_SIM_ASSETS`
+(`~/isaac_assets/adt4`, no remote, nothing pushed). `Scenario.resolve_path`
+expands the variable and RAISES on an unresolved one; `stage.build_stage` now
+fails fast on a missing environment USD instead of booting an empty world.
+
+### 14.1 Scan-derived environments
+
+`scripts/build_scan_env.py` (Isaac interpreter). The three decisions that matter:
+
+1. **Flatten, don't crop.** The reconstructed floor drifts **0.69 m** across a
+   building floor, and the drift SATURATES -- still 0.26 m inside a 40 m crop.
+   That is comparable to the whole 0.15-0.60 m costmap band. Fitting the floor
+   as a height-field and subtracting it takes drift to 0.00 m. Wall shear is
+   0.44 m over 200 m (0.13 deg).
+2. **Visual mesh does not collide.** It carries `CollisionAPI` with
+   `collisionEnabled=false`, which `_collide_environment` leaves alone (it only
+   applies a collider `if not prim.HasAPI(CollisionAPI)`), so PhysX never cooks
+   1.6M triangles. Obstacles come from a light proxy instead. This is why a
+   scan environment is FASTER than authored camp_a.
+3. **Floor only where observed.** A bbox-spanning quad lets the robot walk
+   through unmapped void.
+
+### 14.2 The void trap (read before authoring any scan tour)
+
+`render_costmap.py --check` reports a waypoint FREE if no wall is there --
+and unmapped **void** satisfies that trivially. The first mit_floor3_a tour
+passed with "free with margin" on all six waypoints and had **no floor under
+any of them**; the corridor was 6 m north. Large clearances (11-17 m) in a scan
+are usually void, not open room.
+
+Use `scripts/check_scenario_placement.py` with the `<env>.usd.floor.npz`
+side-car: it reports floor presence AND clearance per spawn/waypoint and exits
+1. Verified it fails that exact tour 7/8 and passes the corrected one.
+
+### 14.3 Kilometre-scale terrain
+
+`scripts/fetch_dem.py` (spark_env: rasterio/pyproj) -> `.npz` ->
+`scripts/build_dem_env.py` (Isaac: pxr). Two interpreters, one intermediate
+file, because neither can import the other's packages.
+
+**Cell size is tiered by scale.** The bake is one PhysX overlap query per cell
+in pure python at ~100k cells/s:
+
+| area | cell | cells | bake |
+|---|---|---|---|
+| building floor 200 m | 0.10 m | 4M | ~40 s |
+| 1 x 1 km | 0.10 m | 100M | **~17 min, infeasible** |
+| 1 x 1 km | 0.50 m | 4M | ~40 s |
+
+A* is not the constraint: 4M cells in 0.5 s, 16M in 3.2 s. Use `nav.bounds` to
+crop the bake to the mission ROI.
+
+**The costmap band had to become terrain-relative.** `_Z_MIN/_Z_MAX` is
+ABSOLUTE and assumes ground at z=0. On 88 m of relief that is open air over
+most of the tile. Set `nav.terrain_npz` and slope becomes the obstacle
+(`nav.slope_limit_deg`, default 10 -- the policy is pretrained FLAT). Proven by
+contrast on the same environment: flat ROI 0.0% occupied, steep ROI 27.5%.
+
+**Water is perfectly flat, so "flattest window" finds the lake.** The first
+Buckner mission area was 200 x 200 m of ONE elevation -- Lake Popolopen.
+`fetch_dem.py` now excludes near-zero-variance regions (30% of this tile).
+
+### 14.4 GT semantics: the defaultPrim trap
+
+`add_reference_to_stage` places the referenced layer's defaultPrim CONTENTS
+under `/World/Environment`; **the defaultPrim NAME is not in the composed
+path**. Every scenario keyed regexes on it:
+
+    ".*camp_a/Roads.*"        -> 0 prims
+    ".*Environment/Roads.*"   -> 7 prims
+
+camp's road/rock classes had therefore been silently BACKGROUND in every GT
+capture since they were written. Fixed in all scenarios. Verified on the
+campus_a GT twin: 77 frames went from `{BACKGROUND, UNLABELLED}` to
+`{BACKGROUND, UNLABELLED, wall, floor, fire_extinguisher}`.
+
+New classes must be added in THREE places or they never reach hydra:
+`labelspaces/instance_seg.yaml`, `gt_semantics.LABELSPACE_NAME_TO_ID` (lockstep
+test), and -- only for open-vocab DETECTION, not GT -- the isaac_sim overlay's
+positional `text_prompt`. Environment classes 31-40 are GT-only.
+
+GT twins are kinematic: Replicator GT + PhysX SIGSEGVs on complex renders
+(§12.19), so physics scenarios keep `gt.enabled: false`.
+
+### 14.5 Status
+
+Mapping validated end-to-end on a new environment: `build_map.py --orchestrate`
+on campus_a, exit 0, 8/8 waypoints, 14 MB DSG (447 nodes) + 9.7 MB mesh.
+
+NOT done: the two-robot `fleet_static_map_smoke.py` gate on a new environment
+(needs regions/intersection room and per-robot goals authored for it), and the
+West Point scan patch is extracted and georeferenced but NOT inset -- its
+alignment to the DEM is 1.28 m std, short of the 1 m bar, and insetting needs a
+terrain-aware warp rather than the indoor flatten.
+
+NOTE: `spark_dsg` in `spark_env` is version-skewed and raises "invalid
+attributes for s(0)" on any recent map, including pre-existing ones. Load DSGs
+with the WORKSPACE build (`source install/setup.zsh`) instead.
