@@ -17,10 +17,18 @@
     # and a 0.8 m handoff to put both cones inside physical reach before pick.
     # Detection range is unaffected. See task-12-report.md.
     goal_tolerance: 0.8
-    # Two-policy fleet execution plus tracked RGB/RViz capture can run far
-    # below wall-clock real time. Scale the wall-time follow budget without
-    # changing single-robot/default deployments (base default remains 6 s/m).
-    follow_timeout_per_meter: 180.0
+    # The follower's budget is wall-clock but the robot walks in sim time, so
+    # it must be divided by the real-time factor. Measured RTF for two-policy
+    # fleet execution is ~0.52 (dcist_sim 8cb4772; sim_app logs it every
+    # --profile-interval seconds), giving 6 / 0.52 ~= 12 s/m; 20 s/m keeps
+    # margin for render-load spikes while still failing a genuinely stuck
+    # traverse in tens of seconds rather than minutes. Default deployments are
+    # unchanged (base_params keeps the real-robot 6 s/m).
+    #
+    # This was 180 s/m while an unbounded rep.modify.pose leak dragged RTF to
+    # ~0.005; that leak is fixed, and a budget sized for it only delays
+    # honest failures.
+    follow_timeout_per_meter: 20.0
     # Single-quoted keys/values (not double-quoted JSON): the generated params
     # file is loaded via `allow_substs: true` (master.launch.yaml), whose
     # substitution pass strips backslash-escaped double quotes ANYWHERE in the
