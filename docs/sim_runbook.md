@@ -2489,5 +2489,19 @@ robots physically picked and placed distinct cones at distinct
 58 s (22:49:26 -> 22:50:24), Euclid finishing 22:51:38; whole execution
 phase 3 min 9 s at a flat **RTF 0.41-0.42**. All five required artifacts
 non-empty (24 MB mission video, 4.9 MB execution RViz). This run reused the
-`camp_sim_a_physics` map to isolate execution; the fresh-map run is the
-separate full gate.
+`camp_sim_a_physics` map to isolate execution.
+
+**Full fresh-map gate: `~/adt4_output/camp_fleet_physics_fresh3`** -- the
+complete lifecycle passed, `hamilton_map_build` through `complete`. Hamilton
+rebuilt the map live (11.2 MB DSG + 8.1 MB mesh), it was ingested, and both
+robots then picked and placed distinct cones (`o1->t12`, `o2->t24`) with all
+three recordings non-empty (4.9 MB mapping RViz, 3.7 MB execution RViz, 15 MB
+mission video). End to end **2 min 25 s** at RTF 0.40-0.42. Two consecutive
+passes of the unmodified verifier (this and `navfix1`) constitute the
+physics-tier acceptance.
+
+Budget for planning: a full fresh-map physics fleet run is **~3 minutes**, not
+the hour the pre-fix configuration needed. Note the historical ~2-of-5
+clean-traverse rate is **void** -- it measured the four defects above, not the
+policy. A current stall rate would need re-measuring across repeat runs; the
+two runs to date both passed first time.
