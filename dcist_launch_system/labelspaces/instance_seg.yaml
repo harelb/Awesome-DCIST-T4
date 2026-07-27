@@ -37,3 +37,18 @@ label_names:
   - {label: 28, name: barrel}
   - {label: 29, name: ladder}
   - {label: 30, name: fire_extinguisher}
+
+  # Environment classes for the realistic indoor/outdoor environments
+  # (2026-07-27). floor/wall come from the scan-derived and campus_a
+  # environments; terrain/tent/barrier/sandbag/vehicle/tree from the Buckner
+  # DEM environment. Appended, so existing ids are untouched.
+  - {label: 31, name: floor}
+  - {label: 32, name: wall}
+  - {label: 33, name: bench}
+  - {label: 34, name: locker}
+  - {label: 35, name: terrain}
+  - {label: 36, name: tent}
+  - {label: 37, name: barrier}
+  - {label: 38, name: sandbag}
+  - {label: 39, name: vehicle}
+  - {label: 40, name: tree}
