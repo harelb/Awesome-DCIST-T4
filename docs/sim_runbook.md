@@ -2343,3 +2343,87 @@ and a finished action sequence; `verify_executor_evidence` and the final
 `complete` phase passed. Evidence includes 1.4 MB mapping RViz, 1.5 MB execution
 RViz, and 776 KB third-person mission recordings. No GPU compute process remained
 after teardown.
+
+
+### 13.8 Physics-tier fleet: the RTF collapse (2026-07-26)
+
+Phase F's accepted gate (§13.7) is **kinematic** locomotion + magic grasp;
+the design's §8 lists physics locomotion/grasping for the fleet as out of
+scope. A first physics-tier attempt (23 runs, `camp_fleet_static_physics_*`)
+never met the verifier: in the best run both robots completed a physics
+grasp but the mission was still unfinished when the 3600 s
+`--verify-timeout` expired.
+
+#### Root cause: `rep.modify.pose` is not O(1)
+
+The fleet tracking camera moved via
+`with camera: rep.modify.pose(position=..., look_at=...)`, which mutates the
+Replicator graph on **every call**. At the 2 Hz pose gate the cost grows
+without bound and drags `world.step` up with it. Measured inside a single
+3-minute two-robot run (`--profile-interval 20`):
+
+| window | RTF | `video_pose` | `world.step` |
+|---|---|---|---|
+| 1 | 0.46 | 2.6 ms/it | 31.1 ms/it |
+| 4 | 0.22 | 32.0 ms/it | 39.9 ms/it |
+| 6 | 0.04 | 344.4 ms/it | 106.6 ms/it |
+| 8 | **0.02** | **572.1 ms/it** | 152.1 ms/it |
+
+Extrapolated over an hour this is the ~0.005 RTF of
+`camp_fleet_static_physics_final23` — ~20 s of simulated time per hour of
+wall clock. **Single-robot physics (Phase E, RTF 0.57) was never affected:
+`update_pose` is only called on the `len(robots) > 1` path.**
+
+Fix (`dcist_sim` 8cb4772): define the capture camera as a plain USD prim and
+write its transform op directly each update (`look_at_matrix`, pure-python
+and unit-tested including the straight-down degenerate case). The render
+product takes the prim path, so Replicator is only used for the render
+product + rgb annotator. Focal length is pinned to 24 mm — `rep.create.camera`'s
+default, not USD's 50 mm — so framing is unchanged. Re-measured: **RTF flat at
+0.52** for a full run, `video_pose` 0.0 ms/it.
+
+#### Diagnosing throughput: the loop profiler
+
+`sim_app` logs iteration rate, RTF and per-section wall cost every
+`--profile-interval` seconds (default 30):
+
+```
+sim loop: 618 it, 30.9 it/s, RTF=0.51 (sim 10.3s / wall 20.0s) |
+  world.step 29.9ms/it (92%) | video_capture 1.2ms/it (4%) |
+  ros_bridge 0.9ms/it (3%) | robots 0.2ms/it (0%) | video_pose 0.0ms/it (0%)
+```
+
+Read the **trend across windows**, not one line: a leak shows up as a rising
+per-section cost, which a run-long average hides. Standalone probe (no ROS
+stacks, no executors):
+
+```bash
+source /opt/ros/jazzy/setup.zsh && source ~/dcist_ws/install/setup.zsh
+cd ~/dcist_ws/src/awesome_dcist_t4
+OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
+PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH \
+~/environments/dcist/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
+  --scenario dcist_sim/scenarios/camp_fleet_execution.yaml --headless \
+  --profile-interval 20 --max-seconds 180 --video-out /tmp/probe --video-fps 10
+```
+
+`PYTHONPATH` must be **appended**, not replaced, or `rclpy` disappears and the
+ROS bridge dies at import.
+
+#### Trap: `sim_app` INFO lines were invisible
+
+`sim_app` runs as `python -m dcist_sim_isaac.sim_app`, so `__name__` is
+`"__main__"` and its module logger sat outside the `dcist_sim_isaac` package
+handler configured in `main()` — the root logger's WARNING default swallowed
+every `sim_app` INFO line (loop profiler, `--max-seconds reached`, stop-file
+notices). The logger is now named explicitly. If a diagnostic you added to
+`sim_app` never appears, check this first.
+
+#### Budgets follow the measured RTF
+
+The follower's timeout is wall-clock while the robot walks in sim time, so it
+must be divided by RTF: `follow_timeout_per_meter` is 6 s/m for real robots
+and 20 s/m in the `isaac_sim` overlay (6 / 0.52 ~= 12, plus margin). It was
+briefly 180 s/m — sized for the collapsed RTF, which only delayed honest
+failures. Mission capture likewise returned to 10 fps (RTF 0.45, +15% cost
+over 2 fps) now that tracking is constant-time.
