@@ -2637,3 +2637,330 @@ terrain-aware warp rather than the indoor flatten.
 NOTE: `spark_dsg` in `spark_env` is version-skewed and raises "invalid
 attributes for s(0)" on any recent map, including pre-existing ones. Load DSGs
 with the WORKSPACE build (`source install/setup.zsh`) instead.
+
+## §15 Exploration missions (2026-07-28)
+
+Three real MIT floor scans (floor3, building1, box_14/floor2) turned into
+populated Isaac environments with a **explore -> ground -> replan** harness on
+top: PDDL missions that reference a not-yet-mapped object or region force the
+robot to actually go find it, instead of resolving from a memory lookback.
+Branches: `dcist_sim`/`omniplanner` `feature/exploration` (off
+`feature/camp_mission`/`feature/camp_mission_nl`), superproject
+`feature/isaac_sim_exploration`. Plan:
+`.superpowers/sdd/2026-07-28-exploration-replanning/`.
+
+### 15.1 Pipeline
+
+```
+ explore loop (frontier BFS over the <env>.usd.floor.npz traversable grid)
+   next_waypoint() -> Follow -> mark_visited (+ driven) -> objects_of_class poll
+   |
+   v
+ discovery -- target class appears as a live hydra object node
+   |
+   v
+ objectnav  [GATE 1: standoff dist <= 3.0 m AND path_is_traversable(pose->obj)]
+   |
+   v
+ save DSG --> in-process region precheck (augment_dsg_with_regions)
+   |                 |
+   |                 | region captures 0 MeshPlaces / object missing from save
+   |                 v
+   |           GroundReplan("region_symbol_missing" | "region_not_mapped")
+   |                 |
+   +<----------------+   (--region only: phase_visit_region drives grid.route()
+   |                      to the region first, then re-saves while the robot
+   |                      still stands in it -- active-window places only)
+   v
+ ingest (Neo4j, --skip-unmapped-regions for the non-goal regions)
+   |
+   v
+ ground + plan  (per-candidate FD solve on RegionObjectRearrangementDomain
+   |             or ObjectRearrangementDomain, goal_relevant scope)
+   |
+   |   MissingSymbolError, scene-kind symbol  -> GroundReplan -> back to explore
+   |   MissingSymbolError, kind_hint==""      -> exit 2 (malformed goal, NOT
+   |                                             an explore signal -- typo)
+   |   PddlUnsolvableError / all candidates
+   |     degenerate (empty plan)              -> exit 5 (unsolvable)
+   |   PddlTimeoutError / PddlMalformedError /
+   |     other solver error                   -> exit 2 (infra)
+   |   rounds exhausted with no groundable
+   |     candidate / no frontier left         -> exit 4 (not-found/explored-out)
+   v
+ publish (rearrange_objects_pddl or region_rearrange_objects_pddl topic,
+   |       chosen by whether --region was passed) -> pick -> carry -> place
+   v
+ verify  [GATE 2: held->released transition, release pose within
+          region.radius of the region centre] -> exit 0
+```
+
+The replan loop-back is bounded twice over: `--max-ground-rounds` caps how
+many explore/ground cycles a mission gets, and every explore round is itself
+bounded by `--explore-budget-s` + one `--waypoint-timeout` (see the harness's
+own livelock argument, `task-7-report.md`). `next_waypoint`/`route` returning
+`None` — never `frontier_count() == 0` — is the sole "nothing left to explore"
+signal (a Task-6 hard rule carried through Task 7/9/10).
+
+### 15.2 CLI quickstarts
+
+All commands below are copied from the executed task reports
+(`.superpowers/sdd/2026-07-28-exploration-replanning/task-{2,2b,8,9,10}-report.md`);
+paths/flags are verbatim, only `$ADT4_SIM_ASSETS` substitutions are as
+recorded.
+
+**1. Build a scan environment** (Isaac interpreter, no GPU boot; the
+carve-traj/carve-radius/floor-synthesis pipeline from §14.1, extended with
+Task 2b's known-free-floor synthesis along the driven trajectory):
+
+```bash
+IP=~/environments/dcist/isaac_sim/bin/python
+export PYTHONPATH=/home/harel/dcist_ws/src/awesome_dcist_t4/dcist_sim/dcist_sim_isaac:$PYTHONPATH
+cd /home/harel/dcist_ws/src/awesome_dcist_t4/dcist_sim
+
+$IP -m dcist_sim_isaac.scripts.build_scan_env \
+  --mesh $ADT4_SIM_ASSETS/scans/mit_floor3_fix1.ply --site mit_floor3_b \
+  --out $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd \
+  --carve-traj $ADT4_SIM_ASSETS/scans/floor3_fix1_traj.jsonl --carve-radius 0.45
+```
+(building1/floor2 use the same flags against `mit_building1_fix1.ply`/
+`--site mit_building1_a` and the box_14 `mesh.ply` with `--decimate 1500000
+--site mit_floor2_a` — see task-2b-report.md for all three invocations.)
+Floor synthesis is **on by default** once `--carve-traj`/`--carve-radius` are
+given (`--no-carve-floor` disables it); it is what closed the
+floor-observation gaps that a wall-only carve could not (§14.1's void trap,
+worse here — see 15.7).
+
+**2. Catalog -> scenario conversion** (spark_env; the converter Task 3 built,
+run by Task 8 with the controller-mandated `nav.inflation_radius_m: 0.35`
+alignment):
+
+```bash
+python dcist_sim_isaac/dcist_sim_isaac/scripts/catalog_to_scenario.py \
+  --catalog /home/harel/code/planning_images/floor1_floor3_out/floor3_spatial/objects_3d.json \
+  --classes scenarios/exploration/prop_classes.yaml \
+  --floor-npz $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd.floor.npz \
+  --template scenarios/exploration/mit_floor3_explore_template.yaml \
+  --out scenarios/mit_floor3_explore.yaml \
+  --min-score 0.5 --clearance 0.35
+```
+building1/floor2 use the same shape at converter defaults (`--clearance
+0.35` only, no `--min-score`) against their own catalog/npz/template — see
+task-8-report.md. The generated scenario's own header records the exact
+`--command:` line it was produced with (self-documenting, Task 8 fix round
+1) — always trust that header over a re-typed command. `--snap-radius`
+(default 0.75 m) nudges a wall-adjacent detection onto the nearest
+traversable cell instead of dropping it outright (Task 3 finding: a strict
+"centroid must be traversable" filter placed almost nothing — the scan
+environment's wall band swallows anything standing against a wall).
+
+**3. Placement check** (same tool as §14.2, run against the generated
+scenario + its floor side-car; `--inflation 0.35` matches the scenarios'
+`nav.inflation_radius_m`):
+
+```bash
+python dcist_sim_isaac/dcist_sim_isaac/scripts/check_scenario_placement.py \
+  --scenario scenarios/mit_floor3_explore.yaml \
+  --floor-npz $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd.floor.npz \
+  --inflation 0.35
+```
+All three generated scenarios pass with `OK: all N points have observed
+floor and >= 0.35 m clearance; all 0 tour legs connected and plausible`
+(exit 0) — exploration scenarios have no authored tour, hence 0 legs.
+
+**4. `explore_mission.py` — dry run** (spark_env, zero ROS imports, fast
+sanity check of scenario + floor grid + policy before touching a GPU):
+
+```bash
+PYTHONPATH=dcist_sim_isaac python \
+  dcist_sim_isaac/dcist_sim_isaac/scripts/explore_mission.py \
+  --scenario scenarios/mit_floor3_explore.yaml --robot hilbert \
+  --target-class fire_extinguisher --output-dir <scratch>/dry_run --dry-run
+```
+
+**5. `explore_mission.py` — gate 1 (objectnav)**, live GPU (ROS workspace +
+spark_env sourced, `PYTHONPATH` appended, matching §13.1's venv pattern):
+
+```bash
+source ~/dcist_ws/install/setup.zsh && source $ADT4_ENV/spark_env/bin/activate
+export PYTHONPATH=$PWD/dcist_sim/dcist_sim_isaac:$PYTHONPATH
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_explore.yaml --robot hilbert \
+  --target-class recycling_bin --explore-budget-s 1800 \
+  --output-dir ~/adt4_output/explore_floor3_gate1
+```
+
+**6. `explore_mission.py` — gate 2 (pick-place into a region)**, same
+invocation plus `--region`:
+
+```bash
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_explore.yaml --robot hilbert \
+  --target-class recycling_bin --explore-budget-s 1800 --region lobby \
+  --output-dir ~/adt4_output/explore_floor3_gate2
+```
+
+**7. `explore_mission.py` — negative gate** (in-vocabulary class that is
+genuinely absent from the scene; `--coverage-limit` lowered so the run
+terminates on coverage, not the 1800 s budget):
+
+```bash
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_explore.yaml --robot hilbert \
+  --target-class backpack --coverage-limit 0.35 --explore-budget-s 1800 \
+  --output-dir ~/adt4_output/explore_floor3_gate_neg
+```
+
+### 15.3 Exit codes (`explore_mission.py`)
+
+| code | name | meaning | `summary.json` |
+|---|---|---|---|
+| **0** | `EXIT_OK` | both requested gates passed (gate 1 always; gate 2 only if `--region` given) | written |
+| **2** | `EXIT_INFRA` | infrastructure/malformed-goal failure — bad scenario/args, sim/ROS startup failure, verify timeout, FD solver/timeout/malformed error, `kind_hint==""` missing symbol | **always written**, even on pre-loop startup failure (`_startup` wraps every pre-phase-1 exception into `MissionAbort(EXIT_INFRA, ...)`) |
+| **4** | `EXIT_NOT_FOUND` | target genuinely not found / region unreachable / ground rounds exhausted with no groundable candidate — coverage-limited or budget-limited exploration ran out | written |
+| **5** | `EXIT_UNSOLVABLE` | a real `PddlUnsolvableError`, or every grounding candidate came back degenerate (empty plan — goal already true at init) | written |
+
+Every path — including `KeyboardInterrupt` (exit 130) — flushes and calls
+`os._exit(code)` only after `summary.json` is on disk; teardown runs in a
+`finally` with its own exception guard so a teardown error never masks the
+mission's real exit code (Task 7's fix round 1, "pre-try failures exit 2
+w/o summary.json" finding, closed).
+
+### 15.4 Typed-error seam + ground-round verdict
+
+`omniplanner/omniplanner/src/dsg_pddl/grounding_errors.py` (built by Task 5,
+reused in-process by `explore_mission.py`'s `phase_ground` and by the live
+`omniplanner_node`):
+
+- **`MissingSymbolError`** — carries `.missing`, a **list** (plural — a goal
+  can reference more than one absent symbol) of `MissingSymbol(name,
+  kind_hint)`. `kind_hint` is one of `"object"`/`"region"`/`"place"`, guessed
+  from the PDDL symbol's leading character (`o`/`r`/`p`), or **`""` when
+  unknown** — and `""` means the token is a malformed/typo'd predicate
+  argument, **not** evidence the scene graph is missing an object: treating
+  an empty `kind_hint` as an explore-trigger was Task 5's containment
+  violation (found by the 6R review, fixed same day). `scene_missing_symbols`
+  filters to only `"object"`/`"region"` entries; `missing_symbol_decision`
+  triages the remainder to `"replan"` (rounds left), `"not_found"` (rounds
+  exhausted), or `"malformed"` (no scene-kind symbols at all → exit 2).
+- **`PddlUnsolvableError`** / `PddlTimeoutError` / `PddlMalformedError` (all
+  `PddlSolverError`) — `error_for_fd_returncode` maps Fast Downward's own
+  driver return code: `{10, 11, 12}` unsolvable, `{21, 23, 24}` timeout,
+  `{31}` malformed (undeclared object — the pre-fix failure mode, when a
+  missing symbol was silently dropped from the goal instead of raising);
+  anything else stays a plain `PddlSolverError` so an unrecognized FD
+  failure is never mistaken for "unsolvable."
+- **`ground_round_verdict(n_candidates, n_degenerate, missing_region)`**
+  (`explore_mission.py`, pure) is the hard rule that a ground round with
+  candidates that **all** raised `MissingSymbolError` — never reaching FD —
+  is a **replan** signal (`"no_groundable_candidate"`), not unsolvable; only
+  a genuine `PddlUnsolvableError`, or **every** candidate reaching the solver
+  and coming back degenerate, earns `"unsolvable"`/exit 5. This was Task 7's
+  own fix-round-1 bug (the all-missing case was originally misclassified as
+  unsolvable) and is now covered by 5 dedicated tests.
+- **`GroundReplan(reason, detail)`** — the harness-local exception the round
+  loop catches to mean "the saved map doesn't cover the goal yet, explore
+  more" (bounded by `--max-ground-rounds`); raised for
+  `region_symbol_missing`/`region_not_mapped` (region precheck or
+  `augment_dsg_with_regions`) and for `no_groundable_candidate` (the ground
+  round verdict above).
+
+### 15.5 Per-floor environments + scenarios
+
+Sidecar convention: every `build_scan_env.py` output USD `<name>.usd` has a
+matching `<name>.usd.floor.npz` (floor/wall boolean grids + origin + cell
+size — the traversability oracle every downstream tool reads: placement
+checks, the exploration policy, `region_injector`'s bridging). Large assets
+(USDs, PLYs, trajectory jsonls, `.floor.npz` sidecars) live outside the repo
+in the git-lfs store at `$ADT4_SIM_ASSETS` (`~/isaac_assets/adt4`, no
+remote, per §14).
+
+| floor | environment USD | scenario | objects | regions |
+|---|---|---|---|---|
+| 3 | `mit_floor3_b.usd` | `mit_floor3_explore.yaml` | **49** (12 classes) | lobby, central_hall, west_wing |
+| building1 | `mit_building1_a.usd` | `mit_building1_explore.yaml` | **59** (16 classes) | lobby, south_wing, east_wing |
+| 2 (box_14) | `mit_floor2_a.usd` | `mit_floor2_explore.yaml` | **84** (17 classes) | staging_area, east_hall, west_wing |
+
+Each generated scenario's own leading comment block is self-documenting
+(catalog path, exact converter command line, spawn/yaw derivation, GATE
+TARGET CLASS + distance, and REGIONS with clearance/distance-to-gate) —
+Task 8's fix round made this a hard requirement after a review finding that
+the runnable files initially carried only 3 lines of boilerplate. 13 new
+`instance_seg` labelspace classes (ids 41-53) were added for these prop
+categories (superproject `1022574`), plus 6 curated reuses of existing ids.
+
+### 15.6 Gate evidence
+
+All runs: kinematic locomotion + magic grasp, `nav.inflation_radius_m: 0.35`
+(controller override — 0.45 seals the carved doorways shut, clearance sits
+in `(0.40, 0.45]`). Evidence dirs under `~/adt4_output/`; each contains
+`events.jsonl`, `summary.json`, `mission_video/capture.mp4`, `isaac.log`.
+
+| floor | gate | result | key numbers | evidence dir |
+|---|---|---|---|---|
+| floor3 | 0 (smoke) | PASS | 49/49 objects spawned, RTF 1.00 | `explore_floor3_gate0/` |
+| floor3 | 1 (objectnav) | PASS, exit 0 | discovery @ coverage 11.7%, `dist_to_object` 1.704 m | `explore_floor3_gate1/` |
+| floor3 | 2 (pick-place, region `lobby`) | PASS, exit 0 | recycling_bin_0 released 1.374 m from lobby centre (re-verified post-fix; original pass 1.994 m) | `explore_floor3_gate2_fixround1/` (supersedes `explore_floor3_gate2/`) |
+| floor3 | negative (`backpack`, absent) | PASS, exit 4 | `explored_out`, coverage 0.356 ≥ 0.35 limit, `found: 0` throughout | `explore_floor3_gate_neg/` |
+| building1 | 0 (smoke) | PASS | 59/59 objects spawned, RTF 1.00 | `explore_building1_gate0/` |
+| building1 | 1 (objectnav, required) | PASS, exit 0 | class **substituted `backpack` -> `recycling_bin`** (below); discovery @ coverage 39.0%, `dist_to_object` 1.367 m (post-fix-round-2 re-run) | `explore_building1_gate1_fixround2/` |
+| building1 | 2 (pick-place, region `lobby`, optional) | PASS, exit 0 | recycling_bin_4 released 0.924 m from lobby centre; region-directed replan never fired (lobby mapped in round 1) | `explore_building1_gate2/` |
+| floor2 | 0 (smoke) | PASS | 84/84 objects spawned, RTF 1.00 | `explore_floor2_gate0/` |
+| floor2 | 1 (objectnav, stretch) | **FAIL, honest exit 4** | class substituted `printer` -> `recycling_bin` (too far/slow); 384 waypoints, 1844 m, coverage 0.9507 `explored_out`; robot passed **0.20 m** from the target instance and never detected it, despite 115 live hydra object nodes | `explore_floor2_gate1/` |
+
+Building1's header-designated gate class (`backpack`) and floor2's
+(`printer`) were both substituted for the passing/attempted runs — see
+15.7 items 1 and the floor2 discovery mystery below; the header comments in
+the scenario files still record the original picks.
+
+### 15.7 Known limitations + follow-ups
+
+1. **Blind escape leg on recovery.** The exploration policy's speck-recovery
+   path (Task 10 fix rounds) can only ever be reached when the robot is
+   already standing on a cell the grid calls non-traversable — that is the
+   premise of recovery — so the first commanded hop off that cell can never
+   itself satisfy `path_is_traversable`. Root cause is upstream: the scan
+   environment's wall band is thick enough that a real, driven position
+   reads as "inside a wall" (see the wall-band follow-up memory,
+   `followup_scan_env_wall_band_blocks_doorways`); the honest fix is a
+   thinner wall band at build time, not more grid logic in the recovery
+   path. Also: `ingest_map.py`'s trajectory-bridging path builds a grid that
+   is never `mark_visited`-ed, so recovery is unconditionally refused there
+   (harmless today, undocumented edge case).
+2. **Pre-existing hydra non-drivable place edges (>4 m).** Even after Task 9's
+   bridging fix gated every *synthetic* edge on drivability, hydra's own
+   place graph ships a small number of >4 m edges that were never
+   bridge-created (e.g. floor3's t526<->t568 at 4.4 m) — same executor
+   blindness, out of scope for this work.
+3. **Regions with radius < ~2.5 m are unverifiable.** The executor's place
+   command triggers roughly 2 m short of the commanded place point (measured
+   release slop); a region narrower than that margin would fail the strict
+   verifier even with a geometrically perfect place target. All 9 regions
+   authored across the three floors use radius 3.5 m specifically to clear
+   this.
+4. **Region-directed replan machinery has floor3-only live evidence.** The
+   `phase_visit_region`/save-in-place/re-injection/bridging chain was built
+   and iterated entirely against floor3's `lobby` (which required 12 attempt
+   rounds to close, task-9-report.md). Building1's Gate 2 passed in a single
+   ground round because `lobby` sits 7.3 m from spawn and was already mapped
+   by the first explore pass — the replan-for-a-region path itself remains
+   unexercised on a second environment (`east_wing`, 64.4 m out, would
+   exercise it).
+5. **The NL "explore" escape hatch is deliberately out of scope.** The live
+   NL prompt (§13.5) has no "object absent" branch — adding one risks the
+   model hallucinating a plausible-sounding object instead of triggering
+   real exploration. This work exercises the same explore->ground->replan
+   machinery through scripted class/region missions instead, which is
+   considered an equivalent test of the seam.
+6. **The floor2 discovery mystery.** floor2's Gate 1 swept to 95.07%
+   coverage (384 waypoints, 1844 m) and passed **0.20 m** from the target
+   instance without hydra ever producing a matching object node, despite the
+   run generating 115 hydra object-node image-crop directories (i.e. the
+   GT-semantics -> hydra object pipeline is demonstrably alive on this env).
+   Ruled out with evidence: missing labelspace entry, scenario/semantics
+   config skew, object placement height, object size, and the class-string
+   spelling (`recycling_bin` matched immediately on every building1 and
+   floor3 run). Needs a live-stack labelspace dump — comparing the strings
+   hydra actually assigns on `/{robot}/hydra/backend/dsg` against the
+   scenario's labels while a floor2 mission runs — to close; no code change
+   was attempted without that evidence in hand.
