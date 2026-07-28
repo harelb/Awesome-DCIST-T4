@@ -2820,11 +2820,14 @@ python3 -m dcist_sim_isaac.scripts.explore_mission \
 | **4** | `EXIT_NOT_FOUND` | target genuinely not found / region unreachable / ground rounds exhausted with no groundable candidate — coverage-limited or budget-limited exploration ran out | written |
 | **5** | `EXIT_UNSOLVABLE` | a real `PddlUnsolvableError`, or every grounding candidate came back degenerate (empty plan — goal already true at init) | written |
 
-Every path — including `KeyboardInterrupt` (exit 130) — flushes and calls
-`os._exit(code)` only after `summary.json` is on disk; teardown runs in a
-`finally` with its own exception guard so a teardown error never masks the
-mission's real exit code (Task 7's fix round 1, "pre-try failures exit 2
-w/o summary.json" finding, closed).
+Every path that raises `Exception` (including `MissionAbort`) flushes and
+calls `os._exit(code)` only after `summary.json` is on disk; teardown runs
+in a `finally` with its own exception guard so a teardown error never masks
+the mission's real exit code (Task 7's fix round 1, "pre-try failures exit 2
+w/o summary.json" finding, closed). `KeyboardInterrupt` is not an
+`Exception` subclass, so it escapes `run_mission`'s and `main`'s handlers
+uncaught: exit 130, with no `summary.json` written. This is accepted
+behavior, not a bug.
 
 ### 15.4 Typed-error seam + ground-round verdict
 
