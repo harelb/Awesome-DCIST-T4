@@ -52,3 +52,29 @@ label_names:
   - {label: 38, name: sandbag}
   - {label: 39, name: vehicle}
   - {label: 40, name: tree}
+
+  # Exploration-mission prop classes (2026-07-28), curated free-standing
+  # object list for catalog-driven scenario spawning
+  # (dcist_sim/scenarios/exploration/prop_classes.yaml, Task 3). 6 of its 19
+  # curated names already exist in this labelspace at lower ids -- chair(1),
+  # table(4), box(17), shelf(27), fire_extinguisher(30), bench(33) -- and
+  # class_to_labelspace_id() already resolves them correctly for exploration
+  # spawns, so they are NOT re-registered here (unlike the `tree` 5-vs-40
+  # duplicate above, these names have locked-in test expectations in
+  # test_gt_semantics.py and are used by other isaac_sim scenarios via the
+  # SAME shared LABELSPACE_NAME_TO_ID dict; shadowing them with new ids would
+  # silently redirect those other scenarios' GT semantics). Only the 13
+  # genuinely new prop names are appended below, alphabetically, ids 41+.
+  - {label: 41, name: backpack}
+  - {label: 42, name: cabinet}
+  - {label: 43, name: cart}
+  - {label: 44, name: desk}
+  - {label: 45, name: display_case}
+  - {label: 46, name: monitor}
+  - {label: 47, name: plant}
+  - {label: 48, name: printer}
+  - {label: 49, name: recycling_bin}
+  - {label: 50, name: refrigerator}
+  - {label: 51, name: stool}
+  - {label: 52, name: trash_can}
+  - {label: 53, name: water_bottle}
