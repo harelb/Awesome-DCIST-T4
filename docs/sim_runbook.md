@@ -2653,7 +2653,8 @@ Branches: `dcist_sim`/`omniplanner` `feature/exploration` (off
 
 ```
  explore loop (frontier BFS over the <env>.usd.floor.npz traversable grid)
-   next_waypoint() -> Follow -> mark_visited (+ driven) -> objects_of_class poll
+   next_waypoint() -> explore_legs() ROUTED legs -> Follow per leg
+                   -> mark_visited (+ driven) -> objects_of_class poll
    |
    v
  discovery -- target class appears as a live hydra object node
