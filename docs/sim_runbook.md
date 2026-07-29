@@ -2573,6 +2573,13 @@ Use `scripts/check_scenario_placement.py` with the `<env>.usd.floor.npz`
 side-car: it reports floor presence AND clearance per spawn/waypoint and exits
 1. Verified it fails that exact tour 7/8 and passes the corrected one.
 
+The checker also verifies spawn-connectivity (added 2026-07-29 after the
+openset suitcase island): every extra spawn, the tour start, and a 32-point
+standoff ring around every object must be reachable from the first robot
+spawn on the floor+clearance grid. Object failures print `0/32 ...
+UNREACHABLE` and exit 1; `--connectivity-warn-only` downgrades objects (never
+spawns). Ring radius defaults to inflation + 0.3 m (`--standoff-radius-m`).
+
 ### 14.3 Kilometre-scale terrain
 
 `scripts/fetch_dem.py` (spark_env: rasterio/pyproj) -> `.npz` ->
