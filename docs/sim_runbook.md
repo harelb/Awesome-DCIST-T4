@@ -3073,7 +3073,7 @@ python3 -m dcist_sim_isaac.scripts.explore_mission \
   --output-dir ~/adt4_output/openset_gate2
 ```
 Proves the full open-set chain in one run: escape hatch fires
-(`o_suitcase`) -> tier 2 rejects two weak false positives below threshold
+(`o_suitcase`) -> tier 2 rejects one weak false positive below threshold
 -> accepts a real hit (score 0.949) -> `ensure_labelspace_entry` appends the
 class -> ingest -> FD plan -> delivered 0.478 m from the lobby centre.
 
@@ -3137,7 +3137,7 @@ Measured numbers (Gate 0, `~/adt4_output/sam3_calib_floor3/calibration_full/`,
   archive — one oblique view of `recycling_bin_0` (the realistic trash-can
   mesh) scored "suitcase" 0.598, and `--assert-threshold 0.55` on that
   archive exits 4 (`~/adt4_output/sam3_recalib_gate2_attempt2/`). The
-  revised **0.65** is the midpoint of the weakest true-suitcase anchor
+  revised **0.65** sits near the midpoint of the weakest true-suitcase anchor
   across ALL measured archives (fused maxima 0.715/0.949/0.848/0.801) and
   the strongest measured false positive (0.414/0.598): every true view
   still clears it by >= 0.065, every measured FP is rejected by >= 0.052.
