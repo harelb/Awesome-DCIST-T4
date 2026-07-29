@@ -2968,3 +2968,280 @@ the scenario files still record the original picks.
    hydra actually assigns on `/{robot}/hydra/backend/dsg` against the
    scenario's labels while a floor2 mission runs — to close; no code change
    was attempted without that evidence in hand.
+
+### 15.8 NL missions + open-vocabulary re-query (2026-07-28)
+
+15.7 item 5 called the NL "explore" escape hatch out of scope. This is the
+follow-on that closes it: one live NL sentence now drives the whole
+explore -> ground -> replan machinery for a class the ground-truth semantics
+pipeline has never heard of. Plan: `.superpowers/sdd/2026-07-28-e2e-openset-
+wiring/`; branches `dcist_sim`/`nlu_interface` `feature/exploration`
+(nlu_interface: `feature/exploration_nl`) off the 15.1-15.7 branches;
+superproject `feature/isaac_sim_exploration`. Not pushed at time of writing.
+
+**One-command story:**
+
+```
+explore_mission.py --nl "find the suitcase and bring it to the lobby" --nl-graph <prior save>
+  |
+  v
+phase_nl: ONE gpt-4.1-mini call, in-process (nlu_interface, request_llm_goal)
+  -> answer inverted against --nl-graph's own symbols (region -> room label;
+     grounded o<N> -> its class)
+  |
+  |  class has live nodes in --nl-graph          class absent from GT labelspace
+  |  (grounded mission)                          OR prompt emits placeholder o_<class>
+  v                                              (escape hatch: never substitutes,
+grounded target_class, novel=False                never refuses -- see nl_openset.py)
+  |                                                          |
+  |                                                          v
+  |                                              novel mission, TIER 2 enabled
+  |                                              (mission_is_novel ORs the graph
+  |                                               verdict with "class not in
+  |                                               gt_semantics.LABELSPACE_NAME_TO_ID" --
+  |                                               a prior open-set save that already
+  |                                               contains the injected node cannot
+  |                                               silently turn tier 2 off)
+  |                                                          |
+  +------------------- explore (15.1's frontier loop) -------+
+  |                              |
+  |                     tier 1: objects_of_class poll (live hydra nodes, as 15.1)
+  |                              |  miss
+  |                              v
+  |                     tier 2: RequeryBridge queries the SAM3 warm worker over
+  |                             the mission's ALREADY-ACCUMULATED posed keyframes
+  |                             (throttled every --requery-interval-s during
+  |                             exploration; the terminal query scans the FULL
+  |                             archive, unthrottled)
+  |                              |
+  |                     accept_detections(min_score=--requery-conf, min_frames>=2
+  |                             OR n_pixels>=800) -> merge_detections (same-label,
+  |                             1.0 m radius) -> best_detection
+  v                              |
+objectnav to the fused centroid <-+  [hit]
+  |
+  v
+save DSG (node's OWN in-memory graph, not the dsg_saver service -- see below)
+  -> ensure_labelspace_entry (append _l2p0, idempotent) + ensure_object_of_class
+     (inject the node) -- BEFORE the region precheck, which otherwise refuses an
+     unresolvable label
+  |
+  v
+ingest (Neo4j) -> ground + plan (FD, on the graph heracles publishes)
+  -> publish -> pick -> carry -> place -> verify   [same GATE 1/2 as 15.1]
+```
+
+**Honest exit-4 negative:** `should_exit_not_found(explored_out, requery_enabled,
+final_requery_hits)` only raises `EXIT_NOT_FOUND` when BOTH legs hold —
+exploration genuinely ran out (coverage/budget limited) **and** the terminal,
+unthrottled, full-archive re-query came back with zero accepted hits while the
+worker was still alive. A dead worker or a still-throttled miss does not
+count; this is the same "no vacuous negative" discipline as 15.1's
+`next_waypoint()/route() returning None` rule.
+
+#### CLI quickstart — the three real gate invocations
+
+All three commands are copied verbatim from `task-8-report.md`'s passing
+attempts (`.superpowers/sdd/2026-07-28-e2e-openset-wiring/`); Gate 2/3's
+`--requery-conf` reflects the **revised, live-verified** threshold (see
+Calibration below) — do not run a fresh mission at the superseded 0.55.
+Same sourcing recipe as 15.2 item 5 (ROS jazzy + workspace + spark_env,
+`PYTHONPATH` appended, cwd superproject root).
+
+**Gate 1 — NL regression (`--no-requery`), grounded class:**
+
+```bash
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_openset.yaml --robot hilbert \
+  --nl "put a recycling bin in the lobby" \
+  --nl-graph ~/adt4_output/explore_floor3_gate2_fixround1/dsg_augmented.json \
+  --no-requery --output-dir ~/adt4_output/openset_gate1
+```
+Proves: the NL front end resolves a grounded class off the live graph without
+ever touching the escape hatch (`novel=False`, hatch silent) and that
+`--no-requery` keeps tier 2 fully cold (0 `requery_attempts`, no worker
+spawned) end to end through delivery.
+
+**Gate 2 — FLAGSHIP, novel class via re-query (`--requery-conf 0.65`):**
+
+```bash
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_openset.yaml --robot hilbert \
+  --nl "find the suitcase and bring it to the lobby" \
+  --nl-graph ~/adt4_output/explore_floor3_gate2_fixround1/dsg_augmented.json \
+  --requery-conf 0.65 --explore-budget-s 1800 \
+  --output-dir ~/adt4_output/openset_gate2
+```
+Proves the full open-set chain in one run: escape hatch fires
+(`o_suitcase`) -> tier 2 rejects two weak false positives below threshold
+-> accepts a real hit (score 0.949) -> `ensure_labelspace_entry` appends the
+class -> ingest -> FD plan -> delivered 0.478 m from the lobby centre.
+
+**Gate 3 — negative, novel class genuinely absent (`--coverage-limit 0.5`):**
+
+```bash
+python3 -m dcist_sim_isaac.scripts.explore_mission \
+  --scenario dcist_sim/scenarios/mit_floor3_openset.yaml --robot hilbert \
+  --nl "find the microwave and bring it to the lobby" \
+  --nl-graph ~/adt4_output/explore_floor3_gate2_fixround1/dsg_augmented.json \
+  --requery-conf 0.65 --coverage-limit 0.5 --explore-budget-s 1800 \
+  --output-dir ~/adt4_output/openset_gate3
+```
+Proves the negative is honest: `explored_out` (coverage-limited, not
+budget-limited — a documented cost-bounding knob, sanctioned because the
+gate's point is the terminal full-archive verdict, not maximal coverage) AND
+a final full-archive re-query over 445 frames returns 0 hits with the worker
+still alive; **zero** `labelspace_appended`/injection events fire.
+
+**Flag notes:**
+
+- `--requery-conf` has **no default, by design** — a novel mission without
+  it (and without `--no-requery`) exits 2 (`require_requery_conf`). SAM3
+  scores are uncalibrated; the value must come from the calibration
+  workflow below, currently **0.65** (the scenario header in
+  `mit_floor3_openset.yaml` documents the provenance and supersedes any
+  older 0.55 references — see the docstring copy-paste hazard in
+  Limitations).
+- `--nl-graph` is **required with `--nl`** (outside `--dry-run`): the
+  mission cannot explore for a class before it knows the class, and there
+  is no registry mapping a scenario to a prior save, so the operator must
+  point at one (typically the prior gate's `dsg_augmented.json`).
+- `--no-requery` is for grounded-class missions only (Gate 1's shape); it
+  is also the only way to run an off-labelspace class through the grounded
+  path when a prior save already contains the injected node (see the
+  hatch-retention trap in Limitations).
+
+#### Calibration workflow
+
+`dcist_sim/dcist_sim_isaac/scripts/sam3_calibration.py` (sam3-venv only):
+sweeps realistic-vs-proxy asset pairs at `--conf 0.02` over a scenario's
+posed keyframes, 3D-attributes each mask to its instance, prints a
+realistic/proxy/hits/score table, applies the decision rule (realistic max
+>= 2x proxy max AND >= 0.15), and — for a proxy-less novel class — emits
+`suggested_threshold_novel` (`novel_threshold`, pure: midpoint of the
+realistic median-of-hits and the archive's fused false-positive max, clamped
+to a floor). `--assert-threshold <float>` is the regression mode: **exit 4**
+when `false_positives_gt_2m.max_score >= threshold` (fails CLOSED — also
+exit 4 — with no FP profile to check at all); exit 0 only when every paired
+prompt's rule passes, exit 3 if any paired prompt fails its rule, exit 2 if
+no prompt had both realistic and proxy frames.
+
+Measured numbers (Gate 0, `~/adt4_output/sam3_calib_floor3/calibration_full/`,
+293 keyframes):
+- Realistic assets score **5.1-6.5x** their proxy counterparts: fire
+  extinguisher 0.938 vs 0.145 (**6.5x**), trash can 0.852 vs 0.166
+  (**5.1x**) — both clear the decision rule.
+- Threshold history: **0.55 -> 0.65.** Gate 0's 0.55 (midpoint of the
+  realistic suitcase median 0.715 and the 293-frame archive's FP max 0.414)
+  was FALSIFIED live in Gate 2 attempt 2 by a fresh 508-frame mission
+  archive — one oblique view of `recycling_bin_0` (the realistic trash-can
+  mesh) scored "suitcase" 0.598, and `--assert-threshold 0.55` on that
+  archive exits 4 (`~/adt4_output/sam3_recalib_gate2_attempt2/`). The
+  revised **0.65** is the midpoint of the weakest true-suitcase anchor
+  across ALL measured archives (fused maxima 0.715/0.949/0.848/0.801) and
+  the strongest measured false positive (0.414/0.598): every true view
+  still clears it by >= 0.065, every measured FP is rejected by >= 0.052.
+  `suggested_threshold_novel`'s own number (0.317 on the drive-by archive)
+  was explicitly NOT used — see Limitations.
+- Latency: **~0.24 s/frame** for the full detect+reproject archive query
+  (0.17-0.18 s/frame for a single-prompt sweep segment); model load
+  **~11.3 s** (lazy, first query only). The harness's own margins
+  (`REQUERY_PER_FRAME_S=0.5`, 90 s cold-load term) are ~2x conservative —
+  measured safe as-is, no knob changes were needed.
+
+#### venv / process map
+
+| component | interpreter | notes |
+|---|---|---|
+| `explore_mission.py` harness (incl. `phase_nl`, graph loading, ingest, grounding) | **workspace-sourced** python: `source /opt/ros/jazzy/setup.zsh && source ~/dcist_ws/install/setup.zsh && source $ADT4_ENV/spark_env/bin/activate` | The exact recipe `phase_ground_precheck` has always depended on. `spark_dsg` resolves to the **workspace build** (`~/dcist_ws/install/spark_dsg/...`), which loads current saves fine. |
+| bare `spark_env` (unsourced workspace) | `~/environments/dcist/spark_env/bin/python`, ROS/workspace NOT sourced | **CANNOT load current saves** — `spark_dsg.DynamicSceneGraph.load` raises `RuntimeError: invalid attributes for s(0)` on both the floor3 and camp graphs. This is why Task 3's offline LLM regression driver ran under `~/environments/dcist/agentic_navigation/bin/python` instead (spark_dsg 1.1.5) — a separate, one-off workaround for an *offline* script, not the mission's own runtime path. |
+| SAM3 query worker (`sam3_query_worker.py`) | `~/environments/dcist/sam3/bin/python` **ONLY**, launched by absolute path (no colcon package, no tmux/launch wiring) | HTTP boundary (`POST /query`, `GET /health`) — the harness process and the worker never share Python state. The worker **never opens a DSG**: no `spark_dsg` import is reachable from its query path (`object_discovery`'s only `spark_dsg` use is lazy, inside the Neo4j-upsert helpers the worker never calls). Model loads lazily on first query; GPU work is serialized under a lock. |
+| keyframe source for re-query | glob over `<output-dir>/raw_robot/agents/` | Same `-o raw_robot` layout the mission already writes; `list_keyframes` skips any prefix whose meta fails to parse or is missing an image file. |
+
+#### Gate evidence table
+
+| gate | tool | result | key numbers | evidence dir |
+|---|---|---|---|---|
+| 0 (SAM3 calibration) | `sam3_calibration.py` | PASS, threshold 0.55 (later revised 0.65) | realistic vs proxy 6.5x (fire ext.) / 5.1x (trash can); suitcase fused 0.949 (55 views) / 0.711 (30 views); 3D-lift error 0.438 m; latency 0.17-0.24 s/frame, 11.3 s cold load | `~/adt4_output/sam3_calib_floor3/calibration_full/` |
+| A (labelspace-append round trip) | `labelspace_append_smoke.py` (regression tool, not a one-off script — 48 pure-decider tests in `test_labelspace_append_smoke.py`) | PASS, exit 0, 26.2 s | appended `suitcase` id 54 (55 entries); injected `O11`, 1 `CONTAINS` edge survives Neo4j -> heracles publish; FD 4-action pick+place plan 0.166 s on the **published** graph (81 nodes, reconstructed from Neo4j, not the ingested 678-node file) | `~/adt4_output/labelspace_append_smoke/` |
+| 1 (NL regression) | `explore_mission.py --no-requery` | PASS, exit 0 | hatch silent (`novel=False`); requery cold (0 attempts); delivered 2.019 m from lobby centre (criterion <= 3.5 m) | `~/adt4_output/openset_gate1/` |
+| 2 (FLAGSHIP) | `explore_mission.py --requery-conf 0.65` | PASS, exit 0 (attempt 3) | `requery_hit` 0.949 @ 32.5% coverage/246 s; objectnav 0.109 m; `labelspace_appended` id 54; delivered 0.478 m from lobby centre; top-down replay `gate2_topdown_replay.mp4` | `~/adt4_output/openset_gate2/` |
+| 3 (negative) | `explore_mission.py --requery-conf 0.65 --coverage-limit 0.5` | PASS, exit 4 | `explored_out` @ coverage 0.5049/309 s; final full-archive re-query over 445 frames = 0 hits (worker alive); zero injections | `~/adt4_output/openset_gate3/` |
+
+**Gate A's Neo4j-wipe warning:** the deployment is Neo4j Community
+(single database, no scratch namespace) — every ingest, including this
+smoke, runs `MATCH (n) DETACH DELETE n` first and logs it loudly
+(`EVIDENCE neo4j_before_wipe`) before doing so. `--skip-session` runs the
+ingest leg only (offline, ~8 s) but is explicit that this is **not** a full
+Gate A pass (no live publish/ground-on-published-graph check) — it prints a
+`PARTIAL (--skip-session)` verdict rather than claiming success. A stale
+tmux session or a live camp/explore/hydra/omniplanner/heracles process on
+the target socket refuses the smoke before it touches the DB (a running
+`rmw_zenohd` is fine and gets adopted).
+
+#### Known limitations + follow-ups
+
+1. **Score-only open-set gating is view-dependent and will drift.** Two
+   different mission archives produced suitcase false-positive maxima 0.414
+   and 0.598; the revised 0.65 clears every measured true view by only
+   >= 0.065. The durable fix is a **standoff re-confirmation**: after
+   objectnav to a re-query centroid, re-query the newest close-range frames
+   and demand the class re-detect near the centroid before injection (plus
+   optionally blacklisting rejected centroids so a persistent false-positive
+   frame cannot re-fire from the archive on a later round).
+2. **Nothing in code enforces the calibrated threshold.** `--requery-conf`
+   is deliberately defaultless, so the falsified 0.55 would be accepted
+   silently by any invocation that still passes it, and
+   `sam3_calibration.py --assert-threshold` is not wired into any
+   pre-mission check. The measured true-positive margin above 0.65 is only
+   0.065 — thin enough that a future asset/lighting change could falsify it
+   again with no code-level guard to catch it before a live mission.
+3. **`suggested_threshold_novel` presumes dwelled, facing views** and is
+   invalid on a drive-by mission archive: its realistic-median anchor
+   collapsed to 0.036 on the Gate-2-attempt-2 archive, suggesting 0.317 —
+   *below* a measured false positive. The `--assert-threshold` regression
+   half is sound (it is what caught the 0.598 drift); the suggestion half
+   needs a max-based or top-quantile anchor before it can be trusted on a
+   mission (as opposed to a calibration-tour) archive.
+4. **`dsg_saver` is unreliable for large graphs, and the fix is local to
+   this harness.** Gate 2 attempt 1 failed because the `dsg_saver` service's
+   own `DsgSubscriber` cache lagged a 178 MB backend publish, shipping a
+   pre-arrival graph. `explore_mission` now saves the node's own in-memory
+   DSG directly (`phase_save_dsg_live`) instead of asking the service, but
+   `camp_mission_smoke` and any other `dsg_saver` consumer still race on big
+   maps — this is a latent bug in shared launch infrastructure, only worked
+   around here.
+5. **The heracles duplicate-name labelspace collapse is upstream, not
+   introduced by this work.** Hydra's shipped `_l2p0` lists `tree` twice (ids
+   5 and 40); heracles' `{name: id}` round trip keeps only the last id, so
+   id 5 silently vanishes from every published graph. `ensure_labelspace_entry`
+   matches on canonical class form and can never *create* a duplicate, but a
+   mission whose target class happened to share a name with a lower id would
+   be silently unresolvable. Gate A's smoke now reports this every run
+   (`labelspace_collapse` evidence line) rather than letting it rot into a
+   mystery; fixing it is an upstream `heracles` issue.
+6. **The placement checker doesn't validate connectivity — the island
+   lesson.** `check_scenario_placement` verifies observed-floor + clearance
+   at a point only, never routing; `suitcase_0`'s original placement passed
+   it while sitting on an 8-cell traversability island 8.03 m from the main
+   component (objectnav would have been a guaranteed exit 4 independent of
+   any SAM3 score). The relocation to `(-31.324, 42.550)` was validated with
+   the actual production routing chain (`standoff_candidates` + `grid.route`
+   from spawn), not by re-running the exit-0 checker. Any future relocation
+   of a novel-class object needs that same routing check, not placement
+   exit 0 alone.
+7. **Compound NL sentences are rejected by design, not truncated.**
+   `parse_nl_answer` raises `NlParseError` (`"compound goal: ..."`) on any
+   `and`/`or`/`not`-composed answer or trailing text after the single
+   predicate — including a single conjunct wrapped in a redundant `(and
+   ...)`. An operator sentence that legitimately wants two things ("bring
+   the suitcase to the lobby and check the west wing") is therefore a hard
+   parse failure (exit 2, `nl_parse_failed`), not a partial plan; the
+   alternative (truncating to the first conjunct) was rejected as a
+   trust-boundary violation during review.
+8. **Detector re-priming is config-time only.** `RequeryBridge` issues
+   exactly one SAM3 prompt per mission — the spaced form of the resolved
+   mission class — fixed for the whole run. There is no live path to add a
+   synonym prompt or re-target the detector at a different class mid-mission;
+   doing so safely would also require canonicalizing synonym labels before
+   `merge_detections`' same-label-only fusion, which is unbuilt.
