@@ -2580,6 +2580,23 @@ spawn on the floor+clearance grid. Object failures print `0/32 ...
 UNREACHABLE` and exit 1; `--connectivity-warn-only` downgrades objects (never
 spawns). Ring radius defaults to inflation + 0.3 m (`--standoff-radius-m`).
 
+### 14.2b GT object registry + spawn tool (2026-07-30)
+
+`scenarios/assets/objects/gt/registry.yaml`: 41 sourced GT classes (6 reused,
+11 tier-A graspable, 24 tier-B fixed); unsourced classes are logged in
+`GAPS.md`, not dropped silently. `scripts/add_gt_objects.py` samples a
+gate-validated pose (this checker's own helpers) and appends it, then reruns
+the full gate as its last step:
+
+    python3 dcist_sim_isaac/scripts/add_gt_objects.py \
+      --scenario scenarios/mit_floor3_openset.yaml \
+      --floor-npz $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd.floor.npz \
+      --class cup --count 2 --seed 42
+
+Before a class's first mission use, run `sam3_calibration.py
+--assert-threshold` with its registry `sam3_prompt` -- the registry ships an
+asset, not a proven detection threshold.
+
 ### 14.3 Kilometre-scale terrain
 
 `scripts/fetch_dem.py` (spark_env: rasterio/pyproj) -> `.npz` ->
