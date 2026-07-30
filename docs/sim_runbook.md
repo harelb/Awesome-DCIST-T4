@@ -2582,20 +2582,18 @@ spawns). Ring radius defaults to inflation + 0.3 m (`--standoff-radius-m`).
 
 ### 14.2b GT object registry + spawn tool (2026-07-30)
 
-`scenarios/assets/objects/gt/registry.yaml`: 41 sourced GT classes (6 reused,
-11 tier-A graspable, 24 tier-B fixed); unsourced classes are logged in
-`GAPS.md`, not dropped silently. `scripts/add_gt_objects.py` samples a
-gate-validated pose (this checker's own helpers) and appends it, then reruns
-the full gate as its last step:
+`scenarios/assets/objects/gt/registry.yaml`: 44 sourced GT classes (9 reused,
+11 tier-A graspable, 24 tier-B fixed), else a `GAPS.md` row. 30 of them stream
+from Nucleus at scenario **load**, not just build -- run `verify_cdn_paths()`
+as the one-command liveness check first. `add_gt_objects.py` samples a
+gate-validated pose, appends it, reruns the full gate, and reverts on failure:
 
-    python3 dcist_sim_isaac/scripts/add_gt_objects.py \
-      --scenario scenarios/mit_floor3_openset.yaml \
-      --floor-npz $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd.floor.npz \
-      --class cup --count 2 --seed 42
+    python3 dcist_sim_isaac/scripts/add_gt_objects.py --scenario scenarios/mit_floor3_openset.yaml \
+      --floor-npz $ADT4_SIM_ASSETS/environments/mit_floor3_b.usd.floor.npz --class cup --count 2 --seed 42
 
-Before a class's first mission use, run `sam3_calibration.py
---assert-threshold` with its registry `sam3_prompt` -- the registry ships an
-asset, not a proven detection threshold.
+`--min-sep` is center-to-center with no bbox extents -- bump it for large
+tier-B classes. Verify `sam3_prompt` via `sam3_calibration.py
+--assert-threshold` before first mission use.
 
 ### 14.3 Kilometre-scale terrain
 
