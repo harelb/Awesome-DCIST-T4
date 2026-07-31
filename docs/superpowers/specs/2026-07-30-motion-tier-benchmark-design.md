@@ -20,14 +20,40 @@ A generated, seeded, self-contained mission whose ground truth is known **by con
 | `VOCAB-2a` | target spawned before mapping pass; absent from labelspace; **pre-motion archive re-query enabled** | tier 2a resolves a vocabulary mismatch with ~zero search motion |
 | `VOCAB-no2a` | identical trial; archive re-query disabled | **metres of motion avoided by 2a** — the headline ablation (§6.4) |
 | `VOCAB-3closed` | identical; mission re-query (2b) also disabled | separates ours-before-motion (2a) and ours-during-motion (2b) from closed-set; expected honest failure |
-| `TEMPORAL` | target in the archive at X; relocated to Y before the mission | ladder escalation 2a→3: stale-hit handling, escalation cost |
+| ~~`TEMPORAL`~~ | target in the archive at X; relocated to Y before the mission | ladder escalation 2a→3: stale-hit handling, escalation cost — **DEFERRED to v1.1 by T6, see task-6-report §8** |
 | `ABSENT` | target not in scene; two sub-variants recorded: in-labelspace (prompted-and-never-seen — the paper's genuine negative evidence) and out-of-labelspace | justified refusal: coverage-at-refusal, zero false discoveries, exit-4 evidence |
 
 Target-class selection is computed per environment: VOCAB conditions draw from registry ∩ ¬labelspace (the suitcase pattern); ABSENT in-vocab draws from labelspace ∩ ¬scene. The generator records the selection basis per trial.
 
 Out of scope v1: aggregate/part/attribute/substance mismatches (need the tier-1 derive machinery — planner-side, workstream B); multi-robot; any real-graph task generation.
 
-**TEMPORAL is the riskiest condition**: `explore_mission`'s behavior on a stale archive hit (objectnav to X finds nothing) is unverified, and the rejected-centroid blacklist from the e2e follow-ups may be prerequisite. The GPU smoke gates it; if escalation machinery exceeds a task, TEMPORAL ships in v1.1 and the paper doc says so.
+**TEMPORAL was the riskiest condition, and it is now DEFERRED to v1.1** — the
+outcome this paragraph anticipated. `explore_mission`'s behaviour on a stale
+archive hit was unverified; T6 resolved it as unscoreable and removed the
+condition from the v1 matrix (T6 report §8; the suite's own expansion block is
+gone, with the restore recipe left in its place in
+`dcist_sim/scenarios/benchmarks/motion_tier_v1.yaml`). Two reasons, both
+measured or cited:
+
+1. **Structural dead-end, cited to the line.** A stale hit exits 2
+   `verify_failed` because objectnav's `MissionAbort` bypasses the `GroundReplan`
+   re-loop (`explore_mission.py:2860 → :2884`) and the geometric-only verify gate
+   (`:2201-2205`) passes a reachable stale spot. The runner classifies exit 2 as
+   an INFRA failure, so the condition's failure mode is indistinguishable from a
+   crashed stack.
+2. **Not probeable yet either.** TEMPORAL's floor3 class order is
+   `[phone, mop, microphone, broom]`; seed 11 draws `phone`, which T6 measured as
+   undetectable (best 0.6055 over a full 1677-frame archive scan, below the 0.65
+   threshold *and* below the 0.6406 false positive the same prompt produces). The
+   mission would miss at both poses and never reach the escalation path.
+
+**v1 therefore ships 80 trials over 45 worlds** (was 85/50): 3 envs × 5 conditions
+× 5 seeds, plus the 5-trial floor3 NL slice. v1.1 restores TEMPORAL after the
+escalation fix: a distinct `stale_archive_verify_failed` reason code, a perception
+re-check at the stale pose before the geometric gate, a re-loop into
+`GroundReplan` on that code, and a detectability-gated target class. The
+T6-validated TEMPORAL trial tree (19.004 m relocation, placement gate exit 0) is
+preserved, so v1.1 needs no new design work here.
 
 ## Schema (the option-C contract)
 
