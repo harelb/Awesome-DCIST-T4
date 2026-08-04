@@ -1,6 +1,6 @@
 # Motion-tier benchmark run viewer — design
 
-2026-08-04. Status: DESIGN — awaiting Harel's approval before implementation.
+2026-08-04. Status: APPROVED (Harel, 2026-08-04 "go for it") and IMPLEMENTED — dcist_sim scripts/benchmark_viewer.py, commits 1fa4bb8..ec2388c.
 Context: motion-tier benchmark (§6.5) produces 80-trial evidence trees under
 `~/adt4_output/motion_bench/` (per-trial `events.jsonl`, `summary.json`,
 `mission_video/capture.mp4`, mapping archives with keyframe RGB/depth, floor
@@ -66,7 +66,10 @@ analyzer pass. One command in the runbook:
   `*.floor.npz`, rendered once per env into assets/) with an SVG overlay:
   mission path from `events.jsonl` (colored by purpose: explore vs objectnav),
   spawned GT objects from `scenario_mission.yaml` (target highlighted),
-  requery/archive hit positions, abort location. Hover a path vertex → its
+  requery/archive hit positions, and an abort marker at the last trajectory
+  vertex (abort events carry no coordinates, so the marker is the last pose
+  the robot was commanded FROM, not the abort's own location — the page's
+  legend and the marker's tooltip both say so). Hover a path vertex → its
   timestamp/event.
 - **Timeline**: phases and salient events (waypoint timeouts, requery
   attempts/hits/rejections, ground rounds, aborts) as a vertical list with
