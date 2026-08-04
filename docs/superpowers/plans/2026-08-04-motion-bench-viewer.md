@@ -386,7 +386,7 @@ Note for the implementer: `aggregates` sub-shapes vary — render dicts/lists ge
 **Interfaces:**
 - Consumes: everything above.
 - Produces:
-  - `build_trial_digest(row, trials_dir, out_dir) -> dict` — assembles the Task-4 digest for one trial: events from `<out-dir>/trials/<id>/events.jsonl`, summary from `summary.json`, scenario GT + target distance for each hit (`gt_dist_m` = distance to nearest GT object whose label == row's `target_class`, None when no such object), keyframes resolved against the mapping archive: the agents dir is `<out-dir>/mapping/<cache_key12>/raw_robot/agents` where `cache_key12` comes from `trial.json`'s `sim_binding.mapping_pass.cache_key[:12]` (no mapping_pass → no keyframes), and video paths (`mission_video/capture.mp4`, `stop_video/capture.mp4`) that exist on disk or None.
+  - `build_trial_digest(row, trials_dir, out_dir) -> dict` — assembles the Task-4 digest for one trial: events from `<out-dir>/trials/<id>/events.jsonl`, summary from `summary.json`, scenario GT + target distance for each hit (`gt_dist_m` = distance to nearest GT object whose label == row's `target_class`, None when no such object), keyframes resolved against the mapping archive: use the hit's `frame_ts` list when present, else fall back to `frame_ts_range` (real archive_requery_hit events log an ns `[lo, hi]` range, NOT a list — discovered in Task 4) by globbing `agent_<ts>_meta.json` timestamps inside the range (cap 6). The agents dir is `<out-dir>/mapping/<cache_key12>/raw_robot/agents` where `cache_key12` comes from `trial.json`'s `sim_binding.mapping_pass.cache_key[:12]` (no mapping_pass → no keyframes), and video paths (`mission_video/capture.mp4`, `stop_video/capture.mp4`) that exist on disk or None.
   - `generate_site(trials_dir, out_dir) -> dict` — reads `<out-dir>/metrics.json` (missing → `SystemExit` with the exact analyzer command to run), renders floor PNG once per env (from the FIRST attempted trial of that env; cached in `viewer/assets/floor_<env>.png` + transform in `floor_<env>.json`), writes `viewer/index.html` + `viewer/trial/<id>.html` for every row with `not_attempted == False`, returns `{"pages": int, "envs": [str], "skipped": int}`.
   - `main(argv=None) -> int` — argparse `--trials-dir` (required), `--out-dir` (required); prints `benchmark_viewer.py: N page(s) -> <out-dir>/viewer (serve with: cd <out-dir> && python3 -m http.server)`.
 
@@ -458,7 +458,7 @@ def test_main_prints_serve_hint(tmp_path, capsys):
 - [ ] **Step 5: Smoke against the real run** (read-only inputs, writes only viewer/):
 
 Run: `source $ADT4_ENV/spark_env/bin/activate && cd dcist_sim/dcist_sim_isaac && python scripts/benchmark_viewer.py --trials-dir ~/adt4_output/motion_bench/trials_v1 --out-dir ~/adt4_output/motion_bench/v1`
-Expected: `40 page(s)` (stage-1+2 attempted trials), no traceback. Spot-open `viewer/trial/motion_tier_v1_floor3_vocab_2a_s23.html` and verify the FP hit renders with keyframes and gt_dist_m ≈ 10.97.
+Expected: `40 page(s)` (stage-1+2 attempted trials), no traceback. Spot-open `viewer/trial/motion_tier_v1_floor3_vocab_2a_s23.html` and verify the FP hit renders with keyframes and gt_dist_m ≈ 10.40 (hit-position→GT-mop distance; 10.97 was the stall-point distance).
 
 - [ ] **Step 6: Append runbook §15.10** to `dcist_sim/docs/sim_runbook.md`: the one-command generate + serve recipe and the note that metrics.json must exist (analyzer first).
 
