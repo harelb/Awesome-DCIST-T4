@@ -3319,12 +3319,20 @@ cd ~/adt4_output/motion_bench/v1 && python3 -m http.server
    come from the mapping pass (`<out-dir>/mapping/<cache_key12>/raw_robot/
    agents`), live `requery_hit` frames from the trial's OWN
    `raw_robot/agents`; the viewer prefers whatever dir the runner stamped on
-   its `keyframe_dir` event and reconstructs both as fallbacks. A hit event
-   records only a `frame_ts_range`, so a wide range (v1's live hits span up to
-   18 min) is sampled evenly, endpoints included, down to 6 frames.
+   its `keyframe_dir` event and reconstructs both as fallbacks.
+5. **A keyframe strip is a WINDOW SAMPLE, not the contributors.** A hit event
+   records only a `frame_ts_range`, and 8 of v1's 12 hits hold 1166-1587
+   frames in that window for 4-13 actual contributors — which frames those
+   were is recorded nowhere. The 6 shown are ranked by camera-to-hit distance
+   from each `agent_<ts>_meta.json`'s `world_T_body` (even sampling when the
+   metas carry no poses), and every strip is captioned with its own numbers
+   ("6 of 1587 keyframes in the hit's window ... n_frames=8 contributed").
+   Read them as "the robot was here, looking at roughly this", never as proof
+   of what the detector fired on.
 
 **v1 evidence (2026-08-04):** 40 pages / 40 not-attempted skipped, 3 env
 rasters (floor3, floor2, building1), 0 broken relative links across all 41
 documents, all 12 detection hits keyframed. The site is where the s23 clutter
 false positive reads at a glance: `score=0.738`, fused 10.40 m from the only
-`mop` in the scenario, with the 6 archive frames that produced it.
+`mop` in the scenario, alongside 6 of the 12 keyframes in the window its
+fusion drew from.
