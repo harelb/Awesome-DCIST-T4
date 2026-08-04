@@ -4,7 +4,7 @@
 
 **Goal:** A generator script that writes a static forensics site (`viewer/`) into a benchmark run's out-dir: suite outcome matrix, per-trial trajectory/timeline/video pages, and detection-evidence keyframe views.
 
-**Architecture:** One script (`dcist_sim_isaac/scripts/benchmark_viewer.py`, repo convention: the benchmark trio are single scripts with pure importable functions) digests the evidence tree into per-trial JSON-able dicts, renders floor-plan PNGs once per env, and emits self-contained HTML pages that reference videos/keyframes RELATIVELY (nothing copied). The analyzer's `metrics.json` is the single source of outcomes — the viewer never re-scores.
+**Architecture:** One script (`scripts/benchmark_viewer.py`, repo convention: the benchmark trio are single scripts with pure importable functions) digests the evidence tree into per-trial JSON-able dicts, renders floor-plan PNGs once per env, and emits self-contained HTML pages that reference videos/keyframes RELATIVELY (nothing copied). The analyzer's `metrics.json` is the single source of outcomes — the viewer never re-scores.
 
 **Tech Stack:** Python stdlib + PyYAML + numpy + PIL (all already in spark_env). No web framework, no CDN — inline CSS/JS in the page templates.
 
@@ -48,7 +48,7 @@
 import json
 import os
 
-from dcist_sim_isaac.scripts.benchmark_viewer import (
+from scripts.benchmark_viewer import (
     hits_from_events,
     read_events,
     timeline_from_events,
@@ -143,7 +143,7 @@ Expected: ImportError (module does not exist).
 ```python
 import yaml
 
-from dcist_sim_isaac.scripts.benchmark_viewer import (
+from scripts.benchmark_viewer import (
     env_npz_from_scenario,
     gt_objects_from_scenario,
     resolve_keyframes,
@@ -207,7 +207,7 @@ def test_resolve_keyframes(tmp_path):
 ```python
 import numpy as np
 
-from dcist_sim_isaac.scripts.benchmark_viewer import render_floor_png
+from scripts.benchmark_viewer import render_floor_png
 
 
 def test_render_floor_png(tmp_path):
@@ -258,7 +258,7 @@ def test_render_floor_png_missing(tmp_path):
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-from dcist_sim_isaac.scripts.benchmark_viewer import OUTCOME_STYLE, render_trial_page
+from scripts.benchmark_viewer import OUTCOME_STYLE, render_trial_page
 
 
 def _min_row():
@@ -337,7 +337,7 @@ def test_trial_page_survives_empty_digest(tmp_path):
 - [ ] **Step 1: Write the failing test**
 
 ```python
-from dcist_sim_isaac.scripts.benchmark_viewer import render_index
+from scripts.benchmark_viewer import render_index
 
 
 def test_index_matrix_and_aggregates():
@@ -393,7 +393,7 @@ Note for the implementer: `aggregates` sub-shapes vary — render dicts/lists ge
 - [ ] **Step 1: Write the failing integration test**
 
 ```python
-from dcist_sim_isaac.scripts.benchmark_viewer import generate_site, main
+from scripts.benchmark_viewer import generate_site, main
 
 
 def _mini_tree(tmp_path):
