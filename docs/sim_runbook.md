@@ -3267,3 +3267,64 @@ the target socket refuses the smoke before it touches the DB (a running
    synonym prompt or re-target the detector at a different class mid-mission;
    doing so safely would also require canonicalizing synonym labels before
    `merge_detections`' same-label-only fusion, which is unbuilt.
+
+### 15.10 Benchmark run viewer (`benchmark_viewer.py`, 2026-08-04)
+
+A static forensics site over a finished motion-tier benchmark run: one
+`index.html` outcome matrix for the suite plus one page per attempted trial
+(trajectory map on the env's floor plan, salient-event timeline, mission
+video, every detection hit with its distance to GT and the keyframes behind
+it, key numbers from `summary.json`). Plan:
+`.superpowers/sdd/2026-08-04-motion-bench-viewer/`. The viewer never scores
+anything -- `metrics.json`'s outcomes are the single source of truth -- and it
+copies nothing: every video/keyframe is a relative link into the run's own
+evidence tree.
+
+**One-command story (analyzer first, then viewer, then serve):**
+
+```
+source $ADT4_ENV/spark_env/bin/activate
+cd ~/dcist_ws/src/awesome_dcist_t4/dcist_sim/dcist_sim_isaac
+
+# 1. the analyzer writes metrics.json -- the viewer REFUSES to run without it
+python scripts/benchmark_analyze.py \
+  --trials-dir ~/adt4_output/motion_bench/trials_v1 \
+  --out-dir    ~/adt4_output/motion_bench/v1 \
+  --report     ~/adt4_output/motion_bench/v1/report.md
+
+# 2. the site (~2 s for v1's 40 pages; writes ONLY under <out-dir>/viewer/)
+python scripts/benchmark_viewer.py \
+  --trials-dir ~/adt4_output/motion_bench/trials_v1 \
+  --out-dir    ~/adt4_output/motion_bench/v1
+
+# 3. serve from the OUT-DIR, never from viewer/
+cd ~/adt4_output/motion_bench/v1 && python3 -m http.server
+#   -> http://localhost:8000/viewer/
+```
+
+**The four things that bite:**
+
+1. **`metrics.json` must exist.** Missing or unparseable, the tool exits
+   non-zero and prints the exact `benchmark_analyze.py` invocation to run --
+   a site of pages with no outcomes would be worse than no site.
+2. **Serve the out-dir, not `viewer/`.** Pages reference `../../trials/...`
+   and `../../mapping/...`, so an http.server rooted at `viewer/` shows every
+   page with dead videos and dead keyframes.
+3. **Floor plans come from `<env-usd>.floor.npz`.** One raster per env,
+   cached in `viewer/assets/floor_<env>.png` (+ `.json`, the world<->pixel
+   transform). No npz for that env -> the overlay silently falls back to world
+   metres, labeled on the page. Rebuild with the floor-plan rasterizer, not
+   by re-running the viewer.
+4. **Keyframes live in two different archives.** `archive_requery_hit` frames
+   come from the mapping pass (`<out-dir>/mapping/<cache_key12>/raw_robot/
+   agents`), live `requery_hit` frames from the trial's OWN
+   `raw_robot/agents`; the viewer prefers whatever dir the runner stamped on
+   its `keyframe_dir` event and reconstructs both as fallbacks. A hit event
+   records only a `frame_ts_range`, so a wide range (v1's live hits span up to
+   18 min) is sampled evenly, endpoints included, down to 6 frames.
+
+**v1 evidence (2026-08-04):** 40 pages / 40 not-attempted skipped, 3 env
+rasters (floor3, floor2, building1), 0 broken relative links across all 41
+documents, all 12 detection hits keyframed. The site is where the s23 clutter
+false positive reads at a glance: `score=0.738`, fused 10.40 m from the only
+`mop` in the scenario, with the 6 archive frames that produced it.
