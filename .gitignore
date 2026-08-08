@@ -5,3 +5,11 @@
 # Network diagnostics
 adt4_diagnostics/
 *.pyc
+
+# Colcon build artifacts
+build/
+install/
+log/
+
+# Local agent config
+.claude/
