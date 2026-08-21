@@ -25,3 +25,11 @@ label_names:
   - {label: 22, name: trash}
   - {label: 23, name: clothes}
   - {label: 24, name: ball}
+  # bldg45f6 belief-planning scene classes (2026-08-21). Ids 25-53 are
+  # sim-only and live solely in dcist_sim_isaac/gt_semantics.py's
+  # LABELSPACE_NAME_TO_ID (warehouse/camp/exploration props); the gap below is
+  # deliberate so the two never disagree on an id that IS shared.
+  - {label: 54, name: coffee_machine}
+  - {label: 55, name: microwave}
+  - {label: 56, name: notebook}
+  - {label: 57, name: computer}
