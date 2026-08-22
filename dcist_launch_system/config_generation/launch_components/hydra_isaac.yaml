@@ -1,0 +1,35 @@
+---
+# isaac_sim hydra window (Task 15e). Identical to `hydra.yaml` EXCEPT the
+# hydra node consumes dcist_sim's ground-truth semantic label topic
+# (`<robot>_zed/semantic/gt_image_raw`, published by ros_bridge when the
+# scenario sets `gt_semantics_pub: true`) instead of the live perception
+# frontend's `.../semantic/image_raw`. This places DSG object nodes from
+# pixel-perfect GT masks, collapsing the range-dependent FastSAM
+# mislocalization that blocked the A1 pick (docs/sim_runbook.md §12.11/§12.12).
+#
+# The instance_segmentation window still runs (it is harmless: the executor's
+# own YOLOE detection reads the RGB topic directly, and hydra no longer
+# subscribes to instance-seg's output). Only hydra's semantic input moves.
+nodes_to_monitor:
+  dsg_saver: {}
+  hydra: {external_monitor: {type: JsonMonitor}}
+  semantic_inference: {external_monitor: {type: JsonMonitor}}
+windows:
+  - window_name: hydra
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_instance_segmentation:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true labelspace_name:=instance_seg hydra_semantic_topic:=${ADT4_ROBOT_NAME}_zed/semantic/gt_image_raw
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra_visualizer:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_saver:=true
+      # Identity map-><robot>/map for single-robot Isaac: hydra maps in
+      # <robot>/map and that map IS the mission's global frame (ingest_map
+      # stores those coords; heracles republishes them tagged "map"). The
+      # default (10/20/1.57) verification offset would make the omniplanner
+      # read object coords in the wrong frame and drive the robot ~24 m off
+      # the cone -- the C2-mission pick blocker (see task-C2-report.md).
+      # Eventual real fix belongs in heracles_publisher_node's hardcoded
+      # frame_id="map" (heracles_ros/src/heracles_ros/heracles_publisher_node.py),
+      # not this identity-offset workaround.
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_static_map_to_robot_map:=true static_map_to_robot_map_x:=0 static_map_to_robot_map_y:=0 static_map_to_robot_map_yaw:=0

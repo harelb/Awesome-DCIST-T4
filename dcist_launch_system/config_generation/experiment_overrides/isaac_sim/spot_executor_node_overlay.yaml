@@ -1,0 +1,72 @@
+---
+/**:
+  ros__parameters:
+    spot_interface: sim
+    sim_rgb_topic: /$(var robot_name)/$(var robot_name)_zed/rgb/image_rect_color
+    body_frame: $(var robot_name)/body
+    mid_level_planner_type: identity   # P1: derisk; astar+live-occupancy is a stretch goal
+    detector_confidence: 0.02
+    # goal_tolerance 0.8 (base_params default is 2.8): the pick-object action
+    # sends the robot to the object's DSG position, but the magic-grasp backend
+    # only attaches an object within grasp_radius (1.5 m, field_smoke.yaml) of the
+    # gripper -- it does NOT walk-in to the detected centroid like the real BD
+    # grasp does. With the 2.8 m default the follower stops up to 2.8 m short, so
+    # the gripper is beyond the 1.5 m reach and the grasp service returns failure
+    # even though YOLOE detected the object. Detection range is unaffected.
+    # See task-12-report.md.
+    #
+    # 0.95, not 0.8: follow_path's arrival test measures the base against the
+    # REQUESTED endpoint (the object centre), but the sim planner parks the
+    # base outside the object's inflated footprint -- measured 0.74-0.79 m,
+    # plus the planner's own terminal tolerance (nav.goal_tol_m, 0.10 in
+    # camp_fleet_execution.yaml) = up to 0.89 m. With 0.8 the follower could
+    # never break: the planner reported "reached" and commanded zero velocity
+    # while the executor kept re-publishing waypoints until its wall-clock
+    # timeout. That deadlock -- not the walking policy -- is what produced the
+    # fleet "traverse stalls" (Euclid ~410 s vs Hamilton's 64 s full mission);
+    # it only cleared when the approach angle happened to snap closer.
+    # 0.95 clears the 0.89 m worst case and stays under the arm's 0.984 m
+    # reach (actual parked distance is <= 0.89, so the grasp stays in range).
+    goal_tolerance: 0.95
+    # The follower's budget is wall-clock but the robot walks in sim time, so
+    # it must be divided by the real-time factor. Measured RTF for two-policy
+    # fleet execution is ~0.52 (dcist_sim 8cb4772; sim_app logs it every
+    # --profile-interval seconds), giving 6 / 0.52 ~= 12 s/m; 20 s/m keeps
+    # margin for render-load spikes while still failing a genuinely stuck
+    # traverse in tens of seconds rather than minutes. Default deployments are
+    # unchanged (base_params keeps the real-robot 6 s/m).
+    #
+    # This was 180 s/m while an unbounded rep.modify.pose leak dragged RTF to
+    # ~0.005; that leak is fixed, and a budget sized for it only delays
+    # honest failures.
+    follow_timeout_per_meter: 20.0
+    # Single-quoted keys/values (not double-quoted JSON): the generated params
+    # file is loaded via `allow_substs: true` (master.launch.yaml), whose
+    # substitution pass strips backslash-escaped double quotes ANYWHERE in the
+    # file text (not just inside $(...) tokens) -- a double-quoted-JSON value
+    # like '{"bag": "cement bag"}' gets its escaped inner quotes silently
+    # stripped after config_generation's YAML round-trip re-quotes it, which
+    # corrupts the file into invalid YAML ("substituted parameter file is not
+    # a valid yaml file"). Single quotes avoid embedding any backslash at all.
+    # Consumer parses this via yaml.safe_load (spot_executor_ros.py), which
+    # accepts single-quoted YAML strings fine -- it is not strict JSON.
+    # 'box' -> 'cement bag': the live-perception frontend (YOLOE instance-seg,
+    # labelspace `instance_seg`) classifies the duffel_bag asset as class `box`
+    # (label 17), not `bag`, so the DSG object node -- and hence the planner's
+    # Pick.object_class -- is `box` for the field_smoke bag. Mapping `box` to the
+    # Task-6-tuned prompt `cement bag` (already registered at detector init via
+    # the `bag` synonym) makes the grasp query use the proven detection prompt
+    # regardless of whether the frontend labels the duffel `box` or `bag`. It
+    # also sidesteps a latent crash in Detector.set_up_detector (detection_utils
+    # .py: appends via the low-level `yolo_model.model.set_classes(names)`, which
+    # on this ultralytics YOLOE build requires an `embeddings` arg and raises;
+    # only reached for a class NOT pre-registered in ["","bag","cone","pipe"]).
+    # With the synonym, `box` resolves to the already-registered `cement bag`, so
+    # that append path is never taken. See task-12-report.md.
+    # Warehouse-prop entries (2026-07-18 mapping harness): DSG labels from the
+    # extended instance_seg labelspace (25-30) mapped to their YOLOE prompts.
+    # Plain prompts are evidence-based (probe_report_2026-07.md hit table);
+    # fire_extinguisher's underscore label maps back to the two-word prompt.
+    # Every value is registered at detector init from this dict, so the
+    # detection_utils set_classes crash path stays untaken.
+    detector_class_synonyms: "{'bag': 'cement bag', 'pipe': 'gray pipe', 'box': 'cement bag', 'pallet': 'pallet', 'forklift': 'forklift', 'shelf': 'shelf', 'barrel': 'barrel', 'ladder': 'ladder', 'fire_extinguisher': 'fire extinguisher'}"

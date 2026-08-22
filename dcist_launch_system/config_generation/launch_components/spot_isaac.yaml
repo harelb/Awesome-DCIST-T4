@@ -1,0 +1,71 @@
+---
+# Robot-side stack for the `spot_isaac` experiment: SimSpot-backed executor +
+# calibration/state publishing + an unattended manipulation auto-approver,
+# all driven against Isaac Sim's ros_bridge (dcist_sim_isaac) over ROS2.
+#
+# The Isaac Sim process itself is NOT launched from this tmux window: it
+# lives in a separate Python environment (the Isaac Sim venv, not
+# ${ADT4_WS}/install) and must be started independently, outside tmux.
+# Source ROS first (the non---smoke path imports rclpy; use the .zsh
+# variants under zsh -- setup.bash breaks in zsh):
+#   source /opt/ros/jazzy/setup.zsh
+#   source ${ADT4_WS}/install/setup.zsh
+#   cd ${ADT4_WS}/src/awesome_dcist_t4
+#   OMNI_KIT_ACCEPT_EULA=YES PRIVACY_CONSENT=Y \
+#   PYTHONPATH=${ADT4_WS}/src/awesome_dcist_t4/dcist_sim/dcist_sim_isaac \
+#   ADT4_ROBOT_NAME=<robot_name> \
+#   ${ADT4_ENV}/isaac_sim/bin/python -m dcist_sim_isaac.sim_app \
+#       --scenario dcist_sim/scenarios/field_smoke.yaml --headless
+# NOTE: the sim reads which robots to spawn from the scenario YAML, not from
+# ADT4_ROBOT_NAME -- ADT4_ROBOT_NAME only selects the ROS-side namespace used
+# by this tmux window's panes below. It MUST name one of the scenario's
+# robots (sim_app.py logs a loud warning, but does not abort, on a mismatch).
+# See dcist_sim/dcist_sim_isaac/README.md for details.
+#
+# No teleop pane here (unlike spot_sim.yaml) per the P1 plan.
+#
+# No static map->robot/map or robot/map->odom panes: this experiment uses the
+# `map` launch_config (live hydra), which already publishes
+# map->$(var robot_name)/map via hydra.yaml and $(var robot_name)/map->odom
+# via the live hydra backend -- mirrors spot_real.yaml, not spot_sim.yaml
+# (which is only used by the offline spot_prior_dsg experiment).
+#
+# launch_calibration_publisher:=true is REQUIRED (not optional, unlike a real
+# robot run): it publishes the frontleft->zed_camera_link static TF hop that
+# the sim's ros_bridge does not provide itself (ros_bridge/camera.py only
+# provides body->frontleft and zed_camera_link->...->optical_frame).
+#
+# launch_zed is intentionally NOT enabled: the sim's ros_bridge already
+# publishes the ZED rgb/depth topics and the optical TF chain itself, so
+# running the real zed-ros2-wrapper here would double-publish both.
+#
+# Non-interactive bring-up (no real TTY, e.g. CI/agent use): `run-adt4`
+# always calls `tmuxp load` in attached mode, which fails with
+# "open terminal failed: not a terminal" -- this is generic tmuxp/tmux
+# behavior, reproduces identically for any pre-existing experiment (verified
+# with spot_bag-default), and is NOT specific to spot_isaac. Workaround:
+# `run-adt4 ... --tmuxp-args="-d -L <socket>"` (detached, on an ISOLATED tmux
+# socket). The `-L <socket>` matters: if the calling shell is itself nested
+# inside tmux (its own $TMUX set) and reuses the default server, a libtmux
+# bug in `Session.cmd()` (naive `"-t" in str(arg)` substring check across ALL
+# args, including environment VALUES) can silently drop the `-t <session>`
+# target flag whenever an env var value contains the substring "-t" -- e.g.
+# an `ADT4_OUTPUT_DIR` path built from this repo's own directory name
+# (".../awesome_dcist_t4/..." contains "-t4") -- misdirecting
+# `set-environment` (and hence ADT4_OUTPUT_DIR et al.) onto the calling
+# shell's own ambient tmux session instead of the new one, which then makes
+# every `ros2 launch master.launch.yaml ...` pane fail with "environment
+# variable 'ADT4_OUTPUT_DIR' does not exist" (master.launch.yaml's
+# `$(env ADT4_OUTPUT_DIR)` `let` is evaluated unconditionally on every
+# invocation). A dedicated `-L` socket sidesteps this since it has no other
+# session to misdirect to. See task-11-report.md for the full trace.
+nodes_to_monitor:
+  spot_executor: {}
+windows:
+  - window_name: isaac_spot
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_executor:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_spot_state_publisher:=true launch_calibration_publisher:=true launch_spot_base_link:=true
+      - ros2 run dcist_sim_ros auto_approver --ros-args -r __ns:=/$ADT4_ROBOT_NAME -r manipulation_request:=/$ADT4_ROBOT_NAME/spot_executor_node/manipulation_request -r pick_confirmation:=/$ADT4_ROBOT_NAME/spot_executor_node/pick_confirmation

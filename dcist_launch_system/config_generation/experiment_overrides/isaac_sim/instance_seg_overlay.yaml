@@ -1,0 +1,19 @@
+# isaac_sim: warehouse-prop classes for the mapping harness (2026-07-18).
+# The config composition APPENDS overlay list entries to the base list
+# (verified: a full-list overlay produced 25+31=56 prompts), so this overlay
+# holds ONLY the new classes -- they land at indices 25-30, in lockstep with
+# dcist_launch_system/labelspaces/instance_seg.yaml (text_prompt is
+# positional: index == label id).
+# Class choices are evidence-based: YOLOE hits on the full_warehouse probe
+# renders (dcist_sim/docs/probe_report_2026-07.md) at detector_confidence
+# 0.02 -- pallet 5, forklift 7, shelf 2, barrel 2, ladder 9,
+# "fire extinguisher" 6. `table` scored 0 and was dropped.
+model:
+  instance_model:
+    text_prompt:
+      - pallet
+      - forklift
+      - shelf
+      - barrel
+      - ladder
+      - fire extinguisher

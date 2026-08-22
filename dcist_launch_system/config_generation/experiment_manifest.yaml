@@ -6,6 +6,8 @@ launch_configs:
   map: [main, hydra, roman]
   # like `map`, but hydra consumes ROMAN intra-session loop closures (drift reduction)
   map_lc: [main, hydra_lc, roman]
+  # like `map`, but hydra consumes dcist_sim's GT semantic label topic (Task 15e)
+  map_isaac: [main, hydra_isaac, roman]
   relocalize: [main, hydra_multi, roman]
   # development groupings
   map_old: [main, hydra_old, roman]
@@ -23,6 +25,7 @@ configs:
   prior_dsg: []
   relocalize: []
   apollo_relocalize: [relocalize]
+  isaac_sim: []
 # Variant names shown first in run-adt4 session selection
 important_variants:
   - base_station-default
@@ -100,3 +103,27 @@ experiments:
   spot_prior_dsg_heracles:
     launch_config: [plan_prior_heracles, spot_sim]
     config: [prior_dsg]
+
+  # Isaac Sim — full robot-side stack (live hydra) against dcist_sim_isaac,
+  # ported from feature/epistemic_grounding for the bldg45f6 belief-planning
+  # coffee demo (2026-08-21). See dcist_sim_isaac/docs/bldg45f6_coffee_demo.md.
+  spot_isaac:
+    launch_config: [map, spot_isaac]
+    config: [isaac_sim]
+  spot_isaac_gt:
+    launch_config: [map_isaac, spot_isaac]
+    config: [isaac_sim]
+  # Mission variants: roman-off (GPU savings; sim GT localization makes
+  # relocalization unnecessary). The _gt variant ingests dcist_sim's GT
+  # semantic labels (hydra_isaac) instead of FastSAM.
+  spot_isaac_mission:
+    launch_config: [main, hydra, spot_isaac]
+    config: [isaac_sim]
+  spot_isaac_mission_gt:
+    launch_config: [main, hydra_isaac, spot_isaac]
+    config: [isaac_sim]
+  # Planning side: omniplanner + rviz reading the Neo4j-served graph
+  # (heracles/dsg_out), NOT live hydra. Start AFTER map ingest.
+  isaac_mission_base:
+    launch_config: [heracles_mission, planning_heracles_mission]
+    config: [isaac_sim]
