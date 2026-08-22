@@ -86,6 +86,12 @@ launch:
   # (subscriber stays on its private topic that nobody publishes). Intra-session ROMAN
   # loop closures are enabled by pointing this at roman/roman_lc/pose_graph_update.
   - arg: {name: hydra_external_lc_topic, default: '~/external_loop_closures'}
+  # Topic feeding hydra's semantic LABEL image. Default = the live perception
+  # frontend's output ($(var camera)/semantic/image_raw). The isaac_sim
+  # experiment points this at dcist_sim's ground-truth label topic
+  # ($(var camera)/semantic/gt_image_raw) so DSG objects are placed from
+  # pixel-perfect GT masks (Task 15e; see the hydra_isaac launch component).
+  - arg: {name: hydra_semantic_topic, default: $(var camera)/semantic/image_raw}
   - node:
       if: $(var launch_hydra)
       pkg: hydra_ros
@@ -97,7 +103,7 @@ launch:
         - {from: ~/input/camera/depth_registered/image_rect, to: $(var camera)/depth/depth_registered}
         - {from: ~/input/camera/rgb/image_raw, to: $(var camera)/rgb/image_rect_color}
         - {from: ~/input/camera/rgb/camera_info, to: $(var camera)/rgb/camera_info}
-        - {from: ~/input/camera/semantic/image_raw, to: $(var camera)/semantic/image_raw}
+        - {from: ~/input/camera/semantic/image_raw, to: $(var hydra_semantic_topic)}
         - {from: ~/external_loop_closures, to: $(var hydra_external_lc_topic)}
         - {from: ~/status, to: ros_system_monitor/hydra/status}
       args: >-
@@ -109,6 +115,7 @@ launch:
 
   # Hydra Visualizer
   - arg: {name: launch_hydra_visualizer, default: 'false'}
+  - arg: {name: hydra_visualizer_dsg_topic, default: hydra/backend/dsg}
   - node:
       if: $(var launch_hydra_visualizer)
       pkg: hydra_visualizer
@@ -117,7 +124,7 @@ launch:
       param:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
-        - {from: ~/dsg, to: hydra/backend/dsg}
+        - {from: ~/dsg, to: $(var hydra_visualizer_dsg_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra_visualizer.yaml
@@ -317,6 +324,7 @@ launch:
 
   # Omniplanner
   - arg: {name: launch_omniplanner, default: 'false'}
+  - arg: {name: omniplanner_dsg_topic, default: hydra/backend/dsg}
   - pyenv_node:
       if: $(var launch_omniplanner)
       pkg: omniplanner_ros
@@ -328,7 +336,7 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/omniplanner_node.yaml, allow_substs: true}
       remap:
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
-        - {from: ~/dsg_in, to: hydra/backend/dsg}
+        - {from: ~/dsg_in, to: $(var omniplanner_dsg_topic)}
         - {from: ~/llm_response, to: rviz2_node/llm_response}
 
   # Scene Graph Publisher
@@ -398,13 +406,29 @@ launch:
       args: --frame-id $(var robot_name)/body --child-frame-id $(var robot_name)/base_link
 
   # Static TF to replace Hydra multi map->robot/map TF.
-  # Non-identity transform for verification.
+  # Non-identity transform for verification by default. The offset is
+  # parameterized so single-robot deployments that ingest the robot's OWN
+  # hydra map AS the global "map" frame (e.g. the Isaac camp mission: hydra
+  # maps in <robot>/map, ingest_map stores those coords, heracles republishes
+  # them tagged frame_id="map") can set it to identity -- otherwise the
+  # omniplanner reads object coords (in <robot>/map) as if they were "map"
+  # while looking the robot pose up through this offset, an uncorrected frame
+  # mismatch that drives the robot ~24 m off the target. See task-C2-report.md
+  # "Root-cause investigation". Defaults unchanged (10/20/1.57) so every
+  # existing real-robot / bag / multi-robot session keeps the verification TF.
+  # The eventual REAL fix (this static-TF is a workaround) belongs in
+  # heracles_publisher_node's hardcoded `frame_id="map"`
+  # (heracles/heracles_ros/src/heracles_ros/heracles_publisher_node.py) --
+  # it should republish under the robot's own map frame instead.
   - arg: {name: launch_static_map_to_robot_map, default: 'false'}
+  - arg: {name: static_map_to_robot_map_x, default: '10'}
+  - arg: {name: static_map_to_robot_map_y, default: '20'}
+  - arg: {name: static_map_to_robot_map_yaw, default: '1.57'}
   - node:
       if: $(var launch_static_map_to_robot_map)
       pkg: tf2_ros
       exec: static_transform_publisher
-      args: --frame-id map --child-frame-id $(var robot_name)/map --x 10 --y 20 --yaw 1.57
+      args: --frame-id map --child-frame-id $(var robot_name)/map --x $(var static_map_to_robot_map_x) --y $(var static_map_to_robot_map_y) --yaw $(var static_map_to_robot_map_yaw)
 
   # Static TF to replace Hydra backend TF with non-identity transform for verification
   # This node is used to replace the backend TF from hydra, when we are running planning offline.
@@ -417,6 +441,7 @@ launch:
 
   # Heracles scene graph publisher
   - arg: {name: launch_heracles_publisher, default: 'false'}
+  - arg: {name: heracles_dsg_out_topic, default: hydra/backend/dsg}
   - pyenv_node:
       if: $(var launch_heracles_publisher)
       pkg: heracles_ros
@@ -428,7 +453,7 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/heracles_publisher_node.yaml, allow_substs: true}
       remap:
         - from: ~/dsg_out
-          to: hydra/backend/dsg
+          to: $(var heracles_dsg_out_topic)
 
   # State updater for heracles
   - arg: {name: launch_heracles_state_updater, default: 'false'}
