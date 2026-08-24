@@ -1,0 +1,26 @@
+---
+# isaac_sim hydra window, PRIOR-MAP variant (2026-08-24). Identical to
+# `hydra_isaac.yaml` EXCEPT hydra loads `instance_seg_base.yaml` — the
+# closed-set labelspace WITHOUT the bldg45f6 belief-planning classes
+# (coffee_machine/microwave/notebook/computer, ids 54-57). dcist_sim still
+# renders those ids into gt_image_raw; hydra simply has no entry for them,
+# so the saved prior map is vocabulary-blind to the demo's target classes
+# while the RGB keyframes still image them for open-vocab reprocessing.
+# Used by the spot_isaac_mission_gt_base session (two-stacks-one-robot plan,
+# phase 0). Keep every OTHER pane in lockstep with hydra_isaac.yaml.
+nodes_to_monitor:
+  dsg_saver: {}
+  hydra: {external_monitor: {type: JsonMonitor}}
+  semantic_inference: {external_monitor: {type: JsonMonitor}}
+windows:
+  - window_name: hydra
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_instance_segmentation:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true labelspace_name:=instance_seg_base hydra_semantic_topic:=${ADT4_ROBOT_NAME}_zed/semantic/gt_image_raw
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra_visualizer:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_saver:=true
+      # Identity map-><robot>/map, same rationale as hydra_isaac.yaml (the
+      # C2-mission frame-offset blocker; see that file's comment).
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_static_map_to_robot_map:=true static_map_to_robot_map_x:=0 static_map_to_robot_map_y:=0 static_map_to_robot_map_yaw:=0

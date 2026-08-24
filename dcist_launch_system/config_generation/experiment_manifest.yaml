@@ -122,6 +122,12 @@ experiments:
   spot_isaac_mission_gt:
     launch_config: [main, hydra_isaac, spot_isaac]
     config: [isaac_sim]
+  # PRIOR-MAP variant (2026-08-24): GT semantics through the BASE labelspace
+  # (instance_seg_base — no bldg45f6 belief classes), so the saved map is
+  # vocabulary-blind to the demo targets. two-stacks-one-robot plan phase 0.
+  spot_isaac_mission_gt_base:
+    launch_config: [main, hydra_isaac_base, spot_isaac]
+    config: [isaac_sim]
   # Planning side: omniplanner + rviz reading the Neo4j-served graph
   # (heracles/dsg_out), NOT live hydra. Start AFTER map ingest.
   isaac_mission_base:

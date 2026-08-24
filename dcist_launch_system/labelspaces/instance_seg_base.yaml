@@ -1,0 +1,37 @@
+---
+# BASE variant of instance_seg.yaml (2026-08-24): the closed-set labelspace
+# as it stood BEFORE the bldg45f6 belief-planning classes (ids 54-57) were
+# appended. Used by the *_gt_base sessions to build a PRIOR MAP that is
+# deliberately vocabulary-blind to coffee_machine / microwave / notebook /
+# computer: dcist_sim still renders those ids into gt_image_raw, but hydra
+# has no entry for them, so they never become DSG objects — while the RGB
+# keyframes still image them for later open-vocab reprocessing (SAM3).
+# This is the closed-vs-open-set premise of the two-stacks-one-robot plan,
+# phase 0. Keep ids 0-24 in LOCKSTEP with instance_seg.yaml; never re-add
+# 54-57 here — that would defeat the file's purpose.
+label_names:
+  - {label: 0, name: ignore}
+  - {label: 1, name: chair}
+  - {label: 2, name: cone}
+  - {label: 3, name: bag}
+  - {label: 4, name: table}
+  - {label: 5, name: tree}
+  - {label: 6, name: car}
+  - {label: 7, name: van}
+  - {label: 8, name: truck}
+  - {label: 9, name: bus}
+  - {label: 10, name: bicycle}
+  - {label: 11, name: door}
+  - {label: 12, name: pole}
+  - {label: 13, name: fence}
+  - {label: 14, name: sign}
+  - {label: 15, name: window}
+  - {label: 16, name: bed}
+  - {label: 17, name: box}
+  - {label: 18, name: basket}
+  - {label: 19, name: seating}
+  - {label: 20, name: flag}
+  - {label: 21, name: light}
+  - {label: 22, name: trash}
+  - {label: 23, name: clothes}
+  - {label: 24, name: ball}
