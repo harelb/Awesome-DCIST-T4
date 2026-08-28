@@ -69,7 +69,7 @@ renderer:
         scale: 0.1
         alpha: 0.8
         color:
-          type: UniformColorAdapter
+          type: UniformEdgeColorAdapter
           color: [0, 0, 0]
   interlayer_edges:
     - {from: 3*, to: 2p*, draw: false}
