@@ -122,6 +122,7 @@ backend:
   enable_async_publish: false
   add_places_to_deformation_graph: false
   optimize_on_lc: false
+  optimize_every_update: false
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects:
