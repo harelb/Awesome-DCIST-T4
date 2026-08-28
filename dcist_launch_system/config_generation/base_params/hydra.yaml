@@ -119,6 +119,11 @@ backend:
   enable_async_publish: false
   add_places_to_deformation_graph: false
   optimize_on_lc: true
+  # Upstream #154 gated our "solve only on new loop closures" fix behind this flag and
+  # defaulted it true, which restores the old have_loopclosures_ latch (a full ~1.86 s
+  # PGO solve on EVERY spin once any LC has been seen). false = solve only when new loop
+  # closures arrive; the non-solve path still deforms with the cached optimized values.
+  optimize_every_update: false
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects:
