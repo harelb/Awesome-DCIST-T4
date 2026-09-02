@@ -1,0 +1,78 @@
+---
+# isaac_sim_meshfix (2026-08-27): isaac_sim + two reconstruction fixes, isolated
+# in their own config so the coffee-demo / prior-map isaac sessions keep the
+# exact params they were validated with.
+#
+# FIX 1 -- floor holes from grazing incidence.
+# Hydra's TSDF is purely projective: sdf = d_to_surface - distance_to_voxel
+# (hydra/src/reconstruction/projective_integrator.cpp:328), measured along the
+# RAY, with no incidence-angle correction. The truncation band's VERTICAL extent
+# is therefore truncation*sin(theta), which collapses on near-parallel surfaces.
+# With the camera 0.60 m above the floor and the floor plane landing exactly
+# midway between voxel layers (+-0.05 at voxel_size 0.1), the first
+# behind-surface voxel has |sdf| = D*0.05/0.65, exceeding truncation_distance
+# 0.3 at D > 3.90 m (horizontal 3.55 m). Past that, projective_integrator.cpp
+# :229-237 DISCARDS the measurement outright, because extra_integration_distance
+# defaults to 0.0f -- the voxel keeps weight 0 forever and mesh_integrator.cpp
+# :217 then returns on the whole cube. Measured on test_issac_hydra: 21.7% of
+# the floor the depth actually measured (303 m^2) had no mesh, and 96.6% of all
+# floor mesh lay inside the predicted 3.55 m radius. The ceiling (2.10 m
+# stand-off -> predicted 12.4 m limit) held ~99% until max_range, which is the
+# control proving it is incidence, not range.
+#
+# 0.5 m admits behind-surface voxels out to |sdf| <= 0.8 m (clipped to
+# -truncation), covering the floor across the full 10 m sensor range.
+# KNOWN COSTS: fills up to 0.5 m behind EVERY surface, so structures thinner
+# than 1.0 m thicken; far-field floor snaps to the voxel midplane (+-0.05 m).
+active_window:
+  projective_integrator:
+    extra_integration_distance: 0.5
+
+# FIX 2 -- traversability places under-linking.
+# confidence = observed_z_voxels / 6 (traversability_estimator.cpp:290,321,334),
+# so min_confidence 1.0 demands ALL SIX z-voxels of the 0.5 m band be carved;
+# partially-observed-but-free columns become UNKNOWN, which is a hard barrier to
+# the region-growing flood fill that creates place-place edges. Measured on
+# test_issac_hydra: boundary bins facing the gaps were 54% UNKNOWN / 21%
+# traversable, vs 20% / 78% across edges that did form; the places graph came
+# out as 33 components (giant 84%) with 21% articulation points, against 5.6%
+# for a plain Delaunay graph over the identical points.
+# 0.4 requires >=40% of the column observed. min_traversability 1.0 and
+# pessimistic: true are KEPT, so any OCCUPIED voxel still yields INTRAVERSABLE
+# and real walls still block.
+frontend:
+  traversability_places:
+    estimator:
+      min_confidence: 0.4
+
+# FIX 3 -- traversability places under-linking, backend connector half.
+# Place-place edges come from two sources: the frontend's voxel-adjacency
+# (region_growing_traversability_clustering.cpp:517-526, positive weight) and
+# the backend's boundary-overlap connector (findConnections ->
+# TravNodeAttributes::intersects, weights -1/-2). The backend half is where
+# regions from DIFFERENT active-window passes are supposed to get stitched
+# together, and it essentially never fires: fromExteriorPoints
+# (spark_dsg/src/node_attributes.cpp:797-831) takes the MINIMUM radius per
+# angular bin and backfills empty bins with the global minimum, so the stored
+# star polygon is a heavily shrunk INNER approximation (measured on
+# test_issac_hydra: median min_radius 0.33 m vs median max_radius 1.84 m), and
+# since the clustering partitions voxels disjointly, neighbouring regions abut
+# instead of overlapping. Of 863 cross-component place pairs within 8 m, 858
+# failed intersects().
+# The connector now falls back to a proximity link, gated so it cannot bridge a
+# wall: the two centroids must be within max_connection_distance_m, the gap left
+# between the two boundaries along the connecting ray must be <=
+# max_connection_gap_m, and (require_traversable_boundary, default true) the
+# boundary bins each place presents to the other must be TRAVERSABLE -- a wall
+# leaves them INTRAVERSABLE and unobserved space leaves them UNKNOWN, so a link
+# through a wall is refused.
+# 3.0 m is the value simulated offline on the 361-place map: components
+# 33 -> 7, giant component 304 -> 352 of 361.
+# DEFAULT IS OFF (max_connection_distance_m 0.0) everywhere else, so this key is
+# the only thing that turns the fallback on.
+backend:
+  update_functors:
+    traversability:
+      max_connection_distance_m: 3.0
+      max_connection_gap_m: 1.0
+      require_traversable_boundary: true

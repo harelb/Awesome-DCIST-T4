@@ -26,6 +26,9 @@ configs:
   relocalize: []
   apollo_relocalize: [relocalize]
   isaac_sim: []
+  # isaac_sim + projective-integrator / traversability fixes (2026-08-27).
+  # Separate config so the validated isaac sessions are untouched.
+  isaac_sim_meshfix: [isaac_sim]
 # Variant names shown first in run-adt4 session selection
 important_variants:
   - base_station-default
@@ -128,6 +131,40 @@ experiments:
   spot_isaac_mission_gt_base:
     launch_config: [main, hydra_isaac_base, spot_isaac]
     config: [isaac_sim]
+  # Isaac Sim BAG replay (2026-08-26): open-set mapping (YOLOE instance-seg ->
+  # hydra) from a dcist_sim_isaac ros_bridge recording. No roman (sim GT
+  # odometry needs no loop closures, and it frees the GPU for YOLOE), no robot
+  # hardware/executor windows, plus the isaac_bag_tf namespace bridge.
+  # Play the bag WITHOUT --filter-tf (the bag's `odom`/`body` frames do not
+  # contain the robot name) and remap the camera topics:
+  #   /$ROBOT/camera/rgb         := /$ROBOT/${ROBOT}_zed/rgb/image_rect_color
+  #   /$ROBOT/camera/depth       := /$ROBOT/${ROBOT}_zed/depth/depth_registered
+  #   /$ROBOT/camera/camera_info := /$ROBOT/${ROBOT}_zed/rgb/camera_info
+  spot_isaac_bag:
+    launch_config: [main, hydra, rviz, isaac_bag_tf]
+    config: [isaac_sim]
+  # Same bag replay, with the two reconstruction fixes (see
+  # experiment_overrides/isaac_sim_meshfix/hydra_overlay.yaml).
+  spot_isaac_bag_meshfix:
+    launch_config: [main, hydra, rviz, isaac_bag_tf]
+    config: [isaac_sim_meshfix]
+  # Same again, for the newer `collect_env_*` recordings whose unnamespaced TF
+  # root is `world -> base` (full Spot URDF on /tf, no /tf_static) instead of
+  # `odom -> body`. Only the TF bridge differs -- see isaac_bag_tf_world.yaml.
+  spot_isaac_bag_world_meshfix:
+    launch_config: [main, hydra, rviz, isaac_bag_tf_world]
+    config: [isaac_sim_meshfix]
+  # Same again, for BEHAVIOR-1K / OmniGibson `og_ros` viewer recordings, whose
+  # unnamespaced TF root is `world -> odom -> {camera_link, viewer_optical}` --
+  # a free-flying camera with no robot body. Only the TF bridge differs -- see
+  # behavior1k_bag_tf.yaml. Camera topic remaps for these bags:
+  #   /og/viewer/rgb         := /$ROBOT/${ROBOT}_zed/rgb/image_rect_color
+  #   /og/viewer/depth       := /$ROBOT/${ROBOT}_zed/depth/depth_registered
+  #   /og/viewer/camera_info := /$ROBOT/${ROBOT}_zed/rgb/camera_info
+  behavior1k_bag_meshfix:
+    launch_config: [main, hydra, rviz, behavior1k_bag_tf]
+    config: [isaac_sim_meshfix]
+
   # Planning side: omniplanner + rviz reading the Neo4j-served graph
   # (heracles/dsg_out), NOT live hydra. Start AFTER map ingest.
   isaac_mission_base:

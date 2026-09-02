@@ -62,6 +62,7 @@ setup(
             "dsg_saver_node = dcist_launch_system.dsg_saver_node:main",
             "record_topics = dcist_launch_system.record_topics:main",
             "static_tf_from_json = dcist_launch_system.static_tf_from_json:main",
+            "ground_projected_body_tf = dcist_launch_system.ground_projected_body_tf:main",
             "run_offline_fusion = dcist_launch_system.run_offline_fusion:main",
         ],
     },

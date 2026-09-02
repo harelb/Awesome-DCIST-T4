@@ -1,0 +1,30 @@
+---
+# TF bridge for Isaac-Sim rosbags that publish the FULL Spot URDF tree
+# (`collect_env_*` recordings, 2026-08-29). Variant of isaac_bag_tf.yaml for a
+# different unnamespaced root: these bags carry everything on /tf (there is no
+# /tf_static at all) as
+#
+#   world -> base -> {spot_camera, fl_hip, ..., arm0_link_*}
+#
+# rather than the older `odom -> body` + static `body -> <robot>_camera`. The
+# two identity hops below splice that tree into the namespaced one the ADT4
+# stack expects (hydra.yaml odom_frame/robot_frame):
+#
+#   <robot>/map --(hydra backend)--> <robot>/odom --(here)--> world
+#     --(bag /tf)--> base --(here)--> <robot>/base_link
+#                        \--(bag /tf)--> spot_camera
+#
+# so hydra resolves the odometry lookup (<robot>/odom -> <robot>/base_link) and
+# the `extrinsics: {type: ros}` camera lookup (<robot>/base_link -> spot_camera,
+# the camera_info frame_id, reached by walking up through `base`).
+#
+# NOTE: play the bag WITHOUT run-adt4's default `--filter-tf -k '.*<robot>.*'`
+# keep-filter -- it would drop `world` and `base`, which do not contain the
+# robot name. See the spot_isaac_bag_world_meshfix experiment.
+windows:
+  - window_name: isaac_bag_tf
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 run tf2_ros static_transform_publisher --frame-id ${ADT4_ROBOT_NAME}/odom --child-frame-id world
+      - ros2 run tf2_ros static_transform_publisher --frame-id base --child-frame-id ${ADT4_ROBOT_NAME}/base_link
