@@ -154,13 +154,16 @@ experiments:
   spot_isaac_bag_world_meshfix:
     launch_config: [main, hydra, rviz, isaac_bag_tf_world]
     config: [isaac_sim_meshfix]
-  # Same again, for BEHAVIOR-1K / OmniGibson `og_ros` viewer recordings, whose
-  # unnamespaced TF root is `world -> odom -> {camera_link, viewer_optical}` --
-  # a free-flying camera with no robot body. Only the TF bridge differs -- see
-  # behavior1k_bag_tf.yaml. Camera topic remaps for these bags:
-  #   /og/viewer/rgb         := /$ROBOT/${ROBOT}_zed/rgb/image_rect_color
-  #   /og/viewer/depth       := /$ROBOT/${ROBOT}_zed/depth/depth_registered
-  #   /og/viewer/camera_info := /$ROBOT/${ROBOT}_zed/rgb/camera_info
+  # Same again, for BEHAVIOR-1K / OmniGibson recordings, whose unnamespaced TF
+  # root is `world -> odom -> {camera_link, <stream>_optical}` -- a free-flying
+  # camera with no robot body. Only the TF bridge differs -- see
+  # behavior1k_bag_tf.yaml, which also documents OG_OPTICAL_FRAME/OG_BODY_Z.
+  # Camera topic remaps, with <stream> = `viewer` for the 2026-08-31 og_ros
+  # recordings and `survey` for the verified camera tours in
+  # /data/openset_bags/behavior1k_bags:
+  #   /og/<stream>/rgb         := /$ROBOT/${ROBOT}_zed/rgb/image_rect_color
+  #   /og/<stream>/depth       := /$ROBOT/${ROBOT}_zed/depth/depth_registered
+  #   /og/<stream>/camera_info := /$ROBOT/${ROBOT}_zed/rgb/camera_info
   behavior1k_bag_meshfix:
     launch_config: [main, hydra, rviz, behavior1k_bag_tf]
     config: [isaac_sim_meshfix]

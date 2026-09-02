@@ -4,13 +4,27 @@
 # root layout. These bags carry everything on /tf (there is no /tf_static at
 # all) as
 #
-#   world -> odom -> {camera_link, viewer_optical}
+#   world -> odom -> {camera_link, <stream>_optical}
 #
 # i.e. a FREE-FLYING camera with no robot body at all: `camera_link` is the
-# body-convention camera pose and `viewer_optical` is the same pose in optical
+# body-convention camera pose and `<stream>_optical` is the same pose in optical
 # convention (verified on behavior1k_apt_tour: the two quaternions differ by
 # exactly the camera_link->optical rotation, and `world -> odom` is a constant
-# identity). `viewer_optical` is what the rgb/depth/camera_info headers carry.
+# identity). `<stream>_optical` is what the rgb/depth/camera_info headers carry.
+#
+# `<stream>` varies by recording generation, so the optical frame is set with
+# OG_OPTICAL_FRAME (default `viewer_optical`):
+#
+#   og_ros viewer recordings (behavior1k_apt_tour, 2026-08-31)
+#       topics /og/viewer/{rgb,depth,camera_info}, frame `viewer_optical`
+#       -> default, no env var needed
+#   verified camera tours (/data/openset_bags/behavior1k_bags, 2026-09-01)
+#       topics /og/survey/{rgb,depth,camera_info}, frame `survey_optical`
+#       -> export OG_OPTICAL_FRAME=survey_optical
+#
+# Confirm before running a new batch, it is two commands:
+#   ros2 bag play <bag> &
+#   ros2 topic echo /tf --once | grep child_frame_id
 #
 # The two hops below splice that tree into the namespaced one the ADT4 stack
 # expects (hydra.yaml odom_frame/robot_frame):
@@ -20,7 +34,7 @@
 #                        \--(projected, here)--> <robot>/base_link
 #
 # so hydra resolves the odometry lookup (<robot>/odom -> <robot>/base_link) and
-# the `extrinsics: {type: ros}` camera lookup (<robot>/base_link -> viewer_optical,
+# the `extrinsics: {type: ros}` camera lookup (<robot>/base_link -> <stream>_optical,
 # the camera_info frame_id, reached by walking up through `odom`).
 #
 # base_link is NOT pinned to the camera. It is the camera pose PROJECTED down to
@@ -39,9 +53,14 @@
 # 0.5 matches Spot's standing body height, giving a band of [0.5, 1.0].
 # Check the mesh bounding box before reusing this on another recording.
 #
+# Override per scene with OG_BODY_Z (default 0.5). The multi-floor scenes in
+# /data/openset_bags/behavior1k_bags (house_single_floor, office_large,
+# hotel_gym_spa) have NOT been checked -- if a map comes out with a good mesh
+# and near-zero places, this is the first thing to look at.
+#
 # NOTE: play the bag WITHOUT run-adt4's default `--filter-tf -k '.*<robot>.*'`
 # keep-filter -- it would drop `world`, `odom`, `camera_link` and
-# `viewer_optical`, none of which contain the robot name. See the
+# `<stream>_optical`, none of which contain the robot name. See the
 # behavior1k_bag_meshfix experiment.
 windows:
   - window_name: behavior1k_bag_tf
@@ -49,4 +68,4 @@ windows:
     layout: tiled
     panes:
       - ros2 run tf2_ros static_transform_publisher --frame-id ${ADT4_ROBOT_NAME}/odom --child-frame-id world
-      - ros2 run dcist_launch_system ground_projected_body_tf --ros-args -p source_parent:=odom -p source_child:=viewer_optical -p out_child:=${ADT4_ROBOT_NAME}/base_link -p body_z:=0.5
+      - ros2 run dcist_launch_system ground_projected_body_tf --ros-args -p source_parent:=odom -p source_child:=${OG_OPTICAL_FRAME:-viewer_optical} -p out_child:=${ADT4_ROBOT_NAME}/base_link -p body_z:=${OG_BODY_Z:-0.5}

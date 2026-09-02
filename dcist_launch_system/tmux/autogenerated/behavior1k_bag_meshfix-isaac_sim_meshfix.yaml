@@ -56,4 +56,4 @@ windows:
     layout: tiled
     panes:
       - ros2 run tf2_ros static_transform_publisher --frame-id ${ADT4_ROBOT_NAME}/odom --child-frame-id world
-      - ros2 run dcist_launch_system ground_projected_body_tf --ros-args -p source_parent:=odom -p source_child:=viewer_optical -p out_child:=${ADT4_ROBOT_NAME}/base_link -p body_z:=0.5
+      - ros2 run dcist_launch_system ground_projected_body_tf --ros-args -p source_parent:=odom -p source_child:=${OG_OPTICAL_FRAME:-viewer_optical} -p out_child:=${ADT4_ROBOT_NAME}/base_link -p body_z:=${OG_BODY_Z:-0.5}
