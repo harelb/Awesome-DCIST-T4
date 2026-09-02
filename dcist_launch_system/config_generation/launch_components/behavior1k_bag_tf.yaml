@@ -53,10 +53,27 @@
 # 0.5 matches Spot's standing body height, giving a band of [0.5, 1.0].
 # Check the mesh bounding box before reusing this on another recording.
 #
-# Override per scene with OG_BODY_Z (default 0.5). The multi-floor scenes in
-# /data/openset_bags/behavior1k_bags (house_single_floor, office_large,
-# hotel_gym_spa) have NOT been checked -- if a map comes out with a good mesh
-# and near-zero places, this is the first thing to look at.
+# Override per scene with OG_BODY_Z (default 0.5). Measured 2026-09-02 across
+# all 15 /data/openset_bags/behavior1k_bags scenes: every one reconstructs its
+# floor at odom z = 0.00 (the scenes are normalized; cf. the bag README's
+# "ceiling cropped above odom Z=2.0 m"), so the 0.5 default is correct for the
+# whole set and the band lands at [0.5, 1.0], clear of the floor. Re-measure
+# before reusing this on a differently-generated recording:
+#   python3 -c "import json;d=json.load(open('.../hydra/backend/dsg_with_mesh.json'));
+#               zs=[p[2] for p in d['mesh']['points']]"   # floor = dominant low-z bin
+#
+# :bangbang: THESE VARS MUST NOT BE PLAIN-ASSIGNED IN ~/.zshrc. The tmux panes
+# run interactive zsh (options.default-command: /bin/zsh) and source ~/.zshrc
+# AFTER inheriting the environment, so `export OG_BODY_Z=0.5` in the rc file
+# silently overrides anything exported before run-adt4 -- a parameter sweep then
+# runs the same value N times and looks like "body_z has no effect". Use the
+# `export OG_BODY_Z=${OG_BODY_Z:-0.5}` form in the rc file instead. The node
+# logs the value it actually used ("projecting odom -> X onto z=..."); check
+# that line before trusting any body_z result.
+#
+# Note that place count is driven far more by floor MESH COVERAGE than by
+# body_z: no floor mesh => no traversable columns => no places. A sparse floor
+# is the grazing-incidence problem, not a body_z problem.
 #
 # NOTE: play the bag WITHOUT run-adt4's default `--filter-tf -k '.*<robot>.*'`
 # keep-filter -- it would drop `world`, `odom`, `camera_link` and
