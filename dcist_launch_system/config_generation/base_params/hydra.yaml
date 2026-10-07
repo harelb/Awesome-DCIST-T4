@@ -14,7 +14,7 @@ input:
   max_receiver_queue_size: 1
   inputs:
     camera:
-      receiver: {type: InstanceImageReceiver, queue_size: 30}
+      receiver: {type: ImageReceiver, semantics_type: instance, queue_size: 30}
       sensor: {type: camera_info, min_range: 0.2, max_range: 10.0, extrinsics: {type: ros}}
 active_window:
   type: ActiveWindow
