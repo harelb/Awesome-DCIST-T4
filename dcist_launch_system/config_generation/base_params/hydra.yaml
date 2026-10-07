@@ -94,13 +94,9 @@ backend:
   min_dsg_separation_s: 1
   publish_mesh: true
   min_mesh_separation_s: 10
-  change_gate:
-    displacement_threshold_m: 0.10
-    node_delta_threshold: 25
-    max_interval_s: 2.0
-    min_separation_s: 0.5
-  enable_async_publish: false
   add_places_to_deformation_graph: false
+  agent_image_root: $<env ADT4_OUTPUT_DIR>/agents
+  object_image_root: $<env ADT4_OUTPUT_DIR>/images
   optimize_on_lc: true
   # Upstream #154 gated our "solve only on new loop closures" fix behind this flag and
   # defaulted it true, which restores the old have_loopclosures_ latch (a full ~1.86 s
@@ -113,6 +109,7 @@ backend:
       type: GenericUpdateFunctor
       verbosity: 0
       layer: OBJECTS
+      image_root: $<env ADT4_OUTPUT_DIR>/images
       node_matcher: {type: IoUNodeMatcher, min_same_iou: 0.1, min_cross_iou: 0.3}
       merge_proposer: {strategy: {type: Pairwise}}
     traversability: {type: UpdateRegionGrowingTraversabilityFunctor, layer: MESH_PLACES}
