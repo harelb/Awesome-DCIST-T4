@@ -50,7 +50,6 @@ active_window:
     min_object_reconstruction_observations: 10
     object_reconstruction_resolution: -0.05
     visualizer_classification: false
-    save_object_images: true
     object_image_output_path: $<env ADT4_OUTPUT_DIR>/images
     projective_integrator:
       num_threads: 8
@@ -93,7 +92,7 @@ frontend:
     place_max_neighbor_z_diff: .5
     place_overlap_threshold: 0.0
 sub_keyframe:
-  enabled: true
+  type: SubKeyframeModule
   image_output_path: $<env ADT4_OUTPUT_DIR>/subkeyframes
   sensor_name: camera
   gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
