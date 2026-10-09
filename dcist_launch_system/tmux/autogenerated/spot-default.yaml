@@ -62,6 +62,11 @@ windows:
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_fastsam:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_roman_map:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_roman_lc:=true
+  - window_name: fleetlink
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/$ADT4_ROBOT_NAME -p robot_name:=$ADT4_ROBOT_NAME -p use_sim_time:=$sim_time
   - window_name: real_spot
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled

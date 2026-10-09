@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""adt4-console entry point (dev, no install) — re-execs into spark_env like fleet-adt4."""
+
+import os
+import pathlib
+import sys
+
+# Re-exec with spark_env Python BEFORE importing anything heavy (fastapi lives there).
+if not os.environ.get("_ADT4_CONSOLE_REEXEC"):
+    _adt4_env = os.environ.get("ADT4_ENV", "")
+    if _adt4_env:
+        _spark_env = pathlib.Path(_adt4_env) / "spark_env"
+        _spark_python = _spark_env / "bin" / "python3"
+        if _spark_python.exists() and sys.prefix != str(_spark_env):
+            os.environ["_ADT4_CONSOLE_REEXEC"] = "1"
+            os.execv(str(_spark_python), [str(_spark_python)] + sys.argv)
+
+# Dev install: adt4_console/, fleetlink/ and dcist_launch_system/src/ on sys.path
+_pkg = pathlib.Path(__file__).resolve().parent.parent
+_repo = _pkg.parent
+for _p in (_pkg, _repo / "fleetlink", _repo / "dcist_launch_system" / "src"):
+    if _p.is_dir() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from adt4_console.cli import main  # noqa: E402
+
+main()

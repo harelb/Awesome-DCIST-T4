@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>adt4_console</name>
+  <version>0.1.0</version>
+  <description>ADT4 web console: FastAPI base-station server (fleet, launch, maps, 3D scene graph, planning).</description>
+  <maintainer email="harelb@mit.edu">harel</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>omniplanner_msgs</exec_depend>
+  <exec_depend>robot_executor_msgs</exec_depend>
+  <exec_depend>ros_system_monitor_msgs</exec_depend>
+  <exec_depend>dcist_launch_system</exec_depend>
+  <exec_depend>dcist_launch_system_msgs</exec_depend>
+  <exec_depend>spark_dsg</exec_depend>
+  <exec_depend>heracles</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

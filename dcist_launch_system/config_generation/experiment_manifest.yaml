@@ -3,10 +3,10 @@
 launch_configs:
   # core groupings
   main: [core, status]
-  map: [main, hydra, roman]
+  map: [main, hydra, roman, fleetlink]
   # like `map`, but hydra consumes ROMAN intra-session loop closures (drift reduction)
-  map_lc: [main, hydra_lc, roman]
-  relocalize: [main, hydra_multi, roman]
+  map_lc: [main, hydra_lc, roman, fleetlink]
+  relocalize: [main, hydra_multi, roman, fleetlink]
   # development groupings
   map_old: [main, hydra_old, roman]
   no_relocalize: [main, transform_publishers]
@@ -16,6 +16,8 @@ launch_configs:
   # planning and base station
   plan_prior: [main, prior_dsg, planning]
   plan_prior_heracles: [main, heracles_prior_dsg, planning]
+  # web console instead of rviz (rviz-free base station)
+  plan_prior_web: [main, prior_dsg, planning_web, console]
 # Configs build the set of rosparams that will be loaded
 configs:
   default: []
@@ -27,6 +29,7 @@ configs:
 important_variants:
   - base_station-default
   - base_station_heracles-default
+  - base_station_web-default
   - phoenix-default
   - phoenix_relocalize-relocalize
   - spot-default
@@ -40,6 +43,9 @@ experiments:
     config: [default]
   base_station_heracles:
     launch_config: [plan_prior_heracles, multi_status]
+    config: [default]
+  base_station_web:
+    launch_config: [plan_prior_web, multi_status]
     config: [default]
 
   # spot configs — require Spot hardware or bag playback

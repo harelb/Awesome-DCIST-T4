@@ -1,0 +1,166 @@
+// REST client: bearer auth, typed errors, msgpack support.
+import {useCallback, useEffect, useRef, useState} from "react";
+import {getToken} from "./auth";
+import {unpack} from "../codec";
+
+export class ApiError extends Error {
+  status: number; // 0 = network error / backend down
+  detail: string;
+  constructor(status: number, detail: string) {
+    super(detail || `HTTP ${status}`);
+    this.status = status;
+    this.detail = detail;
+  }
+  get kind(): "down" | "ros" | "auth" | "notfound" | "other" {
+    if (this.status === 0 || this.status === 502 || this.status === 504) return "down";
+    if (this.status === 503) return "ros";
+    if (this.status === 401 || this.status === 403) return "auth";
+    if (this.status === 404) return "notfound";
+    return "other";
+  }
+}
+
+type Listener = (ok: boolean, err?: ApiError) => void;
+const listeners = new Set<Listener>();
+export function onBackendState(l: Listener) {
+  listeners.add(l);
+  return () => void listeners.delete(l);
+}
+function notify(ok: boolean, err?: ApiError) {
+  for (const l of listeners) l(ok, err);
+}
+
+function headers(extra?: HeadersInit): Headers {
+  const h = new Headers(extra);
+  const t = getToken();
+  if (t) h.set("Authorization", `Bearer ${t}`);
+  return h;
+}
+
+async function errorFrom(res: Response): Promise<ApiError> {
+  let detail = "";
+  try {
+    const text = await res.text();
+    try {
+      const j = JSON.parse(text);
+      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail ?? j);
+    } catch {
+      detail = text.slice(0, 300);
+    }
+  } catch {
+    /* ignore */
+  }
+  return new ApiError(res.status, detail || res.statusText);
+}
+
+export async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  let res: Response;
+  try {
+    res = await fetch(path, {...init, headers: headers(init.headers)});
+  } catch (e) {
+    const err = new ApiError(0, "Backend unreachable");
+    notify(false, err);
+    throw err;
+  }
+  if (!res.ok) {
+    const err = await errorFrom(res);
+    if (err.kind === "down") notify(false, err);
+    else notify(true);
+    throw err;
+  }
+  notify(true);
+  return res;
+}
+
+export async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return (await (await request(path, {signal})).json()) as T;
+}
+
+export async function sendJSON<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await request(path, {
+    method,
+    headers: body === undefined ? undefined : {"Content-Type": "application/json"},
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  return (text ? JSON.parse(text) : {}) as T;
+}
+
+export const postJSON = <T,>(path: string, body?: unknown) => sendJSON<T>("POST", path, body ?? {});
+export const putJSON = <T,>(path: string, body?: unknown) => sendJSON<T>("PUT", path, body ?? {});
+export const deleteJSON = <T,>(path: string) => sendJSON<T>("DELETE", path);
+
+export async function getMsgpack(path: string, signal?: AbortSignal): Promise<unknown> {
+  const res = await request(path, {signal, headers: {Accept: "application/x-msgpack"}});
+  return unpack(await res.arrayBuffer());
+}
+
+export function errorText(e: unknown): string {
+  if (e instanceof ApiError) {
+    if (e.kind === "down") return "Backend unreachable";
+    if (e.kind === "ros") return "ROS not connected" + (e.detail && !/ros/i.test(e.detail) ? `: ${e.detail}` : "");
+    if (e.kind === "auth") return "Not authorised: open the console with ?token=...";
+    return e.detail || `HTTP ${e.status}`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+export interface ApiState<T> {
+  data: T | undefined;
+  error: ApiError | null;
+  loading: boolean;
+  reload: () => void;
+  setData: (d: T) => void;
+}
+
+/** Fetch JSON on mount (and every `pollMs`), keeping the last good value on error. */
+export function useApi<T>(path: string | null, pollMs = 0): ApiState<T> {
+  const [data, setData] = useState<T | undefined>(undefined);
+  const [error, setError] = useState<ApiError | null>(null);
+  const [loading, setLoading] = useState<boolean>(Boolean(path));
+  const [tick, setTick] = useState(0);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!path) {
+      setLoading(false);
+      return;
+    }
+    const ctl = new AbortController();
+    let retry: number | undefined;
+    setLoading(true);
+    getJSON<T>(path, ctl.signal)
+      .then(d => {
+        if (!alive.current) return;
+        setData(d);
+        setError(null);
+      })
+      .catch(e => {
+        if (!alive.current || ctl.signal.aborted) return;
+        const err = e instanceof ApiError ? e : new ApiError(0, String(e));
+        setError(err);
+        // backend down: retry on our own so pages recover when it comes back
+        if (err.kind === "down" && !pollMs) retry = window.setTimeout(() => alive.current && setTick(t => t + 1), 5000);
+      })
+      .finally(() => {
+        if (alive.current && !ctl.signal.aborted) setLoading(false);
+      });
+    return () => {
+      ctl.abort();
+      window.clearTimeout(retry);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, tick]);
+  useEffect(() => {
+    if (!pollMs || !path) return;
+    const id = window.setInterval(() => setTick(t => t + 1), pollMs);
+    return () => window.clearInterval(id);
+  }, [pollMs, path]);
+  const reload = useCallback(() => setTick(t => t + 1), []);
+  return {data, error, loading, reload, setData};
+}

@@ -48,6 +48,7 @@ class SessionInfo:
     sim_time: bool = False
     bag: Optional[pathlib.Path] = None
     bag_delay: float = 5.0
+    bag_args: list[str] = field(default_factory=list)
     trajectory: Optional[pathlib.Path] = None
     trajectory_args: list[str] = field(default_factory=list)
     record: Optional[str] = None
@@ -218,11 +219,20 @@ def _make_bag_window(info: SessionInfo):
     bag_args += [f"-f '{x}'" for x in to_drop]
     if info.sim_time:
         bag_args.append("--clock")
+    bag_args += info.bag_args
 
+    # tmuxp types pane commands with send-keys before the (slow, oh-my-zsh) shell
+    # is ready, and in windows after the first the keystrokes are lost, so the bag
+    # never started.  Run playback as the window's own process instead; `exec zsh`
+    # keeps the window usable afterwards.
+    play_cmd = (
+        "source ${ADT4_WS}/install/setup.zsh && "
+        f"ros2 run ianvs play_rosbag {info.bag} {' '.join(bag_args)}; exec zsh"
+    )
     window_config = {
         "layout": "tiled",
-        "panes": [f"ros2 run ianvs play_rosbag {info.bag} {' '.join(bag_args)}"],
-        "shell_command_before": "source ${ADT4_WS}/install/setup.zsh",
+        "window_shell": f"zsh -ic {shlex.quote(play_cmd)}",
+        "panes": ["blank"],
         "window_name": "play_rosbag",
     }
     if info.trajectory:
@@ -290,6 +300,11 @@ def _write_session_to_file(session_path, info: SessionInfo, fout, verbose=False)
 @click.option("--bag", default=None, type=click.Path(exists=True), help="bag to run")
 @click.option("--bag-delay", default=5.0, help="bag playback delay")
 @click.option(
+    "--bag-args",
+    default=None,
+    help="extra args for play_rosbag, e.g. '--start-offset 60 --playback-duration 180'",
+)
+@click.option(
     "--trajectory",
     "-t",
     default=None,
@@ -321,6 +336,7 @@ def main(
     show_tmux,
     bag,
     bag_delay,
+    bag_args,
     trajectory,
     trajectory_args,
     record,
@@ -369,6 +385,8 @@ def main(
     )
     if trajectory_args:
         info.trajectory_args = trajectory_args.split(" ")
+    if bag_args:
+        info.bag_args = shlex.split(bag_args)
 
     with tempfile.NamedTemporaryFile("w+", suffix=".yaml") as fout:
         _write_session_to_file(session_path, info, fout, verbose=dry_run or show_tmux)

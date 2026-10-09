@@ -1,0 +1,1096 @@
+"""Robot-side fleetlink agent.
+
+:class:`AgentCore` is pure logic (no ROS): it takes graphs / poses / guards /
+health / action results, and on every :meth:`AgentCore.tick` emits
+
+* C1 ``state`` at ``state_hz`` (latest value only),
+* C2 graph deltas against the last *sent* state, split by budget closest to
+  the robot first (``codec.split_delta``),
+* C3 mesh tiles whose hash differs from the sent manifest, closest first, plus
+  a periodic manifest,
+
+* C3 ``grid/occupancy`` (latest occupancy grid) every ``grid_period_s`` when
+  its content hash changed,
+* C1 ``paths`` (executor smooth / MLP paths + MLP target) only on change,
+
+serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
+``resend``) with an ack each, and answers C4 camera queries on
+``adt4/<r>/media/camera/<name>``.  :class:`AgentNode` wraps it in rclpy.
+"""
+
+from __future__ import annotations
+
+import secrets
+import threading
+import time
+from collections import deque
+from typing import Callable
+
+import numpy as np
+
+from fleetlink import codec, media
+from fleetlink.codec import GraphDelta, GraphState
+from fleetlink.scheduler import Item, Scheduler
+from fleetlink.transport import Transport
+
+DEFAULT_CONFIG = {
+    "budgets": {"C1": 5_000, "C2": 50_000, "C3": 100_000, "C4": 200_000},  # bytes/s
+    "budget_min": {"C2": 5_000, "C3": 5_000},
+    "budget_max": {"C2": 500_000, "C3": 1_000_000},
+    "total_bps": None,
+    "auto": False,
+    "state_hz": 4.0,  # 2 Hz cannot keep C1 staleness < 1 s at 3 % loss (see API.md Deviations)
+    "c2_hz": 1.0,
+    "mesh_period_s": 5.0,
+    "manifest_period_s": 5.0,
+    "tile_size": codec.DEFAULT_TILE_SIZE,
+    "max_msg_bytes": 64 * 1024,
+    "burst_s": 1.0,
+    "ack_cache": 256,
+    "grid_period_s": 5.0,
+    "paths_hz": 2.0,  # how often paths are checked for a change
+    "cameras": ["rgb", "overlay"],
+}
+
+
+def load_config(path: str | None = None) -> dict:
+    """DEFAULT_CONFIG overlaid with a yaml file (``fleetlink.yaml`` layout)."""
+    cfg = {
+        k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULT_CONFIG.items()
+    }
+    if path:
+        import yaml
+
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if isinstance(v, dict) and isinstance(cfg.get(k), dict):
+                cfg[k].update(v)
+            else:
+                cfg[k] = v
+    return cfg
+
+
+def _merge(cfg: dict | None) -> dict:
+    out = load_config(None)
+    for k, v in (cfg or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k].update(v)
+        else:
+            out[k] = v
+    return out
+
+
+def graph_inputs(G) -> tuple:
+    """spark_dsg graph → (records, edges, labelspaces, mesh_arrays | None)."""
+    records = codec.graph_records(G)
+    edges = codec.graph_edges(G)
+    labelspaces = codec.graph_labelspaces(G)
+    mesh = None
+    try:
+        if G.has_mesh() and G.mesh is not None and G.mesh.num_faces() > 0:
+            mesh = codec.mesh_arrays(G.mesh)
+    except Exception:
+        mesh = None
+    return records, edges, labelspaces, mesh
+
+
+class AgentCore:
+    STREAM_CLASS = {
+        "ctl/ack": "C0",
+        "state": "C1",
+        "dsg/delta": "C2",
+        "mesh/tile": "C3",
+        "mesh/manifest": "C3",
+        "grid/occupancy": "C3",
+        "paths": "C1",
+    }
+
+    def __init__(
+        self,
+        robot: str,
+        transport: Transport,
+        config: dict | None = None,
+        clock: Callable[[], float] = time.time,
+    ):
+        self.robot = robot
+        self.transport = transport
+        self.cfg = _merge(config)
+        self.clock = clock
+        self.epoch = secrets.token_hex(6)
+        self.prefix = f"adt4/{robot}"
+        self.seq = dict.fromkeys(self.STREAM_CLASS, 0)
+        self.sched = Scheduler(
+            transport,
+            self.cfg["budgets"],
+            clock,
+            burst_s=self.cfg["burst_s"],
+            total_bps=self.cfg["total_bps"],
+            budget_min=self.cfg["budget_min"],
+            budget_max=self.cfg["budget_max"],
+            auto=bool(self.cfg["auto"]),
+        )
+        self._lock = threading.RLock()
+        self._inbox: deque = deque()
+        self._inbox_lock = threading.Lock()
+        self._acked: dict = {}  # request id -> ack payload (idempotent retries)
+
+        # graph
+        self._target: tuple | None = None  # (records, edges, labelspaces)
+        self.sent = GraphState()
+        self._snapshot = False
+        self._rec_bytes = 40.0  # learned packed bytes per upsert (edges count 1/2)
+        # mesh
+        self._mesh = None
+        self._mesh_version = 0
+        self._tiled_version = 0
+        self.tiles: dict[str, dict] = {}
+        self.sent_manifest: dict[str, str] = {}
+        self._tiles_dirty = False
+        # state
+        self.pose: dict | None = None
+        self.guards: dict = {}
+        self.health: dict = {}
+        self.results: deque = deque(maxlen=10)
+        self._t_state = -1e9
+        self._t_c2 = -1e9
+        self._t_mesh = -1e9
+        self._t_manifest = -1e9
+        self._base_rtt: float | None = None
+        # occupancy grid (C3) / executor paths (C1)
+        self._grid: dict | None = None  # raw: frame, resolution, origin, w, h, data
+        self._grid_dirty = False
+        self.sent_grid_hash: str | None = None
+        self._t_grid = -1e9
+        self._paths = {"smooth": None, "mlp": None, "target": None}
+        self._paths_frame = ""
+        self._paths_t: float | None = None
+        self._paths_dirty = False
+        self.sent_paths_hash: str | None = None
+        self._t_paths = -1e9
+        # cameras (C4 request/reply)
+        self.camera_names: list[str] = list(self.cfg["cameras"])
+        self._frames: dict[str, dict] = {}
+        self._media_lock = threading.Lock()
+        self._c4_tokens = self._c4_cap()
+        self._c4_t: float | None = None
+        self.media_served = 0
+        self.media_refused = 0
+
+        self._sub = transport.subscribe(f"{self.prefix}/ctl/req", self._on_req)
+        try:
+            self._queryable = transport.declare_queryable(
+                f"{self.prefix}/media/camera/*", self._on_camera_query
+            )
+        except NotImplementedError:
+            self._queryable = None
+
+    # ------------------------------------------------------------------ inputs
+
+    def on_graph(self, G) -> None:
+        records, edges, labelspaces, mesh = graph_inputs(G)
+        self.on_records(records, edges, labelspaces, mesh)
+
+    def on_records(self, records, edges, labelspaces=None, mesh_arrays=None) -> None:
+        with self._lock:
+            self._target = (dict(records), set(edges), labelspaces or {})
+            if mesh_arrays is not None:
+                self._mesh = mesh_arrays
+                self._mesh_version += 1
+
+    def on_pose(self, pose: dict) -> None:
+        """``{x, y, z, qw, qx, qy, qz, frame, t}``."""
+        with self._lock:
+            self.pose = dict(pose)
+
+    def on_guards(self, guards: dict) -> None:
+        with self._lock:
+            self.guards = dict(guards)
+
+    def on_health(self, health: dict) -> None:
+        with self._lock:
+            self.health = dict(health)
+
+    def on_result(self, result: dict) -> None:
+        with self._lock:
+            self.results.append(dict(result))
+
+    def on_grid(self, frame, resolution, origin, width, height, data, t=None) -> None:
+        """Latest occupancy grid (``data``: int8 bytes, row-major, -1 = unknown)."""
+        with self._lock:
+            self._grid = {
+                "frame": frame,
+                "resolution": resolution,
+                "origin": list(origin),
+                "width": int(width),
+                "height": int(height),
+                "data": bytes(data),
+                "t": t,
+            }
+            self._grid_dirty = True
+
+    def on_path(self, which: str, value, frame: str = "", t=None) -> None:
+        """``which`` in smooth | mlp (Nx3 points) | target ([x, y, z] or None)."""
+        if which not in self._paths:
+            raise ValueError(f"unknown path {which!r}")
+        with self._lock:
+            self._paths[which] = value
+            if frame:
+                self._paths_frame = frame
+            if t is not None:
+                self._paths_t = t
+            self._paths_dirty = True
+
+    def set_cameras(self, names) -> None:
+        with self._media_lock:
+            self.camera_names = list(names)
+
+    def on_camera_frame(
+        self, name, encoding, width, height, step, data, stamp=None
+    ) -> None:
+        """Keep the newest raw frame per camera; conversion happens on request."""
+        frame = {
+            "encoding": encoding,
+            "width": int(width),
+            "height": int(height),
+            "step": int(step),
+            "data": data,
+            "stamp": stamp,
+            "rx_t": self.clock(),
+        }
+        with self._media_lock:
+            self._frames[name] = frame
+
+    # ----------------------------------------------------------------- helpers
+
+    def origin(self):
+        if self.pose is not None:
+            return (self.pose["x"], self.pose["y"], self.pose["z"])
+        return None
+
+    def _builder(self, stream: str, payload_fn: Callable[[], object]):
+        def build():
+            payload = payload_fn()
+            if payload is None:
+                return None
+            seq = self.seq[stream]
+            self.seq[stream] = seq + 1
+            env = codec.envelope(self.robot, stream, seq, self.epoch, payload)
+            env["t"] = self.clock()
+            return codec.pack(env)
+
+        return build
+
+    def _queue(
+        self,
+        stream: str,
+        key: str,
+        payload_fn,
+        size_hint=0,
+        on_sent=None,
+        tag=None,
+        front=False,
+    ):
+        cls = self.STREAM_CLASS[stream]
+        self.sched.enqueue(
+            Item(cls, key, self._builder(stream, payload_fn), size_hint, on_sent, tag),
+            front,
+        )
+
+    # ------------------------------------------------------------------- C0
+
+    def _on_req(self, key: str, data: bytes) -> None:
+        try:
+            env = codec.unpack(data)
+        except Exception:
+            return
+        with self._inbox_lock:
+            self._inbox.append(env.get("p", env))
+
+    def _handle(self, req: dict, now: float) -> None:
+        rid = req.get("id")
+        op = req.get("op")
+        args = req.get("args") or {}
+        if rid in self._acked and op != "ping":
+            ack = self._acked[rid]
+        else:
+            try:
+                result = self._execute(op, args, now)
+                ack = {"id": rid, "ok": True, "result": result}
+            except Exception as exc:  # bad request: report, never crash the agent
+                ack = {"id": rid, "ok": False, "result": {"error": str(exc)}}
+            if op != "ping":
+                self._acked[rid] = ack
+                while len(self._acked) > self.cfg["ack_cache"]:
+                    self._acked.pop(next(iter(self._acked)))
+        self._queue("ctl/ack", f"{self.prefix}/ctl/ack", lambda a=ack: a, 64)
+
+    def _execute(self, op: str, args: dict, now: float):
+        if op == "resync":
+            self.start_snapshot()
+            return {"epoch": self.epoch}
+        if op == "budget":
+            for cls, bps in args.items():
+                self.sched.set_budget(cls, bps)
+            return {"budgets": dict(self.sched.budgets)}
+        if op == "auto":
+            self.sched.auto = bool(args.get("enabled", True))
+            return {"auto": self.sched.auto}
+        if op == "ping":
+            rtt = args.get("rtt")
+            if rtt is not None:
+                self._base_rtt = (
+                    rtt if self._base_rtt is None else min(self._base_rtt, rtt)
+                )
+            if args.get("rx"):
+                self.sched.feedback(args["rx"], rtt, now, self._base_rtt)
+            return {
+                "t": args.get("t"),
+                "t_robot": now,
+                "budgets": dict(self.sched.budgets),
+            }
+        if op == "resend":
+            streams = list(args.get("streams") or [])
+            if "grid" in streams:
+                self.sent_grid_hash = None
+                self._grid_dirty = True
+                self._t_grid = -1e9
+            if "paths" in streams:
+                self.sent_paths_hash = None
+                self._paths_dirty = True
+            return {"resend": streams}
+        if op == "tiles":
+            keys = list(args.get("keys") or [])
+            for k in keys:
+                self.sent_manifest.pop(k, None)
+            self._tiles_dirty = True
+            return {"requeued": len(keys)}
+        raise ValueError(f"unknown op {op!r}")
+
+    # ------------------------------------------------------------------- C2
+
+    def start_snapshot(self) -> None:
+        """Reset the sent mirror and stream the whole graph as a snapshot."""
+        with self._lock:
+            self.sched.clear("C2")
+            self.sent = GraphState()
+            self._snapshot = True
+            begin = {"kind": "snapshot_begin", **GraphDelta().encode()}
+            self._queue("dsg/delta", f"{self.prefix}/dsg/delta", lambda: begin, 64)
+            self._t_c2 = -1e9  # stream the first chunk on the next tick
+
+    def _c2_tick(self) -> None:
+        budget = self.sched.budget("C2") or float("inf")
+        per_tick = budget / max(self.cfg["c2_hz"], 1e-3)
+        allow = min(per_tick, self.cfg["max_msg_bytes"]) - self.sched.queued_bytes("C2")
+        if allow <= 0:
+            return
+        if self._target is None:
+            delta = GraphDelta()
+        else:
+            delta = self.sent.diff(*self._target)
+        if delta.empty():
+            if self._snapshot:
+                self._finish_snapshot()
+            return
+        n = max(1, int(allow / self._rec_bytes))
+        now_d, later = codec.split_delta(delta, n, self.origin())
+        self.sent.apply(now_d)
+        kind = "snapshot_chunk" if self._snapshot else "delta"
+        payload = {"kind": kind, **now_d.encode()}
+        weight = len(now_d.upserts) + 0.5 * len(now_d.edges_add) + 1
+
+        def learn(nbytes, weight=weight):
+            self._rec_bytes = 0.7 * self._rec_bytes + 0.3 * max(4.0, nbytes / weight)
+
+        self._queue(
+            "dsg/delta",
+            f"{self.prefix}/dsg/delta",
+            lambda: payload,
+            int(weight * self._rec_bytes),
+            on_sent=learn,
+        )
+        if self._snapshot and later.empty():
+            self._finish_snapshot()
+
+    def _finish_snapshot(self) -> None:
+        self._snapshot = False
+        end = {"kind": "snapshot_end", **GraphDelta().encode()}
+        self._queue("dsg/delta", f"{self.prefix}/dsg/delta", lambda: end, 64)
+        self._queue_manifest()
+
+    # ------------------------------------------------------------------- C3
+
+    def _manifest_payload(self):
+        return {"tiles": dict(self.sent_manifest), "tile_size": self.cfg["tile_size"]}
+
+    def _queue_manifest(self) -> None:
+        # front of C3, built at send time → lists exactly the tiles already put
+        self._queue(
+            "mesh/manifest",
+            f"{self.prefix}/mesh/manifest",
+            self._manifest_payload,
+            64 + 24 * len(self.sent_manifest),
+            tag="manifest",
+            front=True,
+        )
+
+    def _c3_tick(self) -> None:
+        if self._mesh is not None and self._tiled_version != self._mesh_version:
+            pos, col, faces = self._mesh
+            self.tiles = codec.tile_mesh(pos, col, faces, self.cfg["tile_size"])
+            self._tiled_version = self._mesh_version
+            for k in [k for k in self.sent_manifest if k not in self.tiles]:
+                del self.sent_manifest[k]
+        elif not self._tiles_dirty:
+            return
+        self._tiles_dirty = False
+        changed = [
+            k for k, t in self.tiles.items() if self.sent_manifest.get(k) != t["hash"]
+        ]
+        o = self.origin()
+        if o is not None:
+            o = np.asarray(o)
+            ts = self.cfg["tile_size"]
+            changed.sort(
+                key=lambda k: float(
+                    np.sum((codec.tile_centre(self.tiles[k], ts) - o) ** 2)
+                )
+            )
+        # re-queue tiles only; the manifest and a pending occupancy grid stay
+        self.sched.clear("C3", lambda it: it.tag not in ("manifest", "grid"))
+        for k in changed:
+            tile = self.tiles[k]
+
+            def mark(_n, k=k, h=tile["hash"]):
+                self.sent_manifest[k] = h
+
+            size = len(tile["pos"]) + len(tile["col"]) + len(tile["idx"])
+            self._queue(
+                "mesh/tile",
+                f"{self.prefix}/mesh/tile/{k}",
+                lambda tile=tile: tile,
+                size,
+                on_sent=mark,
+            )
+
+    # ------------------------------------------------- C3 grid / C1 paths
+
+    def _grid_tick(self) -> None:
+        if not self._grid_dirty or self._grid is None:
+            return
+        self._grid_dirty = False
+        g = self._grid
+        try:
+            payload = media.encode_grid(
+                g["frame"], g["resolution"], g["origin"], g["width"], g["height"],
+                g["data"], g["t"],
+            )  # fmt: skip
+        except ValueError:
+            return
+        if payload["hash"] == self.sent_grid_hash:
+            return
+
+        def mark(_n, h=payload["hash"]):
+            self.sent_grid_hash = h
+
+        self._queue(
+            "grid/occupancy",
+            f"{self.prefix}/grid/occupancy",
+            lambda: payload,
+            len(payload["data"]) + 128,
+            on_sent=mark,
+            tag="grid",
+        )
+
+    def _paths_tick(self) -> None:
+        if not self._paths_dirty:
+            return
+        self._paths_dirty = False
+        p = self._paths
+        payload = media.paths_payload(
+            p["smooth"], p["mlp"], p["target"], self._paths_frame, self._paths_t
+        )
+        if payload["hash"] == self.sent_paths_hash:
+            return
+
+        def mark(_n, h=payload["hash"]):
+            self.sent_paths_hash = h
+
+        self._queue(
+            "paths",
+            f"{self.prefix}/paths",
+            lambda: payload,
+            64 + 20 * (len(payload["smooth"]) + len(payload["mlp"])),
+            on_sent=mark,
+            tag="paths",
+        )
+
+    # --------------------------------------------------------- C4 media
+
+    def _c4_cap(self) -> float:
+        b = self.sched.budgets.get("C4")
+        return float("inf") if b is None else max(1.0, b * self.cfg["burst_s"])
+
+    def _c4_take(self, now: float) -> bool:
+        """Token bucket on the C4 budget (may go into debt by one frame)."""
+        b = self.sched.budgets.get("C4")
+        if b is None:
+            return True
+        if self._c4_t is not None:
+            self._c4_tokens = min(
+                self._c4_cap(), self._c4_tokens + b * max(0.0, now - self._c4_t)
+            )
+        self._c4_t = now
+        return self._c4_tokens > 0
+
+    def _on_camera_query(self, key: str, params: dict):
+        name = key.rsplit("/", 1)[-1]
+        now = self.clock()
+        with self._media_lock:
+            names = list(self.camera_names)
+            frame = self._frames.get(name)
+        if name not in names:
+            return media.pack_reply({"error": "unknown camera", "cameras": names})
+        if frame is None:
+            return media.pack_reply({"error": "no frame yet", "cameras": names})
+
+        def num(k, default, lo, hi):
+            try:
+                return int(min(hi, max(lo, int(float(params.get(k, default))))))
+            except (TypeError, ValueError):
+                return default
+
+        w = num("w", 640, 16, 4096)
+        q = num("q", 70, 5, 95)
+        with self._media_lock:
+            if not self._c4_take(now):
+                self.media_refused += 1
+                return media.pack_reply({"error": "budget", "cameras": names})
+        try:
+            rep = media.camera_reply(frame, w, q, now)
+        except Exception as exc:  # noqa: BLE001
+            return media.pack_reply({"error": f"encode failed: {exc}"})
+        rep["camera"] = name
+        out = media.pack_reply(rep)
+        with self._media_lock:
+            if self.sched.budgets.get("C4") is not None:
+                self._c4_tokens -= len(out)
+            self.media_served += 1
+        return out
+
+    # ------------------------------------------------------------------- C1
+
+    def _state_payload(self):
+        with self._lock:
+            return {
+                "pose": self.pose,
+                "guards": self.guards,
+                "health": self.health,
+                "results": list(self.results),
+                "stats": self.stats(),
+                "cameras": list(self.camera_names),
+                "hashes": {"grid": self.sent_grid_hash, "paths": self.sent_paths_hash},
+            }
+
+    def stats(self) -> dict:
+        s = self.sched
+        return {
+            "epoch": self.epoch,
+            "sent": dict(s.sent_bytes),
+            "rate": {c: round(r, 1) for c, r in s.rate.items()},
+            "queue": s.queue_stats(),
+            "budgets": {c: s.budgets[c] for c in ("C1", "C2", "C3")},
+            "auto": s.auto,
+            "nodes": len(self._target[0]) if self._target else 0,
+            "tiles": len(self.tiles),
+        }
+
+    # ------------------------------------------------------------------ tick
+
+    def tick(self, now: float | None = None) -> dict:
+        now = self.clock() if now is None else now
+        with self._inbox_lock:
+            reqs = list(self._inbox)
+            self._inbox.clear()
+        with self._lock:
+            for req in reqs:
+                self._handle(req, now)
+            if now - self._t_state >= 1.0 / self.cfg["state_hz"]:
+                self._t_state = now
+                self._queue(
+                    "state",
+                    f"{self.prefix}/state",
+                    self._state_payload,
+                    512,
+                    tag="state",
+                )
+            if now - self._t_c2 >= 1.0 / self.cfg["c2_hz"]:
+                self._t_c2 = now
+                self._c2_tick()
+            if self._tiles_dirty or (
+                now - self._t_mesh >= self.cfg["mesh_period_s"]
+                and self._tiled_version != self._mesh_version
+            ):
+                self._t_mesh = now
+                self._c3_tick()
+            if now - self._t_manifest >= self.cfg["manifest_period_s"] and self.tiles:
+                self._t_manifest = now
+                self._queue_manifest()
+            if self._grid_dirty and now - self._t_grid >= self.cfg["grid_period_s"]:
+                self._t_grid = now
+                self._grid_tick()
+            if self._paths_dirty and now - self._t_paths >= 1.0 / self.cfg["paths_hz"]:
+                self._t_paths = now
+                self._paths_tick()
+            return self.sched.drain(now)
+
+    def graph_state(self) -> GraphState:
+        """The robot's current (target) graph as a GraphState (for comparisons)."""
+        g = GraphState()
+        if self._target:
+            g.records = dict(self._target[0])
+            g.edges = set(self._target[1])
+            g.labelspaces = dict(self._target[2])
+        return g
+
+    def close(self) -> None:
+        unsub = getattr(self.transport, "unsubscribe", None)
+        if unsub is not None:
+            unsub(self._sub)
+        qs = getattr(self.transport, "_queryables", None)
+        if qs is not None and self._queryable in qs:
+            qs.remove(self._queryable)
+
+
+# ----------------------------------------------------------------------------
+# ROS wrapper
+# ----------------------------------------------------------------------------
+
+
+def guards_to_dict(msg) -> dict:
+    return {
+        "robot_name": msg.robot_name,
+        "battery_percent": float(msg.battery_percent),
+        "battery_known": bool(msg.battery_known),
+        "estop_pressed": bool(msg.estop_pressed),
+        "estop_known": bool(msg.estop_known),
+        "powered_on": bool(msg.powered_on),
+        "power_known": bool(msg.power_known),
+        "lease_owned": bool(msg.lease_owned),
+        "lease_known": bool(msg.lease_known),
+        "faults": list(msg.faults),
+        "notes": msg.notes,
+        "t": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+    }
+
+
+def result_to_dict(msg) -> dict:
+    return {
+        "robot_name": msg.robot_name,
+        "plan_id": msg.plan_id,
+        "action_type": msg.action_type,
+        "action_index": int(msg.action_index),
+        "status": msg.status,
+        "detail": msg.detail,
+        "t": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+    }
+
+
+def status_table_to_dict(msg) -> dict:
+    names = {1: "nominal", 2: "warning", 3: "error", 4: "no_hb", 5: "startup"}
+    counts = {"nominal": 0, "warning": 0, "error": 0}
+    nodes = []
+    for n in msg.status:
+        st = names.get(int(n.status), str(n.status))
+        if st in counts:
+            counts[st] += 1
+        elif st == "no_hb":
+            counts["error"] += 1
+        nodes.append(
+            {
+                "nickname": n.nickname,
+                "node_name": n.node_name,
+                "status": st,
+                "notes": n.notes,
+                "required": bool(n.required),
+            }
+        )
+    return {**counts, "nodes": nodes, "monitor": msg.monitor_name}
+
+
+def stamp_s(header) -> float:
+    return header.stamp.sec + header.stamp.nanosec * 1e-9
+
+
+def parse_cameras(entries) -> dict[str, str]:
+    """``["rgb=euclid_zed/rgb/image_rect_color", ...]`` → ``{name: topic}``."""
+    out = {}
+    for e in entries or []:
+        name, sep, topic = str(e).partition("=")
+        if sep and name.strip() and topic.strip():
+            out[name.strip()] = topic.strip()
+    return out
+
+
+def path_points(msg) -> np.ndarray:
+    """nav_msgs/Path → (N, 3) float array."""
+    return np.array(
+        [[p.pose.position.x, p.pose.position.y, p.pose.position.z] for p in msg.poses],
+        dtype=float,
+    ).reshape(-1, 3)
+
+
+def marker_target(msg):
+    """visualization_msgs/MarkerArray → position of the first live marker (or None)."""
+    for m in msg.markers:
+        if int(m.action) not in (0,):  # ADD/MODIFY only; DELETE/DELETEALL clear
+            continue
+        if m.points:
+            p = m.points[-1]
+            base = m.pose.position
+            return [base.x + p.x, base.y + p.y, base.z + p.z], m.header.frame_id
+        p = m.pose.position
+        return [p.x, p.y, p.z], m.header.frame_id
+    return None, (msg.markers[0].header.frame_id if msg.markers else "")
+
+
+def transform_points(pts: np.ndarray, tf) -> np.ndarray:
+    """Apply a geometry_msgs/TransformStamped to (N, 3) points."""
+    t, q = tf.transform.translation, tf.transform.rotation
+    w, x, y, z = q.w, q.x, q.y, q.z
+    R = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
+    return pts @ R.T + np.array([t.x, t.y, t.z])
+
+
+class AgentNode:
+    """rclpy wrapper: subscriptions + TF pose → :class:`AgentCore`.
+
+    Graph deserialisation runs on a worker thread holding only the newest
+    pending DsgUpdate (older pending ones are dropped).  Ticking runs on its
+    own thread so a slow executor never delays C1.
+    """
+
+    def __init__(
+        self, transport: Transport | None = None, node=None, node_name="fleetlink_agent"
+    ):
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import QoSProfile
+
+        self._rclpy = rclpy
+        self.node = node or Node(node_name)
+        nd = self.node
+        cfg_file = nd.declare_parameter("config", "").value or None
+        cfg = load_config(cfg_file)
+        p = lambda name, default: nd.declare_parameter(name, default).value  # noqa: E731
+        robot = p("robot_name", nd.get_namespace().strip("/") or "robot")
+        # Pose must be expressed in the frame the scene graph lives in, which is
+        # the DSG message's header.frame_id (Hydra: <robot>/map).  ``map_frame``
+        # overrides that; the global ``map`` frame is a last resort only, since
+        # map -> <robot>/map is often a placeholder static transform.
+        self.map_frame = p("map_frame", "")
+        self._dsg_frame = ""
+        self.body_frame = p("body_frame", f"{robot}/body")
+        self.fallback_map_frame = p("fallback_map_frame", f"{robot}/map")
+        dsg_topic = p("dsg_topic", "hydra/backend/dsg")
+        guards_topic = p("guards_topic", "spot_executor_node/runtime_guards")
+        result_topic = p("result_topic", "spot_executor_node/action_result")
+        health_topic = p("health_topic", "/global/ros_system_monitor/table_in")
+        self.health_monitor = p("health_monitor_name", robot)
+        for cls in ("C1", "C2", "C3"):
+            cfg["budgets"][cls] = p(f"budget_{cls}", int(cfg["budgets"][cls]))
+        cfg["auto"] = p("auto", bool(cfg["auto"]))
+        tick_hz = p("tick_hz", 20.0)
+        cfg["mesh_period_s"] = p("mesh_period_s", float(cfg["mesh_period_s"]))
+        cfg["tile_size"] = p("tile_size", float(cfg["tile_size"]))
+        connect = p("zenoh_connect", "tcp/127.0.0.1:7447")
+        cfg["budgets"]["C4"] = p("budget_C4", int(cfg["budgets"]["C4"]))
+        grid_topic = p("grid_topic", "hydra/tsdf/occupancy")
+        cfg["grid_period_s"] = p("grid_period_s", float(cfg["grid_period_s"]))
+        smooth_topic = p(
+            "smooth_path_topic", "spot_executor_node/smooth_path_publisher"
+        )
+        mlp_topic = p("mlp_path_topic", "spot_executor_node/mlp_path_publisher")
+        target_topic = p("mlp_target_topic", "spot_executor_node/mlp_target_publisher")
+        cameras = parse_cameras(
+            p(
+                "cameras",
+                [
+                    # euclid: euclid_zed/rgb/image_rect_color
+                    f"rgb={robot}_zed/rgb/image_rect_color",
+                    "overlay=semantic_overlay/image_raw",
+                ],
+            )
+        )
+        cfg["cameras"] = list(cameras)
+
+        if transport is None:
+            from fleetlink.transport import ZenohTransport
+
+            transport = ZenohTransport(connect)
+        self.transport = transport
+        self.core = AgentCore(robot, transport, cfg)
+        self.log = nd.get_logger()
+
+        self._pending = None
+        self._pending_cv = threading.Condition()
+        self._running = True
+        self.graphs_received = 0
+        self.graphs_dropped = 0
+        self.graphs_processed = 0
+
+        from hydra_msgs.msg import DsgUpdate
+
+        nd.create_subscription(DsgUpdate, dsg_topic, self._on_dsg, QoSProfile(depth=1))
+        # best-effort subscribers match both reliable and best-effort publishers
+        from rclpy.qos import qos_profile_sensor_data
+
+        sensor_qos = qos_profile_sensor_data
+        try:
+            from nav_msgs.msg import OccupancyGrid, Path
+
+            nd.create_subscription(OccupancyGrid, grid_topic, self._on_grid, sensor_qos)
+            nd.create_subscription(
+                Path, smooth_topic, lambda m: self._on_path("smooth", m), sensor_qos
+            )
+            nd.create_subscription(
+                Path, mlp_topic, lambda m: self._on_path("mlp", m), sensor_qos
+            )
+        except ImportError:
+            self.log.warn("nav_msgs unavailable: no occupancy grid / paths")
+        try:
+            from visualization_msgs.msg import MarkerArray
+
+            nd.create_subscription(
+                MarkerArray, target_topic, self._on_target, sensor_qos
+            )
+        except ImportError:
+            self.log.warn("visualization_msgs unavailable: no MLP target")
+        try:
+            from sensor_msgs.msg import Image
+
+            for name, topic in cameras.items():
+                nd.create_subscription(
+                    Image,
+                    topic,
+                    lambda m, name=name: self._on_image(name, m),
+                    sensor_qos,
+                )
+        except ImportError:
+            self.log.warn("sensor_msgs unavailable: no cameras")
+        try:
+            from robot_executor_msgs.msg import ActionResultMsg, RuntimeGuardsMsg
+
+            nd.create_subscription(
+                RuntimeGuardsMsg,
+                guards_topic,
+                lambda m: self.core.on_guards(guards_to_dict(m)),
+                10,
+            )
+            nd.create_subscription(
+                ActionResultMsg,
+                result_topic,
+                lambda m: self.core.on_result(result_to_dict(m)),
+                10,
+            )
+        except ImportError:
+            self.log.warn("robot_executor_msgs unavailable: no guards/results")
+        try:
+            from ros_system_monitor_msgs.msg import StatusTable
+
+            nd.create_subscription(StatusTable, health_topic, self._on_health, 10)
+        except ImportError:
+            self.log.warn("ros_system_monitor_msgs unavailable: no health")
+
+        self._tf_buffer = None
+        try:
+            import tf2_ros
+
+            self._tf_buffer = tf2_ros.Buffer()
+            self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, nd)
+        except ImportError:
+            self.log.warn("tf2_ros unavailable: no pose")
+        nd.create_timer(1.0 / max(cfg["state_hz"], 1.0), self._update_pose)
+
+        self._decoder = threading.Thread(target=self._decode_loop, daemon=True)
+        self._decoder.start()
+        self._tick_period = 1.0 / tick_hz
+        self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
+        self._ticker.start()
+        self.log.info(
+            f"fleetlink agent robot={robot} epoch={self.core.epoch} dsg={dsg_topic} "
+            f"budgets={cfg['budgets']}"
+        )
+
+    def _on_dsg(self, msg) -> None:
+        self._dsg_frame = msg.header.frame_id or self._dsg_frame
+        with self._pending_cv:
+            if self._pending is not None:
+                self.graphs_dropped += 1
+            self._pending = bytes(msg.layer_contents)
+            self.graphs_received += 1
+            self._pending_cv.notify()
+
+    def _decode_loop(self) -> None:
+        import spark_dsg as dsg
+
+        while self._running:
+            with self._pending_cv:
+                while self._pending is None and self._running:
+                    self._pending_cv.wait(0.5)
+                data, self._pending = self._pending, None
+            if data is None:
+                continue
+            try:
+                G = dsg.DynamicSceneGraph.from_binary(data)
+                self.core.on_records(*graph_inputs(G))
+                self.graphs_processed += 1
+            except Exception as exc:
+                self.log.error(f"failed to decode DSG: {exc}")
+
+    def _on_grid(self, msg) -> None:
+        from fleetlink.media import yaw_from_quat
+
+        o = msg.info.origin
+        q = o.orientation
+        self.core.on_grid(
+            msg.header.frame_id,
+            msg.info.resolution,
+            [
+                o.position.x,
+                o.position.y,
+                o.position.z,
+                yaw_from_quat(q.w, q.x, q.y, q.z),
+            ],
+            msg.info.width,
+            msg.info.height,
+            np.asarray(msg.data, dtype=np.int8).tobytes(),
+            stamp_s(msg.header),
+        )
+
+    def _map_frame(self) -> str:
+        return self.map_frame or self._dsg_frame or self.fallback_map_frame
+
+    def _ros_frame(self, frame: str) -> str:
+        """Spot SDK frame names (the executor publishes paths in ``vision``) →
+        their ROS TF names: Spot's vision/odom frames are ``<robot>/odom`` here."""
+        robot = self.core.robot
+        return {
+            "vision": f"{robot}/odom",
+            "odom": f"{robot}/odom",
+            "body": f"{robot}/body",
+        }.get(frame, frame)
+
+    def _to_map(self, pts: np.ndarray, frame: str):
+        """Express points in the scene-graph frame when TF allows (else unchanged)."""
+        frame = self._ros_frame(frame)
+        target = self._map_frame()
+        if not frame or frame == target or self._tf_buffer is None or not len(pts):
+            return pts, frame or target
+        from rclpy.time import Time
+
+        try:
+            tf = self._tf_buffer.lookup_transform(target, frame, Time())
+        except Exception:
+            return pts, frame
+        return transform_points(pts, tf), target
+
+    def _on_path(self, which: str, msg) -> None:
+        pts, frame = self._to_map(path_points(msg), msg.header.frame_id)
+        self.core.on_path(which, pts, frame, stamp_s(msg.header))
+
+    def _on_target(self, msg) -> None:
+        target, frame = marker_target(msg)
+        if target is not None:
+            pts, frame = self._to_map(np.array([target], float), frame)
+            target = [float(v) for v in pts[0]]
+        self.core.on_path("target", target, frame)
+
+    def _on_image(self, name: str, msg) -> None:
+        self.core.on_camera_frame(
+            name,
+            msg.encoding,
+            msg.width,
+            msg.height,
+            msg.step,
+            msg.data,  # converted lazily, only when a frame is requested
+            stamp_s(msg.header),
+        )
+
+    def _on_health(self, msg) -> None:
+        if self.health_monitor and msg.monitor_name != self.health_monitor:
+            return
+        self.core.on_health(status_table_to_dict(msg))
+
+    def _update_pose(self) -> None:
+        if self._tf_buffer is None:
+            return
+        from rclpy.time import Time
+
+        parents = [self.map_frame or self._dsg_frame, self.fallback_map_frame, "map"]
+        for parent in dict.fromkeys(f for f in parents if f):
+            try:
+                tf = self._tf_buffer.lookup_transform(parent, self.body_frame, Time())
+            except Exception:
+                continue
+            tr, q = tf.transform.translation, tf.transform.rotation
+            st = tf.header.stamp
+            self.core.on_pose(
+                {
+                    "x": tr.x,
+                    "y": tr.y,
+                    "z": tr.z,
+                    "qw": q.w,
+                    "qx": q.x,
+                    "qy": q.y,
+                    "qz": q.z,
+                    "frame": parent,
+                    "t": st.sec + st.nanosec * 1e-9,
+                }
+            )
+            return
+
+    def _tick_loop(self) -> None:
+        while self._running:
+            t0 = time.monotonic()
+            try:
+                self.core.tick(time.time())
+            except Exception as exc:
+                self.log.error(f"tick failed: {exc}")
+            time.sleep(max(0.0, self._tick_period - (time.monotonic() - t0)))
+
+    def shutdown(self) -> None:
+        self._running = False
+        with self._pending_cv:
+            self._pending_cv.notify_all()
+        self._ticker.join(timeout=2.0)
+        self._decoder.join(timeout=2.0)
+        self.core.close()
+
+
+def main(args=None) -> None:
+    import rclpy
+
+    rclpy.init(args=args)
+    agent = AgentNode()
+    try:
+        rclpy.spin(agent.node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        agent.shutdown()
+        agent.transport.close()
+        agent.node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

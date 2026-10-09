@@ -1,0 +1,24 @@
+---
+# fleetlink defaults (API.md §8). Budgets are BYTES per second.
+budgets:
+  C1: 5000  # state (~340 B at 4 Hz ≈ 1.4 kB/s)
+  C2: 50000  # graph deltas, 1 Hz tick
+  C3: 100000  # mesh tiles + occupancy grid
+  C4: 200000  # on-demand camera frames (request/reply)
+budget_min:  # auto (AIMD) mode never goes below / above these
+  C2: 5000
+  C3: 5000
+budget_max:
+  C2: 500000
+  C3: 1000000
+total_bps:  # optional overall cap shared in strict priority (null = none)
+auto: false
+state_hz: 4.0  # C1 rate; 2 Hz is not enough for < 1 s staleness at 3 % loss
+c2_hz: 1.0
+mesh_period_s: 5.0
+manifest_period_s: 5.0
+tile_size: 8.0
+max_msg_bytes: 65536
+burst_s: 1.0
+grid_period_s: 5.0  # occupancy grid: checked this often, sent only when it changed
+paths_hz: 2.0  # executor paths: checked this often, sent only when they changed
