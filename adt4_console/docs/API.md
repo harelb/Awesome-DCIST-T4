@@ -582,3 +582,31 @@ A backend that follows these works with the UI unchanged.
   "waiting for key frame", and the robot's own report from the keepalive response.
 * Inspect tab with nothing selected: a "Graph statistics" block for each enabled, loaded source. It refetches on a
   version change. A live source refetches on deltas, throttled to once every 3 s.
+
+### 12.x Recovery and timing (added after the first field-style tests)
+
+* **Bitrate follows the budget.** The encoder runs at `kbps_effective = min(kbps, 80% of the C5
+  budget / active streams)`, quantised to 25 kbit/s (floor 50). Encoding above the budget only
+  made the bucket drop frames, and each drop froze the picture until a key frame. On the
+  Pennovation bag, 800 kbit/s requested under a 40 kB/s budget went from 47 frames in 30 s with
+  2.1 s stalls to 302 frames (10 fps) with a 0.17 s worst stall. The state reports
+  `kbps_effective`.
+* **Key frames on demand.** C0 op `video_keyframe {camera}` → `{camera, forced}` restarts that
+  stream's encoder; a fresh ffmpeg starts with an IDR. At most every 0.5 s per stream, reported as
+  `forced_keyframes`. Three sources trigger it:
+  * the agent itself after a budget drop (at most 1/s);
+  * the receiver when a C5 seq gap ends on a delta frame (lost on the link, at most 1/s);
+  * the console when a backed-up browser starts waiting for a key frame (`Hub.on_video_starved`),
+    or when a browser asks: `POST /api/robots/{r}/video/{camera}/keyframe` → `{ok, requested}`.
+    The browser calls this whenever its key gate skips a frame (at most 1/s).
+
+  Recovery after a 1.5 s outage: first frame 0.22 s after the budget came back. Before this,
+  recovery waited for the next GOP key frame, up to 2 s.
+* **Clock offsets.**
+  * Ping acks carry `t_robot`. The receiver keeps robot − base offsets NTP-style and uses the one
+    from the lowest-RTT of the last 20 pings.
+  * `GET /api/live` adds `clock_offset_ms`, and `latency_ms` is now offset-corrected.
+  * Relayed video frames carry `t_base`, the capture time in the console clock.
+  * `GET /api/time` → `{t}` lets the browser estimate its own offset (Cristian, best of 5 samples,
+    refreshed every minute; `src/lib/clock.ts`).
+  * The video "lag" is therefore robot-capture-to-browser with all three clocks reconciled.

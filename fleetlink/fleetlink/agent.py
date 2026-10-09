@@ -397,6 +397,9 @@ class AgentCore:
             return {"requeued": len(keys)}
         if op == "video":
             return self.video.request(args, now)
+        if op == "video_keyframe":
+            cam = str(args.get("camera") or "")
+            return {"camera": cam, "forced": self.video.force_keyframe(cam, now)}
         raise ValueError(f"unknown op {op!r}")
 
     # ------------------------------------------------------------------- C2

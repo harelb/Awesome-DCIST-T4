@@ -50,7 +50,7 @@ const supported = await page.evaluate(async () => {
   return out;
 });
 console.log("browser decoder support:", JSON.stringify(supported));
-await page.waitForTimeout(12000);
+await page.waitForTimeout(Number(process.env.WAIT_MS ?? 12000));
 await page.screenshot({path: join(shotDir, `video-${cam}-${fps}fps.png`)});
 const stats = await page.locator(".video-stats, .camera-meta").first().textContent().catch(() => "");
 console.log("stats:", (stats ?? "").replace(/\s+/g, " ").trim());

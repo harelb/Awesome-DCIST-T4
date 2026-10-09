@@ -406,3 +406,125 @@ def test_agent_streams_h264_through_link(monkeypatch):
     assert len(fr) >= 15 and fr[0]["key"] and fr[0]["codec"] == "h264"
     assert fr[0]["width"] == 320 and fr[0]["height"] == 240
     assert decode_count("h264", [f["data"] for f in fr], 320, 240) == len(fr)
+
+
+@pytest.mark.skipif(not shutil.which("true"), reason="posix")
+def test_force_keyframe_beats_the_gop(monkeypatch):
+    """A forced key frame arrives within a few frames, not at the 2 s GOP edge."""
+    if not _has_encoder("libx264"):
+        pytest.skip("no libx264")
+    got = []
+    frame = {"encoding": "rgb8", "width": 320, "height": 240, "step": 960}
+    i = [0]
+
+    def get_frame(_cam):
+        i[0] += 1
+        return {**frame, "data": synth(i[0], 320, 240).tobytes(), "stamp": None}
+
+    vs = video.VideoStreams(
+        get_frame=get_frame,
+        send=lambda cam, p: got.append((time.time(), p["key"])) or len(p["data"]),
+        budget_fn=lambda: 1e9,
+        cameras=lambda: ["rgb"],
+    )
+    vs.request({"camera": "rgb", "codec": "h264", "fps": 10, "kbps": 300})
+    try:
+        t_end = time.time() + 1.2  # past the first key frame, inside the 2 s GOP
+        while time.time() < t_end:
+            vs.tick()
+            time.sleep(0.01)
+        t_force = time.time()
+        assert vs.force_keyframe("rgb")
+        assert not vs.force_keyframe("rgb")  # rate-limited (0.5 s)
+        t_end = time.time() + 0.6
+        while time.time() < t_end:
+            vs.tick()
+            time.sleep(0.01)
+    finally:
+        vs.stop_all()
+    after = [t for t, key in got if key and t > t_force]
+    assert after, "no key frame after the forced restart"
+    assert after[0] - t_force < 0.4  # natural next key would be ~0.8 s away
+
+
+def test_video_keyframe_op_acks():
+    tr, clock, core = _agent()
+    _req(tr, {"camera": "rgb", "fps": 5, "codec": "jpeg", "width": 80}, "a")
+    _run(clock, core, 1.0)
+    req = {"id": "kf", "op": "video_keyframe", "args": {"camera": "rgb"}}
+    tr.inject("adt4/r/ctl/req", env_bytes("base", "ctl/req", 1, "b", req))
+    _run(clock, core, 0.1)
+    ack = [m[1]["p"] for m in tr.messages("adt4/r/ctl/ack") if m[1]["p"]["id"] == "kf"]
+    assert (
+        ack and ack[0]["ok"] and ack[0]["result"] == {"camera": "rgb", "forced": True}
+    )
+    assert core.video.streams["rgb"].forced == 1
+
+
+def test_receiver_requests_keyframe_on_delta_gap_and_corrects_clock():
+    tr = RecordingTransport()
+    clock = VirtualClock(1000.0)
+    events = []
+    rx = Receiver(
+        tr, lambda r, k, d: events.append((k, d)), clock=clock, threaded=False
+    )
+    rx.start()
+
+    def frame(seq, key, t):
+        p = {"camera": "rgb", "codec": "h264", "seq": seq, "t": t, "key": key,
+             "width": 640, "height": 360, "fps": 5, "data": b"z" * 100}  # fmt: skip
+        env = env_bytes("r", "video/rgb", seq, "e1", p)
+        tr.inject("adt4/r/video/rgb", env)
+
+    def kf_requests():
+        return [
+            codec.unpack(d)["p"]
+            for k, d, _ in tr.sent
+            if k.endswith("ctl/req") and codec.unpack(d)["p"]["op"] == "video_keyframe"
+        ]
+
+    frame(0, True, 1000.0)
+    frame(3, False, 1000.0)  # lost 1, 2 → ask for a key frame
+    frame(5, False, 1000.0)  # second gap within 1 s: rate-limited
+    assert [r["args"] for r in kf_requests()] == [{"camera": "rgb"}]
+    clock.advance(1.5)
+    frame(9, True, 1000.0)  # a gap ending on a key frame needs nothing
+    assert len(kf_requests()) == 1
+
+    # clock offset: robot clock runs 3 s ahead; the lowest-RTT ping wins
+    r = rx._robots["r"]
+    for t_send, rtt in [(1001.0, 0.4), (1002.0, 0.02), (1003.0, 0.3)]:
+        clock.t = t_send + rtt
+        robot_t = t_send + rtt / 2 + 3.0
+        rx._on_ack(
+            r, {"id": None, "result": {"t": t_send, "t_robot": robot_t}}, clock.t
+        )
+    assert abs(rx.clock_offset("r") - 3.0) < 1e-9
+    assert abs(rx.link("r")["clock_offset_ms"] - 3000.0) < 1e-6
+    # a frame captured 0.1 s ago in robot time maps to 0.1 s ago in base time
+    clock.t = 1010.0
+    frame(10, False, 1010.0 + 3.0 - 0.1)
+    vid = [d for k, d in events if k == "video"][-1]
+    assert abs(vid["t_base"] - (1010.0 - 0.1)) < 1e-9
+
+
+def test_encoder_bitrate_capped_to_c5_budget():
+    budget = {"C5": 400_000.0}
+    vs = video.VideoStreams(
+        get_frame=lambda c: None,
+        send=lambda cam, p: 0,
+        budget_fn=lambda: budget["C5"],
+        cameras=lambda: ["rgb", "overlay"],
+    )
+    vs.request({"camera": "rgb", "codec": "h264", "kbps": 800})
+    st = vs.streams["rgb"]
+    assert vs.effective_kbps(st) == 800  # 0.8 * 3200 kbit/s leaves plenty
+    budget["C5"] = 40_000.0  # 320 kbit/s → 256 → 250 (25 kbit/s steps)
+    assert vs.effective_kbps(st) == 250
+    vs.request({"camera": "overlay", "codec": "h264", "kbps": 800})
+    assert vs.effective_kbps(st) == 125  # two streams share the budget
+    budget["C5"] = 1_000.0
+    assert vs.effective_kbps(st) == video.MIN_KBPS  # never below the floor
+    budget["C5"] = None
+    assert vs.effective_kbps(st) == 800  # unlimited
+    vs.stop_all()

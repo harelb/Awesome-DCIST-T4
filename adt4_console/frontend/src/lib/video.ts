@@ -9,6 +9,7 @@ export interface VideoFrame {
   codec: VideoCodec;
   seq: number;
   t: number; // robot wall clock when the frame was sampled (s)
+  tBase?: number | null; // the same instant in the console's clock (clock-offset corrected)
   stamp?: number | null; // image header stamp
   key: boolean;
   width: number;
@@ -141,6 +142,7 @@ export function parseVideoFrame(d: unknown): VideoFrame | null {
     codec: o.codec as VideoCodec,
     seq: o.seq,
     t: Number(o.t ?? 0),
+    tBase: typeof o.t_base === "number" ? o.t_base : null,
     stamp: (o.stamp as number | null | undefined) ?? null,
     key: Boolean(o.key),
     width: Number(o.width ?? 0),
@@ -149,4 +151,11 @@ export function parseVideoFrame(d: unknown): VideoFrame | null {
     data,
     robot: o.robot === undefined ? undefined : String(o.robot),
   };
+}
+
+/** End-to-end lag (ms) from robot capture to now, skew-corrected: the console
+ * maps the capture time into its clock (``tBase``), ``offset`` maps ours. */
+export function frameLagMs(f: Pick<VideoFrame, "tBase">, nowMs: number, offset: number | null): number | null {
+  if (f.tBase == null || offset == null) return null;
+  return (nowMs / 1000 + offset - f.tBase) * 1000;
 }

@@ -183,3 +183,12 @@ async def video_stop(robot: str, camera: str, request: Request):
     return services(request).live.video.stop(
         robot, camera, await _viewer(request) or None
     )
+
+
+@robots_router.post("/{robot}/video/{camera}/keyframe")
+def video_keyframe(robot: str, camera: str, request: Request):
+    """Ask the robot for a key frame now (a browser's decoder lost sync).  The
+    receiver also does this by itself when it sees frames lost on the link."""
+    rx = _rx(request)
+    fn = getattr(rx, "request_keyframe", None)
+    return {"ok": True, "requested": bool(fn(robot, camera)) if fn else False}

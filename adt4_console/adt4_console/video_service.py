@@ -60,6 +60,8 @@ class VideoRelay:
     ):
         self.live = live  # LiveService (its .receiver may connect later)
         self.hub = hub
+        if hub is not None:
+            hub.on_video_starved = self._on_starved
         self.clock = clock
         self.viewer_timeout_s = viewer_timeout_s
         self.robot_keepalive_s = robot_keepalive_s
@@ -215,6 +217,13 @@ class VideoRelay:
             self.hub.publish_video(f"video/{robot}/{camera}", data, key)
 
     # -- status ------------------------------------------------------------
+
+    def _on_starved(self, topic: str) -> None:
+        """Hub callback: a viewer started dropping until the next key frame."""
+        parts = topic.split("/")  # video/<robot>/<camera>
+        rx = self.live.receiver
+        if len(parts) == 3 and rx is not None and hasattr(rx, "request_keyframe"):
+            rx.request_keyframe(parts[1], parts[2])  # rate-limited to 1/s there
 
     def status(self, st: _Stream) -> dict:
         now = self.clock()

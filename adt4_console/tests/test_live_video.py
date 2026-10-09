@@ -270,3 +270,28 @@ def test_video_over_websocket(vlive):
         while not f["topic"].startswith("video/"):
             f = msgpack.unpackb(ws.receive_bytes())
         assert f["data"]["seq"] == 2
+
+
+def test_starved_viewer_and_keyframe_route_request_a_keyframe(vlive):
+    client, svc, rx, relay = vlive
+    asked = []
+    rx.request_keyframe = lambda robot, cam: asked.append((robot, cam)) or True
+    # explicit request (browser decoder lost sync)
+    r = client.post("/api/robots/euclid/video/rgb/keyframe")
+    assert r.status_code == 200 and r.json() == {"ok": True, "requested": True}
+    assert asked == [("euclid", "rgb")]
+    # a backed-up browser starts dropping deltas → the hub asks too
+    c = svc.hub.add_client()
+    c.video_maxlen = 1
+    svc.hub.subscribe(c, ["video/"])
+    topic = "video/euclid/rgb"
+    svc.hub.publish_video(topic, {"seq": 0, "key": True}, True)
+    svc.hub.publish_video(topic, {"seq": 1, "key": False}, False)  # queue full → drop
+    assert asked[-1] == ("euclid", "rgb") and len(asked) == 2
+
+
+def test_time_endpoint(client):
+    import time
+
+    t = client.get("/api/time").json()["t"]
+    assert abs(t - time.time()) < 5

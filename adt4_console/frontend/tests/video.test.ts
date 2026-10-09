@@ -69,3 +69,20 @@ describe("video helpers", () => {
     expect(await pickCodec(undefined)).toBe("jpeg");
   });
 });
+
+describe("skew-corrected lag", () => {
+  it("uses the console-mapped capture time and the browser offset", async () => {
+    const {frameLagMs} = await import("../src/lib/video");
+    const {bestOffset} = await import("../src/lib/clock");
+    // browser clock runs 5 s behind the console; capture 120 ms ago (console clock)
+    const off = bestOffset([
+      {t0: 100.0, t1: 100.4, server: 105.3}, // slow sample: rtt 0.4
+      {t0: 200.0, t1: 200.02, server: 205.01}, // best: offset 5.0
+    ]);
+    expect(off).toBeCloseTo(5.0, 6);
+    const nowMs = 300_000; // browser clock
+    expect(frameLagMs({tBase: 304.88}, nowMs, off)).toBeCloseTo(120, 3);
+    expect(frameLagMs({tBase: null}, nowMs, off)).toBeNull();
+    expect(frameLagMs({tBase: 304.88}, nowMs, null)).toBeNull();
+  });
+});

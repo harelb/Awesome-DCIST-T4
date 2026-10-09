@@ -28,6 +28,7 @@ Time comes from ``clock`` (default ``time.time``); without a background thread
 
 from __future__ import annotations
 
+import collections
 import itertools
 import secrets
 import threading
@@ -102,6 +103,11 @@ class _Robot:
         self.last_state_rx: float | None = None
         self.latency: float | None = None
         self.rtt: float | None = None
+        # robot clock - base clock, from pings (NTP-style; the lowest-RTT
+        # recent sample is the least distorted by queueing)
+        self.offset_samples: collections.deque = collections.deque(maxlen=20)
+        self.clock_offset: float | None = None
+        self.kf_req_t: dict[str, float] = {}
         self.bytes = dict.fromkeys(CLASSES, 0)
         self.rates = dict.fromkeys(CLASSES, 0.0)
         self.win = dict.fromkeys(CLASSES, 0)
@@ -290,6 +296,9 @@ class Receiver:
             "staleness_s": staleness,
             "state_age_s": None if r.last_state_rx is None else now - r.last_state_rx,
             "latency_ms": None if r.latency is None else 1000.0 * r.latency,
+            "clock_offset_ms": (
+                None if r.clock_offset is None else 1000.0 * r.clock_offset
+            ),
             "rtt_ms": None if r.rtt is None else 1000.0 * r.rtt,
             "nodes": len(r.graph.records),
             "tiles": len(r.tiles),
@@ -421,7 +430,9 @@ class Receiver:
             r.bytes[cls] += len(data)
             r.win[cls] += len(data)
             r.last_seen = now
-            lat = now - float(env.get("t", now))
+            # one-way latency in the base clock (robot stamps corrected by the
+            # estimated clock offset once a ping has measured it)
+            lat = now - (float(env.get("t", now)) - (r.clock_offset or 0.0))
             r.latency = lat if r.latency is None else 0.8 * r.latency + 0.2 * lat
             if env["epoch"] in r.retired:
                 return  # late message from a previous agent incarnation
@@ -490,6 +501,10 @@ class Receiver:
         if last is not None and seq > last + 1:
             v.gaps += 1
             v.lost += seq - last - 1
+            if not p.get("key"):
+                # frames were lost on the link: ask for a key frame now rather
+                # than freezing until the next GOP boundary
+                self._request_keyframe(r, cam, now)
         v.frames += 1
         v.keys += int(bool(p.get("key")))
         v.bytes += n
@@ -498,8 +513,34 @@ class Receiver:
         v.last_rx = now
         v.last = {k: p.get(k) for k in ("codec", "width", "height")}
         v.last["target_fps"] = p.get("fps")
-        # ``gap``: the first frame we see, or frames were lost before this one
-        return {**p, "camera": cam, "gap": gap}
+        # ``gap``: the first frame we see, or frames were lost before this one;
+        # ``t_base``: the capture time in this (base) clock
+        t_base = None
+        if p.get("t") is not None:
+            t_base = float(p["t"]) - (r.clock_offset or 0.0)
+        return {**p, "camera": cam, "gap": gap, "t_base": t_base}
+
+    def _request_keyframe(self, r: _Robot, camera: str, now: float) -> bool:
+        """C0 ``video_keyframe`` (lock held), at most once per second per stream."""
+        if now - r.kf_req_t.get(camera, -1e9) < 1.0:
+            return False
+        r.kf_req_t[camera] = now
+        self._pending_send(r.name, "video_keyframe", {"camera": camera})
+        return True
+
+    def request_keyframe(self, robot: str, camera: str) -> bool:
+        """Ask the robot for a key frame now (e.g. a browser's decoder failed)."""
+        with self._lock:
+            r = self._robots.get(robot)
+            if r is None:
+                return False
+            return self._request_keyframe(r, camera, self.clock())
+
+    def clock_offset(self, robot: str) -> float | None:
+        """Estimated robot clock minus base clock (seconds), or None."""
+        with self._lock:
+            r = self._robots.get(robot)
+            return None if r is None else r.clock_offset
 
     def _new_epoch(self, r: _Robot, epoch: str, now: float) -> None:
         if r.epoch is not None:
@@ -596,6 +637,10 @@ class Receiver:
         if res.get("t") is not None:  # ping ack (pings are fire-and-forget)
             rtt = now - float(res["t"])
             r.rtt = rtt if r.rtt is None else 0.8 * r.rtt + 0.2 * rtt
+            if res.get("t_robot") is not None:
+                off = float(res["t_robot"]) - (float(res["t"]) + now) / 2.0
+                r.offset_samples.append((rtt, off))
+                r.clock_offset = min(r.offset_samples)[1]
         if "budgets" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["budgets"] = {
                 c: res["budgets"].get(c) for c in ("C1", "C2", "C3", "C4", "C5")

@@ -4,7 +4,8 @@
 import {useEffect, useRef, useState} from "react";
 import {getToken} from "../lib/auth";
 import {ws} from "../ws";
-import {BITRATE_PRESETS, FPS_OPTIONS, KeyGate, RateMeter, VIDEO_WIDTHS, chunkInit, decoderConfig, parseVideoFrame, pickCodec, type VideoCodec, type VideoFrame as StreamFrame} from "../lib/video";
+import {consoleClockOffset} from "../lib/clock";
+import {BITRATE_PRESETS, FPS_OPTIONS, KeyGate, RateMeter, VIDEO_WIDTHS, chunkInit, decoderConfig, frameLagMs, parseVideoFrame, pickCodec, type VideoCodec, type VideoFrame as StreamFrame} from "../lib/video";
 
 const START_SPACING_MS = 1100;
 const KEEPALIVE_MS = 2000;
@@ -156,6 +157,7 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
     let last: StreamFrame | null = null;
     let decoder: VideoDecoder | null = null;
     let lastUrl: string | null = null;
+    let lastKfReq = -1e9;
 
     const draw = (frame: VideoFrame) => {
       const c = canvasRef.current;
@@ -193,7 +195,7 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
       const now = performance.now();
       meter.add(fr.data.byteLength, now);
       last = fr;
-      lagMs = fr.t ? Date.now() - fr.t * 1000 : null;
+      lagMs = frameLagMs(fr, Date.now(), consoleClockOffset());
       if (fr.codec === "jpeg") {
         const url = URL.createObjectURL(new Blob([fr.data as BlobPart], {type: "image/jpeg"}));
         if (lastUrl) URL.revokeObjectURL(lastUrl);
@@ -208,7 +210,15 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
       }
       if (decoder && decoder.decodeQueueSize > 8) gate.broken(); // decoder backlog: drop to the next key frame
       const {action, reconfigure} = gate.accept(fr, f.seq);
-      if (action === "skip") return;
+      if (action === "skip") {
+        // lost sync: ask for a key frame now instead of freezing until the
+        // next GOP boundary (up to 2 s); at most once a second
+        if (performance.now() - lastKfReq > 1000) {
+          lastKfReq = performance.now();
+          void post(`${base}/keyframe`, {}).catch(() => undefined);
+        }
+        return;
+      }
       try {
         if (!decoder || decoder.state === "closed") decoder = newDecoder();
         if (!decoder) return;
@@ -304,7 +314,7 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
           {stats.fps.toFixed(1)} fps · {Math.round(stats.kbps)} kbit/s
           {stats.decodeMs !== null && ` · decode ${stats.decodeMs.toFixed(0)} ms`}
           {stats.lagMs !== null && stats.lagMs > -5000 && stats.lagMs < 60000 && (
-            <span title="Browser clock minus the robot's sample time (includes clock skew)"> · lag {Math.max(0, stats.lagMs).toFixed(0)} ms</span>
+            <span title="Robot capture to browser display, corrected for robot/console/browser clock offsets"> · lag {Math.max(0, stats.lagMs).toFixed(0)} ms</span>
           )}
           {stats.skipped > 0 && ` · skipped ${stats.skipped}`}
           {stats.waitingKey && stats.codec && <span className="tone-warn"> · waiting for key frame</span>}

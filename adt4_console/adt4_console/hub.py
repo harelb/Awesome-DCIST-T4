@@ -181,6 +181,8 @@ class Hub:
         self._latest: dict[str, bytes] = {}
         # video topic -> [(frame bytes, key, t, size)] from the newest key frame
         self._gop: dict[str, list[tuple[bytes, bool, float, int]]] = {}
+        # called with a video topic when some client starts waiting for a key frame
+        self.on_video_starved = None
         self._lock = threading.Lock()
 
     def add_client(self, loop=None) -> Client:
@@ -244,9 +246,17 @@ class Hub:
                 ):
                     # too long to replay: new viewers wait for the next key frame
                     del self._gop[topic]
+        starved = False
         for c in clients:
-            if c.wants(topic):
-                c.push_video(topic, frame, key)
+            if c.wants(topic) and not c.push_video(topic, frame, key) and not key:
+                starved = True
+        if starved and self.on_video_starved is not None:
+            # a backed-up browser now waits for a key frame: ask for one now
+            # rather than letting it freeze until the next GOP boundary
+            try:
+                self.on_video_starved(topic)
+            except Exception:  # noqa: BLE001
+                pass
         return seq
 
     def clear_video(self, topic: str) -> None:

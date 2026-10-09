@@ -48,6 +48,7 @@ LIMITS = {"fps": (0.5, 15.0), "kbps": (50, 2000), "width": (64, 1920)}
 DEFAULTS = {"fps": 5.0, "kbps": 300, "width": 640, "codec": "h264"}
 KEEPALIVE_S = 6.0
 MAX_STREAMS = 4
+MIN_KBPS = LIMITS["kbps"][0]  # floor of the budget cap
 
 
 class EncoderError(RuntimeError):
@@ -452,6 +453,10 @@ def scale(img: np.ndarray, w: int, h: int) -> np.ndarray:
     return np.ascontiguousarray(img[ys][:, xs])
 
 
+FORCE_MIN_S = 0.5  # on-demand key frames (C0 video_keyframe), per stream
+DROP_FORCE_MIN_S = 1.0  # after a budget drop: slower, a starved link would thrash
+
+
 class _Stream:
     def __init__(self, camera: str, params: dict, now: float):
         self.camera = camera
@@ -473,17 +478,22 @@ class _Stream:
         self.win_t = now
         self.sent_kbps = 0.0
         self.fed_t: deque = deque(maxlen=64)  # (t, stamp) per frame fed
+        self.kbps_eff = int(params["kbps"])  # after the C5 budget cap
+        self.forced = 0  # encoder restarts to get a key frame now
+        self.last_force = -1e9
 
     def state(self) -> dict:
         out = {
             "codec": self.codec,
             "fps": self.params["fps"],
             "kbps": self.params["kbps"],
+            "kbps_effective": self.kbps_eff,
             "width": self.width or self.params["width"],
             "height": self.height,
             "sent_kbps": round(self.sent_kbps, 1),
             "frames": self.frames,
             "dropped": self.dropped,
+            "forced_keyframes": self.forced,
         }
         if self.error:
             out["error"] = self.error
@@ -557,6 +567,25 @@ class VideoStreams:
                 "state": st.state(),
             }
 
+    def force_keyframe(
+        self, camera: str, now: float | None = None, min_gap: float = FORCE_MIN_S
+    ) -> bool:
+        """Get a key frame now instead of at the next GOP boundary (up to 2 s away).
+
+        ffmpeg cannot be asked for an IDR over stdin, but a fresh encoder always
+        starts with one, so the encoder is restarted (~50 ms) and the next frame
+        is fed immediately.  At most once per ``min_gap`` seconds per stream."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            st = self.streams.get(camera)
+            if st is None or now - st.last_force < min_gap:
+                return False
+            st.last_force = now
+            st.forced += 1
+            self._close_encoder(st)  # rebuilt (key frame first) on the next frame
+            st.next_t = now
+            return True
+
     def stop_all(self) -> None:
         with self._lock:
             for st in list(self.streams.values()):
@@ -612,20 +641,44 @@ class VideoStreams:
                 except Exception as exc:  # noqa: BLE001 - bad frame: report, go on
                     st.error = f"frame: {exc}"
 
+    def effective_kbps(self, st: _Stream) -> int:
+        """The requested bitrate, capped to fit the C5 budget (shared by all
+        streams, 80% to leave room for key-frame peaks).  Encoding above the
+        budget only makes the bucket drop frames — and every drop freezes the
+        picture until a key frame — so the encoder is told the truth instead.
+        Quantised to 25 kbit/s so small budget changes don't restart it."""
+        want = int(st.params["kbps"])
+        budget = self.bucket.budget_fn()
+        if not budget or budget <= 0:
+            return want
+        share = 0.8 * float(budget) * 8 / 1000.0 / max(1, len(self.streams))
+        cap = max(MIN_KBPS, int(share // 25) * 25)
+        return min(want, cap)
+
     def _feed(self, st: _Stream, frame: dict, now: float) -> None:
         img = to_rgb(frame)
         w, h = out_size(img.shape[1], img.shape[0], st.params["width"])
         p = st.params
-        want = (st.codec, w, h, p["fps"], p["kbps"])
+        st.kbps_eff = self.effective_kbps(st)
+        want = (st.codec, w, h, p["fps"], st.kbps_eff)
         if st.enc is None or st.enc_key != want:
             self._close_encoder(st)
             st.enc = self._make_encoder(st, w, h)
-            st.enc_key = (st.codec, w, h, p["fps"], p["kbps"])
+            st.enc_key = want
             st.width, st.height = w, h
             st.wait_key = True  # a new encoder starts with a key frame
             st.fed_t.clear()
         st.fed_t.append((now, frame.get("stamp")))
         st.enc.feed(scale(img, w, h))
+
+    def _force_later(self, camera: str, now: float) -> None:
+        # called from an encoder's reader thread: closing that encoder there
+        # would join itself, so hand the restart to a short-lived thread
+        threading.Thread(
+            target=self.force_keyframe,
+            args=(camera, now, DROP_FORCE_MIN_S),
+            daemon=True,
+        ).start()
 
     def _make_encoder(self, st: _Stream, w: int, h: int):
         p = st.params
@@ -636,13 +689,13 @@ class VideoStreams:
         if st.codec in ("h264", "vp8"):
             try:
                 return FfmpegEncoder(
-                    st.codec, w, h, p["fps"], p["kbps"], on_frame, self.ffmpeg
+                    st.codec, w, h, p["fps"], st.kbps_eff, on_frame, self.ffmpeg
                 )
             except EncoderError as exc:
                 st.error = str(exc)
                 st.fallback = True
                 st.codec = "jpeg"
-        return JpegEncoder(w, h, p["fps"], p["kbps"], on_frame)
+        return JpegEncoder(w, h, p["fps"], st.kbps_eff, on_frame)
 
     def _fall_back(self, st: _Stream, why: str) -> None:
         st.error = why
@@ -662,6 +715,9 @@ class VideoStreams:
             if not self.bucket.admit(len(data), key, now):
                 st.dropped += 1
                 st.wait_key = True
+                # recover with a fresh key frame instead of waiting out the GOP;
+                # rarer than on request, since a starved budget would thrash
+                self._force_later(st.camera, now)
                 return
             st.wait_key = False
             seq = self.seq.get(st.camera, 0)

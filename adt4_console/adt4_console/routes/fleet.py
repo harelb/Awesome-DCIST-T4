@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -9,6 +11,13 @@ from .. import __version__
 from . import services
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/time")
+def server_time():
+    """Console wall clock, for browsers to estimate their clock offset (lag
+    figures compare times taken on robot, console and browser)."""
+    return {"t": time.time()}
 
 
 @router.get("/health")
