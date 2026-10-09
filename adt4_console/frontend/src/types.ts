@@ -171,6 +171,8 @@ export interface RobotPlan {
   plan: null | {plan_id: string; robot_name: string; t: number; actions: PlanAction[]};
   results: ActionResult[];
   llm: string[];
+  /** omniplanner ~/plan_status: one entry per handled goal */
+  status?: {plugin: string; robot: string; ok: boolean; error: string; t: number}[];
 }
 
 export interface PlanRobot {
@@ -178,7 +180,7 @@ export interface PlanRobot {
   plugins: {name: string; kind: "language" | "goto" | "tsp" | "pddl" | string; topic: string}[];
 }
 
-export type Cls = "C1" | "C2" | "C3";
+export type Cls = "C1" | "C2" | "C3" | "C4" | "C5";
 
 export interface LinkInfo {
   connected: boolean;

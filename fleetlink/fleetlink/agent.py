@@ -14,8 +14,10 @@ health / action results, and on every :meth:`AgentCore.tick` emits
 * C1 ``paths`` (executor smooth / MLP paths + MLP target) only on change,
 
 serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
-``resend``) with an ack each, and answers C4 camera queries on
-``adt4/<r>/media/camera/<name>``.  :class:`AgentNode` wraps it in rclpy.
+``resend``, ``video``) with an ack each, answers C4 camera queries on
+``adt4/<r>/media/camera/<name>`` and streams C5 live video on
+``adt4/<r>/video/<name>`` while the base keeps a ``video`` request alive
+(:mod:`fleetlink.video`).  :class:`AgentNode` wraps it in rclpy.
 """
 
 from __future__ import annotations
@@ -28,13 +30,22 @@ from typing import Callable
 
 import numpy as np
 
-from fleetlink import codec, media
+from fleetlink import codec, media, video
 from fleetlink.codec import GraphDelta, GraphState
 from fleetlink.scheduler import Item, Scheduler
 from fleetlink.transport import Transport
 
+# budget classes reported in the state message (and adjustable from the console)
+CLASSES_REPORTED = ("C1", "C2", "C3", "C4", "C5")
+
 DEFAULT_CONFIG = {
-    "budgets": {"C1": 5_000, "C2": 50_000, "C3": 100_000, "C4": 200_000},  # bytes/s
+    "budgets": {  # bytes/s
+        "C1": 5_000,
+        "C2": 50_000,
+        "C3": 100_000,
+        "C4": 200_000,
+        "C5": 400_000,  # live video (all streams together)
+    },
     "budget_min": {"C2": 5_000, "C3": 5_000},
     "budget_max": {"C2": 500_000, "C3": 1_000_000},
     "total_bps": None,
@@ -50,6 +61,8 @@ DEFAULT_CONFIG = {
     "grid_period_s": 5.0,
     "paths_hz": 2.0,  # how often paths are checked for a change
     "cameras": ["rgb", "overlay"],
+    "video_keepalive_s": video.KEEPALIVE_S,  # a stream stops without a request this long
+    "ffmpeg": None,  # None -> $FLEETLINK_FFMPEG / ffmpeg on PATH / /usr/bin/ffmpeg
 }
 
 
@@ -176,6 +189,19 @@ class AgentCore:
         self._c4_t: float | None = None
         self.media_served = 0
         self.media_refused = 0
+        # live video (C5)
+        self.video = video.VideoStreams(
+            get_frame=self._latest_frame,
+            send=video.make_sender(
+                transport, robot, lambda: self.epoch, clock, self.prefix
+            ),
+            budget_fn=lambda: self.sched.budgets.get("C5"),
+            clock=clock,
+            cameras=lambda: list(self.camera_names),
+            burst_s=self.cfg["burst_s"],
+            keepalive_s=float(self.cfg["video_keepalive_s"]),
+            ffmpeg=self.cfg["ffmpeg"],
+        )
 
         self._sub = transport.subscribe(f"{self.prefix}/ctl/req", self._on_req)
         try:
@@ -260,6 +286,10 @@ class AgentCore:
         }
         with self._media_lock:
             self._frames[name] = frame
+
+    def _latest_frame(self, name: str) -> dict | None:
+        with self._media_lock:
+            return self._frames.get(name)
 
     # ----------------------------------------------------------------- helpers
 
@@ -365,6 +395,8 @@ class AgentCore:
                 self.sent_manifest.pop(k, None)
             self._tiles_dirty = True
             return {"requeued": len(keys)}
+        if op == "video":
+            return self.video.request(args, now)
         raise ValueError(f"unknown op {op!r}")
 
     # ------------------------------------------------------------------- C2
@@ -591,6 +623,7 @@ class AgentCore:
                 "stats": self.stats(),
                 "cameras": list(self.camera_names),
                 "hashes": {"grid": self.sent_grid_hash, "paths": self.sent_paths_hash},
+                "video": self.video.state(),
             }
 
     def stats(self) -> dict:
@@ -600,7 +633,9 @@ class AgentCore:
             "sent": dict(s.sent_bytes),
             "rate": {c: round(r, 1) for c, r in s.rate.items()},
             "queue": s.queue_stats(),
-            "budgets": {c: s.budgets[c] for c in ("C1", "C2", "C3")},
+            # C4 (camera queries) / C5 (video) too, so the console can show
+            # and adjust every class's budget
+            "budgets": {c: s.budgets[c] for c in CLASSES_REPORTED if c in s.budgets},
             "auto": s.auto,
             "nodes": len(self._target[0]) if self._target else 0,
             "tiles": len(self.tiles),
@@ -643,7 +678,9 @@ class AgentCore:
             if self._paths_dirty and now - self._t_paths >= 1.0 / self.cfg["paths_hz"]:
                 self._t_paths = now
                 self._paths_tick()
-            return self.sched.drain(now)
+            sent = self.sched.drain(now)
+        self.video.tick(now)  # outside the core lock: encoders call back from threads
+        return sent
 
     def graph_state(self) -> GraphState:
         """The robot's current (target) graph as a GraphState (for comparisons)."""
@@ -655,6 +692,7 @@ class AgentCore:
         return g
 
     def close(self) -> None:
+        self.video.close()
         unsub = getattr(self.transport, "unsubscribe", None)
         if unsub is not None:
             unsub(self._sub)
@@ -812,6 +850,8 @@ class AgentNode:
         cfg["tile_size"] = p("tile_size", float(cfg["tile_size"]))
         connect = p("zenoh_connect", "tcp/127.0.0.1:7447")
         cfg["budgets"]["C4"] = p("budget_C4", int(cfg["budgets"]["C4"]))
+        cfg["budgets"]["C5"] = p("budget_C5", int(cfg["budgets"]["C5"]))
+        cfg["ffmpeg"] = p("ffmpeg", cfg["ffmpeg"] or "") or None
         grid_topic = p("grid_topic", "hydra/tsdf/occupancy")
         cfg["grid_period_s"] = p("grid_period_s", float(cfg["grid_period_s"]))
         smooth_topic = p(
@@ -924,6 +964,10 @@ class AgentNode:
         self._tick_period = 1.0 / tick_hz
         self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
         self._ticker.start()
+        # video frames are sampled on their own thread so 15 fps is not quantised
+        # to the 20 Hz tick
+        self._video_thread = threading.Thread(target=self._video_loop, daemon=True)
+        self._video_thread.start()
         self.log.info(
             f"fleetlink agent robot={robot} epoch={self.core.epoch} dsg={dsg_topic} "
             f"budgets={cfg['budgets']}"
@@ -1066,11 +1110,23 @@ class AgentNode:
                 self.log.error(f"tick failed: {exc}")
             time.sleep(max(0.0, self._tick_period - (time.monotonic() - t0)))
 
+    def _video_loop(self) -> None:
+        while self._running:
+            now = time.time()
+            try:
+                self.core.video.tick(now)
+            except Exception as exc:
+                self.log.error(f"video tick failed: {exc}")
+            due = self.core.video.next_due()
+            wait = 0.05 if due is None else min(0.05, max(0.002, due - time.time()))
+            time.sleep(wait)
+
     def shutdown(self) -> None:
         self._running = False
         with self._pending_cv:
             self._pending_cv.notify_all()
         self._ticker.join(timeout=2.0)
+        self._video_thread.join(timeout=2.0)
         self._decoder.join(timeout=2.0)
         self.core.close()
 

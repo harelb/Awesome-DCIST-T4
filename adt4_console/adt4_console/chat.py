@@ -3,9 +3,13 @@
 ``ChatService.stream(message, robot, src)`` yields NDJSON-able dicts:
 ``text`` / ``tool`` / ``goal`` (a proposal the UI can send) / ``error`` / ``done``.
 
-With Anthropic credentials (and ``settings.llm``) Claude answers using two
-tools over the selected graph source; otherwise a deterministic fallback handles
-"find / go to <label>" by matching object labels and proposing a goto goal.
+With LLM credentials (and ``settings.llm``) the model answers using tools over
+the selected graph source — OpenAI (``ADT4_OPENAI_API_KEY``/``OPENAI_API_KEY``,
+default ``gpt-4.1-mini``) or Anthropic.  Spend is metered from each response's
+token usage against ``settings.llm_budget_usd`` (persisted in
+``settings.llm_usage_path``); past the cap, or without credentials, a
+deterministic fallback handles "find / go to <label>" by matching object labels
+and proposing a goto goal.
 """
 
 from __future__ import annotations
@@ -14,9 +18,78 @@ import json
 import logging
 import math
 import os
+import pathlib
 import re
+import threading
+import time
 
 log = logging.getLogger(__name__)
+
+# USD per 1M tokens (input, output).  Unknown models are metered at the
+# conservative default so the budget cap errs on the safe side.
+PRICES = {
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4o": (2.50, 10.00),
+}
+DEFAULT_PRICE = (5.00, 15.00)
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
+
+
+def price_for(model: str) -> tuple[float, float]:
+    """Longest matching price-table prefix (dated snapshots share their family)."""
+    best = None
+    for name in PRICES:
+        if model.startswith(name) and (best is None or len(name) > len(best)):
+            best = name
+    return PRICES[best] if best else DEFAULT_PRICE
+
+
+class UsageLedger:
+    """Cumulative LLM spend, persisted so the budget cap survives restarts."""
+
+    def __init__(self, path: str, budget_usd: float):
+        self.path = pathlib.Path(os.path.expanduser(path))
+        self.budget_usd = budget_usd
+        self.lock = threading.Lock()
+        self.data = {
+            "spent_usd": 0.0,
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        try:
+            self.data.update(json.loads(self.path.read_text()))
+        except (OSError, ValueError):
+            pass
+
+    @property
+    def spent(self) -> float:
+        return float(self.data["spent_usd"])
+
+    def remaining(self) -> float:
+        return self.budget_usd - self.spent
+
+    def record(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        pin, pout = price_for(model)
+        cost = (input_tokens * pin + output_tokens * pout) / 1e6
+        with self.lock:
+            d = self.data
+            d["spent_usd"] = round(d["spent_usd"] + cost, 6)
+            d["calls"] += 1
+            d["input_tokens"] += int(input_tokens)
+            d["output_tokens"] += int(output_tokens)
+            d["last"] = {"model": model, "cost_usd": round(cost, 6), "t": time.time()}
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(d))
+            except OSError as e:
+                log.warning("could not persist LLM usage: %s", e)
+        return cost
+
 
 _GOTO_RE = re.compile(
     r"^\s*(?:please\s+)?(?:find|locate|where\s+is|where\s+are|go\s+to|goto|navigate\s+to|"
@@ -76,6 +149,16 @@ def find_objects(
     return hits[:limit]
 
 
+def search_for_model(graph, src_id, query, origin=None, limit: int = 10):
+    """(hits for the UI, tool result for the LLM).  The LLM also gets the true
+    match count, so "how many X?" is not answered with the page size."""
+    every = (
+        find_objects(graph, src_id, query, origin, limit=1_000_000) if src_id else []
+    )
+    hits = every[:limit]
+    return hits, {"total_matches": len(every), "returned": len(hits), "objects": hits}
+
+
 class ChatService:
     def __init__(self, settings, graph, live=None, ros=None):
         self.settings = settings
@@ -83,6 +166,11 @@ class ChatService:
         self.live = live
         self.ros = ros
         self._client = None
+        self._client_provider = None
+        self.ledger = UsageLedger(
+            getattr(settings, "llm_usage_path", "~/.adt4_console/llm_usage.json"),
+            getattr(settings, "llm_budget_usd", 10.0),
+        )
 
     # ---------------------------------------------------------------- helpers
     def _default_src(self, src: str | None) -> str | None:
@@ -102,21 +190,55 @@ class ChatService:
             return (pose["x"], pose["y"], pose["z"])
         return None
 
-    def llm_client(self):
+    def provider(self) -> str | None:
+        """Which LLM provider is usable ("openai"/"anthropic"), or None."""
         if not self.settings.llm:
             return None
-        if self._client is None:
-            if not (
-                os.environ.get("ANTHROPIC_API_KEY")
-                or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-            ):
-                return None
-            try:
-                import anthropic
+        want = getattr(self.settings, "llm_provider", "auto")
+        has_openai = bool(_openai_key())
+        has_anthropic = bool(
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        )
+        if want in ("auto", "openai") and has_openai:
+            return "openai"
+        if want in ("auto", "anthropic") and has_anthropic:
+            return "anthropic"
+        return None
 
-                self._client = anthropic.Anthropic()
+    def model(self) -> str | None:
+        prov = self.provider()
+        if prov is None:
+            return None
+        return self.settings.llm_model or (
+            OPENAI_DEFAULT_MODEL if prov == "openai" else ANTHROPIC_DEFAULT_MODEL
+        )
+
+    def usage(self) -> dict:
+        return {
+            "provider": self.provider(),
+            "model": self.model(),
+            "budget_usd": self.ledger.budget_usd,
+            **self.ledger.data,
+        }
+
+    def llm_client(self):
+        prov = self.provider()
+        if prov is None:
+            return None
+        if self._client is None or self._client_provider != prov:
+            try:
+                if prov == "openai":
+                    import openai
+
+                    self._client = openai.OpenAI(api_key=_openai_key())
+                else:
+                    import anthropic
+
+                    self._client = anthropic.Anthropic()
+                self._client_provider = prov
             except Exception as e:  # noqa: BLE001
-                log.warning("anthropic client unavailable: %s", e)
+                log.warning("%s client unavailable: %s", prov, e)
                 return None
         return self._client
 
@@ -125,10 +247,19 @@ class ChatService:
         src = self._default_src(src)
         try:
             client = self.llm_client()
-            if client is not None:
-                yield from self._llm(client, message, robot, src)
-            else:
+            if client is not None and self.ledger.remaining() <= 0:
+                yield {
+                    "type": "error",
+                    "text": f"LLM budget of ${self.ledger.budget_usd:.2f} is used up "
+                    f"(${self.ledger.spent:.2f}); using the offline assistant.",
+                }
+                client = None
+            if client is None:
                 yield from self._fallback(message, robot, src)
+            elif self._client_provider == "openai":
+                yield from self._llm_openai(client, message, robot, src)
+            else:
+                yield from self._llm(client, message, robot, src)
         except Exception as e:  # noqa: BLE001
             log.exception("chat failed")
             yield {"type": "error", "text": f"{type(e).__name__}: {e}"}
@@ -179,8 +310,9 @@ class ChatService:
         {
             "name": "find_objects",
             "description": "Search the selected scene graph for objects whose semantic label or "
-            "name matches a short noun phrase (e.g. 'chair', 'trash can'). Returns symbols like "
-            "'O(12)' with positions in metres.",
+            "name matches a short noun phrase (e.g. 'chair', 'trash can'). Returns "
+            "total_matches (the true count) and up to 10 objects (nearest the robot first) "
+            "with symbols like 'O(12)' and positions in metres.",
             "input_schema": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -192,13 +324,19 @@ class ChatService:
             "name": "propose_goal",
             "description": "Propose a navigation goal for the operator to approve. kind='goto' "
             "visits points in order, 'tsp' visits them in the best order; points are node "
-            "symbols returned by find_objects. kind='language' passes a command to the robot's "
+            "symbols returned by find_objects. kind='pddl' sends pddl_goal to the "
+            "visit_objects_pddl planner, e.g. '(and (visited-object o12) (visited-object o7))' "
+            "(object symbol O(12) -> o12). kind='language' passes a command to the robot's "
             "language planner.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "kind": {"type": "string", "enum": ["goto", "tsp", "language"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["goto", "tsp", "pddl", "language"],
+                    },
                     "points": {"type": "array", "items": {"type": "string"}},
+                    "pddl_goal": {"type": "string"},
                     "command": {"type": "string"},
                 },
                 "required": ["kind"],
@@ -221,7 +359,7 @@ class ChatService:
         origin = self._robot_pos(robot)
         for _ in range(6):
             kwargs = dict(
-                model=self.settings.llm_model,
+                model=self.model(),
                 max_tokens=4000,
                 system=system,
                 tools=self._TOOLS,
@@ -256,18 +394,14 @@ class ChatService:
                 elif block.type == "tool_use":
                     args = dict(block.input or {})
                     if block.name == "find_objects":
-                        out = (
-                            find_objects(
-                                self.graph, src, str(args.get("query", "")), origin
-                            )
-                            if src
-                            else []
+                        hits, out = search_for_model(
+                            self.graph, src, str(args.get("query", "")), origin
                         )
                         yield {
                             "type": "tool",
                             "name": block.name,
                             "args": args,
-                            "result": out,
+                            "result": hits,
                         }
                     elif block.name == "propose_goal":
                         kind = args.get("kind", "goto")
@@ -296,3 +430,143 @@ class ChatService:
                 return
             messages.append({"role": "assistant", "content": resp.content})
             messages.append({"role": "user", "content": results})
+
+    # ---------------------------------------------------------------- shared
+    def _system(self, src, robot) -> str:
+        return (
+            "You are the operator assistant of a multi-robot mapping console. Answer "
+            "briefly. Use find_objects to look things up in the scene graph; when the "
+            "operator wants a robot to go somewhere, call propose_goal (the operator "
+            "approves it in the UI — never claim the robot is already moving). "
+            f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}."
+        )
+
+    def _run_tool(self, name, args, message, robot, src, origin):
+        """Execute one tool call; returns (events_to_stream, result_for_model)."""
+        if name == "find_objects":
+            hits, for_model = search_for_model(
+                self.graph, src, str(args.get("query", "")), origin
+            )
+            return [
+                {"type": "tool", "name": name, "args": args, "result": hits}
+            ], for_model
+        if name == "propose_goal":
+            kind = args.get("kind", "goto")
+            if kind == "language":
+                body = {"command": args.get("command") or message}
+            elif kind == "pddl":
+                body = {
+                    "plugin": "visit_objects_pddl",
+                    "goal": args.get("pddl_goal", ""),
+                }
+            else:
+                body = {"points": list(args.get("points") or [])}
+            goal = {"type": "goal", "kind": kind, "body": body, "robot": robot}
+            return [goal], {"proposed": True}
+        return [], {"error": f"unknown tool {name}"}
+
+    # ------------------------------------------------------------------ OpenAI
+    def _openai_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "parameters": t["input_schema"],
+                },
+            }
+            for t in self._TOOLS
+        ]
+
+    def _llm_openai(self, client, message, robot, src):
+        import openai
+
+        model = self.model()
+        messages = [
+            {"role": "system", "content": self._system(src, robot)},
+            {"role": "user", "content": message},
+        ]
+        origin = self._robot_pos(robot)
+        for _ in range(6):
+            if self.ledger.remaining() <= 0:
+                yield {
+                    "type": "error",
+                    "text": "LLM budget exhausted mid-conversation.",
+                }
+                return
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=self._openai_tools(),
+                    temperature=0,
+                    max_tokens=800,
+                )
+            except openai.APIStatusError as e:
+                yield {
+                    "type": "error",
+                    "text": f"LLM error ({e.status_code}): {e.message}",
+                }
+                return
+            except openai.APIConnectionError:
+                yield {
+                    "type": "error",
+                    "text": "LLM unreachable; falling back to offline search.",
+                }
+                yield from self._fallback(message, robot, src)
+                return
+            if resp.usage is not None:
+                cost = self.ledger.record(
+                    resp.model or model,
+                    resp.usage.prompt_tokens,
+                    resp.usage.completion_tokens,
+                )
+                log.info(
+                    "chat LLM %s: %d in / %d out tokens, $%.5f (total $%.4f of $%.2f)",
+                    resp.model,
+                    resp.usage.prompt_tokens,
+                    resp.usage.completion_tokens,
+                    cost,
+                    self.ledger.spent,
+                    self.ledger.budget_usd,
+                )
+            msg = resp.choices[0].message
+            if msg.content and msg.content.strip():
+                yield {"type": "text", "text": msg.content}
+            calls = msg.tool_calls or []
+            if not calls:
+                return
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": c.id,
+                            "type": "function",
+                            "function": {
+                                "name": c.function.name,
+                                "arguments": c.function.arguments,
+                            },
+                        }
+                        for c in calls
+                    ],
+                }
+            )
+            for c in calls:
+                try:
+                    args = json.loads(c.function.arguments or "{}")
+                except ValueError:
+                    args = {}
+                events, out = self._run_tool(
+                    c.function.name, args, message, robot, src, origin
+                )
+                yield from events
+                messages.append(
+                    {"role": "tool", "tool_call_id": c.id, "content": json.dumps(out)}
+                )
+
+
+def _openai_key() -> str | None:
+    return os.environ.get("ADT4_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")

@@ -2016,6 +2016,13 @@ input[type="checkbox"] {
 .camera-meta {
   color: var(--text-2);
 }
+.camera-frame canvas {
+  width: 100%;
+  height: auto;
+}
+.camera-panel .segmented button {
+  padding: 4px 10px;
+}
 
 /* Graph statistics (Inspect tab, nothing selected) */
 .stats-panel {

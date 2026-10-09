@@ -116,3 +116,26 @@ def test_tile_quantization_error_below_1cm():
     d = np.linalg.norm(dpos[:, None, :] - pos[None, :, :], axis=2).min(axis=1)
     assert d.max() <= 0.01
     assert codec.tile_manifest(tiles) == {k: v["hash"] for k, v in tiles.items()}
+
+
+def test_pack_is_thread_safe():
+    # zstd (de)compressors are not thread-safe; the agent packs concurrently from
+    # its tick, video and query threads.  A shared instance corrupted the heap
+    # ("free(): corrupted unsorted chunks") under live video + mapping.
+    import threading
+
+    owners = {}
+
+    def worker(i):
+        owners[i] = (codec._zc(), codec._zd())  # keep alive: ids could be reused
+        blob = {"i": i, "data": bytes([i % 256]) * 50_000}
+        for _ in range(200):
+            assert codec.unpack(codec.pack(blob)) == blob
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len({id(c) for c, _ in owners.values()}) == 8  # one per thread
+    assert len({id(d) for _, d in owners.values()}) == 8

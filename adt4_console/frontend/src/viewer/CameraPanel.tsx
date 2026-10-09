@@ -1,10 +1,12 @@
 // Camera tab: on-demand frames from a robot's fleetlink agent (C4 request/reply).
 // One request at a time; auto-refresh waits for the previous frame to land.
+// "Video" mode switches to the live C5 stream (VideoView, API.md §12).
 import {useEffect, useRef, useState} from "react";
 import {getJSON, errorText} from "../lib/api";
 import {getToken} from "../lib/auth";
 import {Empty, Toggle} from "../components/ui";
 import {useLiveRobots} from "../stores/robots";
+import {VideoView} from "./VideoView";
 
 export interface CameraFrame {
   url: string;
@@ -69,6 +71,7 @@ export function CameraPanel() {
   const [robot, setRobot] = useState<string>("");
   const [cams, setCams] = useState<string[]>([]);
   const [cam, setCam] = useState<string>("");
+  const [mode, setMode] = useState<"still" | "video">("still");
   const [auto, setAuto] = useState(true);
   const [hz, setHz] = useState(1);
   const [width, setWidth] = useState(640);
@@ -100,7 +103,7 @@ export function CameraPanel() {
 
   // fetch loop: one request in flight; next one `1/hz` after the previous started
   useEffect(() => {
-    if (!r || !cam) return;
+    if (!r || !cam || mode !== "still") return;
     const ctl = new AbortController();
     let timer: number | undefined;
     const run = async () => {
@@ -131,7 +134,7 @@ export function CameraPanel() {
       ctl.abort();
       window.clearTimeout(timer);
     };
-  }, [r, cam, auto, hz, width, nonce]);
+  }, [r, cam, auto, hz, width, nonce, mode]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 250);
@@ -149,6 +152,14 @@ export function CameraPanel() {
   return (
     <div className="camera-panel">
       <div className="row gap-sm wrap">
+        <div className="segmented" role="group" aria-label="Camera mode">
+          <button className={mode === "still" ? "on" : ""} onClick={() => setMode("still")} title="On-demand still frames">
+            Still
+          </button>
+          <button className={mode === "video" ? "on" : ""} onClick={() => setMode("video")} title="Live video stream">
+            Video
+          </button>
+        </div>
         <select className="input input-sm" value={r} onChange={e => setRobot(e.target.value)} aria-label="Robot">
           {robots.map(x => (
             <option key={x} value={x}>
@@ -164,38 +175,50 @@ export function CameraPanel() {
             </option>
           ))}
         </select>
-        <select className="input input-sm" value={width} onChange={e => setWidth(Number(e.target.value))} aria-label="Frame width">
-          {[320, 640, 960, 1280].map(w => (
-            <option key={w} value={w}>
-              {w} px
-            </option>
-          ))}
-        </select>
-        <button className="btn btn-sm" onClick={() => setNonce(n => n + 1)} disabled={!cam}>
-          Refresh
-        </button>
+        {mode === "still" && (
+          <>
+            <select className="input input-sm" value={width} onChange={e => setWidth(Number(e.target.value))} aria-label="Frame width">
+              {[320, 640, 960, 1280].map(w => (
+                <option key={w} value={w}>
+                  {w} px
+                </option>
+              ))}
+            </select>
+            <button className="btn btn-sm" onClick={() => setNonce(n => n + 1)} disabled={!cam}>
+              Refresh
+            </button>
+          </>
+        )}
       </div>
-      <div className="row gap-sm wrap">
-        <Toggle checked={auto} onChange={setAuto} label="Auto refresh" />
-        <label className="slider-row camera-hz">
-          <input type="range" min={MIN_HZ} max={MAX_HZ} step={0.1} value={hz} disabled={!auto} aria-label="Refresh rate" onChange={e => setHz(clampHz(Number(e.target.value)))} />
-          <span className="mono small">{hz.toFixed(1)} Hz</span>
-        </label>
-      </div>
-      <div className={`camera-frame ${busy ? "busy" : ""}`}>
-        {frame ? <img src={frame.url} alt={`${r} ${cam}`} /> : <div className="muted small camera-empty">{busy ? "Requesting frame..." : "No frame"}</div>}
-      </div>
-      {frame && (
-        <div className="mono small camera-meta">
-          <span className={age !== null && age > 5 ? "tone-warn" : ""}>age {age === null ? "?" : `${age.toFixed(1)} s`}</span>
-          {" · "}
-          {(frame.bytes / 1024).toFixed(1)} KB
-          {frame.width ? ` · ${frame.width}x${frame.height}` : ""}
-          {frame.srcWidth ? ` (of ${frame.srcWidth}x${frame.srcHeight})` : ""}
-          {` · ${Math.round(frame.rtt)} ms`}
-        </div>
-      )}
-      {err && <div className="inline-err small">{err}</div>}
+      {mode === "video" ? r && cam ? <VideoView key={`${r}/${cam}`} robot={r} cam={cam} /> : <div className="muted small">No camera</div> : stillView()}
     </div>
   );
+
+  function stillView() {
+    return (
+      <>
+        <div className="row gap-sm wrap">
+          <Toggle checked={auto} onChange={setAuto} label="Auto refresh" />
+          <label className="slider-row camera-hz">
+            <input type="range" min={MIN_HZ} max={MAX_HZ} step={0.1} value={hz} disabled={!auto} aria-label="Refresh rate" onChange={e => setHz(clampHz(Number(e.target.value)))} />
+            <span className="mono small">{hz.toFixed(1)} Hz</span>
+          </label>
+        </div>
+        <div className={`camera-frame ${busy ? "busy" : ""}`}>
+          {frame ? <img src={frame.url} alt={`${r} ${cam}`} /> : <div className="muted small camera-empty">{busy ? "Requesting frame..." : "No frame"}</div>}
+        </div>
+        {frame && (
+          <div className="mono small camera-meta">
+            <span className={age !== null && age > 5 ? "tone-warn" : ""}>age {age === null ? "?" : `${age.toFixed(1)} s`}</span>
+            {" · "}
+            {(frame.bytes / 1024).toFixed(1)} KB
+            {frame.width ? ` · ${frame.width}x${frame.height}` : ""}
+            {frame.srcWidth ? ` (of ${frame.srcWidth}x${frame.srcHeight})` : ""}
+            {` · ${Math.round(frame.rtt)} ms`}
+          </div>
+        )}
+        {err && <div className="inline-err small">{err}</div>}
+      </>
+    );
+  }
 }

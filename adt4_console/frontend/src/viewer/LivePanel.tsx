@@ -10,6 +10,8 @@ const CLASSES: {cls: Cls; name: string; color: string}[] = [
   {cls: "C1", name: "state", color: "#35d07f"},
   {cls: "C2", name: "graph", color: "#4fc3f7"},
   {cls: "C3", name: "mesh", color: "#ffb020"},
+  {cls: "C4", name: "camera stills", color: "#b388ff"},
+  {cls: "C5", name: "video", color: "#ff6f91"},
 ];
 
 // log-scale slider: 0..100 <-> 500 B/s .. 2 MB/s

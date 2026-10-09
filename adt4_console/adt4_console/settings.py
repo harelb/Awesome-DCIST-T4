@@ -41,8 +41,14 @@ class Settings:
     ros_domain_id: int | None = None  # None -> ROS_DOMAIN_ID env
 
     # chat
-    llm: bool = True  # use the Anthropic API when credentials are available
-    llm_model: str = "claude-opus-5-5"
+    llm: bool = True  # use an LLM when credentials are available
+    # "auto": OpenAI if ADT4_OPENAI_API_KEY/OPENAI_API_KEY is set, else Anthropic
+    llm_provider: str = "auto"
+    llm_model: str | None = (
+        None  # None -> provider default (gpt-4.1-mini / claude-opus-5-5)
+    )
+    llm_budget_usd: float = 10.0  # hard cap on cumulative chat spend (persisted)
+    llm_usage_path: str = "~/.adt4_console/llm_usage.json"
 
     @property
     def output_root_path(self) -> pathlib.Path:

@@ -63,6 +63,7 @@ and drops the *oldest* frame of the same topic when full (status topics are late
 | `link/<r>` | same as `GET /api/live` entry for that robot |
 | `grid/<r>` | `{hash, frame, width, height, resolution, t}` when a new occupancy grid arrived → refetch `GET /api/live/{r}/grid` (§11.1) |
 | `robot/<r>/paths` | executor paths `{smooth, mlp, target, frame, t, hash}` (§11.2) |
+| `video/<r>/<camera>` | one live video frame (§12). **Not** latest-value and **not** in the default subscription: subscribe explicitly. The GOP cache is replayed on subscribe |
 
 ## 3. Fleet (wraps `dcist_launch_system.fleet*` — reuse, don't reimplement)
 
@@ -144,12 +145,14 @@ Key space (zenoh): `adt4/<robot>/<stream>`.
 | C1 state | `adt4/<r>/state` | `{pose: {x,y,z,qw,qx,qy,qz,frame,t}, guards: {...RuntimeGuardsMsg fields}, health: {nominal, warning, error, nodes}, results: [..ActionResultMsg dicts, last 10], stats: {per-class sent bytes, queue}}` | INTERACTIVE_LOW, DROP | 5 kB/s, 2 Hz |
 | C2 graph | `adt4/<r>/dsg/delta` | `{kind: "delta"|"snapshot_begin"|"snapshot_chunk"|"snapshot_end", ...GraphDelta.encode()}` | DATA_HIGH, BLOCK | 50 kB/s, 1 Hz tick |
 | C3 mesh | `adt4/<r>/mesh/tile/<key>` and `adt4/<r>/mesh/manifest` | tile dict / `{tiles: {key: hash}}` | DATA_LOW, DROP | 100 kB/s |
+| C5 video | `adt4/<r>/video/<camera>` | one encoded frame, see §12 | DATA_LOW, DROP, best effort | 400 kB/s |
 
 Every message is `codec.pack(codec.envelope(robot, stream, seq, epoch, payload))`; `seq`
 is per stream; `epoch` changes when the agent restarts or the graph is reset.
 
 Receiver (inside the console) API — `fleetlink.receiver.Receiver(transport, on_update)`
-with `on_update(robot, kind, data)`, kinds `snapshot|delta|tiles|state|link`;
+with `on_update(robot, kind, data)`, kinds `snapshot|delta|tiles|state|link` (plus `grid`, `paths`
+from §11 and `video` from §12);
 methods `start()`, `stop()`, `robots()`, `graph(robot) -> GraphState`, `tiles(robot) -> {key: tile}`,
 `state(robot) -> dict`, `link(robot) -> dict`, `set_budget(robot, cls, bps)`,
 `request_resync(robot)`, `set_auto(robot, enabled)`.
@@ -161,28 +164,41 @@ Console endpoints:
 
 ## 9. Planning (rclpy, publishes on the base station)
 
-Omniplanner topics are `/<robot>/omniplanner_node/<plugin>/<suffix>` (plugin list in
-`dcist_launch_system/config/default/omniplanner_plugins.yaml`).
+Omniplanner runs in the **base station's** namespace (`--planner-ns`, default
+`$ADT4_ROBOT_NAME` / the local base-station machine): goal topics are
+`/<planner_ns>/omniplanner_node/<plugin>/<suffix>` and the goal's `robot_id` picks the
+robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.yaml`).
 
 * `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg)
-* `POST /api/robots/{r}/goal/language` `{command, domain_type?: "goto_points"}`
+* `POST /api/robots/{r}/goal/language` `{command, domain_type?: "default"|"Pddl"|"goto_points"}` —
+  `default` (the default) uses the planner's configured LLM→PDDL domain; `goto_points` takes node
+  symbols ("O(12) P(850)") without an LLM and fails with a clear error on prose
 * `POST /api/robots/{r}/goal/goto` `{points: ["O(12)", "P(850)"]}` — symbols are converted to omniplanner point names (`str(NodeSymbol)` without parens if that is what omniplanner expects — check `goto_points_ros.py`)
 * `POST /api/robots/{r}/goal/tsp` same body
 * `POST /api/robots/{r}/goal/pddl` `{plugin, goal}`
 * `POST /api/robots/{r}/executor/pause|resume` (goal_manager Bool topics if present)
-* every goal endpoint returns `{ok, topic, msg}`; also appended to the robot's plan history
-* `GET /api/robots/{r}/plan` → `{goals: [{t, kind, topic, msg}], plan: null | {plan_id, robot_name, t, actions: [{type, path: [[x,y,z]...], object_id, object_class, point}]}, results: [{plan_id, action_index, status, detail, t}], llm: [str]}`
+* every goal endpoint returns `{ok, topic, msg, subscribers}` (`subscribers == 0` after the
+  discovery wait = no planner listening); also appended to the robot's plan history
+* `GET /api/robots/{r}/plan` → `{goals: [{t, kind, topic, msg}], plan: null | {plan_id, robot_name, t, actions: [{type, path: [[x,y,z]...], object_id, object_class, point}]}, results: [{plan_id, action_index, status, detail, t}], llm: [str], status: [{plugin, robot, ok, error, t}]}`
   from `/<r>/omniplanner_node/compiled_plan_out` (ActionSequenceMsg), `~/llm_response`,
-  `/<r>/spot_executor_node/action_result`.
+  `/<r>/spot_executor_node/action_result`, and `status` from omniplanner's
+  `/<planner_ns>/omniplanner_node/plan_status` (one JSON String per handled goal — the only
+  place planning failures are reported).
 
 ## 10. Chat (optional LLM)
 
 `POST /api/chat` `{message, robot?, src?}` → NDJSON stream of `{type: "text", text}` /
 `{type: "tool", name, args, result}` / `{type: "goal", kind, body}` / `{type: "error", text}` /
 `{type: "done"}`. A `goal` line is a *proposal*; the UI shows a "Send to robot" button that
-calls the §9 endpoint. If no LLM key is configured, a deterministic fallback answers
-"find/go to <label>" queries by matching object labels in the selected graph source and
-proposing a goto goal — this keeps the UI testable offline.
+calls the §9 endpoint. Providers: OpenAI (`ADT4_OPENAI_API_KEY`/`OPENAI_API_KEY`, default
+model `gpt-4.1-mini`) or Anthropic; `--llm-provider auto|openai|anthropic`, `--llm-model`.
+Tools: `find_objects` (returns `total_matches` plus up to 10 objects, nearest the robot first)
+and `propose_goal` (`goto`/`tsp`/`pddl`/`language`). Spend is metered from each response's
+token usage and persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget-usd`
+(default 10) the chat switches to the offline fallback. `GET /api/chat/usage` →
+`{provider, model, budget_usd, spent_usd, calls, input_tokens, output_tokens, last}`.
+Without credentials a deterministic fallback answers "find/go to <label>" queries by
+matching object labels in the selected graph source and proposing a goto goal.
 
 ## 11. RViz replacement: occupancy grid, executor paths, cameras, graph stats
 
@@ -291,6 +307,97 @@ edge toggles (`agents-agents` is the trajectory). Layer names match the viewer (
 
 Not bridged: `hydra/traversability/layer` (visualization_msgs/Marker). It would need its
 own stream, and the traversability places already show as the `3/2` layer.
+
+## 12. Live camera video (C5)
+
+A live stream of one robot camera, for when on-demand stills (§11.3) are too slow. Additive:
+nothing in §8 or §11 changed. Code: `fleetlink/fleetlink/video.py` (robot),
+`adt4_console/adt4_console/video_service.py` + `hub.py` (console), `frontend/src/viewer/VideoView.tsx`
++ `src/lib/video.ts` (browser). Units: `kbps` is **kilobits** per second (encoder bitrate); budgets
+stay bytes per second.
+
+### 12.1 Robot
+
+* **C0 op `video {camera, enable, fps, kbps, width, codec}`** starts, retunes or stops a stream.
+  `fps` 0.5–15 (default 5), `kbps` 50–2000 (default 300), `width` 64–1920 (default 640), `codec`
+  `h264` (default) | `vp8` | `jpeg`. Out-of-range values are clamped. A missing key keeps the
+  stream's current value. `enable: false` stops it. An unknown camera is a failed ack
+  (`ok: false, result: {error}`). At most 4 streams. The ack result is
+  `{camera, enabled, params, state}`.
+* **Keepalive.** A stream stops when no `video` op with `enable: true` arrived for
+  `video_keepalive_s` (6 s). Repeating the same parameters only refreshes it. Different parameters
+  restart the encoder, which then starts with a key frame.
+* **Encoder.** The newest frame the agent keeps for that camera (the same one C4 serves) is sampled
+  at `fps`, converted to RGB (§11.3 encodings), and scaled to `width`: aspect kept, both dimensions
+  even, never wider than the source. The frames go on stdin to the system `ffmpeg` (param
+  `ffmpeg`, default `$FLEETLINK_FFMPEG`, `ffmpeg` on `PATH`, `/usr/bin/ffmpeg`):
+  * h264: `-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -bf 0 -g 2*fps
+    -b:v/-maxrate/-bufsize kbps -x264-params aud=1:repeat-headers=1 -f h264`. Annex-B with an AUD
+    per access unit and SPS/PPS before every IDR. Access units are split on AUDs, and the pending
+    one is emitted once x264 has been quiet for 20 ms. `key` = the AU holds an IDR slice.
+  * vp8: `-c:v libvpx -deadline realtime -cpu-used 8 -g 2*fps -b:v kbps -lag-in-frames 0
+    -auto-alt-ref 0 -f ivf`. The IVF frame headers are parsed. `key` = bit 0 of the VP8 frame tag is 0.
+  * jpeg: one JPEG per frame (OpenCV, PNG without it), every frame a key frame. The quality
+    follows the per-frame byte target `kbps / fps`.
+  * **Fallback.** When ffmpeg is missing, cannot start or exits, the stream switches to jpeg at the
+    same fps. The state then reports `codec: "jpeg"`, `requested_codec` and `error`.
+* **Key** `adt4/<r>/video/<camera>`, stream `video/<camera>`, class **C5**: zenoh `DATA_LOW`,
+  `DROP`, best effort. In `LinkEmulator` it is transmitted last (after C3). Each frame is one message,
+  `codec.pack(envelope(...))` like every other stream, put as soon as it leaves the encoder, never
+  queued in the scheduler (and so not counted in `total_bps`).
+* **Payload** `{camera, codec, seq, t, stamp, key, width, height, fps, data}`. `seq` is per camera
+  and continues across stream restarts. `t` is the robot wall clock when the frame was sampled.
+  `stamp` is the image header stamp. `data` is one access unit (h264), one VP8 frame or one JPEG.
+* **Budget.** C5 has its own token bucket on `budgets.C5` (default 400 kB/s, param `budget_C5`,
+  live via the C0 `budget {C5: bps}` op and `POST /api/live/{r}/budget {cls: "C5"}`), shared by all
+  streams, burst `burst_s`. A delta frame needs a positive balance. A key frame may borrow down to
+  minus one burst. Either goes into debt by the frame it sends. After a dropped frame the stream
+  drops delta frames until its next key frame, because they could not be decoded.
+* **C1 state** gains `video: {camera: {codec, fps, kbps, width, height, sent_kbps, frames,
+  dropped, error?, requested_codec?}}` for the active streams (`{}` when none).
+  (`stats.budgets` stays C1–C3. The `budget` op's ack lists every class, C5 included.)
+
+### 12.2 Receiver
+
+* `on_update(robot, "video", frame)`: the payload plus `camera` and `gap`. `gap` is true for the
+  first frame seen on that stream and after a seq gap (frames were lost in between).
+* `Receiver.video(robot, camera, enable=True, retry=True, **params) -> request id` sends the C0 op.
+  Keepalives go with `retry=False`, because the next one follows anyway.
+* `Receiver.video_stats(robot) -> {camera: {frames, keys, bytes, gaps, lost, fps, kbps, age_s,
+  codec, width, height, target_fps, robot}}`. `robot` is the robot's own entry from its C1 state.
+  `link(robot)` `rates` and `bytes` gain `C5`.
+
+### 12.3 Console
+
+* `POST /api/robots/{r}/video/{camera}/start` `{fps=5, kbps=300, width=640, codec="h264", viewer?}`
+  → `{ok, params, changed}`. 422 out of range. **429** when the parameters change again within 1 s
+  of the last change. Starting with the same parameters is not rate-limited and sends nothing to
+  the robot.
+* `POST .../keepalive` `{viewer?}` → the stream status (below) with `ok`. **404** when the console has
+  no such stream (expired or console restarted): the client should `start` again.
+* `POST .../stop` `{viewer?}` → `{ok, active}`. It removes that viewer, or every viewer without one.
+  The robot stream stops when no viewer is left.
+* `GET /api/robots/{r}/video` → `{robot, streams: {camera: status}}`. Status:
+  `{camera, active, params, viewers, age_s, relay: {frames, withheld, waiting_key, gop: {frames,
+  bytes}, codec, width, height, seq}, rx: <video_stats entry>, robot: <state entry> | null}`.
+  Streams the robot reports but this console does not relay are listed with `active: false`.
+* All of these return 503 without fleetlink.
+* **Keepalive loop.** Every 2 s, the console re-sends `video` (same parameters) to the robot while
+  at least one viewer sent a start/keepalive within the last 6 s. When the last viewer goes stale,
+  it sends `enable: false` and forgets the stream.
+* **Relay.** A frame with `gap` that is not a key frame puts the stream in "waiting for key". From
+  then on frames are withheld until the next key frame, so a broken delta chain is never forwarded.
+  Frames of streams nobody started on this console are ignored.
+* **WebSocket topic `video/<r>/<camera>`.** The data is the payload plus `robot` (without `gap`). The
+  frame `seq` is the hub's per-topic counter.
+  * **GOP cache.** The hub keeps the frames from the newest key frame on, capped at 3 s or 2 MB.
+    When the cap is exceeded the cache is dropped until the next key frame. When a client starts
+    wanting the topic (a `sub` that matches it and its previous one did not), the cache is replayed
+    to it first, so it can decode at once. Re-sending the same subscription does not replay.
+  * **Backpressure** per client. At most 32 queued frames per video topic (and the client's overall
+    queue). When either is full, a delta frame is dropped and that topic skips to the next key frame.
+    A key frame replaces the topic's stale queued chain. The generic "drop the oldest frame" rule never
+    evicts a video frame, so a client never receives a delta whose predecessor it missed.
 
 ## Deviations
 
@@ -459,5 +566,19 @@ A backend that follows these works with the UI unchanged.
   (0.2-5 Hz). It keeps one request in flight and starts the next one `1/hz` after the previous one started.
   The tab shows age = `X-Frame-Age` + time since arrival, size = `X-Frame-Bytes`, the frame size, and the round trip.
   It uses plain `fetch` (with the bearer token), so a 504 shows inline and does not raise the "server unreachable" banner.
+* Camera tab **Video** mode (§12), next to the still-image mode: fps select (1, 2, 5, 10, 15),
+  bitrate presets low 150 / medium 300 / high 800 kbit/s, width (320/480/640/960), and codec:
+  `auto` = h264 if `VideoDecoder.isConfigSupported({codec: "avc1.42E01E"})`, else vp8, else jpeg
+  (h264/vp8 can also be forced). h264/vp8 are decoded with WebCodecs `VideoDecoder` (Annex-B, so
+  configured without a `description`, `optimizeForLatency`) and drawn to a canvas. jpeg frames are
+  shown as an `<img>` each. A key-frame gate (`KeyGate` in `src/lib/video.ts`) skips frames until a key
+  frame at the start, after a gap in the topic `seq`, after a decoder error, when the decoder backlog
+  exceeds 8 frames, and when codec or size change (the decoder is reconfigured on that key frame).
+  The browser POSTs `start` (with a per-tab `viewer` id), `keepalive` every 2 s while the page is
+  visible (and `start` again on 404, and after 1.1 s on 429), and `stop` (fetch `keepalive: true`)
+  when the page is hidden, the mode is left, or the camera changes. Changing a parameter only POSTs
+  `start`. Stats: received fps and kbit/s over a 2 s window, decode time (decode call to output),
+  lag (browser clock minus the frame's robot `t`, so it includes clock skew), skipped frames,
+  "waiting for key frame", and the robot's own report from the keepalive response.
 * Inspect tab with nothing selected: a "Graph statistics" block for each enabled, loaded source. It refetches on a
   version change. A live source refetches on deltas, throttled to once every 3 s.

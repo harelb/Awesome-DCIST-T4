@@ -135,3 +135,70 @@ def test_zenoh_camera_query_grid_and_paths(zenoh_router):
         rx.stop()
         robot_tr.close()
         base_tr.close()
+
+
+def test_zenoh_live_video_h264(zenoh_router):
+    """Synthetic camera → AgentCore (real ffmpeg h264) → ZenohTransport (C5) →
+    Receiver: the frames that arrive start with a key frame and decode."""
+    pytest.importorskip("zenoh")
+    from test_video import _has_encoder, decode_count, synth
+
+    if not _has_encoder("libx264"):
+        pytest.skip("ffmpeg without libx264")
+    try:
+        robot_tr = ZenohTransport(zenoh_router)
+        base_tr = ZenohTransport(zenoh_router)
+    except Exception as exc:
+        pytest.skip(f"zenoh session failed: {exc}")
+    frames = []
+    lock = threading.Lock()
+
+    def on_update(robot, kind, data):
+        if kind == "video":
+            with lock:
+                frames.append(data)
+
+    rx = Receiver(base_tr, on_update, tick_period=0.05)
+    rx.start()
+    agent = AgentCore("zvid", robot_tr, {})
+    stop = threading.Event()
+
+    def robot():
+        i = 0
+        while not stop.is_set():
+            img = synth(i, 320, 240)
+            agent.on_camera_frame("rgb", "rgb8", 320, 240, 960, img.tobytes(), i / 30)
+            agent.tick()
+            i += 1
+            time.sleep(1 / 30)
+
+    th = threading.Thread(target=robot, daemon=True)
+    th.start()
+    try:
+        params = {"fps": 10, "kbps": 300, "width": 320, "codec": "h264"}
+        t_end = time.time() + 4.0
+        while time.time() < t_end:
+            rx.video("zvid", "rgb", retry=False, **params)  # start + keepalives
+            time.sleep(1.0)
+        with lock:
+            got = list(frames)
+        assert len(got) >= 15, len(got)
+        assert got[0]["key"] and got[0]["codec"] == "h264"
+        assert got[0]["width"] == 320 and got[0]["height"] == 240
+        assert [f["seq"] for f in got] == list(
+            range(got[0]["seq"], got[0]["seq"] + len(got))
+        )
+        assert decode_count("h264", [f["data"] for f in got], 320, 240) == len(got)
+        stats = rx.video_stats("zvid")["rgb"]
+        assert stats["frames"] >= len(got) and stats["robot"]["codec"] == "h264"
+        assert rx.link("zvid")["bytes"]["C5"] > 0
+        rx.video("zvid", "rgb", enable=False)
+        time.sleep(1.0)
+        assert "rgb" not in agent.video.streams
+    finally:
+        stop.set()
+        th.join(timeout=2)
+        agent.close()
+        rx.stop()
+        robot_tr.close()
+        base_tr.close()

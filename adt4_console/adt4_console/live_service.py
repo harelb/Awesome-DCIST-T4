@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import threading
 
+from .video_service import VideoRelay
+
 log = logging.getLogger(__name__)
 
 
@@ -22,6 +24,7 @@ class LiveService:
         self.retry_s = 10.0
         self.camera_timeout_s = 5.0
         self._stop = threading.Event()
+        self.video = VideoRelay(self, hub)  # live camera video (API.md §12)
 
     def start(self) -> None:
         if self.receiver is not None:
@@ -59,6 +62,10 @@ class LiveService:
 
     def stop(self) -> None:
         self._stop.set()
+        try:
+            self.video.close()
+        except Exception:  # noqa: BLE001
+            pass
         if self.receiver is not None:
             try:
                 self.receiver.stop()
@@ -78,7 +85,9 @@ class LiveService:
     def on_update(self, robot: str, kind: str, data) -> None:
         """Receiver callback (receiver thread)."""
         try:
-            if kind in ("snapshot", "delta", "tiles"):
+            if kind == "video":
+                self.video.on_frame(robot, data)
+            elif kind in ("snapshot", "delta", "tiles"):
                 if self.graph is not None:
                     self.graph.on_live(robot, kind, data)
                 if kind == "snapshot":

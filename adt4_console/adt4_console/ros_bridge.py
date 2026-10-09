@@ -11,6 +11,7 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import importlib
+import json
 import logging
 import pathlib
 import queue
@@ -162,6 +163,7 @@ class RobotPlanState:
         self.plan = None
         self.results = collections.deque(maxlen=100)
         self.llm = collections.deque(maxlen=20)
+        self.status = collections.deque(maxlen=50)  # omniplanner ~/plan_status
 
     def to_dict(self) -> dict:
         return {
@@ -169,6 +171,7 @@ class RobotPlanState:
             "plan": self.plan,
             "results": list(self.results),
             "llm": list(self.llm),
+            "status": list(self.status),
         }
 
 
@@ -380,6 +383,14 @@ class RosBridge:
                 lambda m: self._on_llm(self._last_goal_robot or robot, m),
                 10,
             )
+            # per-goal outcome ({plugin, robot, ok, error}) — failures otherwise
+            # only appear in omniplanner's log
+            self._planner_status_sub = n.create_subscription(
+                string,
+                f"/{self.planner_ns}/omniplanner_node/plan_status",
+                lambda m: self._on_plan_status(robot, m),
+                10,
+            )
         # omniplanner's adaptor listens on spot_executor/, the executor node is
         # spot_executor_node — subscribe to both spellings.
         for ex in ("spot_executor_node", "spot_executor"):
@@ -392,6 +403,15 @@ class RosBridge:
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)
+        self._publish_plan(robot)
+
+    def _on_plan_status(self, default_robot, msg) -> None:
+        try:
+            st = json.loads(msg.data)
+        except ValueError:
+            return
+        robot = st.get("robot") or self._last_goal_robot or default_robot
+        self._plan[robot].status.append(st)
         self._publish_plan(robot)
 
     def _on_llm(self, robot, msg) -> None:

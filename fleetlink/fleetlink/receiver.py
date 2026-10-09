@@ -12,6 +12,12 @@ acked.  ``on_update(robot, kind, data)`` kinds:
 * ``link``     - same as :meth:`Receiver.link` (once per second per robot)
 * ``grid``     - ``{hash, frame, width, height, resolution, t}`` (data via :meth:`Receiver.grid`)
 * ``paths``    - the paths dict ``{smooth, mlp, target, frame, t, hash}``
+* ``video``    - one C5 video frame ``{camera, codec, seq, t, key, width, height,
+  fps, data, ...}`` plus ``gap`` (True when frames of that stream were lost
+  in between; a delta after a gap cannot be decoded)
+
+Live video is turned on / kept alive / off with :meth:`Receiver.video`
+(C0 ``video`` op); :meth:`Receiver.video_stats` has per-stream receive rates.
 
 Camera frames are pulled on demand with :meth:`Receiver.camera` (blocking) or
 :meth:`Receiver.query_camera` (callback), over the transport's C4 request/reply.
@@ -44,6 +50,43 @@ STREAM_CLASS = {
     "paths": "C1",
 }
 RESEND_STREAMS = ("grid", "paths")
+VIDEO_PREFIX = "video/"
+
+
+def stream_class(stream: str) -> str | None:
+    if stream.startswith(VIDEO_PREFIX):
+        return "C5"
+    return STREAM_CLASS.get(stream)
+
+
+class _VideoRx:
+    """Receive-side stats of one video stream."""
+
+    def __init__(self):
+        self.frames = 0
+        self.keys = 0
+        self.bytes = 0
+        self.gaps = 0
+        self.lost = 0
+        self.win_frames = 0
+        self.win_bytes = 0
+        self.fps = 0.0
+        self.kbps = 0.0
+        self.last: dict = {}
+        self.last_rx: float | None = None
+
+    def stats(self, now: float) -> dict:
+        return {
+            "frames": self.frames,
+            "keys": self.keys,
+            "bytes": self.bytes,
+            "gaps": self.gaps,
+            "lost": self.lost,
+            "fps": round(self.fps, 2),
+            "kbps": round(self.kbps, 1),
+            "age_s": None if self.last_rx is None else now - self.last_rx,
+            **self.last,
+        }
 
 
 class _Robot:
@@ -77,6 +120,7 @@ class _Robot:
         self.paths: dict | None = None
         self.mismatch_since: dict[str, float] = {}
         self.resend_req_t: dict[str, float] = {}
+        self.video: dict[str, _VideoRx] = {}
 
 
 class Receiver:
@@ -250,7 +294,7 @@ class Receiver:
             "nodes": len(r.graph.records),
             "tiles": len(r.tiles),
             "budgets": stats.get("budgets", {}),
-            "rates": {c: r.rates[c] for c in ("C1", "C2", "C3", "C4")},
+            "rates": {c: r.rates[c] for c in ("C1", "C2", "C3", "C4", "C5")},
             "bytes": dict(r.bytes),
             "drops": r.drops,
             "gaps": r.gaps,
@@ -290,9 +334,39 @@ class Receiver:
         self.transport.put(f"adt4/{robot}/ctl/req", codec.pack(env), "C0")
 
     def set_budget(self, robot: str, cls: str, bps: float) -> str:
-        if cls not in ("C1", "C2", "C3", "C4"):
+        if cls not in ("C1", "C2", "C3", "C4", "C5"):
             raise ValueError(f"unknown class {cls!r}")
         return self._send(robot, "budget", {cls: float(bps)})
+
+    def video(
+        self,
+        robot: str,
+        camera: str,
+        enable: bool = True,
+        retry: bool = True,
+        **params,
+    ) -> str:
+        """C0 ``video {camera, enable, fps, kbps, width, codec}``: start / update /
+        keep alive (repeat at least every 6 s) or stop (``enable=False``) a stream.
+        Keepalives can go with ``retry=False``: the next one follows anyway."""
+        args = {"camera": camera, "enable": bool(enable)}
+        args.update({k: v for k, v in params.items() if v is not None})
+        return self._send(robot, "video", args, retry=retry)
+
+    def video_stats(self, robot: str, now: float | None = None) -> dict:
+        """``{camera: {frames, keys, bytes, gaps, lost, fps, kbps, age_s, codec,
+        width, height}}`` measured here, plus ``robot`` = the robot's own report
+        for that stream from its C1 state (absent when it is not streaming)."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            r = self._robots.get(robot)
+            if r is None:
+                return {}
+            reported = (r.state or {}).get("video") or {}
+            out = {c: v.stats(now) for c, v in r.video.items()}
+            for cam, st in reported.items():
+                out.setdefault(cam, {})["robot"] = st
+            return out
 
     def set_auto(self, robot: str, enabled: bool) -> str:
         return self._send(robot, "auto", {"enabled": bool(enabled)})
@@ -337,13 +411,13 @@ class Receiver:
             robot, stream = env["robot"], env["stream"]
         except Exception:
             return
-        if stream not in STREAM_CLASS:
+        cls = stream_class(stream)
+        if cls is None:
             return  # e.g. our own ctl/req
         now = self.clock()
         events = []
         with self._lock:
             r = self._robot(robot)
-            cls = STREAM_CLASS[stream]
             r.bytes[cls] += len(data)
             r.win[cls] += len(data)
             r.last_seen = now
@@ -357,14 +431,17 @@ class Receiver:
             last = r.seqs.get(stream)
             if last is not None and seq <= last:
                 return  # duplicate / reordered
-            if last is not None and seq > last + 1:
+            gap = last is not None and seq > last + 1
+            if gap:
                 r.drops += seq - last - 1
                 if stream == "dsg/delta":
                     r.gaps += 1
                     self._maybe_resync(r, now)
             r.seqs[stream] = seq
             p = env["p"]
-            if stream == "state":
+            if cls == "C5":
+                events.append(("video", self._on_video(r, stream, p, seq, last, now)))
+            elif stream == "state":
                 r.state = p
                 r.last_state_rx = now
                 events.append(("state", p))
@@ -403,6 +480,27 @@ class Receiver:
         for kind, d in events:
             self.on_update(robot, kind, d)
 
+    def _on_video(self, r: _Robot, stream: str, p: dict, seq, last, now) -> dict:
+        cam = stream[len(VIDEO_PREFIX) :]
+        v = r.video.get(cam)
+        if v is None:
+            v = r.video[cam] = _VideoRx()
+        n = len(p.get("data") or b"")
+        gap = last is None or seq > last + 1
+        if last is not None and seq > last + 1:
+            v.gaps += 1
+            v.lost += seq - last - 1
+        v.frames += 1
+        v.keys += int(bool(p.get("key")))
+        v.bytes += n
+        v.win_frames += 1
+        v.win_bytes += n
+        v.last_rx = now
+        v.last = {k: p.get(k) for k in ("codec", "width", "height")}
+        v.last["target_fps"] = p.get("fps")
+        # ``gap``: the first frame we see, or frames were lost before this one
+        return {**p, "camera": cam, "gap": gap}
+
     def _new_epoch(self, r: _Robot, epoch: str, now: float) -> None:
         if r.epoch is not None:
             r.retired.add(r.epoch)
@@ -417,6 +515,7 @@ class Receiver:
         r.paths = None
         r.mismatch_since.clear()
         r.resend_req_t.clear()
+        r.video.clear()
         r.in_snapshot = False
         # requests for the previous incarnation are void
         for rid in [k for k, v in self._pending.items() if v["robot"] == r.name]:
@@ -499,7 +598,7 @@ class Receiver:
             r.rtt = rtt if r.rtt is None else 0.8 * r.rtt + 0.2 * rtt
         if "budgets" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["budgets"] = {
-                c: res["budgets"].get(c) for c in ("C1", "C2", "C3")
+                c: res["budgets"].get(c) for c in ("C1", "C2", "C3", "C4", "C5")
             }
         if "auto" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["auto"] = res["auto"]
@@ -528,6 +627,10 @@ class Receiver:
                     for c in CLASSES:
                         r.rates[c] = 0.6 * r.rates[c] + 0.4 * (r.win[c] / dt)
                         r.win[c] = 0
+                    for v in r.video.values():
+                        v.fps = 0.5 * v.fps + 0.5 * (v.win_frames / dt)
+                        v.kbps = 0.5 * v.kbps + 0.5 * (v.win_bytes * 8 / 1000 / dt)
+                        v.win_frames = v.win_bytes = 0
                     r.win_t = now
                     events.append((r.name, "link", self._link(r, now)))
                 if r.epoch is not None and now - r.t_ping >= self.ping_period:

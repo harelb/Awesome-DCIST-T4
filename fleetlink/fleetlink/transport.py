@@ -9,6 +9,7 @@ Stream classes (API.md §8):
 * ``C2`` graph    - DATA_HIGH, BLOCK
 * ``C3`` mesh     - DATA_LOW, DROP
 * ``C4`` media    - DATA, request/reply only (on-demand camera frames)
+* ``C5`` video    - DATA_LOW, DROP, best effort (live camera video, API.md §12)
 
 Request/reply (``declare_queryable`` / ``query``) carries C4: the base asks,
 the robot answers once.  Replies travel above C3 (mesh / grid) in priority,
@@ -28,12 +29,12 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-CLASSES = ("C0", "C1", "C2", "C3", "C4")
+CLASSES = ("C0", "C1", "C2", "C3", "C4", "C5")
 # strict transmit order on the link (zenoh priority order): C4 sits between
-# graph (C2) and mesh (C3)
-PRIORITY_ORDER = ("C0", "C1", "C2", "C4", "C3")
+# graph (C2) and mesh (C3); video (C5) shares DATA_LOW with C3 and goes last
+PRIORITY_ORDER = ("C0", "C1", "C2", "C4", "C3", "C5")
 PRIORITY = {c: i for i, c in enumerate(PRIORITY_ORDER)}  # lower = more important
-BLOCKING = {"C0": True, "C1": False, "C2": True, "C3": False, "C4": False}
+BLOCKING = {"C0": True, "C1": False, "C2": True, "C3": False, "C4": False, "C5": False}
 
 Callback = Callable[[str, bytes], None]
 # queryable handler: (key, params) -> reply bytes, or None for no reply
@@ -164,6 +165,11 @@ class ZenohTransport(Transport):
             "C4": dict(
                 priority=zenoh.Priority.DATA,
                 congestion_control=zenoh.CongestionControl.DROP,
+            ),
+            "C5": dict(
+                priority=zenoh.Priority.DATA_LOW,
+                congestion_control=zenoh.CongestionControl.DROP,
+                reliability=zenoh.Reliability.BEST_EFFORT,
             ),
         }
         self._pubs: dict[tuple[str, str], object] = {}
@@ -382,7 +388,7 @@ class _Direction:
                 self.tx_time += frag / lk.bandwidth
             self.stats.wire_bytes[cls] += frag
             if lk.loss and self.rng.random() < lk.loss:
-                if lk.reliable[cls]:
+                if lk.reliable.get(cls, False):
                     self.stats.retransmits[cls] += 1
                     msg.extra_delay += 2.0 * lk.latency
                     continue  # resend the same fragment
@@ -440,6 +446,7 @@ class LinkEmulator:
             "C2": True,
             "C3": False,
             "C4": True,
+            "C5": False,
         }
         self._lock = threading.RLock()
         rng = random.Random(seed)

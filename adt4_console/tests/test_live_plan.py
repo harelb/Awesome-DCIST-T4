@@ -159,8 +159,15 @@ def test_plan_routes_without_ros(client):
     assert r.status_code == 503
     assert client.post("/api/robots/euclid/save_dsg", json={}).status_code == 503
     assert client.get("/api/robots/euclid/plan").json() == {
-        "goals": [], "plan": None, "results": [], "llm": [],
+        "goals": [], "plan": None, "results": [], "llm": [], "status": [],
     }  # fmt: skip
+    # natural language defaults to the planner's configured (LLM) domain, and
+    # unknown domain types are rejected before anything is published
+    bad = client.post(
+        "/api/robots/euclid/goal/language",
+        json={"command": "go to the car", "domain_type": "chat"},
+    )
+    assert bad.status_code == 422
 
 
 def test_ply_ascii_and_binary_agree(tmp_path):

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -41,8 +42,24 @@ POS_QUANT = 0.01  # metres; positions are compared/hashed at 1 cm
 QUANT = 0.01  # mesh vertex quantisation (metres)
 DEFAULT_TILE_SIZE = 8.0
 
-_ZC = zstandard.ZstdCompressor(level=3)
-_ZD = zstandard.ZstdDecompressor()
+# zstandard (de)compressor objects are NOT thread-safe: sharing one across the
+# agent's tick/video/query threads (or the receiver's zenoh callback threads)
+# corrupts the heap ("free(): corrupted unsorted chunks").  One per thread.
+_tls = threading.local()
+
+
+def _zc() -> zstandard.ZstdCompressor:
+    c = getattr(_tls, "zc", None)
+    if c is None:
+        c = _tls.zc = zstandard.ZstdCompressor(level=3)
+    return c
+
+
+def _zd() -> zstandard.ZstdDecompressor:
+    d = getattr(_tls, "zd", None)
+    if d is None:
+        d = _tls.zd = zstandard.ZstdDecompressor()
+    return d
 
 
 # ----------------------------------------------------------------------------
@@ -52,11 +69,11 @@ _ZD = zstandard.ZstdDecompressor()
 
 def pack(obj, compress: bool = True) -> bytes:
     raw = msgpack.packb(obj, use_bin_type=True)
-    return _ZC.compress(raw) if compress else raw
+    return _zc().compress(raw) if compress else raw
 
 
 def unpack(data: bytes, compressed: bool = True):
-    raw = _ZD.decompress(data) if compressed else data
+    raw = _zd().decompress(data) if compressed else data
     return msgpack.unpackb(raw, raw=False, strict_map_key=False)
 
 

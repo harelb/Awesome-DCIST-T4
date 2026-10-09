@@ -32,3 +32,9 @@ def chat(body: ChatBody, request: Request):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/chat/usage")
+def chat_usage(request: Request):
+    """Provider/model in use and cumulative spend against the budget."""
+    return services(request).chat.usage()

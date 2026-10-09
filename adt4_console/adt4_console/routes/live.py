@@ -7,8 +7,9 @@ from typing import Literal
 import msgpack
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from ..video_service import RateLimited
 from . import services
 
 router = APIRouter(prefix="/api/live")
@@ -55,7 +56,7 @@ def grid(robot: str, request: Request):
 
 
 class BudgetBody(BaseModel):
-    cls: Literal["C1", "C2", "C3", "C4"]
+    cls: Literal["C1", "C2", "C3", "C4", "C5"]
     bps: float
 
 
@@ -124,3 +125,61 @@ def camera(
     media_type = "image/png" if rep.get("format") == "png" else "image/jpeg"
     headers["X-Frame-Bytes"] = str(len(rep["data"]))
     return Response(bytes(rep["data"]), media_type=media_type, headers=headers)
+
+
+# ----------------------------------------------------------------------------
+# Live video (C5 stream, API.md §12)
+# ----------------------------------------------------------------------------
+
+
+class VideoStartBody(BaseModel):
+    fps: float = Field(5.0, ge=0.5, le=15.0)
+    kbps: int = Field(300, ge=50, le=2000)  # kilobits/s
+    width: int = Field(640, ge=64, le=1920)
+    codec: Literal["h264", "vp8", "jpeg"] = "h264"
+    viewer: str = Field("", max_length=64)  # browser tab id (keepalive / stop)
+
+
+async def _viewer(request: Request) -> str:
+    """Optional ``{viewer}`` JSON body (keepalive / stop may be sent without one)."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return ""
+    v = body.get("viewer") if isinstance(body, dict) else None
+    return str(v)[:64] if v else ""
+
+
+@robots_router.get("/{robot}/video")
+def video_streams(robot: str, request: Request):
+    """Active video streams of ``robot`` with relay, receive and robot-side stats."""
+    _rx(request)
+    return {"robot": robot, "streams": services(request).live.video.streams(robot)}
+
+
+@robots_router.post("/{robot}/video/{camera}/start")
+def video_start(robot: str, camera: str, body: VideoStartBody, request: Request):
+    _rx(request)
+    params = body.model_dump(exclude={"viewer"})
+    try:
+        res = services(request).live.video.start(robot, camera, params, body.viewer)
+    except RateLimited as exc:
+        raise HTTPException(429, str(exc)) from None
+    return {"ok": True, "params": res["params"], "changed": res["changed"]}
+
+
+@robots_router.post("/{robot}/video/{camera}/keepalive")
+async def video_keepalive(robot: str, camera: str, request: Request):
+    _rx(request)
+    res = services(request).live.video.keepalive(robot, camera, await _viewer(request))
+    if res is None:
+        raise HTTPException(404, f"no video stream {robot}/{camera}: start it first")
+    return res
+
+
+@robots_router.post("/{robot}/video/{camera}/stop")
+async def video_stop(robot: str, camera: str, request: Request):
+    _rx(request)
+    return services(request).live.video.stop(
+        robot, camera, await _viewer(request) or None
+    )

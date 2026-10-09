@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -37,7 +39,9 @@ def robot_plan(robot: str, request: Request):
 
 class LanguageGoal(BaseModel):
     command: str
-    domain_type: str = "goto_points"
+    # "default" = the planner's configured language domain (LLM -> PDDL);
+    # "goto_points" takes node symbols ("O(12) P(850)") and does not use the LLM.
+    domain_type: Literal["default", "Pddl", "goto_points"] = "default"
     plugin: str | None = None
 
 

@@ -22,7 +22,7 @@ export function visitGoal(syms: string[]): string {
 type Tool = "goto" | "pddl" | "language";
 
 export async function sendGoal(robot: string, kind: string, body: unknown) {
-  return postJSON<{ok: boolean; topic: string; msg: unknown}>(`api/robots/${encodeURIComponent(robot)}/goal/${kind}`, body);
+  return postJSON<{ok: boolean; topic: string; msg: unknown; subscribers?: number}>(`api/robots/${encodeURIComponent(robot)}/goal/${kind}`, body);
 }
 
 export function PlanPanel() {
@@ -31,6 +31,7 @@ export function PlanPanel() {
   const plan = useRobots(s => (planRobot ? s.plan[planRobot] : undefined));
   const [tool, setTool] = useState<Tool>("goto");
   const [lang, setLang] = useState("");
+  const [langDomain, setLangDomain] = useState<"default" | "Pddl" | "goto_points">("default");
   const [pddlPlugin, setPddlPlugin] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ok: boolean; text: string} | null>(null);
@@ -61,8 +62,11 @@ export function PlanPanel() {
     setBusy(label);
     setMsg(null);
     try {
-      const r = (await fn()) as {ok?: boolean; topic?: string} | undefined;
-      setMsg({ok: r?.ok !== false, text: r?.topic ? `Sent on ${r.topic}` : `${label}: ok`});
+      const r = (await fn()) as {ok?: boolean; topic?: string; subscribers?: number} | undefined;
+      if (r?.subscribers === 0)
+        // published, but nothing matched within the discovery window: the planner is not running
+        setMsg({ok: false, text: `No planner is listening on ${r.topic} — is omniplanner running?`});
+      else setMsg({ok: r?.ok !== false, text: r?.topic ? `Sent on ${r.topic}` : `${label}: ok`});
     } catch (e) {
       setMsg({ok: false, text: errorText(e)});
     } finally {
@@ -184,8 +188,20 @@ export function PlanPanel() {
 
       {tool === "language" && (
         <div className="goal-tool">
-          <textarea className="input" rows={3} value={lang} placeholder="go to the red sign near the door" onChange={e => setLang(e.target.value)} aria-label="Language goal" />
-          <button className="btn btn-primary" disabled={!lang.trim() || !!busy} onClick={() => run("Language", () => sendGoal(planRobot!, "language", {command: lang.trim()}))}>
+          <select className="input" value={langDomain} onChange={e => setLangDomain(e.target.value as typeof langDomain)} aria-label="Language domain">
+            <option value="default">LLM → plan (planner default)</option>
+            <option value="Pddl">LLM → PDDL</option>
+            <option value="goto_points">Node symbols, no LLM (e.g. O(12) P(850))</option>
+          </select>
+          <textarea
+            className="input"
+            rows={3}
+            value={lang}
+            placeholder={langDomain === "goto_points" ? "O(12) P(850)" : "go to the red sign near the door"}
+            onChange={e => setLang(e.target.value)}
+            aria-label="Language goal"
+          />
+          <button className="btn btn-primary" disabled={!lang.trim() || !!busy} onClick={() => run("Language", () => sendGoal(planRobot!, "language", {command: lang.trim(), domain_type: langDomain}))}>
             {busy === "Language" && <Spinner />} Send command
           </button>
         </div>
@@ -232,6 +248,19 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
             {plan.results.slice(-6).reverse().map((r, i) => (
               <li key={i}>
                 <span className="mono muted">{fmtTime(r.t)}</span> #{r.action_index} <span className={/fail|abort|error/i.test(r.status ?? "") ? "tone-err" : "tone-ok"}>{r.status}</span> {r.detail}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {plan?.status && plan.status.length > 0 && (
+        <>
+          <h4 className="sub-title">Planner</h4>
+          <ul className="result-list small">
+            {plan.status.slice(-4).reverse().map((st, i) => (
+              <li key={i}>
+                <span className="mono muted">{fmtTime(st.t)}</span> <span className="mono">{st.plugin}</span>{" "}
+                {st.ok ? <span className="tone-ok">planned</span> : <span className="tone-err">failed: {st.error}</span>}
               </li>
             ))}
           </ul>

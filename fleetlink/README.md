@@ -5,7 +5,7 @@ RViz-style overlays, carried over zenoh. A robot-side **agent** turns ROS topics
 budgeted zenoh messages. A base-side **receiver**, which runs inside the
 [ADT4 console](../adt4_console/README.md), mirrors every robot and repairs what got lost.
 
-The wire contract is §8 and §11 of [`adt4_console/docs/API.md`](../adt4_console/docs/API.md),
+The wire contract is §8, §11 and §12 of [`adt4_console/docs/API.md`](../adt4_console/docs/API.md),
 plus its *Deviations → fleetlink* section.
 
 ## Design
@@ -29,6 +29,12 @@ plus its *Deviations → fleetlink* section.
   `adt4_console/frontend/src/codec.ts` mirrors it.
 * **`media.py`.** Occupancy-grid, path and camera-frame payloads: zlib grids, ≤150-point paths,
   and frame conversion to JPEG (OpenCV) or PNG (numpy + zlib).
+* **`video.py`.** Live camera video (C5). `VideoStreams` runs one encoder per requested camera:
+  the system `ffmpeg` as a subprocess (libx264 Annex-B with an AUD per access unit, or libvpx
+  in IVF), raw RGB frames on stdin at the requested fps. `AnnexBSplitter` / `IvfParser` cut the
+  output into frames and flag key frames. Without a working ffmpeg the stream falls back to one
+  JPEG per frame. `C5Bucket` is the class's token bucket: delta frames need budget, key frames
+  may borrow up to one burst, and after a drop a stream skips deltas until its next key frame.
 * **`agent.py`.** `AgentCore` keeps "what the base has" (the sent `GraphState`, the sent tile
   manifest, and the sent grid/paths hashes) and on every `tick()` queues only the difference.
   Graph deltas are split to fit the C2 budget, closest to the robot first. Mesh tiles go only
@@ -61,9 +67,32 @@ plus its *Deviations → fleetlink* section.
 | C2 graph | `dsg/delta` | DATA_HIGH, BLOCK, reliable | 50 kB/s | snapshot begin/chunk/end, deltas (1 Hz tick) |
 | C3 mesh | `mesh/tile/<key>`, `mesh/manifest`, `grid/occupancy` | DATA_LOW, DROP, best effort | 100 kB/s | mesh tiles, manifest every 5 s, occupancy grid (checked every 5 s, sent on change) |
 | C4 media | queryable `media/camera/<name>` | DATA (request/reply) | 200 kB/s | camera frames on request (`?w=640;q=70`) |
+| C5 video | `video/<name>` | DATA_LOW, DROP, best effort | 400 kB/s | live h264 / vp8 / jpeg frames while a `video` request is kept alive |
 
 Budgets are **bytes per second**. On the emulated link the transmit order is
-C0 > C1 > C2 > C4 > C3: an operator waiting for a frame outranks bulk mesh, but not the graph.
+C0 > C1 > C2 > C4 > C3 > C5: an operator waiting for a frame outranks bulk mesh, but not the graph.
+
+### Live video (C5)
+
+The base sends the C0 op `video {camera, enable, fps, kbps, width, codec}` and repeats it at
+least every 6 s (`video_keepalive_s`); the console does that every 2 s while a browser watches.
+fps 0.5–15 (default 5), kbps 50–2000 kilobits/s (default 300), width default 640 (never upscaled,
+aspect kept, even), codec `h264` (default), `vp8` or `jpeg`. Changed parameters restart the
+encoder, which starts with a key frame. Key frames come every 2 s (`-g 2*fps`). Frames are sampled
+from the newest image the agent keeps per camera (the same one C4 uses), on a dedicated thread so
+15 fps is not quantised to the 20 Hz tick. Each frame is one zenoh message
+`{camera, codec, seq, t, stamp, key, width, height, fps, data}`; frames are sent as they leave the
+encoder, never queued. The C1 state lists active streams under `video`. The encoders, on synthetic
+640x360 content for 10 s (`tests/test_video.py`):
+
+| target | h264 (x264 ultrafast, zerolatency) | vp8 (libvpx realtime, cpu-used 8) |
+|---|---|---|
+| 150 kbit/s, 5 fps | 152 kbit/s | 151 kbit/s |
+| 300 kbit/s, 5 fps | 305 kbit/s | 303 kbit/s |
+| 800 kbit/s, 10 fps | 834 kbit/s | 816 kbit/s |
+
+Encoder latency is about 25 ms for h264 (the splitter emits an access unit when x264 has been quiet
+for 20 ms instead of waiting for the next AUD) and about 10 ms for vp8.
 
 ## Parameters
 
@@ -83,10 +112,13 @@ C0 > C1 > C2 > C4 > C3: an operator waiting for a frame outranks bulk mesh, but 
 | `burst_s` | 1.0 | token-bucket depth, in seconds of budget |
 | `grid_period_s` | 5.0 | occupancy grid check period |
 | `paths_hz` | 2.0 | executor path check rate |
+| `budgets.C5` | 400000 | live video, all streams together |
+| `video_keepalive_s` | 6.0 | a stream stops without a `video` request this long |
+| `ffmpeg` | null | ffmpeg binary (null: `$FLEETLINK_FFMPEG`, `ffmpeg` on `PATH`, `/usr/bin/ffmpeg`) |
 
 ROS params of `fleetlink-agent` (topics are relative to the robot namespace unless absolute):
 `robot_name` (default: the namespace), `config`, `zenoh_connect` (`tcp/127.0.0.1:7447`),
-`tick_hz` (20), `budget_C1`…`budget_C4`, `auto`, `mesh_period_s`, `tile_size`, `grid_period_s`,
+`tick_hz` (20), `budget_C1`…`budget_C5`, `ffmpeg`, `auto`, `mesh_period_s`, `tile_size`, `grid_period_s`,
 `dsg_topic` (`hydra/backend/dsg`), `guards_topic`, `result_topic`, `health_topic`,
 `health_monitor_name`, `map_frame` (default: the DSG header frame), `body_frame` (`<robot>/body`),
 `fallback_map_frame` (`<robot>/map`), `grid_topic` (`hydra/tsdf/occupancy`),
@@ -112,10 +144,12 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
         /home/harel/environments/dcist/spark_env/bin/python3 -m pytest -q'
 ```
 
-* `test_codec`, `test_scheduler`, `test_transport`, `test_agent`, `test_receiver`, `test_media`
-  are pure unit tests. They use the `RecordingTransport` and the deterministic `LinkEmulator`
+* `test_codec`, `test_scheduler`, `test_transport`, `test_agent`, `test_receiver`, `test_media`,
+  `test_video` are unit tests. `test_video` runs the real ffmpeg encoders (frame splitting,
+  key-frame flags, bitrate within 30 % of target, decodable output) and skips them when ffmpeg
+  lacks libx264 / libvpx. They use the `RecordingTransport` and the deterministic `LinkEmulator`
   (latency, bandwidth, loss, congestion, C4 query timeouts and budget).
-* `test_zenoh_smoke` (graph, mesh, C0, camera query, grid, paths) and `test_ros_smoke` (a real
+* `test_zenoh_smoke` (graph, mesh, C0, camera query, grid, paths, live h264 video) and `test_ros_smoke` (a real
   `hydra_ros.DsgPublisher` plus OccupancyGrid/Path/MarkerArray/Image publishers into `AgentNode`)
   start a **throwaway** `rmw_zenohd` on `127.0.0.1:17448` and use private ROS domains (88, 89).
   They never touch the live router on 7447. They skip when ROS or that port is unavailable.

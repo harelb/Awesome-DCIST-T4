@@ -58,6 +58,7 @@ adt4_console/bin/adt4-console --port 8090 \
 | `--zenoh-connect EP` | zenoh router for fleetlink (default `tcp/127.0.0.1:7447`) |
 | `--robots a,b` | robots to plan for (default: the topology's robots) |
 | `--no-ros`, `--no-fleetlink`, `--no-llm` | turn subsystems off; their endpoints return 503 or empty |
+| `--llm-provider`, `--llm-model`, `--llm-budget-usd` | chat LLM (OpenAI via `ADT4_OPENAI_API_KEY`, default `gpt-4.1-mini`); hard spend cap, persisted in `~/.adt4_console/llm_usage.json` |
 
 With a token, open the console once as `http://host:8090/?token=TOKEN`. The UI keeps the token for
 the browser tab and removes it from the address bar.
@@ -107,13 +108,25 @@ The header shows the server, WebSocket ("live"), ROS and fleetlink status, plus 
 |---|---|
 | OccupancyMap (`hydra/tsdf/occupancy`) | *Live overlays → <robot>: occupancy*: toggle + opacity. A textured plane at the grid's origin; occupied cells dark red, unknown faint grey, free transparent |
 | MLP Path / smooth path / MLP target | *Live overlays*: smooth path (cyan dashed), MLP path (amber), MLP target (pink marker) |
-| Image (`<robot>_zed/rgb/image_rect_color`, `semantic_overlay/image_raw`) | **Camera** tab: robot, camera and width; auto-refresh at 1 Hz by default (0.2–5 Hz) or manual; shows the frame's age, size in KB and round trip |
+| Image (`<robot>_zed/rgb/image_rect_color`, `semantic_overlay/image_raw`) | **Camera** tab, *Still* mode: robot, camera and width; auto-refresh at 1 Hz by default (0.2–5 Hz) or manual; shows the frame's age, size in KB and round trip. *Video* mode: a live stream (below) |
 | DsgStatsPanel | **Inspect** tab with nothing selected |
 | robot pose, plan | robot glyphs (with a stale marker), plan overlay (current action highlighted) |
 
 Camera frames are pulled **on demand**. The robot sends nothing until someone has the Camera tab
 open. Each frame is resized and JPEG-encoded on the robot. A 640 px frame at quality 70 is
 typically a few tens of kB, so expect about that many kB/s at 1 Hz while the tab is open.
+
+**Live video** (*Camera → Video*) streams a camera as H.264 or VP8 instead. The robot encodes
+with its system `ffmpeg`, the browser decodes with WebCodecs and draws to a canvas, so a
+640 px stream costs about its bitrate: **150 / 300 / 800 kbit/s** for the *low / medium / high*
+presets, about 19 / 38 / 100 kB/s. Pick 1–15 fps and 320–960 px (never above the camera's own
+width). The codec is chosen automatically: h264 when the browser can decode it, else vp8, else
+one JPEG per frame (which costs several times more for the same picture). The stream runs only
+while the tab is visible: the browser sends a keepalive every 2 s, the console forwards one to
+the robot every 2 s while any viewer is alive, and the robot stops 6 s after the last one. The
+stats line shows the received fps and kbit/s, the decode time, the lag (browser clock minus
+robot sample time, so it includes clock skew), skipped frames and "waiting for key frame". The
+second line is the robot's own report (encoder, size, sent rate, frames it dropped for budget).
 
 ### Typed confirms
 
@@ -130,7 +143,7 @@ times out after 300 s and counts as *No*.
 
 ## Live link and fleetlink budgets
 
-Live data travels in five classes with separate byte budgets. All values are bytes per second.
+Live data travels in six classes with separate byte budgets. All values are bytes per second.
 They are set per robot in the agent's `fleetlink/config/fleetlink.yaml` or as ROS params, and
 can be changed live in **Live link**.
 
@@ -141,11 +154,14 @@ can be changed live in **Live link**.
 | C2 graph | scene-graph deltas, closest to the robot first | 50 kB/s | block (backpressure) |
 | C3 mesh | mesh tiles + occupancy grid | 100 kB/s | drop; repaired via manifest / `resend` |
 | C4 media | camera frames on request | 200 kB/s | request refused (`429`), never queued |
+| C5 video | live camera video (all streams together) | 400 kB/s | delta frames dropped, then skipped until the next key frame; key frames borrow up to 1 s of budget |
 
 The Live link tab shows each budget as a log slider (500 B/s to 2 MB/s, applied when you release
 it), the measured rate as a sparkline, and the link's staleness, latency, drops, gaps and resyncs.
 *Auto budget* lets the robot adapt C2/C3 to the measured goodput (AIMD). *Resync* re-streams the
-whole graph. Design details: [fleetlink/README.md](../fleetlink/README.md).
+whole graph. The sliders cover C1–C3. Change C4/C5 with
+`POST /api/live/{r}/budget {"cls": "C5", "bps": ...}` or the agent params `budget_C4` / `budget_C5`.
+Design details: [fleetlink/README.md](../fleetlink/README.md).
 
 ## Troubleshooting
 
@@ -174,6 +190,13 @@ whole graph. Design details: [fleetlink/README.md](../fleetlink/README.md).
   refresh rate or the width, or raise `budget_C4`.
 * **Frame age keeps growing.** The camera topic stopped. Age is measured on the robot from when
   the frame arrived, so it is valid under sim time.
+* **Video: "Robot: ffmpeg not found ..." / "ffmpeg exited ...".** The robot has no usable
+  `ffmpeg` (with libx264 / libvpx) and fell back to JPEG frames at the same fps. Install ffmpeg
+  or point the agent's `ffmpeg` param (or `$FLEETLINK_FFMPEG`) at one.
+* **Video: "waiting for key frame" for seconds.** Frames were lost (on the link, or for the C5
+  budget, see *robot dropped*), and delta frames cannot be decoded without their predecessors.
+  Key frames come every 2 s. Lower the bitrate or fps, or raise C5.
+* **Video: 429 on start.** The parameters were changed again within 1 s. The UI retries by itself.
 * **Viewer is slow.** Turn off sub-keyframes or edges, and hide the mesh of sources you do not need.
 
 ## Tests

@@ -50,6 +50,16 @@ def parse_args(argv=None):
     p.add_argument(
         "--no-llm", action="store_true", help="always use the offline chat fallback"
     )
+    p.add_argument(
+        "--llm-provider", choices=["auto", "openai", "anthropic"], default="auto"
+    )
+    p.add_argument("--llm-model", help="chat model (default: gpt-4.1-mini for OpenAI)")
+    p.add_argument(
+        "--llm-budget-usd",
+        type=float,
+        default=10.0,
+        help="hard cap on cumulative chat LLM spend; afterwards chat goes offline",
+    )
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
 
@@ -77,6 +87,9 @@ def settings_from_args(args):
         if args.robots
         else None,
         llm=not args.no_llm,
+        llm_provider=args.llm_provider,
+        llm_model=args.llm_model,
+        llm_budget_usd=args.llm_budget_usd,
         planner_ns=args.planner_ns,
     )
 
