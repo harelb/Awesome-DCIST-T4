@@ -2,14 +2,8 @@
 
 from __future__ import annotations
 
-import os
-import shlex
-import shutil
-import subprocess
 import sys
-import tempfile
 import threading
-import time
 
 import click
 from textual.app import App, ComposeResult
@@ -17,13 +11,12 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import DataTable, Footer, Header, Label, RichLog, Rule
 
+from dcist_launch_system.fleet import zenohd
 from dcist_launch_system.fleet_helpers import (
     detect_network,
     filter_reachable,
-    generate_zenoh_endpoints,
     get_local_ips,
     load_topology,
-    patch_zenoh_config_local,
     resolve_machines,
 )
 from dcist_launch_system.tui.context import TuiContext
@@ -38,105 +31,18 @@ from dcist_launch_system.tui.screens import (
 
 def _stop_fleet_zenohd(ctx: TuiContext) -> None:
     """Terminate the fleet-managed zenohd so the base station session can take over."""
-    proc = ctx._fleet_zenoh["proc"]
-    if proc and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=2)
-        time.sleep(1)  # allow port to be released (TIME_WAIT)
-        ctx._fleet_zenoh["proc"] = None
+    zenohd.stop(ctx._fleet_zenoh)
 
 
 def _start_fleet_zenohd(ctx: TuiContext) -> tuple[bool, str]:
-    """Start (or restart) the fleet-managed zenohd on the standard zenoh port.
-
-    Returns (True, message) if started, (False, reason) otherwise.
-    """
-    if not shutil.which("ros2"):
-        return False, "ros2 not found on PATH — source your ROS workspace first"
-
-    # Don't start if one is already running under our control
-    if ctx._fleet_zenoh["proc"] and ctx._fleet_zenoh["proc"].poll() is None:
-        return True, "already running"
-
-    try:
-        local_ips = ctx._local_ips
-        zenoh_conf = ctx.topo.get("zenoh", {})
-        port = zenoh_conf.get("port", 7447)
-
-        # Determine this machine's role from topology
-        local_machine = None
-        for m in ctx.runtime_config.values():
-            if m["ip"] in local_ips:
-                local_machine = m
-                break
-
-        # Build connect endpoints from topology
-        if local_machine:
-            endpoints = generate_zenoh_endpoints(
-                ctx.topo, ctx.active_network, local_machine["name"]
-            )
-        else:
-            endpoints = [
-                f"tcp/{m['ip']}:{port}"
-                for m in ctx.runtime_config.values()
-                if m.get("role") == "base_station" and m.get("ip")
-            ]
-
-        # Clean up previous config
-        if ctx._fleet_zenoh["config"]:
-            try:
-                os.unlink(ctx._fleet_zenoh["config"])
-            except OSError:
-                pass
-            ctx._fleet_zenoh["config"] = None
-
-        config_path = patch_zenoh_config_local(endpoints)
-        if not config_path:
-            return False, "failed to patch zenoh config (template missing?)"
-
-        ctx._fleet_zenoh["config"] = config_path
-        stderr_log = tempfile.NamedTemporaryFile(
-            mode="w", prefix="fleet_zenohd_", suffix=".log", delete=False
-        )
-        # Source the ROS workspace before running zenohd — fleet-adt4 may
-        # have been started without full ROS env (e.g. ros2 on PATH via
-        # .zshrc but workspace not sourced). Use zsh login shell so
-        # setup.zsh sources correctly and .zshrc env vars are available.
-        shell_cmd = (
-            f"source ~/dcist_ws/install/setup.zsh 2>/dev/null; "
-            f"ZENOH_ROUTER_CONFIG_URI={shlex.quote(config_path)} "
-            f"ros2 run rmw_zenoh_cpp rmw_zenohd"
-        )
-        zsh = shutil.which("zsh") or "zsh"
-        ctx._fleet_zenoh["proc"] = subprocess.Popen(
-            [zsh, "-l", "-c", shell_cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_log,
-        )
-        # Check it didn't die immediately
-        time.sleep(1.0)
-        if ctx._fleet_zenoh["proc"].poll() is not None:
-            rc = ctx._fleet_zenoh["proc"].returncode
-            ctx._fleet_zenoh["proc"] = None
-            stderr_log.close()
-            try:
-                with open(stderr_log.name) as f:
-                    err_output = f.read().strip()[-500:]  # last 500 chars
-            except Exception:
-                err_output = ""
-            detail = f"\n  stderr: {err_output}" if err_output else ""
-            return (
-                False,
-                f"rmw_zenohd exited immediately (rc={rc}){detail}\n  config: {config_path}",
-            )
-        stderr_log.close()
-        return True, f"started on port {port} with {len(endpoints)} endpoint(s)"
-    except Exception as e:
-        return False, f"error: {e}"
+    """Start (or restart) the fleet-managed zenohd on the standard zenoh port."""
+    return zenohd.start(
+        ctx._fleet_zenoh,
+        ctx.topo,
+        ctx.active_network,
+        ctx.runtime_config,
+        ctx._local_ips,
+    )
 
 
 class FleetApp(App):
@@ -312,9 +218,4 @@ def _launch_tui(
         app = FleetApp(ctx)
         app.run()
     finally:
-        _stop_fleet_zenohd(ctx)
-        if ctx._fleet_zenoh["config"]:
-            try:
-                os.unlink(ctx._fleet_zenoh["config"])
-            except OSError:
-                pass
+        zenohd.cleanup(ctx._fleet_zenoh)

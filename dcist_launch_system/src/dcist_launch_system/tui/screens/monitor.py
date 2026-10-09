@@ -20,6 +20,7 @@ from textual.widgets import (
     Static,
 )
 
+from dcist_launch_system.fleet.silvus import link_matrix, routing_summary
 from dcist_launch_system.fleet_helpers import (
     _STATUS_COLORS,
     _STATUS_NAMES,
@@ -576,73 +577,31 @@ class MonitorScreen(ModalScreen):
                 log.write("[red]No radio data returned.[/]")
                 return
 
-            # Build node_id → radio_name reverse map
-            nid_to_name = {}
-            for rname, info in details.items():
-                nid = info.get("node_id")
-                if nid:
-                    nid_to_name[int(nid)] = rname
-
             names = sorted(details.keys())
             col_w = max(len(n) for n in names) + 2
+            colors = {"good": "green", "fair": "yellow", "poor": "red"}
 
             # ---- RSSI Matrix ----
             log.write("\n[bold]Silvus RSSI Link Quality:[/]")
             header = " " * (col_w + 2) + "".join(f"{n:>{col_w}}" for n in names)
             log.write(f"  [dim]{header}[/]")
 
-            for src in names:
-                info = details[src]
-                if info.get("error"):
+            for src, cells in link_matrix(details).items():
+                if isinstance(cells, str):
                     log.write(
-                        f"  [red]{src:<{col_w}}[/]  [red](unreachable: {info['error'][:40]})[/]"
+                        f"  [red]{src:<{col_w}}[/]  [red](unreachable: {cells[:40]})[/]"
                     )
                     continue
                 row = f"  [cyan]{src:<{col_w}}[/]"
-                link_stats = info.get("link_stats")
-                rssi_raw = info.get("rssi")
-                routing_tree = [int(x) for x in (info.get("routing_tree") or [])]
-                _src_nid = info.get("node_id")
-
                 for dst in names:
-                    if src == dst:
+                    if dst == src:
                         row += f"{'---':>{col_w}}"
                         continue
-
-                    dst_nid = details[dst].get("node_id")
-                    val = None
-
-                    # Try link_stats (keyed by node_id string)
-                    if isinstance(link_stats, dict) and dst_nid is not None:
-                        try:
-                            val = float(
-                                link_stats.get(str(dst_nid))
-                                or link_stats.get(str(int(dst_nid)))
-                            )
-                        except (TypeError, ValueError):
-                            pass
-
-                    # Fallback: rssi field (single-neighbor case)
-                    if (
-                        val is None
-                        and rssi_raw
-                        and isinstance(rssi_raw, list)
-                        and len(names) == 2
-                    ):
-                        try:
-                            val = float(rssi_raw[0]) / 2.0
-                        except (TypeError, ValueError):
-                            pass
-
-                    if val is not None:
-                        if val > -60:
-                            cell = f"[green]{val:.0f}dB[/]"
-                        elif val > -80:
-                            cell = f"[yellow]{val:.0f}dB[/]"
-                        else:
-                            cell = f"[red]{val:.0f}dB[/]"
-                        row += f"{cell:>{col_w}}"
-                    elif dst_nid is not None and int(dst_nid) in routing_tree:
+                    cell = cells[dst]
+                    if cell.rssi_db is not None:
+                        text = f"[{colors[cell.quality]}]{cell.rssi_db:.0f}dB[/]"
+                        row += f"{text:>{col_w}}"
+                    elif cell.linked:
                         row += f"[green]{'linked':>{col_w}}[/]"
                     else:
                         row += f"[dim]{'?':>{col_w}}[/]"
@@ -650,20 +609,11 @@ class MonitorScreen(ModalScreen):
 
             # ---- Mesh Topology ----
             log.write("\n[bold]Mesh Routing (per radio):[/]")
-            for rname in names:
-                info = details[rname]
-                if info.get("error"):
-                    continue
-                nid = info.get("node_id", "?")
-                tree = info.get("routing_tree") or []
-                # Resolve node IDs to radio names where possible
-                tree_str = (
-                    ", ".join(nid_to_name.get(int(n), str(n)) for n in tree)
-                    if tree
-                    else "—"
-                )
-                bat = info.get("battery")
+            for rname, info in routing_summary(details).items():
+                tree_str = ", ".join(info["routes"]) or "—"
+                bat = info["battery"]
                 bat_str = f"  bat={bat:.0f}%" if bat is not None else ""
+                nid = info["node_id"] or "?"
                 log.write(f"  [cyan]{rname}[/] (node {nid}){bat_str}: [{tree_str}]")
 
             mgmt_subnet = self.ctx.topo.get("silvus_radios", {}).get(

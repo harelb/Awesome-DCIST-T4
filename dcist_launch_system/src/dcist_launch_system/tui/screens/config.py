@@ -5,7 +5,6 @@ from __future__ import annotations
 import pathlib
 import threading
 
-import yaml
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -19,6 +18,11 @@ from textual.widgets import (
     Rule,
 )
 
+from dcist_launch_system.fleet.topology import (
+    apply_machine_edit,
+    remove_machine,
+    save_topology,
+)
 from dcist_launch_system.fleet_helpers import (
     _DEFAULT_TOPOLOGY,
     filter_reachable,
@@ -222,45 +226,13 @@ class ConfigScreen(ModalScreen):
         if not result:
             return
         log = self.query_one("#config_log", RichLog)
-        name = result["name"]
-        role = result["role"]
-        platform = result["platform"]
-        desc = result["desc"]
-        mit_wifi = result["mit_wifi"]
-        silvus = result["silvus"]
-        topo_machines = self.ctx.topo.setdefault("machines", {})
-        addrs = {}
-        if mit_wifi:
-            addrs["mit_wifi"] = mit_wifi
-        if silvus:
-            addrs["silvus"] = silvus
-        # Preserve other networks (e.g. penn_wifi) from the original entry
-        ref_name = original_name or name
-        if ref_name in topo_machines:
-            for net, ip in topo_machines[ref_name].get("addresses", {}).items():
-                if net not in ("mit_wifi", "silvus"):
-                    addrs[net] = ip
-        entry = {"role": role, "addresses": addrs}
-        if platform:
-            entry["platform_id"] = platform
-        if desc:
-            entry["desc"] = desc
-        topo_machines[name] = entry
-        if self.ctx.active_network in addrs:
-            ssh_conf = self.ctx.topo.get("ssh", {})
-            user = (
-                ssh_conf.get("base_station_user", "rrg")
-                if role == "base_station"
-                else ssh_conf.get("robot_user", "swarm")
-            )
-            self.ctx.runtime_config[name] = {
-                "name": name,
-                "role": role,
-                "ip": addrs[self.ctx.active_network],
-                "user": user,
-                "desc": desc,
-                "platform_id": platform or "",
-            }
+        name = apply_machine_edit(
+            self.ctx.topo,
+            self.ctx.runtime_config,
+            self.ctx.active_network,
+            result,
+            original_name=original_name,
+        )
         log.write(f"[green]Updated {name}[/]")
         self._refresh_config_table()
 
@@ -286,11 +258,7 @@ class ConfigScreen(ModalScreen):
         if not name:
             log.write("[yellow]No machine selected.[/]")
             return
-        topo_machines = self.ctx.topo.get("machines", {})
-        if name in topo_machines:
-            del topo_machines[name]
-        if name in self.ctx.runtime_config:
-            del self.ctx.runtime_config[name]
+        remove_machine(self.ctx.topo, self.ctx.runtime_config, name)
         self.ctx._deleted_machines.add(name)
         log.write(f"Removed [bold]{name}[/]. Press F5 to save permanently.")
         self._refresh_config_table()
@@ -329,8 +297,7 @@ class ConfigScreen(ModalScreen):
             else _DEFAULT_TOPOLOGY
         )
         try:
-            with open(topo_path, "w") as f:
-                yaml.dump(self.ctx.topo, f, default_flow_style=False, sort_keys=False)
+            save_topology(topo_path, self.ctx.topo)
             log.write(f"[green]Saved to {topo_path}[/]")
         except OSError as e:
             log.write(f"[red]Failed to save: {e}[/]")

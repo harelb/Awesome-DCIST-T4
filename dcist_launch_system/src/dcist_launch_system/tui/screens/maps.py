@@ -17,6 +17,7 @@ from textual.widgets import (
     Tree,
 )
 
+from dcist_launch_system.fleet.maps import is_prior_map
 from dcist_launch_system.fleet_helpers import (
     list_remote_experiments,
     run_parallel,
@@ -115,8 +116,7 @@ class PriorMapSelector(Vertical):
                 node.add_leaf("[dim]no experiments[/]")
                 continue
             for exp in filtered:
-                subdirs = exp.get("subdirs", [])
-                has_prior = "hydra" in subdirs and "roman" in subdirs
+                has_prior = is_prior_map(exp)
                 tag = " [green]\u2714[/]" if has_prior else ""
                 label = f"{exp['name']}  ({exp.get('size', '?')}){tag}"
                 leaf = node.add_leaf(label)

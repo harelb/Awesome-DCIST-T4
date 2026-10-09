@@ -14,6 +14,8 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from dcist_launch_system.fleet.launch_workflow import TMUX_SESSION_NAME
+from dcist_launch_system.fleet.maps import compare_hashes
 from dcist_launch_system.fleet_helpers import (
     _DEFAULT_TOPOLOGY,
     _STATUS_COLORS,
@@ -348,8 +350,7 @@ def verify(ctx, experiment, machine):
         click.secho("No machines returned hash data.", fg="yellow")
         return
 
-    # Collect all files across all machines
-    all_files = sorted(set(f for h in machine_hashes.values() for f in h))
+    rows = compare_hashes(machine_hashes)
     machine_names = sorted(machine_hashes.keys())
 
     table = Table(title=f"Map Verification: {experiment}")
@@ -357,26 +358,11 @@ def verify(ctx, experiment, machine):
     for mname in machine_names:
         table.add_column(mname)
 
-    diffs = 0
-    for fpath in all_files:
-        hashes_for_file = {mn: machine_hashes[mn].get(fpath) for mn in machine_names}
-        unique_hashes = set(v for v in hashes_for_file.values() if v)
-        is_consistent = len(unique_hashes) <= 1
-
-        row = [fpath]
-        for mn in machine_names:
-            h = hashes_for_file[mn]
-            if h is None:
-                row.append("[dim]missing[/]")
-                if unique_hashes:
-                    is_consistent = False
-            elif is_consistent:
-                row.append("[green]OK[/]")
-            else:
-                row.append(f"[red]{h[:8]}[/]")
-        if not is_consistent:
-            diffs += 1
-        table.add_row(*row)
+    styles = {"MISSING": "[dim]missing[/]", "OK": "[green]OK[/]"}
+    for row in rows:
+        cells = [row.cell(mn) for mn in machine_names]
+        table.add_row(row.path, *[styles.get(c, f"[red]{c}[/]") for c in cells])
+    diffs = sum(not row.consistent for row in rows)
 
     console.print(table)
     if diffs == 0:
@@ -471,10 +457,10 @@ def launch(
         rc, _, _ = ssh_cmd(
             m["user"],
             m["ip"],
-            f"tmux has-session -t {shlex.quote(sess)} 2>/dev/null",
+            f"tmux has-session -t {TMUX_SESSION_NAME} 2>/dev/null",
             timeout=5,
         )
-        return m["name"], rc == 0, sess
+        return m["name"], rc == 0, TMUX_SESSION_NAME
 
     session_checks = run_parallel(check_session, cmds)
     conflicts = [r for _, r in session_checks if r[1]]
@@ -492,7 +478,7 @@ def launch(
                 ssh_cmd(
                     m["user"],
                     m["ip"],
-                    f"tmux kill-session -t {shlex.quote(sess)}",
+                    f"tmux kill-session -t {TMUX_SESSION_NAME}",
                     timeout=5,
                 )
         else:

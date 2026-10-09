@@ -1,0 +1,313 @@
+"""Tests for the UI-independent launch workflow — all side effects are faked."""
+
+import pytest
+
+from dcist_launch_system.fleet.launch_workflow import (
+    TMUX_SESSION_NAME,
+    LaunchDeps,
+    LaunchError,
+    LaunchPlan,
+    build_base_station_command,
+    build_robot_commands,
+    default_selection,
+    dry_run_lines,
+    run_launch,
+)
+
+OUT = "~/adt4_output"
+
+RUNTIME = {
+    "smaug": {
+        "name": "smaug",
+        "role": "robot",
+        "ip": "10.0.0.1",
+        "user": "swarm",
+        "platform_id": "smaug",
+        "online": True,
+    },
+    "topaz": {
+        "name": "topaz",
+        "role": "robot",
+        "ip": "10.0.0.2",
+        "user": "swarm",
+        "platform_id": "topaz",
+        "online": True,
+    },
+    "willow": {
+        "name": "willow",
+        "role": "base_station",
+        "ip": "10.0.0.9",
+        "user": "rrg",
+        "platform_id": "base_station",
+        "online": True,
+    },
+}
+
+TOPO = {
+    "fleet_defaults": {
+        "spot_platforms": ["smaug", "topaz"],
+        "sessions": {
+            "mapping": {"spot": "spot-default", "phoenix": "phoenix-default"},
+            "relocalize": {"spot": "spot-relocalize", "phoenix": "phoenix-reloc"},
+        },
+        "base_station_session": "base_station-default",
+    }
+}
+
+
+class FakeSsh:
+    """Scripted ssh: ``rules`` maps a substring of the command to (rc, out, err)."""
+
+    def __init__(self, rules=None):
+        self.rules = rules or {}
+        self.calls = []
+
+    def __call__(self, user, ip, cmd, timeout=5):
+        self.calls.append((ip, cmd))
+        for needle, result in self.rules.items():
+            if needle in cmd and (result[3] if len(result) > 3 else ip) == ip:
+                return result[:3]
+        return 0 if "run-adt4" in cmd else 1, "", ""
+
+    def cmds_for(self, ip):
+        return [c for i, c in self.calls if i == ip]
+
+
+class Recorder:
+    def __init__(self, answers=None, zenohd=False):
+        self.lines = []
+        self.requests = []
+        self.answers = list(answers or [])
+        self.zenohd = zenohd
+        self.stopped = False
+        self.pct = {}
+
+    def log(self, level, text):
+        self.lines.append((level, text))
+
+    def confirm(self, request):
+        self.requests.append(request)
+        return self.answers.pop(0) if self.answers else None
+
+    def progress(self, machine, pct):
+        self.pct[machine] = pct
+
+    def local_zenohd_running(self):
+        return self.zenohd
+
+    def stop_local_zenohd(self):
+        self.stopped = True
+
+    def text(self):
+        return "\n".join(t for _, t in self.lines)
+
+
+def make_deps(ssh, rsync=None):
+    return LaunchDeps(
+        ssh=ssh,
+        rsync=rsync or (lambda *a, **k: (True, "direct", "ok")),
+        deploy_zenoh=lambda user, ip, eps: (True, "deployed"),
+        zenoh_endpoints=lambda topo, net, name, robot_filter=None: ["tcp/x:7447"],
+        rviz=lambda name: f"/tmp/dcist_{name}.rviz",
+        parallel=lambda fn, items: [(i, fn(i)) for i in items],
+        sleep=lambda s: None,
+    )
+
+
+def run(plan, ssh, rec, rsync=None):
+    return run_launch(
+        plan,
+        topo=TOPO,
+        active_network="silvus",
+        runtime_config=RUNTIME,
+        output_root=OUT,
+        callbacks=rec,
+        deps=make_deps(ssh, rsync),
+    )
+
+
+# --- command construction -----------------------------------------------------
+
+
+def test_robot_command_golden():
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e1")
+    [(m, cmd)] = build_robot_commands(plan, RUNTIME, OUT)
+    assert m["name"] == "smaug"
+    assert cmd == (
+        "cd ~/dcist_ws && source install/setup.zsh && "
+        "src/awesome_dcist_t4/dcist_launch_system/bin/run-adt4 spot-default "
+        "-n smaug -c smaug -o ~/adt4_output/e1 -y "
+        '--tmuxp-args "-d"'
+    )
+
+
+def test_robot_command_flags_and_prior_paths():
+    plan = LaunchPlan(
+        robots=["smaug", "topaz"],
+        session="spot-relocalize",
+        experiment="e2",
+        mode="relocalize",
+        prior_path="~/adt4_output/bldg45",
+        prior_source="smaug",
+        record=True,
+    )
+    cmds = dict((m["name"], c) for m, c in build_robot_commands(plan, RUNTIME, OUT))
+    # source machine keeps its original path, others get prior_<name>
+    assert "bldg45" in cmds["smaug"] and "prior_bldg45" not in cmds["smaug"]
+    assert "prior_bldg45" in cmds["topaz"]
+    assert all(" -r " in c for c in cmds.values())
+
+
+@pytest.mark.parametrize(
+    "kwargs, msg",
+    [
+        (dict(robots=[], session="s", experiment="e"), "No robots"),
+        (dict(robots=["smaug"], session="", experiment="e"), "No session"),
+        (dict(robots=["smaug"], session="s", experiment=""), "No experiment"),
+        (
+            dict(robots=["smaug"], session="s", experiment="e", mode="relocalize"),
+            "requires a prior",
+        ),
+        (dict(robots=["ghost"], session="s", experiment="e"), "Unknown robot"),
+    ],
+)
+def test_plan_validation(kwargs, msg):
+    with pytest.raises(LaunchError, match=msg):
+        build_robot_commands(LaunchPlan(**kwargs), RUNTIME, OUT)
+
+
+def test_base_station_command_is_backgrounded_with_rviz():
+    cmd = build_base_station_command(
+        RUNTIME["willow"], "base_station-default", OUT, "e1", "/tmp/r.rviz"
+    )
+    assert "nohup" in cmd and cmd.endswith("&")
+    assert "-c base_station" in cmd and "--rviz-config /tmp/r.rviz" in cmd
+
+
+def test_dry_run_mentions_prior_transfer():
+    plan = LaunchPlan(
+        robots=["smaug", "topaz"],
+        session="s",
+        experiment="e",
+        prior_path="~/adt4_output/p",
+        prior_source="smaug",
+    )
+    lines = dry_run_lines(plan, RUNTIME, OUT)
+    assert any("Transfer prior map: smaug -> topaz" in line for line in lines)
+    assert sum(line.startswith("ssh ") for line in lines) == 2
+
+
+def test_default_selection_mapping_and_relocalize():
+    sel = default_selection(TOPO, RUNTIME, "mapping", None, {"10.0.0.9"})
+    assert sel["robots"] == ["smaug", "topaz"]
+    assert sel["session"] == "spot-default"
+    assert sel["base_station"] == "willow"
+    assert sel["bs_session"] == "base_station-default"
+    sel = default_selection(TOPO, RUNTIME, "relocalize", ["topaz"], set())
+    assert sel["session"] == "spot-relocalize" and sel["base_station"] is None
+
+
+# --- full sequence ------------------------------------------------------------
+
+
+def test_happy_path_launches_robot_and_base_station():
+    ssh = FakeSsh({"tmux has-session": (0, "OK", "", "10.0.0.9")})
+    rec = Recorder(zenohd=True)
+    plan = LaunchPlan(
+        robots=["smaug"],
+        session="spot-default",
+        experiment="e",
+        base_station="willow",
+        bs_session="base_station-default",
+    )
+    assert run(plan, ssh, rec) is True
+    assert rec.requests == []
+    assert rec.stopped  # fleet zenohd handed over to the base station
+    assert any("run-adt4 spot-default" in c for c in ssh.cmds_for("10.0.0.1"))
+    assert any("nohup" in c for c in ssh.cmds_for("10.0.0.9"))
+    assert "base station launched" in rec.text()
+
+
+def test_session_check_uses_real_tmux_session_name():
+    ssh = FakeSsh({"tmux has-session": (0, "", "", "10.0.0.1")})
+    rec = Recorder(answers=[False])
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e")
+    assert run(plan, ssh, rec) is False
+    [req] = rec.requests
+    assert req.kind == "kill_sessions" and req.detail["machines"] == ["smaug"]
+    checks = [c for c in ssh.cmds_for("10.0.0.1") if "has-session" in c]
+    assert checks and all(TMUX_SESSION_NAME in c for c in checks)
+    assert not any("run-adt4" in c for c in ssh.cmds_for("10.0.0.1"))
+
+
+def test_session_conflict_accepted_kills_then_launches():
+    ssh = FakeSsh({"tmux has-session": (0, "", "", "10.0.0.1")})
+    rec = Recorder(answers=[True])
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e")
+    assert run(plan, ssh, rec) is True
+    cmds = ssh.cmds_for("10.0.0.1")
+    kill = next(i for i, c in enumerate(cmds) if "kill-session" in c)
+    launch = next(i for i, c in enumerate(cmds) if "run-adt4" in c)
+    assert kill < launch
+
+
+def test_small_existing_output_asks_plain_confirm_then_removes():
+    ssh = FakeSsh(
+        {
+            "echo EXISTS": (0, "EXISTS", "", "10.0.0.1"),
+            "du -sb": (0, "1024\n", "", "10.0.0.1"),
+        }
+    )
+    rec = Recorder(answers=[True])
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e")
+    assert run(plan, ssh, rec) is True
+    [req] = rec.requests
+    assert req.kind == "overwrite_output" and req.required_text is None
+    assert any(c.startswith("rm -rf") for c in ssh.cmds_for("10.0.0.1"))
+
+
+def test_large_existing_output_requires_typed_confirm():
+    ssh = FakeSsh(
+        {
+            "echo EXISTS": (0, "EXISTS", "", "10.0.0.1"),
+            "du -sb": (0, str(3 * 1024**3), "", "10.0.0.1"),
+        }
+    )
+    rec = Recorder(answers=[None])  # timed out / closed
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e")
+    assert run(plan, ssh, rec) is False
+    [req] = rec.requests
+    assert req.required_text == "confirm" and req.detail["bytes"] == 3 * 1024**3
+    assert not any(c.startswith("rm -rf") for c in ssh.cmds_for("10.0.0.1"))
+    assert "timed out" in rec.text()
+
+
+def test_prior_transfer_skipped_when_present_and_aborts_on_failure():
+    plan = LaunchPlan(
+        robots=["smaug", "topaz"],
+        session="spot-relocalize",
+        experiment="e",
+        prior_path="~/adt4_output/p",
+        prior_source="smaug",
+    )
+    # topaz already has it → no rsync
+    ssh = FakeSsh({"echo OK": (0, "OK", "", "10.0.0.2")})
+    calls = []
+    rec = Recorder()
+    assert run(plan, ssh, rec, rsync=lambda *a, **k: calls.append(a)) is True
+    assert calls == [] and rec.pct["topaz"] == 100
+
+    # topaz lacks it and rsync fails → abort before launching anything
+    ssh = FakeSsh()
+    rec = Recorder()
+    assert run(plan, ssh, rec, rsync=lambda *a, **k: (False, "", "boom")) is False
+    assert "transfer FAILED: boom" in rec.text()
+    assert not any("run-adt4" in c for _, c in ssh.calls)
+
+
+def test_failed_robot_launch_returns_false():
+    ssh = FakeSsh({"run-adt4": (2, "", "nope", "10.0.0.2")})
+    rec = Recorder()
+    plan = LaunchPlan(robots=["smaug", "topaz"], session="s", experiment="e")
+    assert run(plan, ssh, rec) is False
+    assert "smaug: launched" in rec.text() and "topaz: FAILED (rc=2) nope" in rec.text()

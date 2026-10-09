@@ -16,6 +16,7 @@ from textual.widgets import (
     Rule,
 )
 
+from dcist_launch_system.fleet.maps import compare_hashes
 from dcist_launch_system.fleet_helpers import (
     hash_remote_experiment,
     run_parallel,
@@ -65,31 +66,16 @@ class VerifyScreen(ModalScreen):
                 log.write("[yellow]No hash data returned.[/]")
                 return
 
-            all_files = sorted(set(f for h in machine_hashes.values() for f in h))
+            rows = compare_hashes(machine_hashes)
             mnames = sorted(machine_hashes.keys())
 
             table.add_column("File", key="file")
             for mn in mnames:
                 table.add_column(mn, key=mn)
 
-            diffs = 0
-            for fpath in all_files:
-                hashes = {mn: machine_hashes[mn].get(fpath) for mn in mnames}
-                unique = set(v for v in hashes.values() if v)
-                consistent = len(unique) <= 1 and all(v for v in hashes.values())
-                row = [fpath]
-                for mn in mnames:
-                    h = hashes[mn]
-                    if h is None:
-                        row.append("MISSING")
-                        consistent = False
-                    elif consistent:
-                        row.append("OK")
-                    else:
-                        row.append(h[:8])
-                if not consistent:
-                    diffs += 1
-                table.add_row(*row)
+            for row in rows:
+                table.add_row(row.path, *[row.cell(mn) for mn in mnames])
+            diffs = sum(not row.consistent for row in rows)
 
             if diffs == 0:
                 log.write("[bold green]All files consistent.[/]")
