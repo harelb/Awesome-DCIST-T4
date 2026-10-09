@@ -1,5 +1,7 @@
 // One multiplexed WebSocket: msgpack frames {topic, seq, data}, topic-prefix
-// subscriptions, auto-reconnect with exponential backoff.
+// subscriptions, auto-reconnect with exponential backoff. Coming back to the
+// page (phone unlocked, tab shown, network back) reconnects at once instead of
+// waiting out the backoff.
 import {create} from "zustand";
 import {decode, encode} from "@msgpack/msgpack";
 import {withToken} from "./lib/auth";
@@ -37,10 +39,28 @@ class WsClient {
   private timer: number | null = null;
   private stopped = true;
   private reconnectHooks = new Set<() => void>();
+  private wakeBound = false;
 
   start() {
     if (!this.stopped) return;
     this.stopped = false;
+    if (!this.wakeBound) {
+      this.wakeBound = true;
+      const wake = () => this.wake();
+      document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && wake());
+      window.addEventListener("pageshow", wake);
+      window.addEventListener("online", wake);
+    }
+    this.connect();
+  }
+
+  /** Reconnect now if the socket is down (skips the pending backoff). */
+  wake() {
+    if (this.stopped || this.ws) return;
+    if (this.timer) window.clearTimeout(this.timer);
+    this.timer = null;
+    this.attempts = 0;
+    useWsStatus.setState({nextRetryAt: null});
     this.connect();
   }
 

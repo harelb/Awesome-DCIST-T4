@@ -15,6 +15,9 @@ import {CameraPanel} from "./CameraPanel";
 import {Segmented} from "../components/ui";
 import {readyModels} from "../stores/viewer";
 import {useWsStatus} from "../ws";
+import {useIsPhone} from "../lib/media";
+import {Icon} from "../components/Shell";
+import {BottomSheet} from "./BottomSheet";
 
 type Tab = "inspect" | "plan" | "chat" | "live" | "camera";
 
@@ -22,8 +25,28 @@ export default function ViewerPage() {
   const v = useViewer();
   const [params] = useSearchParams();
   const [tab, setTab] = useState<Tab>("inspect");
-  const [leftOpen, setLeftOpen] = useState(() => window.innerWidth > 1100);
-  const [rightOpen, setRightOpen] = useState(() => window.innerWidth > 900);
+  const isPhone = useIsPhone();
+  const [leftOpen, setLeftOpenRaw] = useState(() => window.innerWidth > 1100);
+  const [rightOpen, setRightOpenRaw] = useState(() => window.innerWidth > 900);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const viewerRef = useRef<HTMLDivElement>(null);
+  // phones show one panel at a time, as a bottom sheet
+  const phoneRef = useRef(isPhone);
+  phoneRef.current = isPhone;
+  const setLeftOpen = useCallback((f: boolean | ((o: boolean) => boolean)) => {
+    setLeftOpenRaw(o => {
+      const next = typeof f === "function" ? f(o) : f;
+      if (next && phoneRef.current) setRightOpenRaw(false);
+      return next;
+    });
+  }, []);
+  const setRightOpen = useCallback((f: boolean | ((o: boolean) => boolean)) => {
+    setRightOpenRaw(o => {
+      const next = typeof f === "function" ? f(o) : f;
+      if (next && phoneRef.current) setLeftOpenRaw(false);
+      return next;
+    });
+  }, []);
   const [stats, setStats] = useState<Record<string, TileStats>>({});
   const [bounds, setBounds] = useState<{min: number[]; max: number[]} | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -111,7 +134,7 @@ export default function ViewerPage() {
         if (l.bounds) setBounds(b => b ?? l.bounds);
       },
     }),
-    [addGoto],
+    [addGoto, setRightOpen],
   );
 
   const onVisit = (src: string, sym: string) => {
@@ -128,55 +151,118 @@ export default function ViewerPage() {
     .map(([, s]) => `${s.loaded}/${s.total}`)
     .join(" + ");
 
+  const leftPanel = (
+    <>
+      <SourcesPanel stats={stats} />
+      <LayersPanel />
+      <LiveOverlaysPanel />
+      <DisplayPanel />
+    </>
+  );
+  const tabs = (
+    <Segmented<Tab>
+      ariaLabel="Side panel"
+      value={tab}
+      onChange={setTab}
+      options={[
+        {value: "inspect", label: "Inspect"},
+        {value: "plan", label: "Plan"},
+        {value: "chat", label: "Chat"},
+        {value: "live", label: isPhone ? "Link" : "Live link"},
+        {value: "camera", label: "Camera"},
+      ]}
+    />
+  );
+  const rightBody = (
+    <div className="vright-body">
+      {tab === "inspect" && <Inspector onVisit={onVisit} onGoto={addGoto} />}
+      {tab === "plan" && <PlanPanel />}
+      {tab === "chat" && <ChatPanel />}
+      {tab === "live" && <LivePanel />}
+      {tab === "camera" && <CameraPanel />}
+    </div>
+  );
+  const follow = (
+    <select className="input input-sm follow-select" value={v.follow ?? ""} onChange={e => v.set({follow: e.target.value || null})} aria-label="Follow robot">
+      <option value="">{isPhone ? "Follow" : "Follow: off"}</option>
+      {robots.map(r => (
+        <option key={r} value={r}>
+          {isPhone ? r : `Follow ${r}`}
+        </option>
+      ))}
+    </select>
+  );
+  const camera = (
+    <Segmented
+      ariaLabel="Camera"
+      value={v.topDown ? "top" : "3d"}
+      onChange={x => v.set({topDown: x === "top"})}
+      options={[
+        {value: "3d", label: "3D"},
+        {value: "top", label: "Top"},
+      ]}
+    />
+  );
+
   return (
-    <div className={`viewer ${leftOpen ? "left-open" : ""} ${rightOpen ? "right-open" : ""}`}>
-      {leftOpen && (
+    <div ref={viewerRef} className={`viewer ${leftOpen ? "left-open" : ""} ${rightOpen ? "right-open" : ""} ${isPhone ? "phone" : ""}`}>
+      {leftOpen && !isPhone && (
         <aside className="vpanel vleft" aria-label="Sources and layers">
-          <SourcesPanel stats={stats} />
-          <LayersPanel />
-          <LiveOverlaysPanel />
-          <DisplayPanel />
+          {leftPanel}
         </aside>
       )}
       <div className="vcanvas">
         {enabled.length === 0 && (
           <div className="canvas-empty">
             <div className="state-title">No source shown</div>
-            <div className="muted">Enable a graph source in the left panel.</div>
+            <div className="muted">Enable a graph source in the {isPhone ? "layers sheet" : "left panel"}.</div>
           </div>
         )}
         <Scene sources={enabled} bounds={bounds} cb={cb} />
-        <div className="vtoolbar top-left">
-          <button className="btn btn-sm panel-btn" onClick={() => setLeftOpen(o => !o)} aria-label="Toggle layers panel">
-            {leftOpen ? "Hide panel" : "Layers"}
-          </button>
-          <SearchBox />
-        </div>
-        <div className="vtoolbar top-right">
-          <Segmented
-            ariaLabel="Camera"
-            value={v.topDown ? "top" : "3d"}
-            onChange={x => v.set({topDown: x === "top"})}
-            options={[
-              {value: "3d", label: "3D"},
-              {value: "top", label: "Top"},
-            ]}
-          />
-          <select className="input input-sm" value={v.follow ?? ""} onChange={e => v.set({follow: e.target.value || null})} aria-label="Follow robot">
-            <option value="">Follow: off</option>
-            {robots.map(r => (
-              <option key={r} value={r}>
-                Follow {r}
-              </option>
-            ))}
-          </select>
-          <button className="btn btn-sm panel-btn" onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel">
-            {rightOpen ? "Hide" : "Panel"}
-          </button>
-        </div>
+        {isPhone ? (
+          searchOpen ? (
+            <div className="vtoolbar phone-bar phone-search">
+              <SearchBox autoFocus onPicked={() => setSearchOpen(false)} />
+              <button className="btn icon-only" onClick={() => setSearchOpen(false)} aria-label="Close search">
+                ×
+              </button>
+            </div>
+          ) : (
+            <div className="vtoolbar phone-bar">
+              <button className={`btn icon-only panel-btn ${leftOpen ? "on" : ""}`} onClick={() => setLeftOpen(o => !o)} aria-label="Toggle layers panel" aria-pressed={leftOpen}>
+                <Icon name="layers" size={20} />
+              </button>
+              <button className={`btn icon-only panel-btn ${v.query ? "on" : ""}`} onClick={() => setSearchOpen(true)} aria-label="Search graph">
+                <Icon name="search" size={20} />
+              </button>
+              <span className="grow" />
+              {camera}
+              {follow}
+              <button className={`btn icon-only panel-btn ${rightOpen ? "on" : ""}`} onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel" aria-pressed={rightOpen}>
+                <Icon name="panel" size={20} />
+              </button>
+            </div>
+          )
+        ) : (
+          <>
+            <div className="vtoolbar top-left">
+              <button className="btn btn-sm panel-btn" onClick={() => setLeftOpen(o => !o)} aria-label="Toggle layers panel">
+                {leftOpen ? "Hide panel" : "Layers"}
+              </button>
+              <SearchBox />
+            </div>
+            <div className="vtoolbar top-right">
+              {camera}
+              {follow}
+              <button className="btn btn-sm panel-btn" onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel">
+                {rightOpen ? "Hide" : "Panel"}
+              </button>
+            </div>
+          </>
+        )}
         {v.pickMode === "goto" && (
           <div className="pick-banner">
-            Goto picking: click places, objects or the mesh.{" "}
+            {isPhone ? "Tap places, objects or the mesh." : "Goto picking: click places, objects or the mesh."}{" "}
             <button className="btn btn-xs" onClick={() => v.set({pickMode: "inspect"})}>
               Done
             </button>
@@ -189,28 +275,21 @@ export default function ViewerPage() {
           {v.flat ? " · flat" : ""}
         </div>
       </div>
-      {rightOpen && (
+      {rightOpen && !isPhone && (
         <aside className="vpanel vright" aria-label="Inspector and planning">
-          <Segmented<Tab>
-            ariaLabel="Side panel"
-            value={tab}
-            onChange={setTab}
-            options={[
-              {value: "inspect", label: "Inspect"},
-              {value: "plan", label: "Plan"},
-              {value: "chat", label: "Chat"},
-              {value: "live", label: "Live link"},
-              {value: "camera", label: "Camera"},
-            ]}
-          />
-          <div className="vright-body">
-            {tab === "inspect" && <Inspector onVisit={onVisit} onGoto={addGoto} />}
-            {tab === "plan" && <PlanPanel />}
-            {tab === "chat" && <ChatPanel />}
-            {tab === "live" && <LivePanel />}
-            {tab === "camera" && <CameraPanel />}
-          </div>
+          {tabs}
+          {rightBody}
         </aside>
+      )}
+      {isPhone && leftOpen && (
+        <BottomSheet key="left" label="Sources and layers" host={viewerRef} onClose={() => setLeftOpen(false)}>
+          {leftPanel}
+        </BottomSheet>
+      )}
+      {isPhone && rightOpen && (
+        <BottomSheet key="right" label="Inspector and planning" head={tabs} host={viewerRef} onClose={() => setRightOpen(false)}>
+          {rightBody}
+        </BottomSheet>
       )}
     </div>
   );

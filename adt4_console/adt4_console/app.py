@@ -169,7 +169,10 @@ def _mount_static(app: FastAPI, static_dir: pathlib.Path) -> None:
                     if path.startswith("assets/")
                     else {}
                 )
-                return FileResponse(target, headers=headers)
+                # not in every Python's mimetypes table; browsers ignore a
+                # manifest served as octet-stream
+                media = "application/manifest+json" if target.suffix == ".webmanifest" else None
+                return FileResponse(target, headers=headers, media_type=media)
         if index.is_file():
             return FileResponse(index, headers={"Cache-Control": "no-cache"})
         return HTMLResponse(PLACEHOLDER)

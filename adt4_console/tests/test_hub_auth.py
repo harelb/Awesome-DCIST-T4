@@ -99,9 +99,12 @@ def test_spa_fallback(settings, tmp_path):
     (settings.static_dir / "index.html").write_text("<html>spa</html>")
     (settings.static_dir / "assets").mkdir()
     (settings.static_dir / "assets" / "app.js").write_text("js")
+    (settings.static_dir / "manifest.webmanifest").write_text("{}")
     services = build_services(settings, fleet_deps=fake_fleet_deps())
     with TestClient(create_app(settings, services)) as c:
         assert c.get("/some/client/route").text == "<html>spa</html>"
         assert c.get("/assets/app.js").text == "js"
+        # home-screen install metadata: browsers ignore a manifest without its media type
+        assert c.get("/manifest.webmanifest").headers["content-type"] == "application/manifest+json"
         assert c.get("/api/does-not-exist").status_code == 404
         assert c.get("/../../etc/passwd").text == "<html>spa</html>"

@@ -325,13 +325,20 @@ function Ground({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
   return <primitive object={grid} position={[cx, cy, -0.05]} />;
 }
 
+// Phones / tablets: tile GPUs with little memory. Cap the pixel ratio, skip
+// MSAA and let the browser discard the drawing buffer (keeping it costs a copy
+// per frame there). Desktop keeps it so headless screenshot tours see pixels.
+const COARSE = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches === true;
+const DPR: [number, number] = COARSE ? [1, 1.5] : [1, 2];
+const GL = {antialias: !COARSE, powerPreference: "high-performance" as const, preserveDrawingBuffer: !COARSE};
+
 export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {min: number[]; max: number[]} | null; cb: SceneCallbacks}) {
   return (
     <Canvas
       className="scene-canvas"
       frameloop="demand"
-      dpr={[1, 2]}
-      gl={{antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: true}}
+      dpr={DPR}
+      gl={GL}
       camera={{fov: 50, near: 0.1, far: 5000, position: [-10, -30, 30], up: [0, 0, 1]}}
       onCreated={({gl}) => gl.setClearColor("#0b0f14")}
       data-testid="viewer-canvas"

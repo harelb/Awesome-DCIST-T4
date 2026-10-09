@@ -55,7 +55,7 @@ function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m:
   const tmux = st?.tmux_sessions && st.tmux_sessions !== "none" && st.tmux_sessions !== "N/A" ? st.tmux_sessions.split(",").map(s => s.trim()) : [];
   return (
     <tr className={m.online ? "" : "row-dim"}>
-      <td>
+      <td className="cell-title">
         <div className="row gap">
           <Dot tone={m.online ? "ok" : "err"} title={m.online ? "online" : "offline"} />
           <strong>{m.name}</strong>
@@ -67,16 +67,16 @@ function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m:
           {m.desc ? ` · ${m.desc}` : ""}
         </div>
       </td>
-      <td className="mono">{m.ip}</td>
-      <td>
+      <td data-label="ip" className="mono">{m.ip}</td>
+      <td data-label="ping">
         <span className="row gap-sm">
           <Dot tone={boolTone(m.ping)} /> <span className="mono small">{pingText(m.ping)}</span>
         </span>
       </td>
-      <td>
+      <td data-label="ssh">
         <Dot tone={boolTone(m.ssh)} title={m.ssh ? "ssh ok" : "no ssh"} />
       </td>
-      <td>
+      <td data-label="tmux">
         {tmux.length ? (
           <div className="chips">
             {tmux.map(t => (
@@ -89,23 +89,23 @@ function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m:
           <span className="muted">none</span>
         )}
       </td>
-      <td className="mono small">{na(st?.load)}</td>
-      <td className="mono small">{na(st?.mem)}</td>
-      <td className="mono small">{na(st?.gpu)}</td>
-      <td className="mono small">
+      <td data-label="load" className="mono small">{na(st?.load)}</td>
+      <td data-label="mem" className="mono small">{na(st?.mem)}</td>
+      <td data-label="gpu" className="mono small">{na(st?.gpu)}</td>
+      <td data-label="disk free" className="mono small">
         <span className="row gap-sm">
           {st?.disk && st.disk !== "N/A" && <Dot tone={diskTone(st.disk)} />}
           {na(st?.disk)}
         </span>
       </td>
-      <td className="mono small">
+      <td data-label="battery" className="mono small">
         <span className="row gap-sm">
           {st?.battery && st.battery !== "N/A" && <Dot tone={batteryTone(st.battery)} />}
           {na(st?.battery)}
         </span>
       </td>
-      <td className="mono small">{na(st?.radio)}</td>
-      <td>
+      <td data-label="radio" className="mono small">{na(st?.radio)}</td>
+      <td className="cell-actions">
         {m.role === "robot" && (
           <button className="btn btn-sm btn-danger-outline" disabled={!m.online} onClick={() => onStop(m)}>
             Stop &amp; Save
@@ -222,7 +222,7 @@ export function FleetPage() {
       {list.length > 0 && (
         <Card title="Machines">
           <div className="table-wrap">
-            <table className="table fleet-table">
+            <table className="table fleet-table stack">
               <thead>
                 <tr>
                   <th>machine</th>

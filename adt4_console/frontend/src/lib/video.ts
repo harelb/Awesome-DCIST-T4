@@ -37,18 +37,35 @@ export function decoderConfig(codec: VideoCodec): VideoDecoderConfig | null {
   return null;
 }
 
-/** h264 when this browser can decode it, else vp8, else jpeg (one <img> per frame). */
-export async function pickCodec(
-  dec: {isConfigSupported?: (c: VideoDecoderConfig) => Promise<{supported?: boolean}>} | undefined = (globalThis as {VideoDecoder?: typeof VideoDecoder}).VideoDecoder,
-): Promise<VideoCodec> {
-  if (!dec?.isConfigSupported) return "jpeg";
-  for (const c of ["h264", "vp8"] as const) {
-    try {
-      if ((await dec.isConfigSupported(decoderConfig(c)!)).supported) return c;
-    } catch {
-      /* unsupported config shape */
-    }
+type DecoderProbe = {isConfigSupported?: (c: VideoDecoderConfig) => Promise<{supported?: boolean}>} | undefined;
+const webCodecs = (): DecoderProbe => (globalThis as {VideoDecoder?: typeof VideoDecoder}).VideoDecoder;
+
+/** The WASM h264 decoder (h264.worker.ts) needs only WebAssembly + module
+ * workers, so it also runs on plain-http pages, where WebCodecs is missing. */
+export const wasmH264Available = () => typeof WebAssembly === "object" && typeof Worker === "function";
+
+async function supported(dec: DecoderProbe, codec: VideoCodec): Promise<boolean> {
+  if (!dec?.isConfigSupported) return false;
+  try {
+    return Boolean((await dec.isConfigSupported(decoderConfig(codec)!)).supported);
+  } catch {
+    return false; // unsupported config shape
   }
+}
+
+export type H264Decoder = "webcodecs" | "wasm";
+
+/** How this browser decodes h264: WebCodecs (hardware) when it can, else WASM. */
+export async function h264Decoder(dec: DecoderProbe = webCodecs(), wasm = wasmH264Available()): Promise<H264Decoder | null> {
+  if (await supported(dec, "h264")) return "webcodecs";
+  return wasm ? "wasm" : null;
+}
+
+/** h264 when this browser can decode it (WebCodecs, else WASM), else vp8
+ * (WebCodecs), else jpeg (one <img> per frame). */
+export async function pickCodec(dec: DecoderProbe = webCodecs(), wasm = wasmH264Available()): Promise<VideoCodec> {
+  if (await h264Decoder(dec, wasm)) return "h264";
+  if (await supported(dec, "vp8")) return "vp8";
   return "jpeg";
 }
 

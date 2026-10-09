@@ -1,13 +1,19 @@
 // Camera tab, "Video" mode: a live C5 stream from the robot's fleetlink agent
 // (API.md §12). WebCodecs VideoDecoder for h264 / vp8 drawn to a canvas, an
-// <img> per frame for jpeg. Keepalive every 2 s while the tab is visible.
+// <img> per frame for jpeg. Without WebCodecs (plain-http pages opened from
+// another machine) h264 decodes in a WASM worker instead, drawn with WebGL;
+// `?h264=wasm` forces that path. Keepalive every 2 s while the tab is visible.
 import {useEffect, useRef, useState} from "react";
 import {getToken} from "../lib/auth";
 import {ws} from "../ws";
 import {consoleClockOffset} from "../lib/clock";
-import {BITRATE_PRESETS, FPS_OPTIONS, KeyGate, RateMeter, VIDEO_WIDTHS, chunkInit, decoderConfig, frameLagMs, parseVideoFrame, pickCodec, type VideoCodec, type VideoFrame as StreamFrame} from "../lib/video";
+import {BITRATE_PRESETS, FPS_OPTIONS, KeyGate, RateMeter, VIDEO_WIDTHS, chunkInit, decoderConfig, frameLagMs, h264Decoder, parseVideoFrame, pickCodec, type H264Decoder, type VideoCodec, type VideoFrame as StreamFrame} from "../lib/video";
+import type {WasmH264Decoder} from "../lib/wasmH264";
+import type {YuvRenderer} from "../lib/yuvRenderer";
 
 const START_SPACING_MS = 1100;
+const WASM_BACKLOG = 4; // access units queued in the worker before dropping to the next key frame
+const forceWasm = () => typeof location !== "undefined" && new URLSearchParams(location.search).get("h264") === "wasm";
 const KEEPALIVE_MS = 2000;
 
 interface ServerStatus {
@@ -25,6 +31,7 @@ interface Stats {
   skipped: number;
   waitingKey: boolean;
   codec: string;
+  decoder: H264Decoder | null;
   width: number;
   height: number;
 }
@@ -70,18 +77,22 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
   const [jpegUrl, setJpegUrl] = useState<string | null>(null);
   const visible = usePageVisible();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const glCanvasRef = useRef<HTMLCanvasElement | null>(null); // WASM path (a canvas holds one context type)
+  const [h264Path, setH264Path] = useState<H264Decoder | null>(null);
   const viewer = useRef(viewerId());
 
   useEffect(() => {
     let alive = true;
-    void pickCodec().then(c => alive && setAutoCodec(c));
+    const wasm = forceWasm();
+    void (wasm ? Promise.resolve("h264" as const) : pickCodec()).then(c => alive && setAutoCodec(c));
+    void (wasm ? Promise.resolve("wasm" as const) : h264Decoder()).then(d => alive && setH264Path(d));
     return () => {
       alive = false;
     };
   }, []);
   const codec: VideoCodec | null = codecChoice === "auto" ? autoCodec : codecChoice;
-  const ready = codec !== null;
-  const webcodecs = typeof VideoDecoder !== "undefined";
+  const ready = codec !== null && (codec !== "h264" || h264Path !== null);
+  const webcodecs = typeof VideoDecoder !== "undefined" && !forceWasm();
   const base = `api/robots/${encodeURIComponent(robot)}/video/${encodeURIComponent(cam)}`;
   const paramsRef = useRef({fps, kbps, width, codec});
   paramsRef.current = {fps, kbps, width, codec};
@@ -156,8 +167,13 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
     let lagMs: number | null = null;
     let last: StreamFrame | null = null;
     let decoder: VideoDecoder | null = null;
+    let wasm: WasmH264Decoder | null = null;
+    let wasmLoading = false;
+    let renderer: YuvRenderer | null = null;
+    let alive = true;
     let lastUrl: string | null = null;
     let lastKfReq = -1e9;
+    const useWasmPath = () => h264Path === "wasm";
 
     const draw = (frame: VideoFrame) => {
       const c = canvasRef.current;
@@ -175,6 +191,33 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
         submitted.delete(frame.timestamp);
       }
       frame.close();
+    };
+    const loadWasm = () => {
+      if (wasmLoading) return;
+      wasmLoading = true;
+      void Promise.all([import("../lib/wasmH264"), import("../lib/yuvRenderer")]).then(
+        ([{WasmH264Decoder}, {YuvRenderer}]) => {
+          if (!alive) return;
+          wasm = new WasmH264Decoder(
+            pic => {
+              const c = glCanvasRef.current;
+              if (c && alive) (renderer ??= new YuvRenderer(c)).draw(pic.data, pic.width, pic.height);
+              const t0 = submitted.get(pic.id);
+              if (t0 !== undefined) {
+                const d = performance.now() - t0;
+                decodeMs = decodeMs === null ? d : 0.8 * decodeMs + 0.2 * d;
+                submitted.delete(pic.id);
+              }
+            },
+            (message, id) => {
+              if (id !== undefined) submitted.delete(id);
+              setErr(`decoder: ${message}`);
+              gate.broken();
+            },
+          );
+        },
+        e => setErr(`decoder: ${e instanceof Error ? e.message : String(e)}`),
+      );
     };
     const newDecoder = () => {
       if (!webcodecs) return null;
@@ -204,11 +247,17 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
         return;
       }
       const cfg = decoderConfig(fr.codec);
-      if (!cfg || !webcodecs) {
+      const useWasm = fr.codec === "h264" && h264Path === "wasm";
+      if (!cfg || (!webcodecs && !useWasm)) {
         gate.skipped++;
         return;
       }
+      if (useWasm && !wasm) {
+        loadWasm(); // first h264 frame: fetch the decoder, then start at a key frame
+        gate.broken();
+      }
       if (decoder && decoder.decodeQueueSize > 8) gate.broken(); // decoder backlog: drop to the next key frame
+      if (wasm && wasm.queueSize > WASM_BACKLOG) gate.broken();
       const {action, reconfigure} = gate.accept(fr, f.seq);
       if (action === "skip") {
         // lost sync: ask for a key frame now instead of freezing until the
@@ -217,6 +266,15 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
           lastKfReq = performance.now();
           void post(`${base}/keyframe`, {}).catch(() => undefined);
         }
+        return;
+      }
+      if (useWasm) {
+        if (!wasm) return;
+        if (reconfigure) wasm.reset();
+        const id = Math.round(fr.seq * 1000);
+        submitted.set(id, now);
+        if (submitted.size > 64) submitted.delete(submitted.keys().next().value as number);
+        wasm.decode(fr.data, fr.width, fr.height, id);
         return;
       }
       try {
@@ -249,13 +307,16 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
         skipped: gate.skipped,
         waitingKey: gate.waitingKey && last?.codec !== "jpeg",
         codec: last?.codec ?? "",
+        decoder: last?.codec === "h264" ? (useWasmPath() ? "wasm" : "webcodecs") : null,
         width: last?.width ?? 0,
         height: last?.height ?? 0,
       });
     }, 500);
     return () => {
+      alive = false;
       off();
       window.clearInterval(id);
+      wasm?.close();
       try {
         decoder?.close();
       } catch {
@@ -265,10 +326,11 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
       setJpegUrl(null);
       setStats(null);
     };
-  }, [robot, cam, ready, visible, webcodecs]);
+  }, [robot, cam, ready, visible, webcodecs, h264Path]);
 
   const rob = server?.robot;
   const showJpeg = stats?.codec === "jpeg";
+  const showWasm = stats?.decoder === "wasm";
   return (
     <>
       <div className="row gap-sm wrap">
@@ -295,8 +357,8 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
         </select>
         <select className="input input-sm" value={codecChoice} onChange={e => setCodecChoice(e.target.value as "auto" | VideoCodec)} aria-label="Codec">
           <option value="auto">auto{autoCodec ? ` (${autoCodec})` : ""}</option>
-          <option value="h264" disabled={!webcodecs}>
-            h264
+          <option value="h264" disabled={!h264Path}>
+            h264{h264Path === "wasm" ? " (wasm)" : ""}
           </option>
           <option value="vp8" disabled={!webcodecs}>
             vp8
@@ -305,13 +367,15 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
         </select>
       </div>
       <div className="camera-frame">
-        <canvas ref={canvasRef} className="camera-canvas" style={{display: showJpeg || !stats?.codec ? "none" : "block"}} aria-label={`${robot} ${cam} video`} />
+        <canvas ref={canvasRef} className="camera-canvas" style={{display: showJpeg || !stats?.codec || showWasm ? "none" : "block"}} aria-label={`${robot} ${cam} video`} />
+        <canvas ref={glCanvasRef} className="camera-canvas" style={{display: showWasm ? "block" : "none"}} aria-label={`${robot} ${cam} video (wasm)`} />
         {showJpeg && jpegUrl && <img src={jpegUrl} alt={`${robot} ${cam}`} />}
         {!stats?.codec && <div className="muted small camera-empty">{visible ? "Waiting for video..." : "Paused (tab hidden)"}</div>}
       </div>
       {stats && (
         <div className="mono small camera-meta">
-          {stats.fps.toFixed(1)} fps · {Math.round(stats.kbps)} kbit/s
+          {stats.codec}
+          {stats.decoder === "wasm" ? " (wasm)" : ""} · {stats.fps.toFixed(1)} fps · {Math.round(stats.kbps)} kbit/s
           {stats.decodeMs !== null && ` · decode ${stats.decodeMs.toFixed(0)} ms`}
           {stats.lagMs !== null && stats.lagMs > -5000 && stats.lagMs < 60000 && (
             <span title="Robot capture to browser display, corrected for robot/console/browser clock offsets"> · lag {Math.max(0, stats.lagMs).toFixed(0)} ms</span>

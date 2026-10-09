@@ -1,12 +1,32 @@
-// Token handling: `?token=` is read once from the URL and kept in sessionStorage.
+// Token handling: `?token=` is read once from the URL and kept in localStorage.
+// localStorage, not sessionStorage: an iOS home-screen web app loses
+// sessionStorage every time it is closed. Tokens saved by older builds in
+// sessionStorage are migrated on first read.
 const KEY = "adt4_console_token";
 let cached: string | null | undefined;
 
 function safeGet(): string | null {
   try {
-    return sessionStorage.getItem(KEY);
+    const t = localStorage.getItem(KEY);
+    if (t) return t;
+    const legacy = sessionStorage.getItem(KEY);
+    if (legacy) {
+      localStorage.setItem(KEY, legacy);
+      sessionStorage.removeItem(KEY);
+    }
+    return legacy;
   } catch {
     return null;
+  }
+}
+
+function safeSet(t: string | null) {
+  try {
+    if (t) localStorage.setItem(KEY, t);
+    else localStorage.removeItem(KEY);
+    sessionStorage.removeItem(KEY);
+  } catch {
+    /* private mode: keep in memory */
   }
 }
 
@@ -14,11 +34,7 @@ export function initToken(): string | null {
   const url = new URL(window.location.href);
   const t = url.searchParams.get("token");
   if (t) {
-    try {
-      sessionStorage.setItem(KEY, t);
-    } catch {
-      /* private mode: keep in memory */
-    }
+    safeSet(t);
     cached = t;
     url.searchParams.delete("token");
     window.history.replaceState(window.history.state, "", url.toString());
@@ -35,12 +51,7 @@ export function getToken(): string | null {
 
 export function setToken(t: string | null) {
   cached = t;
-  try {
-    if (t) sessionStorage.setItem(KEY, t);
-    else sessionStorage.removeItem(KEY);
-  } catch {
-    /* ignore */
-  }
+  safeSet(t);
 }
 
 /** Append ?token= to a same-origin URL (images, websocket). */

@@ -4,7 +4,9 @@ export interface Health {
   ok: boolean;
   version: string;
   ros: boolean;
+  ros_error?: string | null;
   fleetlink: boolean;
+  fleetlink_error?: string | null;
   neo4j: Record<string, boolean>;
 }
 

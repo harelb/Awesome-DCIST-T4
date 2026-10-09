@@ -186,7 +186,7 @@ function MapTable({list, isLocal, opening, onTransfer, onVerify, onIngest, onOpe
   if (!list.length) return <div className="muted pad">No experiments.</div>;
   return (
     <div className="table-wrap">
-      <table className="table">
+      <table className="table stack">
         <thead>
           <tr>
             <th>experiment</th>
@@ -200,15 +200,15 @@ function MapTable({list, isLocal, opening, onTransfer, onVerify, onIngest, onOpe
             .sort((a, b) => Number(Boolean(b.is_prior)) - Number(Boolean(a.is_prior)) || b.name.localeCompare(a.name))
             .map(m => (
               <tr key={m.path ?? m.name}>
-                <td>
+                <td className="cell-title">
                   <div className="row gap">
                     <span className="mono strong">{m.name}</span>
                     {m.is_prior && <Badge tone="info">prior</Badge>}
                   </div>
                   {m.path && <div className="muted small mono ellipsis" title={m.path}>{m.path}</div>}
                 </td>
-                <td className="num mono">{sizeText(m.size)}</td>
-                <td>
+                <td className="num mono" data-label="size">{sizeText(m.size)}</td>
+                <td data-label="contents">
                   <div className="chips">
                     {(m.subdirs ?? []).map(s => (
                       <span key={s} className="chip mono">
@@ -217,8 +217,8 @@ function MapTable({list, isLocal, opening, onTransfer, onVerify, onIngest, onOpe
                     ))}
                   </div>
                 </td>
-                <td className="actions-col">
-                  <div className="row gap-sm end">
+                <td className="actions-col cell-actions">
+                  <div className="row gap-sm end wrap">
                     {!isLocal && (
                       <button className="btn btn-sm" onClick={() => onTransfer(m)}>
                         Transfer to base

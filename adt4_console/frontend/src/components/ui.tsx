@@ -244,3 +244,26 @@ export function KV({k, children, mono}: {k: string; children: ReactNode; mono?: 
     </div>
   );
 }
+
+/** Phone-style action sheet: slides up from the bottom over a backdrop. */
+export function Sheet({title, children, onClose}: {title: ReactNode; children: ReactNode; onClose: () => void}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onClose]);
+  return (
+    <div className="sheet-backdrop" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={typeof title === "string" ? title : undefined}>
+        <div className="sheet-grip" aria-hidden />
+        <header className="sheet-head">
+          <h2>{title}</h2>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="sheet-body">{children}</div>
+      </div>
+    </div>
+  );
+}

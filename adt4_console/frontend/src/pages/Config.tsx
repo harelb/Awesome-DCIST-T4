@@ -98,7 +98,7 @@ export function ConfigPage() {
         {topo.data && machines.length === 0 && <Empty title="No machines in topology" />}
         {machines.length > 0 && (
           <div className="table-wrap">
-            <table className="table">
+            <table className="table stack">
               <thead>
                 <tr>
                   <th>name</th>
@@ -117,21 +117,21 @@ export function ConfigPage() {
               <tbody>
                 {machines.map(([name, m]) => (
                   <tr key={name}>
-                    <td className="strong">{name}</td>
-                    <td>
+                    <td className="strong cell-title">{name}</td>
+                    <td data-label="role">
                       <Badge tone={m.role === "robot" ? "info" : "off"}>{m.role.replace("_", " ")}</Badge>
                     </td>
-                    <td className="mono small">
+                    <td className="mono small" data-label="platform">
                       {m.platform_id ?? "-"}
                       {m.platform_type ? <span className="muted"> ({m.platform_type})</span> : null}
                     </td>
-                    <td>{m.desc ?? ""}</td>
+                    <td data-label="description">{m.desc ?? ""}</td>
                     {networks.map(n => (
-                      <td key={n} className="mono small">
+                      <td key={n} className="mono small" data-label={n}>
                         {m.addresses?.[n] ?? <span className="muted">-</span>}
                       </td>
                     ))}
-                    <td>
+                    <td className="cell-actions">
                       <div className="row gap-sm end">
                         <button
                           className="btn btn-sm"

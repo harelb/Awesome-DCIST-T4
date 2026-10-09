@@ -169,7 +169,7 @@ export function DisplayPanel() {
   );
 }
 
-export function SearchBox() {
+export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?: () => void} = {}) {
   const {query, set, select, fly, sources, flat, stackHeight} = useViewer();
   const [open, setOpen] = useState(false);
   const revs = Object.values(sources).map(s => s.rev).join(",");
@@ -192,6 +192,7 @@ export function SearchBox() {
     select({src: r.src, sym: r.sym});
     fly(displayPos(n, flat, stackHeight));
     setOpen(false);
+    onPicked?.();
   };
   return (
     <div className="searchbox">
@@ -199,6 +200,8 @@ export function SearchBox() {
         className="input"
         placeholder="Search objects, labels, symbols (e.g. sign, O(12))"
         value={query}
+        autoFocus={autoFocus}
+        enterKeyHint="search"
         aria-label="Search graph"
         onChange={e => {
           set({query: e.target.value});
@@ -218,7 +221,7 @@ export function SearchBox() {
       {open && query.trim() && results.length > 0 && (
         <ul className="search-results">
           {results.slice(0, 40).map(r => (
-            <li key={r.src + r.sym} onMouseDown={e => (e.preventDefault(), go(r))}>
+            <li key={r.src + r.sym} onMouseDown={e => e.preventDefault()} onClick={() => go(r)}>
               <span className="swatch" style={{background: rgbCss(r.kind === "objects" ? nodeColor(r.label, r.color) : (LAYER_COLORS as Record<string, [number, number, number]>)[r.kind] ?? [200, 200, 200])}} />
               <span className="sr-text">{r.text}</span>
               <span className="mono small muted">{r.sym}</span>
