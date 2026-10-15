@@ -71,9 +71,17 @@ plus its *Deviations → fleetlink* section.
   after a router restart. `connect` is one endpoint, a list or a comma-separated list;
   `zenoh_overrides` sets any other config path. The config keys it sets (`ZENOH_DEFAULTS`,
   checked against eclipse-zenoh 1.8.0): `connect/timeout_ms: 0`, `connect/exit_on_failure: false`,
-  `connect/retry {period_init_ms: 500, period_max_ms: 4000, period_increase_factor: 2}`,
+  `connect/retry {period_init_ms: 500, period_max_ms: 1000, period_increase_factor: 2}`,
+  `transport/unicast/open_timeout: 3000`,
   `transport/link/tx/queue/congestion_control/drop/wait_before_drop: 1000` (µs),
-  `.../drop/max_wait_before_drop_fragments: 50000`, `scouting/multicast/enabled: false`.
+  `.../drop/max_wait_before_drop_fragments: 50000`, `scouting/multicast/enabled: false`,
+  `transport/link/tcp/so_sndbuf: 16384` and `transport/link/tx/batch_size: 8192`.
+  The last two keep a congested radio's backlog in zenoh's priority queues instead of the
+  kernel's TCP send buffer (autotuned to MBs, where C0 waits behind C3: head-of-line), and
+  `period_max_ms: 1000` brings C1 back within ~2 s of a long dropout ending; both were
+  measured with the fleet harness (see *Tests*). The cost: a message larger than the link
+  drains in `max_wait_before_drop_fragments` (e.g. a 50 kB grid on a 30 kB/s radio) is
+  dropped whole, so C3 budgets must stay below the link rate (`auto`).
   Publishers are cached per key and class, LRU-capped at 256 (`undeclare(key)` frees one
   early). `can_send` is only a local in-flight counter (a put of that class still running on
   another thread); the real congestion signal is the receiver's `fb`.
@@ -338,6 +346,20 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
   robot→`/willow/…`, a base-side tf2 lookup of the composed and static frames, and
   `/fleetlink/link_status`. It also checks that the two graphs never see each other.
   Mark: `integration`; `-m "not integration"` skips them.
+* `test_fleet_harness` runs fleetlink mode on its real topology, every part a separate process
+  (`tests/harness.py`):
+  * a base `rmw_zenohd`, `bin/fleetlink-router`, and two robot `rmw_zenohd`, on ports
+    17470-17477 and ROS domains 94-96;
+  * a real `fleetlink-agent` per robot (relay on) and a real `fleetlink-bridge`;
+  * fake robot and base nodes (`tests/harness_nodes/node_host.py`);
+  * a `FaultProxy` on each robot's link that can stall, throttle or reset it.
+
+  It checks graph isolation (ROS graph API and liveliness tokens) and the per-robot relay round
+  trips. It runs a 30 kB/s saturated link with commands still under 2 s, a stall
+  (`FLEETLINK_STALL_S`, 20 s by default, 60 s per the plan) with no #1876 close, C1 back within
+  `FLEETLINK_RESUME_S` and the other robot unaffected, and a fleetlink router kill -9 mid-plan
+  with no re-execution. About 50 s in all. Teardown kills every process group and checks that
+  none is left. The bench checklist is [`docs/bench_cutover.md`](docs/bench_cutover.md).
 * **Benchmark:** `test_integration_pennovation.py` streams the real Pennovation map
   (`/home/harel/data/pennovation_2025/courtyard-alleyways/output/hydra/backend/dsg_with_mesh.json`)
   over an emulated 2 Mbit/s, 150 ms, 3 % loss link. The map is revealed in 20 stages along the

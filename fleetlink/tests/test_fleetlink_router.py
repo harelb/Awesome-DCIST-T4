@@ -106,7 +106,7 @@ def _client(endpoints):
     conf.insert_json5("connect/exit_on_failure", "false")
     conf.insert_json5(
         "connect/retry",
-        '{"period_init_ms": 500, "period_max_ms": 4000, "period_increase_factor": 2}',
+        '{"period_init_ms": 500, "period_max_ms": 1000, "period_increase_factor": 2}',
     )
     return zenoh.open(conf)
 

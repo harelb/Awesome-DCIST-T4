@@ -140,9 +140,21 @@ ZENOH_DEFAULTS = {
     "connect/exit_on_failure": False,
     "connect/retry": {
         "period_init_ms": 500,
-        "period_max_ms": 4000,
+        # capped at 1 s, not 4: after a long radio dropout the backoff has reached
+        # its cap, and C1 must be back within ~2 s of the link returning
+        # (tests/test_fleet_harness.py stall test; 4 s missed it)
+        "period_max_ms": 1000,
         "period_increase_factor": 2,
     },
+    # Keep the backlog in zenoh's priority queues, where DROP and priorities act,
+    # not in the kernel: an autotuned TCP send buffer grew to 2.6 MB on a
+    # saturated 30 kB/s link and put C0 commands 24 s behind bulk C3 (head-of-line;
+    # tests/test_fleet_harness.py throttle test).  16 kB (the kernel doubles it)
+    # caps that at ~1 s on 30 kB/s and still allows ~300 kB/s at 100 ms RTT.
+    "transport/link/tcp/so_sndbuf": 16384,
+    # a batch being written cannot be pre-empted: 8 kB is 0.27 s at 30 kB/s
+    # (64 kB, the default, is 2 s).  Negotiated: the smaller side wins.
+    "transport/link/tx/batch_size": 8192,
     # ms before an unanswered endpoint (e.g. a dead radio) is given up for the next
     # one in the list; zenoh's default is 10 s
     "transport/unicast/open_timeout": 3000,
