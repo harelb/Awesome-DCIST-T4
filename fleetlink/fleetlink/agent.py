@@ -14,7 +14,10 @@ health / action results, and on every :meth:`AgentCore.tick` emits
 * C1 ``paths`` (executor smooth / MLP paths + MLP target) only on change,
 
 serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
-``resend``, ``video``) with an ack each, answers C4 camera queries on
+``resend``, ``video``) with an ack each (``fb``, the receiver's once-a-second
+feedback for auto mode, is fire-and-forget), re-sends lost C2 messages from a
+ring buffer of the last ``c2_ring`` ones (``resend {stream: "dsg", from_seq,
+to_seq}``), answers C4 camera queries on
 ``adt4/<r>/media/camera/<name>`` and streams C5 live video on
 ``adt4/<r>/video/<name>`` while the base keeps a ``video`` request alive
 (:mod:`fleetlink.video`).  :class:`AgentNode` wraps it in rclpy.
@@ -22,6 +25,7 @@ serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
 
 from __future__ import annotations
 
+import importlib.metadata
 import secrets
 import threading
 import time
@@ -33,7 +37,10 @@ import numpy as np
 from fleetlink import codec, media, video
 from fleetlink.codec import GraphDelta, GraphState
 from fleetlink.scheduler import Item, Scheduler
-from fleetlink.transport import Transport
+from fleetlink.transport import Transport, split_endpoints
+
+# rmw_zenoh 0.2.11 links zenoh-c 1.8; eclipse-zenoh must speak the same protocol
+ZENOH_EXPECTED = "1.8"
 
 # budget classes reported in the state message (and adjustable from the console)
 CLASSES_REPORTED = ("C1", "C2", "C3", "C4", "C5")
@@ -63,7 +70,32 @@ DEFAULT_CONFIG = {
     "cameras": ["rgb", "overlay"],
     "video_keepalive_s": video.KEEPALIVE_S,  # a stream stops without a request this long
     "ffmpeg": None,  # None -> $FLEETLINK_FFMPEG / ffmpeg on PATH / /usr/bin/ffmpeg
+    "c2_ring": 256,  # last C2 messages kept for ``resend`` (gap repair)
 }
+
+
+def zenoh_version() -> str | None:
+    """Installed eclipse-zenoh version (None when it is not installed)."""
+    try:
+        return importlib.metadata.version("eclipse-zenoh")
+    except importlib.metadata.PackageNotFoundError:
+        try:
+            import zenoh
+
+            return getattr(zenoh, "__version__", None)
+        except ImportError:
+            return None
+
+
+def zenoh_version_warning(version: str | None = None) -> str | None:
+    """A warning text when eclipse-zenoh is not the 1.8 series rmw_zenoh uses."""
+    version = zenoh_version() if version is None else version
+    if version is None or str(version).startswith(ZENOH_EXPECTED):
+        return None
+    return (
+        f"eclipse-zenoh {version} installed but rmw_zenoh uses zenoh "
+        f"{ZENOH_EXPECTED}.x: pin eclipse-zenoh==1.8.0 in spark_env"
+    )
 
 
 def load_config(path: str | None = None) -> dict:
@@ -147,6 +179,11 @@ class AgentCore:
         self._inbox: deque = deque()
         self._inbox_lock = threading.Lock()
         self._acked: dict = {}  # request id -> ack payload (idempotent retries)
+        self._fb_seen = False  # a base that sends ``fb`` (ping rx is then ignored)
+        # C2 ring buffer: seq -> packed message, for ``resend``
+        self._c2_ring: dict[int, bytes] = {}
+        self.c2_resent = 0
+        self.c2_resend_gone = 0
 
         # graph
         self._target: tuple | None = None  # (records, edges, labelspaces)
@@ -307,7 +344,13 @@ class AgentCore:
             self.seq[stream] = seq + 1
             env = codec.envelope(self.robot, stream, seq, self.epoch, payload)
             env["t"] = self.clock()
-            return codec.pack(env)
+            data = codec.pack(env)
+            if stream == "dsg/delta":
+                ring = self._c2_ring
+                ring[seq] = data
+                while len(ring) > max(0, int(self.cfg["c2_ring"])):
+                    ring.pop(next(iter(ring)))
+            return data
 
         return build
 
@@ -341,6 +384,12 @@ class AgentCore:
         rid = req.get("id")
         op = req.get("op")
         args = req.get("args") or {}
+        if op == "fb":  # fire-and-forget feedback: no ack
+            try:
+                self._execute(op, args, now)
+            except Exception:
+                pass
+            return
         if rid in self._acked and op != "ping":
             ack = self._acked[rid]
         else:
@@ -372,14 +421,28 @@ class AgentCore:
                 self._base_rtt = (
                     rtt if self._base_rtt is None else min(self._base_rtt, rtt)
                 )
-            if args.get("rx"):
+            if args.get("rx") and not self._fb_seen:  # base without ``fb``
                 self.sched.feedback(args["rx"], rtt, now, self._base_rtt)
             return {
                 "t": args.get("t"),
                 "t_robot": now,
                 "budgets": dict(self.sched.budgets),
             }
+        if op == "fb":
+            self._fb_seen = True
+            rtt = args.get("rtt")
+            if rtt is not None:
+                self._base_rtt = (
+                    rtt if self._base_rtt is None else min(self._base_rtt, rtt)
+                )
+            self.sched.feedback(
+                args.get("rx") or {}, rtt, now, self._base_rtt, args.get("loss")
+            )
+            return None
         if op == "resend":
+            out = {}
+            if args.get("stream") == "dsg":
+                out["dsg"] = self._resend_c2(args)
             streams = list(args.get("streams") or [])
             if "grid" in streams:
                 self.sent_grid_hash = None
@@ -388,7 +451,7 @@ class AgentCore:
             if "paths" in streams:
                 self.sent_paths_hash = None
                 self._paths_dirty = True
-            return {"resend": streams}
+            return {"resend": streams, **out}
         if op == "tiles":
             keys = list(args.get("keys") or [])
             for k in keys:
@@ -403,6 +466,23 @@ class AgentCore:
         raise ValueError(f"unknown op {op!r}")
 
     # ------------------------------------------------------------------- C2
+
+    def _resend_c2(self, args: dict) -> dict:
+        """Queue the ring-buffered C2 messages ``from_seq..to_seq`` (inclusive) at
+        the front of C2, byte-identical (same seq).  Raises ValueError ("range
+        gone": the receiver then falls back to a resync) when any of them has
+        already left the ring."""
+        lo, hi = int(args["from_seq"]), int(args["to_seq"])
+        seqs = range(lo, hi + 1)
+        if hi < lo or any(s not in self._c2_ring for s in seqs):
+            self.c2_resend_gone += 1
+            raise ValueError(f"range gone: dsg {lo}-{hi}")
+        key = f"{self.prefix}/dsg/delta"
+        for s in reversed(seqs):
+            data = self._c2_ring[s]
+            self.sched.enqueue(Item("C2", key, lambda d=data: d, len(data)), True)
+        self.c2_resent += len(seqs)
+        return {"from_seq": lo, "to_seq": hi, "resent": len(seqs)}
 
     def start_snapshot(self) -> None:
         """Reset the sent mirror and stream the whole graph as a snapshot."""
@@ -626,6 +706,9 @@ class AgentCore:
                 "stats": self.stats(),
                 "cameras": list(self.camera_names),
                 "hashes": {"grid": self.sent_grid_hash, "paths": self.sent_paths_hash},
+                # last C2 seq handed to the transport: lets the base detect a
+                # lost *last* message, which no later seq gap would reveal
+                "seqs": {"dsg": self.seq["dsg/delta"] - 1},
                 "video": self.video.state(),
             }
 
@@ -642,6 +725,7 @@ class AgentCore:
             "auto": s.auto,
             "nodes": len(self._target[0]) if self._target else 0,
             "tiles": len(self.tiles),
+            "c2_resent": self.c2_resent,
         }
 
     # ------------------------------------------------------------------ tick
@@ -851,7 +935,9 @@ class AgentNode:
         tick_hz = p("tick_hz", 20.0)
         cfg["mesh_period_s"] = p("mesh_period_s", float(cfg["mesh_period_s"]))
         cfg["tile_size"] = p("tile_size", float(cfg["tile_size"]))
-        connect = p("zenoh_connect", "tcp/127.0.0.1:7447")
+        # one endpoint or a comma-separated list (zenoh keeps retrying them all)
+        connect = split_endpoints(p("zenoh_connect", "tcp/127.0.0.1:7447"))
+        cfg["c2_ring"] = p("c2_ring", int(cfg["c2_ring"]))
         cfg["budgets"]["C4"] = p("budget_C4", int(cfg["budgets"]["C4"]))
         cfg["budgets"]["C5"] = p("budget_C5", int(cfg["budgets"]["C5"]))
         cfg["ffmpeg"] = p("ffmpeg", cfg["ffmpeg"] or "") or None
@@ -874,13 +960,14 @@ class AgentNode:
         )
         cfg["cameras"] = list(cameras)
 
+        self.log = nd.get_logger()
+        warning = zenoh_version_warning()
+        if warning:
+            self.log.warn(warning)
         if transport is None:
-            from fleetlink.transport import ZenohTransport
-
-            transport = ZenohTransport(connect)
+            transport = self._open_zenoh(connect)
         self.transport = transport
         self.core = AgentCore(robot, transport, cfg)
-        self.log = nd.get_logger()
 
         self._pending = None
         self._pending_cv = threading.Condition()
@@ -975,6 +1062,19 @@ class AgentNode:
             f"fleetlink agent robot={robot} epoch={self.core.epoch} dsg={dsg_topic} "
             f"budgets={cfg['budgets']}"
         )
+
+    def _open_zenoh(self, connect: list[str]):
+        """Never fails for want of a router: the transport keeps retrying the
+        open in the background (and reconnects after router restarts)."""
+        from fleetlink.transport import ZenohTransport
+
+        transport = ZenohTransport(connect)
+        if not transport.opened.is_set():
+            self.log.warn(
+                f"no zenoh router at {connect} yet ({transport.open_error}); "
+                "retrying in the background"
+            )
+        return transport
 
     def _on_dsg(self, msg) -> None:
         self._dsg_frame = msg.header.frame_id or self._dsg_frame

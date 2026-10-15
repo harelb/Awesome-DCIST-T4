@@ -3,7 +3,13 @@
 ``Receiver(transport, on_update)`` mirrors every robot's graph (``GraphState``)
 and mesh tiles, tracks link statistics, detects C2 sequence gaps and epoch
 changes (→ rate-limited resync request) and sends C0 requests with retry until
-acked.  ``on_update(robot, kind, data)`` kinds:
+acked.  A C2 gap holds the later deltas back and asks the agent to ``resend``
+the missing range from its ring buffer; after ``resend_attempts`` tries (or when
+the agent says the range is gone) it falls back to a rate-limited resync.
+Once a second per robot it sends the C0 ``fb`` op (goodput, loss per class from
+seq gaps, RTT) that drives the agent's auto mode.  Requests are never put
+while the receiver's lock is held: they go to an outbox flushed afterwards.
+``on_update(robot, kind, data)`` kinds:
 
 * ``snapshot`` - ``{"epoch", "nodes", "edges"}`` after a snapshot completed
 * ``delta``    - ``GraphDelta.encode()`` dict + ``{"seq"}``
@@ -127,6 +133,21 @@ class _Robot:
         self.mismatch_since: dict[str, float] = {}
         self.resend_req_t: dict[str, float] = {}
         self.video: dict[str, _VideoRx] = {}
+        # per-class loss accounting from seq gaps (window -> last-window fraction)
+        self.win_msgs = dict.fromkeys(CLASSES, 0)
+        self.win_lost = dict.fromkeys(CLASSES, 0)
+        self.lost = dict.fromkeys(CLASSES, 0)
+        self.loss = dict.fromkeys(CLASSES, 0.0)
+        self.t_fb = -1e9
+        # C2 in-order delivery: next expected seq, held-back later messages,
+        # the outstanding resend {from, to, tries, t, rid}
+        self.c2_next: int | None = None
+        self.c2_hold: dict[int, dict] = {}
+        self.c2_gap: dict | None = None
+        self.c2_need_resync = False
+        self.c2_tail_since: tuple | None = None  # (since, c2_next then)
+        self.resend_requests = 0
+        self.resend_escalations = 0
 
 
 class Receiver:
@@ -145,6 +166,10 @@ class Receiver:
         tile_rerequest_s: float = 10.0,
         connected_timeout: float = 3.0,
         resend_grace_s: float = 10.0,
+        resend_attempts: int = 3,
+        resend_timeout_s: float = 2.0,
+        hold_max: int = 1024,
+        fb_period: float = 1.0,
     ):
         self.transport = transport
         self.on_update = on_update or (lambda r, k, d: None)
@@ -158,6 +183,11 @@ class Receiver:
         self.tile_rerequest_s = tile_rerequest_s
         self.connected_timeout = connected_timeout
         self.resend_grace_s = resend_grace_s
+        self.resend_attempts = resend_attempts
+        self.resend_timeout_s = resend_timeout_s
+        self.hold_max = hold_max
+        self.fb_period = fb_period
+        self._outbox: list[tuple[str, dict]] = []
         self._robots: dict[str, _Robot] = {}
         self._pending: dict[str, dict] = {}  # req id -> {robot, req, t, tries}
         self._ids = itertools.count()
@@ -307,6 +337,11 @@ class Receiver:
             "bytes": dict(r.bytes),
             "drops": r.drops,
             "gaps": r.gaps,
+            "loss": {c: round(r.loss[c], 4) for c in CLASSES},
+            "lost": dict(r.lost),
+            "resend_requests": r.resend_requests,
+            "resend_escalations": r.resend_escalations,
+            "c2_held": len(r.c2_hold),
             "resyncs": r.resyncs,
             "resync_requests": r.resync_requests,
             "auto": stats.get("auto", False),
@@ -336,6 +371,16 @@ class Receiver:
                 }
         self._put_req(robot, req)
         return rid
+
+    def _queue_req(self, robot: str, req: dict) -> None:
+        """Lock held: the put happens in :meth:`_flush` once the lock is released."""
+        self._outbox.append((robot, req))
+
+    def _flush(self) -> None:
+        with self._lock:
+            out, self._outbox = self._outbox, []
+        for robot, req in out:
+            self._put_req(robot, req)
 
     def _put_req(self, robot: str, req: dict) -> None:
         env = codec.envelope("base", "ctl/req", next(self._req_seq), self._session, req)
@@ -394,23 +439,27 @@ class Receiver:
                 for p in self._pending.values()
             ]
 
-    def _maybe_resync(self, r: _Robot, now: float, force: bool = False) -> None:
+    def _maybe_resync(self, r: _Robot, now: float, force: bool = False) -> bool:
+        """Request a resync unless rate-limited; True when one is sent or pending."""
+        if any(
+            p["req"]["op"] == "resync" and p["robot"] == r.name
+            for p in self._pending.values()
+        ):
+            return True
         if force or now - r.last_resync_req >= self.resync_min_interval:
-            if any(
-                p["req"]["op"] == "resync" and p["robot"] == r.name
-                for p in self._pending.values()
-            ):
-                return
             r.resync_requests += 1
             r.last_resync_req = now
             self._pending_send(r.name, "resync", {})
+            return True
+        return False
 
-    def _pending_send(self, robot: str, op: str, args: dict) -> None:
-        # called with the lock held; the put itself is fine under the RLock
+    def _pending_send(self, robot: str, op: str, args: dict) -> str:
+        """Lock held: register a retried request and queue it in the outbox."""
         rid = f"{self._session}-{next(self._ids)}"
         req = {"id": rid, "op": op, "args": args}
         self._pending[rid] = {"robot": robot, "req": req, "t": self.clock(), "tries": 1}
-        self._put_req(robot, req)
+        self._queue_req(robot, req)
+        return rid
 
     # ------------------------------------------------------------- receive
 
@@ -424,72 +473,178 @@ class Receiver:
         if cls is None:
             return  # e.g. our own ctl/req
         now = self.clock()
-        events = []
         with self._lock:
-            r = self._robot(robot)
-            r.bytes[cls] += len(data)
-            r.win[cls] += len(data)
-            r.last_seen = now
-            # one-way latency in the base clock (robot stamps corrected by the
-            # estimated clock offset once a ping has measured it)
-            lat = now - (float(env.get("t", now)) - (r.clock_offset or 0.0))
-            r.latency = lat if r.latency is None else 0.8 * r.latency + 0.2 * lat
-            if env["epoch"] in r.retired:
-                return  # late message from a previous agent incarnation
-            if r.epoch != env["epoch"]:
-                self._new_epoch(r, env["epoch"], now)
-            seq = int(env["seq"])
-            last = r.seqs.get(stream)
-            if last is not None and seq <= last:
-                return  # duplicate / reordered
-            gap = last is not None and seq > last + 1
-            if gap:
-                r.drops += seq - last - 1
-                if stream == "dsg/delta":
-                    r.gaps += 1
-                    self._maybe_resync(r, now)
-            r.seqs[stream] = seq
-            p = env["p"]
-            if cls == "C5":
-                events.append(("video", self._on_video(r, stream, p, seq, last, now)))
-            elif stream == "state":
-                r.state = p
-                r.last_state_rx = now
-                events.append(("state", p))
-                self._check_hashes(r, p, now)
-            elif stream == "grid/occupancy":
-                r.grid = p
-                events.append(
-                    (
-                        "grid",
-                        {
-                            k: p.get(k)
-                            for k in (
-                                "hash",
-                                "frame",
-                                "width",
-                                "height",
-                                "resolution",
-                                "t",
-                            )
-                        },
-                    )
-                )
-            elif stream == "paths":
-                r.paths = p
-                events.append(("paths", p))
-            elif stream == "dsg/delta":
-                events.extend(self._on_graph(r, p, seq))
-            elif stream == "mesh/tile":
-                r.tiles[p["key"]] = p
-                r.tile_req_t.pop(p["key"], None)
-                events.append(("tiles", {"changed": [p["key"]], "removed": []}))
-            elif stream == "mesh/manifest":
-                events.extend(self._on_manifest(r, p, now))
-            elif stream == "ctl/ack":
-                self._on_ack(r, p, now)
+            events = self._receive(self._robot(robot), env, stream, cls, len(data), now)
+        self._flush()
         for kind, d in events:
             self.on_update(robot, kind, d)
+
+    def _receive(self, r: _Robot, env: dict, stream: str, cls: str, n, now) -> list:
+        """Lock held: account and dispatch one message; returns the events."""
+        r.bytes[cls] += n
+        r.win[cls] += n
+        r.last_seen = now
+        # one-way latency in the base clock (robot stamps corrected by the
+        # estimated clock offset once a ping has measured it)
+        lat = now - (float(env.get("t", now)) - (r.clock_offset or 0.0))
+        r.latency = lat if r.latency is None else 0.8 * r.latency + 0.2 * lat
+        if env["epoch"] in r.retired:
+            return []  # late message from a previous agent incarnation
+        if r.epoch != env["epoch"]:
+            self._new_epoch(r, env["epoch"], now)
+        seq = int(env["seq"])
+        p = env["p"]
+        if stream == "dsg/delta":
+            return self._on_c2(r, seq, p, now)
+        last = r.seqs.get(stream)
+        if last is not None and seq <= last:
+            return []  # duplicate / reordered
+        if last is not None and seq > last + 1:
+            r.drops += seq - last - 1
+            r.win_lost[cls] += seq - last - 1
+            r.lost[cls] += seq - last - 1
+        r.win_msgs[cls] += 1
+        r.seqs[stream] = seq
+        events = []
+        if cls == "C5":
+            events.append(("video", self._on_video(r, stream, p, seq, last, now)))
+        elif stream == "state":
+            r.state = p
+            r.last_state_rx = now
+            events.append(("state", p))
+            self._check_hashes(r, p, now)
+            self._c2_check_tail(r, p, now)
+        elif stream == "grid/occupancy":
+            r.grid = p
+            keys = ("hash", "frame", "width", "height", "resolution", "t")
+            events.append(("grid", {k: p.get(k) for k in keys}))
+        elif stream == "paths":
+            r.paths = p
+            events.append(("paths", p))
+        elif stream == "mesh/tile":
+            r.tiles[p["key"]] = p
+            r.tile_req_t.pop(p["key"], None)
+            events.append(("tiles", {"changed": [p["key"]], "removed": []}))
+        elif stream == "mesh/manifest":
+            events.extend(self._on_manifest(r, p, now))
+        elif stream == "ctl/ack":
+            events.extend(self._on_ack(r, p, now))
+        return events
+
+    # ------------------------------------------------- C2 in-order + resend
+
+    def _on_c2(self, r: _Robot, seq: int, p: dict, now: float) -> list:
+        """Apply C2 in seq order.  A message after a gap is held back and the gap
+        is asked for again (``resend``); see :meth:`_c2_tick` for escalation."""
+        if r.c2_next is None:
+            r.c2_next = seq  # first C2 message of this epoch
+        if seq < r.c2_next or seq in r.c2_hold:
+            return []  # duplicate (e.g. a resend that crossed a late original)
+        r.win_msgs["C2"] += 1
+        r.seqs["dsg/delta"] = max(seq, r.seqs.get("dsg/delta", seq))
+        if seq > r.c2_next:
+            frontier = max(r.c2_next - 1, max(r.c2_hold, default=-1))
+            if seq > frontier + 1:  # newly lost messages (count each once)
+                lost = seq - frontier - 1
+                r.gaps += 1
+                r.drops += lost
+                r.win_lost["C2"] += lost
+                r.lost["C2"] += lost
+            r.c2_hold[seq] = p
+            if len(r.c2_hold) > self.hold_max:
+                return self._c2_escalate(r, now)
+            self._c2_check_gap(r, now)
+            return []
+        events = self._on_graph(r, p, seq)
+        r.c2_next = seq + 1
+        events.extend(self._c2_drain(r))
+        self._c2_check_gap(r, now)
+        return events
+
+    def _c2_drain(self, r: _Robot) -> list:
+        events = []
+        while r.c2_next in r.c2_hold:
+            seq = r.c2_next
+            events.extend(self._on_graph(r, r.c2_hold.pop(seq), seq))
+            r.c2_next = seq + 1
+        return events
+
+    def _c2_check_gap(self, r: _Robot, now: float) -> None:
+        if not r.c2_hold:
+            self._c2_clear_gap(r)
+            return
+        frm, to = r.c2_next, min(r.c2_hold) - 1
+        gap = r.c2_gap
+        if gap is not None and gap["from"] == frm and gap["to"] == to:
+            return  # already asked
+        tries = gap["tries"] if gap is not None and gap["from"] == frm else 0
+        self._c2_request(r, frm, to, tries, now)
+
+    def _c2_check_tail(self, r: _Robot, p: dict, now: float) -> None:
+        """The state carries the last C2 seq the agent sent.  If we are behind
+        for longer than ``resend_timeout_s`` with nothing held (the lost message
+        was the last one, so no gap shows), ask for the tail."""
+        last = (p.get("seqs") or {}).get("dsg")
+        if (
+            last is None
+            or r.c2_next is None
+            or int(last) < r.c2_next
+            or r.c2_hold
+            or r.c2_gap is not None
+        ):
+            r.c2_tail_since = None
+            return
+        if r.c2_tail_since is None or r.c2_tail_since[1] != r.c2_next:
+            # C1 outruns C2: give it time to arrive (restarts while C2 progresses)
+            r.c2_tail_since = (now, r.c2_next)
+            return
+        if now - r.c2_tail_since[0] >= self.resend_timeout_s:
+            r.c2_tail_since = None
+            lost = int(last) - r.c2_next + 1
+            r.gaps += 1
+            r.drops += lost
+            r.win_lost["C2"] += lost
+            r.lost["C2"] += lost
+            self._c2_request(r, r.c2_next, int(last), 0, now)
+
+    def _c2_request(self, r: _Robot, frm: int, to: int, tries: int, now) -> None:
+        self._c2_clear_gap(r)
+        rid = self._pending_send(
+            r.name, "resend", {"stream": "dsg", "from_seq": frm, "to_seq": to}
+        )
+        r.resend_requests += 1
+        r.c2_gap = {"from": frm, "to": to, "tries": tries + 1, "t": now, "rid": rid}
+
+    def _c2_clear_gap(self, r: _Robot) -> None:
+        if r.c2_gap is not None:
+            self._pending.pop(r.c2_gap["rid"], None)
+            r.c2_gap = None
+
+    def _c2_escalate(self, r: _Robot, now: float) -> list:
+        """Give up on the gap: apply what is held (as before resends existed) and
+        fall back to a full resync (rate-limited; retried from tick if needed)."""
+        self._c2_clear_gap(r)
+        r.resend_escalations += 1
+        events = []
+        for seq in sorted(r.c2_hold):
+            events.extend(self._on_graph(r, r.c2_hold.pop(seq), seq))
+            r.c2_next = seq + 1
+        r.c2_need_resync = not self._maybe_resync(r, now)
+        return events
+
+    def _c2_tick(self, r: _Robot, now: float) -> list:
+        events = []
+        gap = r.c2_gap
+        if gap is not None:
+            timeout = max(self.resend_timeout_s, 3.0 * (r.rtt or 0.0))
+            if now - gap["t"] >= timeout:
+                if gap["tries"] >= self.resend_attempts:
+                    events = self._c2_escalate(r, now)
+                else:
+                    self._c2_request(r, gap["from"], gap["to"], gap["tries"], now)
+        if r.c2_need_resync:
+            r.c2_need_resync = not self._maybe_resync(r, now)
+        return events
 
     def _on_video(self, r: _Robot, stream: str, p: dict, seq, last, now) -> dict:
         cam = stream[len(VIDEO_PREFIX) :]
@@ -532,9 +687,9 @@ class Receiver:
         """Ask the robot for a key frame now (e.g. a browser's decoder failed)."""
         with self._lock:
             r = self._robots.get(robot)
-            if r is None:
-                return False
-            return self._request_keyframe(r, camera, self.clock())
+            ok = r is not None and self._request_keyframe(r, camera, self.clock())
+        self._flush()
+        return ok
 
     def clock_offset(self, robot: str) -> float | None:
         """Estimated robot clock minus base clock (seconds), or None."""
@@ -558,6 +713,11 @@ class Receiver:
         r.resend_req_t.clear()
         r.video.clear()
         r.in_snapshot = False
+        r.c2_next = None
+        r.c2_hold.clear()
+        r.c2_gap = None
+        r.c2_need_resync = False
+        r.c2_tail_since = None
         # requests for the previous incarnation are void
         for rid in [k for k, v in self._pending.items() if v["robot"] == r.name]:
             del self._pending[rid]
@@ -631,9 +791,17 @@ class Receiver:
             self._pending_send(r.name, "tiles", {"keys": missing})
         return [("tiles", {"changed": [], "removed": removed})] if removed else []
 
-    def _on_ack(self, r: _Robot, p: dict, now: float) -> None:
-        self._pending.pop(p.get("id"), None)
+    def _on_ack(self, r: _Robot, p: dict, now: float) -> list:
+        pend = self._pending.pop(p.get("id"), None)
         res = p.get("result") or {}
+        if (
+            not p.get("ok", True)
+            and pend is not None
+            and r.c2_gap is not None
+            and r.c2_gap["rid"] == p.get("id")
+        ):
+            # the agent no longer has (part of) the range: resend cannot help
+            return self._c2_escalate(r, now)
         if res.get("t") is not None:  # ping ack (pings are fire-and-forget)
             rtt = now - float(res["t"])
             r.rtt = rtt if r.rtt is None else 0.8 * r.rtt + 0.2 * rtt
@@ -647,6 +815,7 @@ class Receiver:
             }
         if "auto" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["auto"] = res["auto"]
+        return []
 
     # ---------------------------------------------------------------- tick
 
@@ -663,8 +832,9 @@ class Receiver:
                     continue
                 pend["tries"] += 1
                 pend["t"] = now
-                self._put_req(pend["robot"], pend["req"])
+                self._queue_req(pend["robot"], pend["req"])
             for r in self._robots.values():
+                events.extend((r.name, k, d) for k, d in self._c2_tick(r, now))
                 if r.win_t is None:
                     r.win_t = now
                 elif now - r.win_t >= 1.0:
@@ -672,20 +842,44 @@ class Receiver:
                     for c in CLASSES:
                         r.rates[c] = 0.6 * r.rates[c] + 0.4 * (r.win[c] / dt)
                         r.win[c] = 0
+                        seen = r.win_msgs[c] + r.win_lost[c]
+                        r.loss[c] = r.win_lost[c] / seen if seen else 0.0
+                        r.win_msgs[c] = r.win_lost[c] = 0
                     for v in r.video.values():
                         v.fps = 0.5 * v.fps + 0.5 * (v.win_frames / dt)
                         v.kbps = 0.5 * v.kbps + 0.5 * (v.win_bytes * 8 / 1000 / dt)
                         v.win_frames = v.win_bytes = 0
                     r.win_t = now
                     events.append((r.name, "link", self._link(r, now)))
-                if r.epoch is not None and now - r.t_ping >= self.ping_period:
+                if r.epoch is None:
+                    continue
+                if now - r.t_ping >= self.ping_period:
                     r.t_ping = now
+                    # ``rx`` only for agents that predate ``fb`` (they ignore fb)
                     rx = {c: r.rates[c] for c in ("C1", "C2", "C3")}
                     req = {
                         "id": f"{self._session}-p{next(self._ids)}",
                         "op": "ping",
                         "args": {"t": now, "rx": rx, "rtt": r.rtt},
                     }
-                    self._put_req(r.name, req)
+                    self._queue_req(r.name, req)
+                if self.fb_period and now - r.t_fb >= self.fb_period:
+                    r.t_fb = now
+                    self._queue_req(r.name, self._fb_req(r, now))
+        self._flush()
         for robot, kind, d in events:
             self.on_update(robot, kind, d)
+
+    def _fb_req(self, r: _Robot, now: float) -> dict:
+        """C0 ``fb``: what arrived here over the last window, for the agent's AIMD
+        (fire-and-forget, no ack)."""
+        return {
+            "id": f"{self._session}-f{next(self._ids)}",
+            "op": "fb",
+            "args": {
+                "t": now,
+                "rx": {c: round(r.rates[c], 1) for c in CLASSES},
+                "loss": {c: round(r.loss[c], 4) for c in CLASSES},
+                "rtt": r.rtt,
+            },
+        }

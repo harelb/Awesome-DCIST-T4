@@ -202,3 +202,59 @@ def test_zenoh_live_video_h264(zenoh_router):
         rx.stop()
         robot_tr.close()
         base_tr.close()
+
+
+def test_zenoh_open_without_router_then_connect_and_restart(late_router):
+    """Agent and receiver sessions open while no router is up (the transport
+    retries in the background), connect once it starts, and recover after the
+    router is killed and restarted."""
+    pytest.importorskip("zenoh")
+    robot_tr = ZenohTransport(late_router.endpoint)  # nothing listens yet
+    base_tr = ZenohTransport(f"tcp/127.0.0.1:1,{late_router.endpoint}")  # comma list
+    assert not robot_tr.opened.is_set() and robot_tr.open_error
+    rx = Receiver(base_tr, None, tick_period=0.05)
+    rx.start()
+    agent = AgentCore("zlate", robot_tr, {"budgets": {"C2": 20_000}})
+    recs, edges, ls = synthetic_records(50, seed=5)
+    agent.on_records(recs, edges, ls)
+    stop = threading.Event()
+
+    def ticker():
+        while not stop.is_set():
+            agent.tick()
+            time.sleep(0.02)
+
+    def wait_graph(timeout):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if (
+                "zlate" in rx.robots()
+                and states_equal(rx.graph("zlate"), agent.graph_state())[0]
+            ):
+                return True
+            time.sleep(0.1)
+        return False
+
+    th = threading.Thread(target=ticker, daemon=True)
+    th.start()
+    try:
+        time.sleep(1.0)
+        assert robot_tr.unopened_drops > 0  # puts were dropped, nothing crashed
+        late_router.start()
+        assert robot_tr.opened.wait(15.0) and base_tr.opened.wait(15.0)
+        assert wait_graph(20.0)
+        # router restart: the client sessions reconnect by themselves
+        late_router.stop(kill=True)
+        time.sleep(1.0)
+        recs2, edges2, _ = synthetic_records(120, seed=6)
+        agent.on_records(recs2, edges2, ls)
+        late_router.start()
+        assert wait_graph(30.0), rx.link("zlate")
+        assert rx.link("zlate")["connected"]
+    finally:
+        stop.set()
+        th.join(timeout=2)
+        rx.stop()
+        agent.close()
+        robot_tr.close()
+        base_tr.close()

@@ -25,3 +25,4 @@ grid_period_s: 5.0  # occupancy grid: checked this often, sent only when it chan
 paths_hz: 2.0  # executor paths: checked this often, sent only when they changed
 video_keepalive_s: 6.0  # a video stream stops without a `video` request this long
 ffmpeg:  # null = $FLEETLINK_FFMPEG / ffmpeg on PATH / /usr/bin/ffmpeg
+c2_ring: 256  # last C2 messages kept for `resend` gap repair (0 = always resync)

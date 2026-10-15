@@ -2,13 +2,18 @@
 link emulator (bandwidth / latency / loss / bounded queues, virtual clock) for
 tests and benchmarks.
 
-Stream classes (API.md §8):
+Stream classes (API.md §8).  **Every class is congestion-control DROP**: a
+must-deliver (BLOCK) message on a congested radio link stalls the whole zenoh
+transport and, after ``wait_before_close``, closes it (zenoh #1876).  Delivery
+guarantees live in the application instead: C0 requests are retried until
+acked, C2 gaps are repaired with ``resend`` from the agent's ring buffer (and a
+full resync as the last resort), C3 tiles through the manifest.
 
-* ``C0`` control  - INTERACTIVE_HIGH, BLOCK, express, reliable
+* ``C0`` control  - INTERACTIVE_HIGH, DROP, express, reliable
 * ``C1`` state    - INTERACTIVE_LOW, DROP
-* ``C2`` graph    - DATA_HIGH, BLOCK
-* ``C3`` mesh     - DATA_LOW, DROP
-* ``C4`` media    - DATA, request/reply only (on-demand camera frames)
+* ``C2`` graph    - DATA_HIGH, DROP, reliable
+* ``C3`` mesh     - DATA_LOW, DROP, best effort
+* ``C4`` media    - DATA, DROP, request/reply only (on-demand camera frames)
 * ``C5`` video    - DATA_LOW, DROP, best effort (live camera video, API.md §12)
 
 Request/reply (``declare_queryable`` / ``query``) carries C4: the base asks,
@@ -22,10 +27,9 @@ from __future__ import annotations
 import heapq
 import itertools
 import json
-import queue
 import random
 import threading
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -34,7 +38,6 @@ CLASSES = ("C0", "C1", "C2", "C3", "C4", "C5")
 # graph (C2) and mesh (C3); video (C5) shares DATA_LOW with C3 and goes last
 PRIORITY_ORDER = ("C0", "C1", "C2", "C4", "C3", "C5")
 PRIORITY = {c: i for i, c in enumerate(PRIORITY_ORDER)}  # lower = more important
-BLOCKING = {"C0": True, "C1": False, "C2": True, "C3": False, "C4": False, "C5": False}
 
 Callback = Callable[[str, bytes], None]
 # queryable handler: (key, params) -> reply bytes, or None for no reply
@@ -74,6 +77,14 @@ def key_matches(expr: str, key: str) -> bool:
     return rec(0, 0)
 
 
+def split_endpoints(connect: str | list[str] | tuple | None) -> list[str]:
+    """``"tcp/a:7450,tcp/b:7450"`` or a list → ``["tcp/a:7450", "tcp/b:7450"]``."""
+    if connect is None:
+        return []
+    items = [connect] if isinstance(connect, str) else list(connect)
+    return [e.strip() for item in items for e in str(item).split(",") if e.strip()]
+
+
 class Transport:
     """Minimal pub/sub interface used by the agent and the receiver."""
 
@@ -84,7 +95,7 @@ class Transport:
         raise NotImplementedError
 
     def can_send(self, cls: str) -> bool:
-        """False when a BLOCK-class put would block (scheduler holds the class back)."""
+        """False when the transport wants the scheduler to hold ``cls`` back."""
         return True
 
     def declare_queryable(self, key_expr: str, handler: QueryHandler):
@@ -111,13 +122,66 @@ class Transport:
 # Zenoh
 # ----------------------------------------------------------------------------
 
+# Zenoh 1.8 config keys, verified against ``zenoh.Config()`` of eclipse-zenoh
+# 1.8.0 (it rejects unknown keys) and by opening sessions against a dead port
+# and through a router restart:
+#
+# * client mode is required: a *peer* opens without a router, but a router
+#   does not forward between peers that cannot reach each other directly;
+# * a 1.8 client cannot open without a router: ``connect/timeout_ms: -1``
+#   blocks ``zenoh.open`` forever and any other value raises "Unable to
+#   connect".  So ``timeout_ms`` is 0 (fail fast) and :class:`ZenohTransport`
+#   retries the open on a background thread with the ``connect/retry`` backoff;
+# * once open, a client reconnects by itself after the router restarts
+#   (``exit_on_failure: false``, the same ``connect/retry`` periods).
+ZENOH_DEFAULTS = {
+    "scouting/multicast/enabled": False,
+    "connect/timeout_ms": 0,
+    "connect/exit_on_failure": False,
+    "connect/retry": {
+        "period_init_ms": 500,
+        "period_max_ms": 4000,
+        "period_increase_factor": 2,
+    },
+    # µs a DROP message waits for a free batch before it is dropped
+    "transport/link/tx/queue/congestion_control/drop/wait_before_drop": 1000,
+    "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments": 50000,
+}
+
+
+class _Pending:
+    """Handle of a subscriber / queryable declared before the session opened."""
+
+    def __init__(self, kind: str, key_expr: str, fn):
+        self.kind, self.key_expr, self.fn = kind, key_expr, fn
+        self.handle = None
+
+    def undeclare(self) -> None:
+        if self.handle is not None:
+            self.handle.undeclare()
+
 
 class ZenohTransport(Transport):
-    """eclipse-zenoh 1.x transport (client mode towards the local router).
+    """eclipse-zenoh 1.x transport (client mode towards the configured routers).
 
-    BLOCK-class puts run on a per-class worker thread with a small queue so a
-    congested C2 publisher never stalls the C1 state stream on the caller's
-    thread; ``can_send`` reports when that queue is full.
+    ``connect`` is one endpoint, a list, or a comma-separated list.
+    ``zenoh_overrides`` maps config paths (``"transport/link/tx/lease"``) to
+    values, applied after :data:`ZENOH_DEFAULTS`.
+
+    The constructor never fails because no router is up: with
+    ``wait_for_router`` (default) a failed open is retried on a background
+    thread forever.  Until then puts are dropped (``unopened_drops``), queries
+    answer None, and subscribers / queryables are declared once it opens
+    (:attr:`opened` is set then).
+
+    Puts are synchronous and never block for long (all classes DROP, the wait
+    for a free batch is ``wait_before_drop``).  ``can_send(cls)`` is a *local*
+    in-flight counter: False only while ``max_inflight`` puts of that class are
+    still inside zenoh on other threads.  It does not see the link; real
+    backpressure comes from the receiver's ``fb`` feedback (scheduler AIMD).
+
+    Publishers are cached per (key, class), least recently used first out at
+    ``max_publishers``; :meth:`undeclare` drops the ones of a key early.
     """
 
     def __init__(
@@ -125,108 +189,199 @@ class ZenohTransport(Transport):
         connect: str | list[str] = "tcp/127.0.0.1:7447",
         mode: str = "client",
         session=None,
-        block_queue: int = 32,
+        zenoh_overrides: dict | None = None,
+        max_publishers: int = 256,
+        max_inflight: int = 1,
+        wait_for_router: bool = True,
     ):
         import zenoh
 
         self._z = zenoh
-        if session is None:
-            conf = zenoh.Config()
-            endpoints = [connect] if isinstance(connect, str) else list(connect)
-            conf.insert_json5("mode", json.dumps(mode))
-            conf.insert_json5("connect/endpoints", json.dumps(endpoints))
-            conf.insert_json5("scouting/multicast/enabled", "false")
-            session = zenoh.open(conf)
-            self._own_session = True
-        else:
-            self._own_session = False
-        self.session = session
+        self.endpoints = split_endpoints(connect)
+        drop = zenoh.CongestionControl.DROP
         self._qos = {
             "C0": dict(
                 priority=zenoh.Priority.INTERACTIVE_HIGH,
-                congestion_control=zenoh.CongestionControl.BLOCK,
+                congestion_control=drop,
                 express=True,
                 reliability=zenoh.Reliability.RELIABLE,
             ),
             "C1": dict(
-                priority=zenoh.Priority.INTERACTIVE_LOW,
-                congestion_control=zenoh.CongestionControl.DROP,
+                priority=zenoh.Priority.INTERACTIVE_LOW, congestion_control=drop
             ),
             "C2": dict(
                 priority=zenoh.Priority.DATA_HIGH,
-                congestion_control=zenoh.CongestionControl.BLOCK,
+                congestion_control=drop,
                 reliability=zenoh.Reliability.RELIABLE,
             ),
             "C3": dict(
                 priority=zenoh.Priority.DATA_LOW,
-                congestion_control=zenoh.CongestionControl.DROP,
+                congestion_control=drop,
                 reliability=zenoh.Reliability.BEST_EFFORT,
             ),
-            "C4": dict(
-                priority=zenoh.Priority.DATA,
-                congestion_control=zenoh.CongestionControl.DROP,
-            ),
+            "C4": dict(priority=zenoh.Priority.DATA, congestion_control=drop),
             "C5": dict(
                 priority=zenoh.Priority.DATA_LOW,
-                congestion_control=zenoh.CongestionControl.DROP,
+                congestion_control=drop,
                 reliability=zenoh.Reliability.BEST_EFFORT,
             ),
         }
-        self._pubs: dict[tuple[str, str], object] = {}
+        self.max_publishers = int(max_publishers)
+        self.max_inflight = int(max_inflight)
+        self._pubs: OrderedDict[tuple[str, str], object] = OrderedDict()
         self._subs = []
         self._lock = threading.Lock()
+        self._inflight = dict.fromkeys(CLASSES, 0)
+        self.put_errors = 0
+        self.unopened_drops = 0
+        self.open_attempts = 0
+        self.open_error: str | None = None
+        self.opened = threading.Event()
         self._closed = False
-        self._workers: dict[str, tuple[queue.Queue, threading.Thread]] = {}
-        for cls in ("C0", "C2"):
-            q: queue.Queue = queue.Queue(maxsize=block_queue)
-            t = threading.Thread(
-                target=self._worker, args=(q,), daemon=True, name=f"fleetlink-{cls}"
+        self._stop = threading.Event()
+        self._opener: threading.Thread | None = None
+        self.session = None
+        self._own_session = session is None
+        if session is not None:
+            self.session = session
+            self.opened.set()
+            return
+        self._conf_json = {
+            "mode": mode,
+            "connect/endpoints": self.endpoints,
+            **ZENOH_DEFAULTS,
+            **(zenoh_overrides or {}),
+        }
+        if not self._try_open():
+            if not wait_for_router:
+                raise RuntimeError(self.open_error)
+            self._opener = threading.Thread(
+                target=self._open_loop, daemon=True, name="fleetlink-zenoh-open"
             )
-            t.start()
-            self._workers[cls] = (q, t)
+            self._opener.start()
+
+    # -- session -------------------------------------------------------------
+
+    def _config(self):
+        conf = self._z.Config()
+        for k, v in self._conf_json.items():
+            conf.insert_json5(k, json.dumps(v))
+        return conf
+
+    def _try_open(self) -> bool:
+        self.open_attempts += 1
+        try:
+            session = self._z.open(self._config())
+        except Exception as exc:  # no router (yet)
+            self.open_error = f"{type(exc).__name__}: {exc}"
+            return False
+        with self._lock:
+            if self._closed:
+                session.close()
+                return False
+            self.session = session
+            pending = [s for s in self._subs if isinstance(s, _Pending)]
+        for p in pending:
+            self._declare(p)
+        self.open_error = None
+        self.opened.set()
+        return True
+
+    def _open_loop(self) -> None:
+        retry = self._conf_json.get("connect/retry") or {}
+        delay = float(retry.get("period_init_ms", 500)) / 1000.0
+        dmax = float(retry.get("period_max_ms", 4000)) / 1000.0
+        factor = float(retry.get("period_increase_factor", 2))
+        while not self._stop.wait(delay):
+            if self._try_open():
+                return
+            delay = min(dmax, delay * factor)
+
+    def _declare(self, p: _Pending) -> None:
+        if p.kind == "sub":
+            p.handle = self.session.declare_subscriber(p.key_expr, p.fn)
+        else:
+            p.handle = self.session.declare_queryable(p.key_expr, p.fn)
 
     def _publisher(self, key: str, cls: str):
+        evicted = []
         with self._lock:
             pub = self._pubs.get((key, cls))
             if pub is None:
                 pub = self.session.declare_publisher(key, **self._qos[cls])
                 self._pubs[(key, cls)] = pub
-            return pub
+                while len(self._pubs) > self.max_publishers:
+                    evicted.append(self._pubs.popitem(last=False)[1])
+            else:
+                self._pubs.move_to_end((key, cls))
+        for p in evicted:
+            self._undeclare_quietly(p)
+        return pub
 
-    def _worker(self, q: queue.Queue) -> None:
-        while True:
-            item = q.get()
-            if item is None:
-                return
-            key, data, cls = item
-            try:
-                self._publisher(key, cls).put(data)
-            except Exception:  # session closed underneath us
-                if self._closed:
-                    return
+    @staticmethod
+    def _undeclare_quietly(p) -> None:
+        try:
+            p.undeclare()
+        except Exception:
+            pass
+
+    def undeclare(self, key: str) -> int:
+        """Undeclare the cached publishers of ``key`` (all classes); returns how many."""
+        with self._lock:
+            gone = [k for k in self._pubs if k[0] == key]
+            pubs = [self._pubs.pop(k) for k in gone]
+        for p in pubs:
+            self._undeclare_quietly(p)
+        return len(pubs)
+
+    def publisher_count(self) -> int:
+        with self._lock:
+            return len(self._pubs)
+
+    # -- pub/sub -------------------------------------------------------------
 
     def put(self, key: str, data: bytes, cls: str) -> None:
         if self._closed:
             return
-        if cls in self._workers:
-            self._workers[cls][0].put((key, data, cls))  # blocks only if full
-        else:
+        if self.session is None:
+            self.unopened_drops += 1
+            return
+        with self._lock:
+            self._inflight[cls] += 1
+        try:
             self._publisher(key, cls).put(data)
+        except Exception:  # session closing underneath us: the message is lost
+            self.put_errors += 1
+        finally:
+            with self._lock:
+                self._inflight[cls] -= 1
 
     def can_send(self, cls: str) -> bool:
-        w = self._workers.get(cls)
-        return w is None or not w[0].full()
+        return self._inflight.get(cls, 0) < self.max_inflight
+
+    def _add(self, kind: str, key_expr: str, fn):
+        with self._lock:
+            if self.session is None:
+                p = _Pending(kind, key_expr, fn)
+                self._subs.append(p)
+                return p
+        if kind == "sub":
+            h = self.session.declare_subscriber(key_expr, fn)
+        else:
+            h = self.session.declare_queryable(key_expr, fn)
+        with self._lock:
+            self._subs.append(h)
+        return h
 
     def subscribe(self, key_expr: str, callback: Callback):
         def handler(sample):
             callback(str(sample.key_expr), sample.payload.to_bytes())
 
-        sub = self.session.declare_subscriber(key_expr, handler)
-        self._subs.append(sub)
-        return sub
+        return self._add("sub", key_expr, handler)
 
     def declare_queryable(self, key_expr: str, handler: QueryHandler):
-        # replies inherit the query's priority (C4 = DATA, set in ``query``)
+        # replies inherit the query's QoS (C4 priority, DROP: set in ``query``);
+        # zenoh 1.8 ignores (and warns about) QoS arguments on ``reply``
         def on_query(query):
             try:
                 key = str(query.key_expr)
@@ -236,12 +391,10 @@ class ZenohTransport(Transport):
             except Exception:  # a bad request must never kill zenoh's thread
                 pass
 
-        q = self.session.declare_queryable(key_expr, on_query)
-        self._subs.append(q)
-        return q
+        return self._add("queryable", key_expr, on_query)
 
     def query(self, key, params, callback, timeout: float = 5.0) -> None:
-        if self._closed:
+        if self._closed or self.session is None:
             callback(None)
             return
         z = self._z
@@ -266,7 +419,7 @@ class ZenohTransport(Transport):
                 sel,
                 z.handlers.Callback(on_reply, lambda: finish(None)),
                 timeout=float(timeout),
-                priority=self._qos["C4"]["priority"],
+                **self._qos["C4"],
             )
         except Exception:
             finish(None)
@@ -274,21 +427,19 @@ class ZenohTransport(Transport):
     def close(self) -> None:
         if self._closed:
             return
-        self._closed = True
-        for q, t in self._workers.values():
-            q.put(None)
-            t.join(timeout=2.0)
-        for s in self._subs:
-            try:
-                s.undeclare()
-            except Exception:
-                pass
-        for p in self._pubs.values():
-            try:
-                p.undeclare()
-            except Exception:
-                pass
-        if self._own_session:
+        with self._lock:
+            self._closed = True
+            subs, self._subs = self._subs, []
+            pubs = list(self._pubs.values())
+            self._pubs.clear()
+        self._stop.set()
+        if self._opener is not None:
+            self._opener.join(timeout=5.0)
+        for s in subs:
+            self._undeclare_quietly(s)
+        for p in pubs:
+            self._undeclare_quietly(p)
+        if self._own_session and self.session is not None:
             self.session.close()
 
 
@@ -322,6 +473,7 @@ class _Msg:
     kind: str = "put"  # put | query | reply
     qid: int = 0
     params: dict | None = None
+    order: int = 0  # enqueue order (the tcp_hol FIFO)
 
 
 @dataclass
@@ -332,6 +484,7 @@ class LinkStats:
     congestion_drops: dict = field(default_factory=lambda: dict.fromkeys(CLASSES, 0))
     loss_drops: dict = field(default_factory=lambda: dict.fromkeys(CLASSES, 0))
     retransmits: dict = field(default_factory=lambda: dict.fromkeys(CLASSES, 0))
+    closed_drops: dict = field(default_factory=lambda: dict.fromkeys(CLASSES, 0))
 
 
 class _Direction:
@@ -342,8 +495,13 @@ class _Direction:
     Loss is applied per fragment.  Reliable classes retransmit the fragment
     (bandwidth is spent again and delivery is delayed by one RTT); best-effort
     classes lose the whole message.  Under congestion (class queue over
-    ``queue_bytes``) DROP classes are dropped at ``put``; BLOCK classes are
-    accepted but ``can_send`` turns False, which is what a blocked put would do.
+    ``queue_bytes``) DROP classes are dropped at ``put``; classes listed in the
+    link's ``block_classes`` are accepted instead (a blocked put).  With
+    ``backpressure`` ``can_send`` turns False while the queue is full.
+
+    ``tcp_hol``: one byte-ordered FIFO for all classes (whole messages in put
+    order, one shared ``queue_bytes``), like everything sitting in a TCP send
+    buffer: a big message delays everything behind it, whatever its priority.
     """
 
     def __init__(self, link: LinkEmulator, rng: random.Random):
@@ -355,6 +513,7 @@ class _Direction:
         self.inflight: list = []
         self.last_delivery = dict.fromkeys(CLASSES, 0.0)
         self.order = itertools.count()
+        self.fifo = itertools.count()
         self.stats = LinkStats()
         self.peer: MemoryTransport | None = None
 
@@ -365,23 +524,48 @@ class _Direction:
         n = len(data)
         self.stats.put_bytes[cls] += n
         lk = self.link
-        if not BLOCKING[cls] and self.queued[cls] + n > lk.queue_bytes:
+        if lk.is_closed(now):
+            self.stats.closed_drops[cls] += 1
+            return False
+        if cls not in lk.block_classes and self._queued(cls) + n > lk.queue_bytes:
             self.stats.congestion_drops[cls] += 1
             return False
         if not self.busy():
             self.tx_time = max(self.tx_time, now)
-        self.queues[cls].append(_Msg(key, data, cls, n, **extra))
+        self.queues[cls].append(_Msg(key, data, cls, n, order=next(self.fifo), **extra))
         self.queued[cls] += n
         return True
 
+    def _queued(self, cls: str) -> int:
+        return sum(self.queued.values()) if self.link.tcp_hol else self.queued[cls]
+
     def can_send(self, cls: str) -> bool:
-        return self.queued[cls] < self.link.queue_bytes
+        lk = self.link
+        if not lk.backpressure and cls not in lk.block_classes:
+            return True  # like zenoh DROP: the sender cannot see the queue
+        return self._queued(cls) < lk.queue_bytes
+
+    def reset(self) -> None:
+        """Connection closed: everything queued or in flight is lost."""
+        for c in CLASSES:
+            self.stats.closed_drops[c] += len(self.queues[c])
+            self.queues[c].clear()
+            self.queued[c] = 0
+        for _, _, msg in self.inflight:
+            self.stats.closed_drops[msg.cls] += 1
+        self.inflight.clear()
 
     def advance(self, t: float) -> list:
         """Transmit until ``t``; returns messages whose delivery time is <= t."""
         lk = self.link
         while self.tx_time < t and self.busy():
-            cls = next(c for c in PRIORITY_ORDER if self.queues[c])
+            if lk.tcp_hol:
+                cls = min(
+                    (c for c in CLASSES if self.queues[c]),
+                    key=lambda c: self.queues[c][0].order,
+                )
+            else:
+                cls = next(c for c in PRIORITY_ORDER if self.queues[c])
             msg = self.queues[cls][0]
             frag = min(lk.mtu, msg.remaining)
             if lk.bandwidth:
@@ -402,8 +586,9 @@ class _Direction:
                 self.stats.loss_drops[cls] += 1
                 continue
             when = self.tx_time + lk.latency + msg.extra_delay
-            when = max(when, self.last_delivery[cls])  # per-class FIFO
-            self.last_delivery[cls] = when
+            fifo = "all" if lk.tcp_hol else cls  # one stream: one delivery order
+            when = max(when, self.last_delivery.get(fifo, 0.0))  # FIFO
+            self.last_delivery[fifo] = when
             heapq.heappush(self.inflight, (when, next(self.order), msg))
         if not self.busy():
             self.tx_time = max(self.tx_time, t)
@@ -421,6 +606,13 @@ class LinkEmulator:
     and a seeded RNG; call :meth:`advance` after moving the clock.
 
     ``bandwidth`` is bytes/s per direction (None = infinite).
+
+    ``block_classes`` lists classes that model zenoh BLOCK (accepted over the
+    queue limit); the default is none, matching :class:`ZenohTransport`.
+    ``backpressure=False`` makes ``can_send`` always True for DROP classes (a
+    real zenoh sender cannot see its queue), so only feedback limits the rate.
+    ``tcp_hol`` replaces the per-priority queues with one FIFO (see
+    :class:`_Direction`).  :meth:`close_transport` emulates a transport close.
     """
 
     def __init__(
@@ -433,6 +625,9 @@ class LinkEmulator:
         mtu: int = 8192,
         seed: int = 0,
         reliable: dict | None = None,
+        block_classes: tuple | list = (),
+        backpressure: bool = True,
+        tcp_hol: bool = False,
     ):
         self.clock = clock or VirtualClock()
         self.bandwidth = bandwidth
@@ -440,6 +635,11 @@ class LinkEmulator:
         self.loss = loss
         self.queue_bytes = queue_bytes
         self.mtu = mtu
+        self.block_classes = frozenset(block_classes)
+        self.backpressure = backpressure
+        self.tcp_hol = tcp_hol
+        self.closed_until: float | None = None
+        self.closes = 0
         self.reliable = reliable or {
             "C0": True,
             "C1": True,
@@ -475,6 +675,20 @@ class LinkEmulator:
 
     def stats(self) -> dict:
         return {"up": self.robot.tx.stats, "down": self.base.tx.stats}
+
+    def is_closed(self, now: float | None = None) -> bool:
+        now = self.clock() if now is None else now
+        return self.closed_until is not None and now < self.closed_until
+
+    def close_transport(self, duration_s: float) -> None:
+        """Emulate a zenoh transport close (lease expiry / #1876): everything
+        queued or in flight in both directions is lost, and every put (and query)
+        is dropped for ``duration_s``; then the link reopens by itself."""
+        with self._lock:
+            self.closes += 1
+            self.closed_until = self.clock() + float(duration_s)
+            for d in (self.robot.tx, self.base.tx):
+                d.reset()
 
 
 class MemoryTransport(Transport):

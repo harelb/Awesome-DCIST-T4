@@ -146,9 +146,9 @@ Key space (zenoh): `adt4/<robot>/<stream>`.
 
 | class | key | payload | zenoh QoS | default budget |
 |---|---|---|---|---|
-| C0 control | `adt4/<r>/ctl/req` (base→robot), `adt4/<r>/ctl/ack` (robot→base) | `{id, op, args}` / `{id, ok, result}`; ops: `resync`, `budget {cls: bps}`, `auto {enabled}`, `ping {t}` | INTERACTIVE_HIGH, BLOCK, express, reliable | — |
+| C0 control | `adt4/<r>/ctl/req` (base→robot), `adt4/<r>/ctl/ack` (robot→base) | `{id, op, args}` / `{id, ok, result}`; ops: `resync`, `budget {cls: bps}`, `auto {enabled}`, `ping {t}` | INTERACTIVE_HIGH, DROP, express, reliable | — |
 | C1 state | `adt4/<r>/state` | `{pose: {x,y,z,qw,qx,qy,qz,frame,t}, guards: {...RuntimeGuardsMsg fields}, health: {nominal, warning, error, nodes}, results: [..ActionResultMsg dicts, last 10], stats: {per-class sent bytes, queue}}` | INTERACTIVE_LOW, DROP | 5 kB/s, 2 Hz |
-| C2 graph | `adt4/<r>/dsg/delta` | `{kind: "delta"|"snapshot_begin"|"snapshot_chunk"|"snapshot_end", ...GraphDelta.encode()}` | DATA_HIGH, BLOCK | 50 kB/s, 1 Hz tick |
+| C2 graph | `adt4/<r>/dsg/delta` | `{kind: "delta"|"snapshot_begin"|"snapshot_chunk"|"snapshot_end", ...GraphDelta.encode()}` | DATA_HIGH, DROP, reliable | 50 kB/s, 1 Hz tick |
 | C3 mesh | `adt4/<r>/mesh/tile/<key>` and `adt4/<r>/mesh/manifest` | tile dict / `{tiles: {key: hash}}` | DATA_LOW, DROP | 100 kB/s |
 | C5 video | `adt4/<r>/video/<camera>` | one encoded frame, see §12 | DATA_LOW, DROP, best effort | 400 kB/s |
 
@@ -421,9 +421,24 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
   (best-effort, DROP) loss. Each key is re-requested at most every 10 s.
 * **`ping` args** are `{t, rx: {C1,C2,C3: bytes/s measured at the base}, rtt}`, sent
   fire-and-forget once per second per robot. The ack result is
-  `{t (echo), t_robot, budgets}`. In auto mode the agent runs AIMD on the C2/C3 budgets
-  from `rx` (goodput vs its own put rate) and RTT inflation, clamped to
-  `budget_min`/`budget_max`.
+  `{t (echo), t_robot, budgets}`. The agent uses `rx` for auto mode only until it has seen an
+  `fb` (bases that predate `fb`).
+* **Extra C0 op `fb {t, rx: {C0..C5: goodput bytes/s}, loss: {C0..C5: fraction lost}, rtt}`**
+  (base→robot), sent fire-and-forget once per second per robot; **never acked**. `loss` is
+  the share of messages missing from the per-stream seq numbering over the last 1 s window,
+  per class. In auto mode the agent runs AIMD on the C2/C3 budgets: x0.7 (at most every 2 s)
+  when a class's loss exceeds 5 %, its goodput is below 80 % of its own put rate, or the RTT
+  exceeds twice the lowest seen + 0.25 s; +10 % of `budget_max` while the class is backlogged
+  and the link keeps up; clamped to `budget_min`/`budget_max`. An agent that predates `fb`
+  answers it with an `ok: false` ack (unknown op), which the receiver ignores.
+* **`resend` for C2: `resend {stream: "dsg", from_seq, to_seq}`** (inclusive), an extension
+  of `resend {streams}` (both forms may be combined). The agent keeps its last `c2_ring`
+  (default 256) packed C2 messages and re-queues that range at the front of C2,
+  byte-identical (same seq, same epoch). Ack result `{resend: [...], dsg: {from_seq, to_seq,
+  resent}}`; if any seq of the range has left the ring the ack is `ok: false`,
+  `result.error = "range gone: dsg A-B"`.
+* **C1 state `seqs: {dsg: N}`**: the last C2 seq the agent handed to the transport, so the
+  receiver can detect a lost *last* C2 message (no later seq would reveal the gap).
 * **C2 payload kinds.** `snapshot_begin` (empty delta) clears the mirror. Each
   `snapshot_chunk` is a budget-sized `GraphDelta` (closest to the robot first).
   `snapshot_end` (empty delta) completes the snapshot. The C3 manifest is re-sent
@@ -432,23 +447,33 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
 * **Manifest payload** is `{tiles: {key: hash}, tile_size}`. It lists only tiles the
   agent has already handed to the transport, and it is built at send time, so on the
   in-order C3 stream a mismatch means a tile was lost.
-* **Reliability.** C0, C1 and C2 are RELIABLE. C3 is BEST_EFFORT, because lost tiles
-  are repaired through the manifest. BLOCK classes (C0, C2) are published from a
-  per-class worker thread, so a congested C2 never stalls C1. `Transport.can_send(cls)`
-  exposes the backpressure to the scheduler.
+* **Reliability.** Every class is congestion-control **DROP** (the §8 table said BLOCK for
+  C0/C2): a BLOCK message on a congested radio stalls the zenoh transport and then closes
+  it (zenoh #1876). C0, C1 and C2 are RELIABLE (link-level retransmission). C3/C5 are
+  BEST_EFFORT. Delivery is the application's job: C0 requests are retried until acked, C2
+  gaps are repaired with `resend` (then resync), C3 tiles through the manifest.
+  `Transport.can_send(cls)` is, for zenoh, only a local in-flight counter; congestion is
+  signalled by `fb`. C4 queries are sent with DROP; replies inherit the query's QoS.
 * **Epochs.** The receiver retires a robot's old epoch, so late messages from the
   previous agent instance are ignored. Seeing a new or first epoch clears the
-  mirror and tiles and immediately requests a resync (not rate-limited). C2 seq gaps
-  request a resync rate-limited to once per 5 s. Gaps on other streams only count as `drops`.
+  mirror and tiles and immediately requests a resync (not rate-limited). C2 is applied in
+  seq order: after a seq gap later C2 messages are held back (up to `hold_max`, 1024) and the
+  range is requested with `resend {stream: "dsg"}`; after 3 attempts (each `max(2 s, 3 RTT)`)
+  or an `ok: false` ack the held messages are applied and a resync is requested, rate-limited
+  to once per 5 s (deferred, not dropped). The same happens when the state's `seqs.dsg` stays
+  ahead of what arrived for 2 s with nothing held. Gaps on other streams count as `drops` and
+  per-class `lost`.
 * **`on_update` data.** `snapshot` → `{epoch, nodes, edges}`. `delta` →
   `GraphDelta.encode()` + `{seq}`. `tiles` → `{changed, removed}`. `state` → the C1
   dict. `link` → `Receiver.link(robot)`, once per second.
 * **`Receiver.link(robot)` extra keys** beyond `/api/live`: `state_age_s`, `rtt_ms`,
-  `bytes` (per-class totals), `resync_requests`, `robot_queue`. `resyncs` counts
+  `bytes` (per-class totals), `resync_requests`, `robot_queue`, `loss` (per class, last 1 s
+  window), `lost` (per-class totals), `resend_requests`, `resend_escalations`, `c2_held`. `resyncs` counts
   *completed* snapshots. `latency_ms` is the envelope `t` (robot wall clock)
   subtracted from receive time, so it includes clock skew between machines.
 * **Optional Receiver kwargs**: `clock`, `threaded` (False means call `tick()`
-  yourself), `retry_s`, `max_retries`, `resync_min_interval`, `ping_period`.
+  yourself), `retry_s`, `max_retries`, `resync_min_interval`, `ping_period`,
+  `resend_attempts` (3), `resend_timeout_s` (2.0), `hold_max` (1024), `fb_period` (1.0).
 * **Health source.** The agent reads the robot's `StatusTable` from
   `/global/ros_system_monitor/table_in`, filtered by `monitor_name == robot`. That is
   where `run-adt4` remaps each robot's `~/table_out`.
@@ -457,6 +482,10 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
 
 Additive (clients may ignore):
 * `GET /api/health` also returns `ros_error` and `fleetlink_error` (why a subsystem is off).
+  `fleetlink` is true only once the zenoh session is open; `fleetlink_state` is `disabled`
+  (`--no-fleetlink`), `error` (no receiver, e.g. zenoh missing), `waiting` (the transport keeps
+  retrying because no router is reachable; `fleetlink_error` names the endpoints) or `connected`.
+* `GET /api/live` also returns `transport: {state, endpoints, error}` (same states).
 * `GET /api/config` also returns `topology_path`.
 * Node detail also returns `n_images`. Image URLs are relative and carry **no token**:
   when auth is on, the client appends `?token=` (for `<img>`).

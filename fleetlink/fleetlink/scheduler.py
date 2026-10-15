@@ -40,6 +40,10 @@ class Scheduler:
         budget_min: dict | None = None,
         budget_max: dict | None = None,
         auto: bool = False,
+        loss_threshold: float = 0.05,
+        ai_step_frac: float = 0.1,
+        md_factor: float = 0.7,
+        md_interval_s: float = 2.0,
     ):
         self.transport = transport
         self.clock = clock
@@ -49,6 +53,11 @@ class Scheduler:
         self.budget_min = {"C2": 5_000, "C3": 5_000, **(budget_min or {})}
         self.budget_max = {"C2": 500_000, "C3": 1_000_000, **(budget_max or {})}
         self.auto = auto
+        self.loss_threshold = loss_threshold
+        self.ai_step_frac = ai_step_frac
+        self.md_factor = md_factor
+        self.md_interval_s = md_interval_s
+        self.decreases = 0
         self.queues: dict[str, deque[Item]] = {c: deque() for c in CLASSES}
         self.tokens = {c: self._cap(c) for c in CLASSES}
         self.total_tokens = self._total_cap()
@@ -183,13 +192,19 @@ class Scheduler:
         rtt: float | None = None,
         now: float | None = None,
         base_rtt: float | None = None,
+        loss: dict | None = None,
     ) -> dict:
-        """Adjust C2/C3 budgets from receiver-measured goodput (bytes/s per class).
+        """Adjust C2/C3 budgets from the receiver's feedback (C0 ``fb``, or the
+        ``rx`` of a legacy ``ping``): ``rx`` = goodput in bytes/s per class,
+        ``loss`` = fraction of messages lost per class (seq gaps), ``rtt`` in s.
 
-        Multiplicative decrease (x0.7, at most every 2 s) when goodput falls below
-        80% of what we put, or when the RTT inflates (queueing); additive increase
-        (+10% of max) when the class is backlogged and goodput keeps up.
-        Budgets stay within [budget_min, budget_max].  No-op unless ``auto``.
+        Multiplicative decrease (x``md_factor``, at most every ``md_interval_s``)
+        when a class's loss exceeds ``loss_threshold`` (all classes are zenoh
+        DROP, so a congested link shows up as seq gaps), when its goodput falls
+        below 80% of what we put, or when the RTT inflates (queueing).
+        Additive increase (+``ai_step_frac`` of max) when the class is
+        backlogged and the link keeps up.  Budgets stay within
+        [budget_min, budget_max].  No-op unless ``auto``.
         """
         now = self.clock() if now is None else now
         with self._lock:
@@ -198,21 +213,23 @@ class Scheduler:
             congested_rtt = (
                 rtt is not None and base_rtt is not None and rtt > 2.0 * base_rtt + 0.25
             )
-            may_decrease = now - self._last_decrease >= 2.0
+            may_decrease = now - self._last_decrease >= self.md_interval_s
             decreased = False
             for c in AUTO_CLASSES:
                 b = self.budgets[c] or self.budget_min[c]
                 tx = self.rate[c]
                 got = float(rx.get(c, 0.0))
-                lossy = tx > 1000 and got < 0.8 * tx
+                lost = float((loss or {}).get(c) or 0.0)
+                lossy = lost > self.loss_threshold or (tx > 1000 and got < 0.8 * tx)
                 if lossy or congested_rtt:
                     if may_decrease:
-                        b *= 0.7
+                        b *= self.md_factor
                         decreased = True
                 elif self.queues[c] and got >= 0.9 * tx:
-                    b += 0.1 * self.budget_max[c]
+                    b += self.ai_step_frac * self.budget_max[c]
                 self.budgets[c] = min(self.budget_max[c], max(self.budget_min[c], b))
                 self.tokens[c] = min(self.tokens[c], self._cap(c))
             if decreased:
                 self._last_decrease = now
+                self.decreases += 1
             return dict(self.budgets)

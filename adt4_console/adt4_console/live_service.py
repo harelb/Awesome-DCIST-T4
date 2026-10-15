@@ -2,6 +2,11 @@
 
 The receiver is imported lazily; with ``--no-fleetlink`` (or no zenoh /
 fleetlink) ``receiver`` stays ``None`` and live endpoints return empty.
+
+``ZenohTransport`` never fails for want of a router: it retries the open in
+the background (and reconnects after router restarts), so the receiver is
+created at once and :attr:`LiveService.status` reports ``waiting`` until the
+session is open, then ``connected``.
 """
 
 from __future__ import annotations
@@ -20,8 +25,7 @@ class LiveService:
         self.hub = hub
         self.receiver = receiver
         self.graph = None  # GraphService, wired by the app
-        self.error: str | None = None
-        self.retry_s = 10.0
+        self.error: str | None = None  # the receiver could not be created at all
         self.camera_timeout_s = 5.0
         self._stop = threading.Event()
         self.video = VideoRelay(self, hub)  # live camera video (API.md §12)
@@ -29,36 +33,71 @@ class LiveService:
     def start(self) -> None:
         if self.receiver is not None:
             self.receiver.start()
-        elif self.settings.fleetlink and not self._connect():
-            # zenohd usually comes up after the console (fleet zenohd / base-station
-            # session): keep retrying in the background.
-            threading.Thread(
-                target=self._retry, name="fleetlink-connect", daemon=True
-            ).start()
+        elif self.settings.fleetlink:
+            self._connect()
 
     def _connect(self) -> bool:
         try:
             from fleetlink.receiver import Receiver
             from fleetlink.transport import ZenohTransport
 
+            # opens at once or keeps retrying in the background (zenohd usually
+            # comes up after the console)
             transport = ZenohTransport(
                 connect=self.settings.zenoh_connect or "tcp/127.0.0.1:7447"
             )
             receiver = Receiver(transport, self.on_update)
             receiver.start()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001  (e.g. zenoh / fleetlink missing)
             self.error = f"{type(e).__name__}: {e}"
             log.warning("fleetlink unavailable: %s", self.error)
             return False
         self.receiver = receiver
         self.error = None
-        log.info("fleetlink receiver connected")
+        opened = getattr(transport, "opened", None)
+        if opened is not None and not opened.is_set():
+            log.info(
+                "fleetlink waiting for a zenoh router at %s",
+                ", ".join(getattr(transport, "endpoints", []) or []),
+            )
+            threading.Thread(
+                target=self._log_when_open,
+                args=(opened,),
+                name="fleetlink-open-wait",
+                daemon=True,
+            ).start()
+        else:
+            log.info("fleetlink receiver connected")
         return True
 
-    def _retry(self) -> None:
-        while not self._stop.wait(self.retry_s):
-            if self._connect():
+    def _log_when_open(self, opened: threading.Event) -> None:
+        while not self._stop.is_set():
+            if opened.wait(1.0):
+                log.info("fleetlink receiver connected")
                 return
+
+    @property
+    def status(self) -> dict:
+        """``{state, endpoints, error}``; state is ``disabled`` (--no-fleetlink),
+        ``error`` (no receiver: ``error`` says why), ``waiting`` (zenoh session
+        not open yet: no router reachable) or ``connected``."""
+        if self.receiver is None:
+            if self.error is not None:
+                return {"state": "error", "endpoints": [], "error": self.error}
+            return {"state": "disabled", "endpoints": [], "error": None}
+        tr = self.receiver.transport
+        endpoints = list(getattr(tr, "endpoints", []) or [])
+        opened = getattr(tr, "opened", None)
+        if opened is not None and not opened.is_set():
+            where = ", ".join(endpoints) or "?"
+            err = getattr(tr, "open_error", None)
+            msg = f"waiting for a zenoh router at {where}"
+            return {
+                "state": "waiting",
+                "endpoints": endpoints,
+                "error": f"{msg} ({err})" if err else msg,
+            }
+        return {"state": "connected", "endpoints": endpoints, "error": None}
 
     def stop(self) -> None:
         self._stop.set()
@@ -77,7 +116,12 @@ class LiveService:
 
     @property
     def available(self) -> bool:
+        """The receiver exists (live endpoints work, possibly still empty)."""
         return self.receiver is not None
+
+    @property
+    def connected(self) -> bool:
+        return self.status["state"] == "connected"
 
     def robots(self) -> list[str]:
         return list(self.receiver.robots()) if self.receiver is not None else []
@@ -116,8 +160,11 @@ class LiveService:
 
     def links(self) -> dict:
         if self.receiver is None:
-            return {"robots": {}}
-        return {"robots": {r: self.receiver.link(r) for r in self.receiver.robots()}}
+            return {"robots": {}, "transport": self.status}
+        return {
+            "robots": {r: self.receiver.link(r) for r in self.receiver.robots()},
+            "transport": self.status,
+        }
 
     def state(self, robot: str) -> dict | None:
         if self.receiver is None:

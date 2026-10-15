@@ -31,13 +31,15 @@ def health(request: Request):
                 neo4j[s.name] = True
             except Exception:  # noqa: BLE001
                 neo4j[s.name] = False
+    link = svc.live.status
     return {
         "ok": True,
         "version": __version__,
         "ros": svc.ros.available,
         "ros_error": svc.ros.error,
-        "fleetlink": svc.live.available,
-        "fleetlink_error": svc.live.error,
+        "fleetlink": svc.live.connected,
+        "fleetlink_state": link["state"],
+        "fleetlink_error": link["error"],
         "neo4j": neo4j,
     }
 

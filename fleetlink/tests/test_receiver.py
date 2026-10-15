@@ -26,39 +26,125 @@ def _delta(records, edges=()):
     return {"kind": "delta", **GraphState().diff(records, set(edges)).encode()}
 
 
-def test_gap_triggers_rate_limited_resync():
+def _c2(rx, seq, payload, epoch="E1"):
+    rx._on_msg("adt4/r/dsg/delta", env_bytes("r", "dsg/delta", seq, epoch, payload))
+
+
+def _ack(rx, req, ok=True, result=None, seq=0):
+    ack = {"id": req["id"], "ok": ok, "result": result or {}}
+    rx._on_msg("adt4/r/ctl/ack", env_bytes("r", "ctl/ack", seq, "E1", ack))
+
+
+def _first_contact(rx, tr, items):
+    _c2(rx, 0, _delta(dict(items[:1])))
+    assert len(_reqs(tr, "resync")) == 1  # first contact = epoch change
+    _ack(rx, _reqs(tr, "resync")[0])
+
+
+def test_gap_holds_back_and_resend_fills_it():
     tr, clock, rx, events = _rx()
     recs, _, _ = synthetic_records(6)
     items = list(recs.items())
-    rx._on_msg(
-        "adt4/r/dsg/delta",
-        env_bytes("r", "dsg/delta", 0, "E1", _delta(dict(items[:2]))),
-    )
-    assert len(_reqs(tr, "resync")) == 1  # first contact = epoch change
-    ack = {"id": _reqs(tr, "resync")[0]["id"], "ok": True, "result": {}}
-    rx._on_msg("adt4/r/ctl/ack", env_bytes("r", "ctl/ack", 0, "E1", ack))
-    clock.advance(10.0)
-    rx._on_msg(
-        "adt4/r/dsg/delta",
-        env_bytes("r", "dsg/delta", 1, "E1", _delta(dict(items[2:3]))),
-    )
-    assert len(_reqs(tr, "resync")) == 1  # contiguous: no resync
-    rx._on_msg(
-        "adt4/r/dsg/delta",
-        env_bytes("r", "dsg/delta", 4, "E1", _delta(dict(items[3:4]))),
-    )
-    assert len(_reqs(tr, "resync")) == 2
+    _first_contact(rx, tr, items)
+    _c2(rx, 1, _delta(dict(items[1:2])))
+    assert not _reqs(tr, "resend")  # contiguous
+    _c2(rx, 4, _delta(dict(items[4:5])))  # 2 and 3 lost
+    (req,) = _reqs(tr, "resend")
+    assert req["args"] == {"stream": "dsg", "from_seq": 2, "to_seq": 3}
+    assert set(rx.graph("r").records) == {s for s, _ in items[:2]}  # 4 held back
     link = rx.link("r")
-    assert link["gaps"] == 1 and link["drops"] == 2
-    # a second gap right away is rate limited (and the resync is still pending)
-    rx._on_msg(
-        "adt4/r/dsg/delta",
-        env_bytes("r", "dsg/delta", 6, "E1", _delta(dict(items[4:5]))),
-    )
-    assert len(_reqs(tr, "resync")) == 2
-    # deltas are still applied
+    assert link["gaps"] == 1 and link["drops"] == 2 and link["c2_held"] == 1
+    _ack(rx, req, result={"dsg": {"resent": 2}}, seq=1)
+    _c2(rx, 2, _delta(dict(items[2:3])))
+    _c2(rx, 3, _delta(dict(items[3:4])))
+    _c2(rx, 3, _delta(dict(items[3:4])))  # duplicate: ignored
     assert set(rx.graph("r").records) == {s for s, _ in items[:5]}
-    assert [k for _, k, _ in events].count("delta") == 4
+    deltas = [d["seq"] for _, k, d in events if k == "delta"]
+    assert deltas == [0, 1, 2, 3, 4]  # applied in order
+    assert len(_reqs(tr, "resync")) == 1  # no resync needed
+    assert rx.link("r")["c2_held"] == 0 and not rx.pending_requests()
+
+
+def test_resend_retries_then_escalates_to_resync():
+    tr, clock, rx, events = _rx()
+    recs, _, _ = synthetic_records(6)
+    items = list(recs.items())
+    _first_contact(rx, tr, items)
+    clock.advance(10.0)  # past the resync rate limit
+    _c2(rx, 3, _delta(dict(items[3:4])))
+    for _ in range(3):
+        clock.advance(2.1)
+        rx.tick()
+    resends = _reqs(tr, "resend")
+    # 3 attempts (first + 2 re-requests); C0 retries of the same ids may add more
+    assert len({r["id"] for r in resends}) == 3
+    assert len(_reqs(tr, "resync")) == 2  # the escalation
+    link = rx.link("r")
+    assert link["resend_escalations"] == 1 and link["c2_held"] == 0
+    # what was held is applied (the resync's snapshot repairs the rest)
+    assert items[3][0] in rx.graph("r").records
+
+
+def test_range_gone_escalates_at_once():
+    tr, clock, rx, events = _rx()
+    recs, _, _ = synthetic_records(6)
+    items = list(recs.items())
+    _first_contact(rx, tr, items)
+    clock.advance(10.0)
+    _c2(rx, 2, _delta(dict(items[2:3])))
+    (req,) = _reqs(tr, "resend")
+    _ack(rx, req, ok=False, result={"error": "range gone: dsg 1-1"}, seq=1)
+    assert len(_reqs(tr, "resync")) == 2
+    assert rx.link("r")["resend_escalations"] == 1
+
+
+def test_escalation_resync_waits_for_rate_limit():
+    tr, clock, rx, events = _rx()
+    recs, _, _ = synthetic_records(6)
+    items = list(recs.items())
+    _first_contact(rx, tr, items)  # resync requested at t=100
+    _c2(rx, 2, _delta(dict(items[2:3])))
+    (req,) = _reqs(tr, "resend")
+    _ack(rx, req, ok=False, result={"error": "range gone"}, seq=1)
+    assert len(_reqs(tr, "resync")) == 1  # rate-limited, not forgotten
+    clock.advance(5.0)
+    rx.tick()
+    assert len(_reqs(tr, "resync")) == 2
+
+
+def test_no_put_under_the_lock_and_loss_per_class():
+    """Requests (resend, tiles, resync, ping, fb, retries) leave through the
+    outbox after the receiver's lock is released."""
+    clock = VirtualClock(100.0)
+
+    class LockCheckingTransport(RecordingTransport):
+        def put(self, key, data, cls):
+            assert not rx._lock._is_owned(), f"put of {key} under the lock"
+            super().put(key, data, cls)
+
+    tr = LockCheckingTransport()
+    rx = Receiver(tr, None, clock=clock, threaded=False)
+    rx.start()
+    recs, _, _ = synthetic_records(6)
+    items = list(recs.items())
+    _c2(rx, 0, _delta(dict(items[:1])))  # first contact → resync
+    _c2(rx, 3, _delta(dict(items[3:4])))  # gap → resend
+    rx._on_msg(
+        "k", env_bytes("r", "mesh/manifest", 0, "E1", {"tiles": {"a": "1"}})
+    )  # → tiles
+    for seq in (0, 1, 2, 5, 6):  # 3 and 4 lost
+        rx._on_msg("k", env_bytes("r", "state", seq, "E1", {"pose": None}))
+    rx.request_keyframe("r", "rgb")
+    for _ in range(3):
+        clock.advance(1.1)
+        rx.tick()  # retries, ping, fb
+    ops = {r["op"] for r in _reqs(tr)}
+    assert {"resync", "resend", "tiles", "ping", "fb", "video_keyframe"} <= ops
+    link = rx.link("r")
+    assert link["lost"]["C1"] == 2 and link["lost"]["C2"] == 2
+    fb = _reqs(tr, "fb")[1]  # the first one goes before a window has closed
+    assert set(fb["args"]) == {"t", "rx", "loss", "rtt"}
+    assert fb["args"]["loss"]["C1"] == round(2 / 7, 4)
 
 
 def test_epoch_change_resets_and_resyncs():
