@@ -21,6 +21,10 @@ import time
 log = logging.getLogger(__name__)
 
 STATUS_TABLE_TOPIC = "/global/ros_system_monitor/table_in"
+# fleetlink-bridge (fleetlink mode): one std_msgs/String JSON per robot,
+# fleetlink.relay.RelayCore.status() — link state + per-topic acks
+LINK_STATUS_TOPIC = "/fleetlink/link_status"
+LINK_STATUS_FRESH_S = 5.0  # older than this: treat the robot as router mode
 
 # omniplanner plugin type -> (kind, topic suffix, message type)
 PLUGIN_TYPES = {
@@ -189,6 +193,9 @@ class RosBridge:
         self._plan: dict[str, RobotPlanState] = collections.defaultdict(RobotPlanState)
         self._subscribed: set[str] = set()
         self._status_nodes: dict[str, dict[str, dict]] = {}
+        # robot -> (receive time, fleetlink-bridge link status)
+        self._link_status: dict[str, tuple[float, dict]] = {}
+        self._link_cv = threading.Condition()
         self._calls: queue.Queue = queue.Queue()
         self._pubs: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -229,6 +236,7 @@ class RosBridge:
         self.error = None
         try:
             self.call(self._subscribe_status).result(5)
+            self.call(self._subscribe_link_status).result(5)
             for r in robots or []:
                 self.ensure_robot(r)
         except Exception as e:  # noqa: BLE001
@@ -353,6 +361,56 @@ class RosBridge:
                 {r: list(d.values()) for r, d in self._status_nodes.items()}
             )
 
+    def _subscribe_link_status(self) -> None:
+        cls = import_type("std_msgs/msg/String")
+        self.node.create_subscription(cls, LINK_STATUS_TOPIC, self._on_link_status, 10)
+
+    def _on_link_status(self, msg) -> None:
+        try:
+            st = json.loads(msg.data)
+            robot = st["robot"]
+        except (ValueError, KeyError, TypeError):
+            return
+        with self._link_cv:
+            self._link_status[robot] = (time.time(), st)
+            self._link_cv.notify_all()
+
+    def link_status(self, robot: str) -> dict | None:
+        """The fleetlink-bridge's status of ``robot`` (fleetlink mode), or None when
+        no fresh status exists (router mode: robot topics are on the base graph)."""
+        with self._link_cv:
+            t, st = self._link_status.get(robot, (0.0, None))
+        return st if st is not None and time.time() - t < LINK_STATUS_FRESH_S else None
+
+    def _acked(self, robot: str, topic: str) -> int:
+        st = self.link_status(robot) or {}
+        return int(((st.get("topics") or {}).get(topic) or {}).get("acked") or 0)
+
+    def wait_delivered(
+        self, robot: str, topic: str, acked_before: int, timeout: float = 3.0
+    ) -> bool:
+        """True once the robot acked a message of ``topic`` after ``acked_before``."""
+        deadline = time.time() + timeout
+        with self._link_cv:
+            while True:
+                _, st = self._link_status.get(robot, (0.0, {}))
+                t = ((st or {}).get("topics") or {}).get(topic) or {}
+                if int(t.get("acked") or 0) > acked_before:
+                    return True
+                left = deadline - time.time()
+                if left <= 0:
+                    return False
+                self._link_cv.wait(left)
+
+    @staticmethod
+    def link_summary(st: dict | None) -> dict | None:
+        if not st:
+            return None
+        return {
+            k: st.get(k)
+            for k in ("connected", "rtt", "loss", "last_seen", "age_s", "cfg_match")
+        }
+
     def ensure_robot(self, robot: str) -> None:
         with self._lock:
             if robot in self._subscribed or not self.available:
@@ -437,7 +495,11 @@ class RosBridge:
 
     # --------------------------------------------------------------- planning
     def plan(self, robot: str) -> dict:
-        return self._plan[robot].to_dict()
+        d = self._plan[robot].to_dict()
+        link = self.link_summary(self.link_status(robot))
+        if link is not None:
+            d["link"] = link  # fleetlink mode: the relay's view of the robot
+        return d
 
     def plugins_for(self, robot: str) -> list[dict]:
         return [
@@ -473,12 +535,32 @@ class RosBridge:
         self._publish_plan(robot)
         return {"ok": True, "topic": topic, "msg": fields, "subscribers": subs}
 
-    def executor_cmd(self, robot: str, cmd: str) -> dict:
+    def executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
+        """Publish Pause/Resume.  Router mode: ``subscribers`` is the ROS match
+        count.  Fleetlink mode (a fresh ``fleetlink/link_status`` for the robot):
+        fleetlink-bridge is always the local subscriber, so that count says
+        nothing; instead wait for the robot's relay ack (``delivered``) and report
+        the *robot-side* subscriber count it carried (None if not acked yet; the
+        relay keeps retrying within the topic's ttl)."""
         topic = f"/{robot}/spot_executor_node/{cmd}"
+        link = self.link_status(robot)
+        before = self._acked(robot, topic)
         subs = self.publish(topic, "std_msgs/msg/Bool", {"data": True})
-        return {
-            "ok": True,
-            "topic": topic,
-            "msg": {"data": True},
-            "subscribers": subs,
-        }
+        out = {"ok": True, "topic": topic, "msg": {"data": True}, "subscribers": subs}
+        if link is None:
+            return out
+        if topic not in (link.get("topics") or {}):
+            # fleetlink mode but relay.yaml does not carry this topic for the robot
+            out.update(via="fleetlink", delivered=False, subscribers=None,
+                       error="topic not relayed", link=self.link_summary(link))  # fmt: skip
+            return out
+        delivered = self.wait_delivered(robot, topic, before, deliver_timeout)
+        st = self.link_status(robot) or link
+        t = (st.get("topics") or {}).get(topic) or {}
+        out.update(
+            via="fleetlink",
+            delivered=delivered,
+            subscribers=t.get("subs") if delivered else None,
+            link=self.link_summary(st),
+        )
+        return out

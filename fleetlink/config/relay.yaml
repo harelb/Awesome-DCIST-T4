@@ -21,12 +21,18 @@
 #                  rebooted robot never re-runs a stale plan.
 #   qos            QoS of the republished ROS endpoint on the receiving side
 #                  (reliability: reliable|best_effort, durability: volatile|transient_local, depth)
-#   platform       optional list; only relay for these robot platforms (spot, husky)
+#   platform       optional list; only relay for these robot platforms (topology
+#                  platform_type: spot, phoenix; "husky" kept as an alias). A robot without
+#                  platform_type counts as spot.
 # tf:        composed transform pairs (robot side uses a tf2 Buffer, base side republishes to
 #            /tf and /tf_static). Static transforms are sent once and again on resync.
 # services:  request/reply relayed with the C0 request/ack pattern (not Zenoh get).
 #            dir is the direction of the REQUEST (down: base calls robot-side server;
-#            up: robot calls base-side server).
+#            up: robot calls base-side server). `service` is the name on the robot;
+#            `base_name` (default: same) the name on the base, where `{base}` is the
+#            base station's ADT4_ROBOT_NAME (fleetlink-bridge param base_name).
+#            timeout_s: the caller gives up after this; requests are retried every 1 s.
+# Unknown keys, modes, directions or classes are rejected (fleetlink.relay.RelayConfig).
 version: 1
 
 topics:
@@ -50,8 +56,10 @@ topics:
     ttl_s: 30
     replay_on_resync: false
     qos: {reliability: reliable, durability: volatile, depth: 1}
-    platform: [husky]
-  # unverified: no subscriber found in spot_tools_ros at this checkout (see inventory)
+    platform: [phoenix, husky]
+  # NOTE: the console's Pause/Resume publish these, but NOTHING subscribes to them on the
+  # robot at this checkout (spot_tools_ros has no pause/resume subscriber; see inventory).
+  # Kept so the commands arrive once a consumer exists; the ack's `subs: 0` shows it.
   - topic: /{robot}/spot_executor_node/pause
     type: std_msgs/msg/Bool
     dir: down
@@ -104,7 +112,7 @@ topics:
     replay_on_resync: false
     qos: {reliability: reliable, durability: volatile, depth: 10}
     # NOTE: not per-robot; every robot publishes into the same global topic (monitor_name
-    # in the msg identifies the robot). BaseBridge must republish it without a {robot} prefix.
+    # in the msg identifies the robot). BaseBridge republishes it as is (one shared publisher).
 
   # ---------------------------------------------------------------- RViz-only (up), OFF by default
   # Heavy; the web console gets map/paths through fleetlink C2/C3 instead. Uncomment only if RViz
@@ -173,7 +181,10 @@ tf:
 
 services:
   # robot-side executor calls this; the base (heracles_state_updater) serves it
+  # (master.launch.yaml remaps heracles_state_updater's ~/update_holding_state to the base
+  # session's own name, hence base_name)
   - service: /{robot}/update_holding_state
+    base_name: /{base}/update_holding_state
     type: heracles_ros_interfaces/srv/UpdateHoldingState
     dir: up
     cls: C0

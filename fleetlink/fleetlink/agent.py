@@ -1049,6 +1049,17 @@ class AgentNode:
             self.log.warn("tf2_ros unavailable: no pose")
         nd.create_timer(1.0 / max(cfg["state_hz"], 1.0), self._update_pose)
 
+        # generic ROS relay (relay.yaml); off unless ``relay_config`` is set, so
+        # router-mode deployments behave exactly as before
+        self.relay = None
+        relay_config = p("relay_config", "")
+        relay_platform = p("relay_platform", "")
+        topology = p("topology", "")
+        if relay_config:
+            self.relay = self._start_relay(
+                robot, relay_config, relay_platform, topology
+            )
+
         self._decoder = threading.Thread(target=self._decode_loop, daemon=True)
         self._decoder.start()
         self._tick_period = 1.0 / tick_hz
@@ -1061,6 +1072,26 @@ class AgentNode:
         self.log.info(
             f"fleetlink agent robot={robot} epoch={self.core.epoch} dsg={dsg_topic} "
             f"budgets={cfg['budgets']}"
+        )
+
+    def _start_relay(self, robot, config_path, platform, topology):
+        from fleetlink import relay_ros
+        from fleetlink.relay import RelayConfig
+
+        if config_path == "default":
+            config_path = str(relay_ros.DEFAULT_RELAY_CONFIG)
+        if not platform:
+            topo = relay_ros.load_topology(topology or str(relay_ros.DEFAULT_TOPOLOGY))
+            platform = relay_ros.topology_robots(topo).get(
+                robot, relay_ros.DEFAULT_PLATFORM
+            )
+        return relay_ros.RobotRelay(
+            self.node,
+            self.transport,
+            robot,
+            RelayConfig.load(config_path),
+            platform=platform,
+            tf_buffer=self._tf_buffer,
         )
 
     def _open_zenoh(self, connect: list[str]):
@@ -1231,19 +1262,27 @@ class AgentNode:
         self._ticker.join(timeout=2.0)
         self._video_thread.join(timeout=2.0)
         self._decoder.join(timeout=2.0)
+        if self.relay is not None:
+            self.relay.shutdown()
         self.core.close()
 
 
 def main(args=None) -> None:
     import rclpy
+    from rclpy.executors import MultiThreadedExecutor
 
     rclpy.init(args=args)
     agent = AgentNode()
+    # multi-threaded: the relay's proxy service servers block (reentrant group)
+    # while the base answers; the agent's own callbacks stay mutually exclusive
+    executor = MultiThreadedExecutor()
+    executor.add_node(agent.node)
     try:
-        rclpy.spin(agent.node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         agent.shutdown()
         agent.transport.close()
         agent.node.destroy_node()

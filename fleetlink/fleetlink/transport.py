@@ -143,6 +143,9 @@ ZENOH_DEFAULTS = {
         "period_max_ms": 4000,
         "period_increase_factor": 2,
     },
+    # ms before an unanswered endpoint (e.g. a dead radio) is given up for the next
+    # one in the list; zenoh's default is 10 s
+    "transport/unicast/open_timeout": 3000,
     # µs a DROP message waits for a free batch before it is dropped
     "transport/link/tx/queue/congestion_control/drop/wait_before_drop": 1000,
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments": 50000,

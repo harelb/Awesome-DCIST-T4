@@ -20,5 +20,10 @@ setup(
     description="QoS-aware robot to base-station scene-graph bridge",
     license="BSD-3-Clause",
     tests_require=["pytest"],
-    entry_points={"console_scripts": ["fleetlink-agent = fleetlink.agent:main"]},
+    entry_points={
+        "console_scripts": [
+            "fleetlink-agent = fleetlink.agent:main",
+            "fleetlink-bridge = fleetlink.relay_ros:main",
+        ]
+    },
 )
