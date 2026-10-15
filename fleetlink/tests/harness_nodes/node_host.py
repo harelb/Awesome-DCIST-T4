@@ -6,7 +6,8 @@ reporting JSON lines on stdout (``{"ev": ...}``).
 ``--role robot --robot r1``: a fake executor (counts ``compiled_plan_out``
 receipts per plan id and publishes one ``action_result`` per receipt after
 ``--exec-delay`` seconds), a ``map -> r1/base_link`` TF publisher, an
-``update_holding_state`` client and an optional random occupancy-grid load.
+``update_holding_state`` client, an optional random occupancy-grid load and an
+optional random camera image (the agent's ``rgb`` camera).
 
 ``--role base --robots r1,r2 --base willow``: plan publishers, ``action_result``
 subscribers, a tf2 buffer, the ``/willow/update_holding_state`` server and a
@@ -206,6 +207,33 @@ def _robot(node, args, handlers, reliable):
         grid["timer"] = node.create_timer(float(cmd.get("period", 1.0)), pub)
 
     handlers["grid"] = grid_load
+
+    from sensor_msgs.msg import Image
+
+    cam = {"timer": None}
+    cam_pub = node.create_publisher(Image, f"/{r}/{r}_zed/rgb/image_rect_color", reliable(1))
+
+    def camera_load(cmd):
+        """Publish a random rgb8 frame (barely compressible) every ``period`` s."""
+        if cam["timer"] is not None:
+            cam["timer"].cancel()
+            cam["timer"] = None
+        w, h = int(cmd.get("w", 0)), int(cmd.get("h", 0))
+        if w <= 0 or h <= 0:
+            return
+
+        def pub():
+            m = Image()
+            m.header.frame_id = f"{r}/camera"
+            m.header.stamp = node.get_clock().now().to_msg()
+            m.width, m.height, m.encoding, m.step = w, h, "rgb8", 3 * w
+            m.data = rng.integers(0, 256, w * h * 3, dtype=np.uint8).tobytes()
+            cam_pub.publish(m)
+
+        pub()
+        cam["timer"] = node.create_timer(float(cmd.get("period", 1.0)), pub)
+
+    handlers["camera"] = camera_load
     handlers["grid_count"] = lambda _c: emit(ev="grid_count", n=grid.get("n", 0), subs=grid_pub.get_subscription_count())
     handlers["exec_delay"] = lambda c: setattr(args, "exec_delay", float(c["s"]))
     handlers["receipts"] = lambda _c: emit(ev="receipts", robot=r, receipts=dict(receipts))

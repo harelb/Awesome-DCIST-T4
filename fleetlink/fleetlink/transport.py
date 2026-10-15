@@ -161,6 +161,18 @@ ZENOH_DEFAULTS = {
     # µs a DROP message waits for a free batch before it is dropped
     "transport/link/tx/queue/congestion_control/drop/wait_before_drop": 1000,
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments": 50000,
+    # batches per priority queue (zenoh default 2, maximum 16).  A message is
+    # fragmented into batch_size pieces, and a DROP message whose fragments find no
+    # free batch within the fragment wait is dropped whole (zenoh grows that wait
+    # 1, 2, 4 ... ms per fragment: ~255 ms for 8 fragments).  With 2 x 8 kB, any
+    # message over ~16 kB on a busy link (C2 snapshot chunks and deltas up to
+    # max_msg_bytes, C3 tiles and grids, C4 JPEG replies, C5 key frames) was dropped
+    # every time, and so was its resend.  16 x 8 kB = 128 kB per data priority
+    # holds the largest of them whole.  Commands are unaffected: C0 / C1 have
+    # their own (strictly higher) priority queues, and the kernel buffer stays small.
+    "transport/link/tx/queue/size/data_high": 16,  # C2
+    "transport/link/tx/queue/size/data": 16,  # C4 replies
+    "transport/link/tx/queue/size/data_low": 16,  # C3, C5
 }
 
 
@@ -174,6 +186,15 @@ class _Pending:
     def undeclare(self) -> None:
         if self.handle is not None:
             self.handle.undeclare()
+
+
+class _PubRef:
+    """A cached zenoh publisher and the puts currently using it."""
+
+    __slots__ = ("pub", "users", "retired")
+
+    def __init__(self, pub):
+        self.pub, self.users, self.retired = pub, 0, False
 
 
 class ZenohTransport(Transport):
@@ -196,7 +217,9 @@ class ZenohTransport(Transport):
     backpressure comes from the receiver's ``fb`` feedback (scheduler AIMD).
 
     Publishers are cached per (key, class), least recently used first out at
-    ``max_publishers``; :meth:`undeclare` drops the ones of a key early.
+    ``max_publishers``; :meth:`undeclare` drops the ones of a key early.  A
+    publisher evicted while a put on another thread is using it is undeclared
+    when that put returns (puts never hold the lock while inside zenoh).
     """
 
     def __init__(
@@ -205,7 +228,7 @@ class ZenohTransport(Transport):
         mode: str = "client",
         session=None,
         zenoh_overrides: dict | None = None,
-        max_publishers: int = 256,
+        max_publishers: int = 1024,
         max_inflight: int = 1,
         wait_for_router: bool = True,
     ):
@@ -243,7 +266,7 @@ class ZenohTransport(Transport):
         }
         self.max_publishers = int(max_publishers)
         self.max_inflight = int(max_inflight)
-        self._pubs: OrderedDict[tuple[str, str], object] = OrderedDict()
+        self._pubs: OrderedDict[tuple[str, str], _PubRef] = OrderedDict()
         self._subs = []
         self._lock = threading.Lock()
         self._inflight = dict.fromkeys(CLASSES, 0)
@@ -318,20 +341,38 @@ class ZenohTransport(Transport):
         else:
             p.handle = self.session.declare_queryable(p.key_expr, p.fn)
 
-    def _publisher(self, key: str, cls: str):
+    def _acquire(self, key: str, cls: str) -> "_PubRef":
+        """The cached publisher of (key, cls), held (``users``) until :meth:`_release`.
+        An LRU-evicted or undeclared publisher still held by a put on another thread
+        is only undeclared when that put returns."""
         evicted = []
         with self._lock:
-            pub = self._pubs.get((key, cls))
-            if pub is None:
-                pub = self.session.declare_publisher(key, **self._qos[cls])
-                self._pubs[(key, cls)] = pub
+            ref = self._pubs.get((key, cls))
+            if ref is None:
+                ref = _PubRef(self.session.declare_publisher(key, **self._qos[cls]))
+                self._pubs[(key, cls)] = ref
                 while len(self._pubs) > self.max_publishers:
                     evicted.append(self._pubs.popitem(last=False)[1])
             else:
                 self._pubs.move_to_end((key, cls))
-        for p in evicted:
-            self._undeclare_quietly(p)
-        return pub
+            ref.users += 1
+            evicted = [r for r in evicted if self._retire(r)]
+        for r in evicted:
+            self._undeclare_quietly(r.pub)
+        return ref
+
+    def _release(self, ref: "_PubRef") -> None:
+        with self._lock:
+            ref.users -= 1
+            gone = ref.retired and ref.users == 0
+        if gone:
+            self._undeclare_quietly(ref.pub)
+
+    @staticmethod
+    def _retire(ref: "_PubRef") -> bool:
+        """Lock held: out of the cache; True when nobody uses it (undeclare now)."""
+        ref.retired = True
+        return ref.users == 0
 
     @staticmethod
     def _undeclare_quietly(p) -> None:
@@ -341,13 +382,15 @@ class ZenohTransport(Transport):
             pass
 
     def undeclare(self, key: str) -> int:
-        """Undeclare the cached publishers of ``key`` (all classes); returns how many."""
+        """Undeclare the cached publishers of ``key`` (all classes); returns how many
+        (one still in a put on another thread goes when that put returns)."""
         with self._lock:
             gone = [k for k in self._pubs if k[0] == key]
-            pubs = [self._pubs.pop(k) for k in gone]
-        for p in pubs:
-            self._undeclare_quietly(p)
-        return len(pubs)
+            refs = [self._pubs.pop(k) for k in gone]
+            now = [r for r in refs if self._retire(r)]
+        for r in now:
+            self._undeclare_quietly(r.pub)
+        return len(refs)
 
     def publisher_count(self) -> int:
         with self._lock:
@@ -363,11 +406,15 @@ class ZenohTransport(Transport):
             return
         with self._lock:
             self._inflight[cls] += 1
+        ref = None
         try:
-            self._publisher(key, cls).put(data)
+            ref = self._acquire(key, cls)
+            ref.pub.put(data)
         except Exception:  # session closing underneath us: the message is lost
             self.put_errors += 1
         finally:
+            if ref is not None:
+                self._release(ref)
             with self._lock:
                 self._inflight[cls] -= 1
 
@@ -445,7 +492,7 @@ class ZenohTransport(Transport):
         with self._lock:
             self._closed = True
             subs, self._subs = self._subs, []
-            pubs = list(self._pubs.values())
+            pubs = [r.pub for r in self._pubs.values()]
             self._pubs.clear()
         self._stop.set()
         if self._opener is not None:

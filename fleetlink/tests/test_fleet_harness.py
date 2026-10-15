@@ -138,42 +138,61 @@ def test_relay_round_trips_per_robot(fleet):
 
 
 def test_throttled_link_keeps_commands_flowing(fleet):
-    """r1's radio throttled to THROTTLE_BPS and saturated by bulk C3 (a random
-    occupancy grid every second, far over the rate): plans, results and a service
+    """r1's radio throttled to THROTTLE_BPS and saturated by large C3 messages (a
+    random ~64 kB occupancy grid every 2.5 s) while the base asks for a ~30 kB C4
+    camera frame: the large messages arrive whole, plans, results and a service
     call still get through in seconds, C1 keeps coming, r2 does not notice."""
     px = fleet.robots["r1"]["proxy"]
     h1 = fleet.robots["r1"]["helper"]
-    # random 0..100 cells compress to ~0.83 B; the harness agent sends the grid at
-    # most 5 Hz (grid_period_s 0.2).  Small messages: one larger than the link drains
-    # in zenoh's 50 ms fragment wait would be dropped whole and never load it.
-    side = int((0.4 * THROTTLE_BPS / 0.83) ** 0.5)  # 5 Hz x 0.4 s of link = 2x
-    h1.send(cmd="grid", side=side, period=0.2)
+    # random 0..100 cells compress to ~0.84 B: side 277 is a ~64 kB grid, 8 zenoh
+    # fragments of 8 kB.  With zenoh's default tx queue (2 batches per priority) and
+    # 50 ms fragment wait, a message this size was dropped whole on a saturated link
+    # and its hash-mismatch resend was dropped again, forever.  ZENOH_DEFAULTS'
+    # 16-batch data queues hold it.  Every 2.5 s is ~26 kB/s: the link stays full.
+    h1.send(cmd="grid", side=277, period=2.5)
+    # random rgb8 256x192 -> a ~29 kB JPEG reply (4 fragments), DATA priority
+    h1.send(cmd="camera", w=256, h=192, period=1.0)
     px.throttle(THROTTLE_BPS)
     try:
         time.sleep(6.0)  # let every queue fill
         b0, t0 = px.bytes["up"], time.time()
+        n0 = len(fleet.grid_rx["r1"])
         lat1 = [fleet.plan_round_trip("r1", f"thr-r1-{i}", 20) for i in range(3)]
+        cam_dt, cam, cam_n = fleet.camera_query("r1", timeout=10.0, w=640, q=70)
         lat2 = [fleet.plan_round_trip("r2", f"thr-r2-{i}", 5) for i in range(3)]
         rep = h1.ask("hold", "hold_reply", timeout=15, id="O(thr)")
+        wait(lambda: len(fleet.grid_rx["r1"]) > n0, max(0.0, t0 + 15.0 - time.time()))  # fmt: skip
         t1 = time.time()
+        grids = [n for t, n in fleet.grid_rx["r1"][n0:]]
         rate = (px.bytes["up"] - b0) / (t1 - t0)
         gap1 = max_gap(fleet.state_times["r1"], t0, t1)
         gap2 = max_gap(fleet.state_times["r2"], t0, t1)
         print(f"\nthrottle {THROTTLE_BPS:.0f} B/s: up {rate:.0f} B/s, r1 plan rt {lat1}, "
               f"r2 plan rt {lat2}, hold {rep and rep.get('dt')}, C1 max gap r1 {gap1:.2f} s "
-              f"r2 {gap2:.2f} s")  # fmt: skip
+              f"r2 {gap2:.2f} s; camera {cam_n} B in {cam_dt}; grids {grids} in "
+              f"{t1 - t0:.1f} s")  # fmt: skip
         errs = (h1.find(lambda e: e.get('ev') in ('error', 'warn')), h1.ask('grid_count', 'grid_count'))
+        assert grids and min(grids) > 50_000, f"no large grid arrived: {grids} {errs}"
+        assert cam is not None and cam.get("format") == "jpeg" and cam_n > 20_000, (cam_n, cam and cam.get("error"))  # fmt: skip
+        assert cam_dt < 5.0, cam_dt
         assert rate > 0.7 * THROTTLE_BPS, f'link not saturated ({rate:.0f} B/s) {errs}'
-        assert all(x is not None and x < 4.0 for x in lat1), lat1
+        assert all(x is not None and x < 3.0 for x in lat1), lat1
         assert rep is not None and rep["ok"] and rep["dt"] < 4.0, rep
         assert gap1 < 3.0, gap1
         assert all(x is not None and x < 2.0 for x in lat2), lat2
         assert gap2 < 1.0, gap2
     finally:
         h1.send(cmd="grid", side=0)
+        h1.send(cmd="camera", w=0, h=0)
         px.resume()
     assert fleet.plan_round_trip("r1", "thr-after", 15) is not None
     _no_non_droppable(fleet)
+
+
+def wait(pred, timeout):
+    from harness import wait as w
+
+    return w(pred, timeout)
 
 
 def max_gap(times, t0, t1):

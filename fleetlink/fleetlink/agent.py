@@ -1269,13 +1269,15 @@ class AgentNode:
 
 def main(args=None) -> None:
     import rclpy
-    from rclpy.executors import MultiThreadedExecutor
+
+    from fleetlink.relay_ros import make_executor
 
     rclpy.init(args=args)
     agent = AgentNode()
     # multi-threaded: the relay's proxy service servers block (reentrant group)
-    # while the base answers; the agent's own callbacks stay mutually exclusive
-    executor = MultiThreadedExecutor()
+    # while the base answers, at most relay_ros.MAX_PROXY_CALLS of
+    # EXECUTOR_THREADS at once; the agent's own callbacks stay mutually exclusive
+    executor = make_executor()
     executor.add_node(agent.node)
     try:
         executor.spin()

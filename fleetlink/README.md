@@ -75,15 +75,30 @@ plus its *Deviations → fleetlink* section.
   `transport/unicast/open_timeout: 3000`,
   `transport/link/tx/queue/congestion_control/drop/wait_before_drop: 1000` (µs),
   `.../drop/max_wait_before_drop_fragments: 50000`, `scouting/multicast/enabled: false`,
-  `transport/link/tcp/so_sndbuf: 16384` and `transport/link/tx/batch_size: 8192`.
-  The last two keep a congested radio's backlog in zenoh's priority queues instead of the
-  kernel's TCP send buffer (autotuned to MBs, where C0 waits behind C3: head-of-line), and
-  `period_max_ms: 1000` brings C1 back within ~2 s of a long dropout ending; both were
-  measured with the fleet harness (see *Tests*). The cost: a message larger than the link
-  drains in `max_wait_before_drop_fragments` (e.g. a 50 kB grid on a 30 kB/s radio) is
-  dropped whole, so C3 budgets must stay below the link rate (`auto`).
-  Publishers are cached per key and class, LRU-capped at 256 (`undeclare(key)` frees one
-  early). `can_send` is only a local in-flight counter (a put of that class still running on
+  `transport/link/tcp/so_sndbuf: 16384`, `transport/link/tx/batch_size: 8192` and
+  `transport/link/tx/queue/size/{data_high,data,data_low}: 16`.
+  `so_sndbuf` and `batch_size` keep a congested radio's backlog in zenoh's priority queues
+  instead of the kernel's TCP send buffer (autotuned to MBs, where C0 waits behind C3:
+  head-of-line), and `period_max_ms: 1000` brings C1 back within ~2 s of a long dropout
+  ending; both were measured with the fleet harness (see *Tests*).
+  The queue sizes: zenoh sends a message larger than one batch as 8 kB fragments, and a DROP
+  message whose next fragment finds no free batch in time (zenoh grows that wait 1, 2, 4 …
+  ms per fragment, capped at `max_wait_before_drop_fragments` in all) is dropped whole.
+  With zenoh's default of 2 batches per priority, every message over ~16 kB (C2 deltas and
+  snapshot chunks, C3 tiles and grids, C4 JPEG replies, C5 key frames) was dropped on a busy
+  link, and so was its resend. 16 batches (zenoh's maximum) hold 128 kB per data priority,
+  so such a message is queued whole; C0/C1 have their own, strictly higher, queues.
+  Measured on a 30 kB/s radio saturated by 64 kB grids (fleet harness): every grid and a
+  28 kB camera reply (in 1.0 s) arrive, plan→result 1.0-1.6 s, the relayed service 0.8 s.
+  Raising `max_wait_before_drop_fragments` does not help: a put blocks the agent's tick
+  thread for that long (C1 gaps over 3 s at 2 s) and a 200 kB grid still does not fit.
+  The limit that remains: one message over ~128 kB cannot cross a slow radio (30 kB/s) at
+  all, and bulk budgets above the link rate keep the data queues full (use `auto`).
+  The fleetlink router's json5 sets the same queue sizes, since it re-fragments what it
+  forwards (to the base consumers, and base→robot over the radio).
+  Publishers are cached per key and class, LRU-capped at 1024 (`undeclare(key)` frees one
+  early). A publisher evicted while a put on another thread uses it is undeclared when that
+  put returns. `can_send` is only a local in-flight counter (a put of that class still running on
   another thread); the real congestion signal is the receiver's `fb`.
   `LinkEmulator` is two `MemoryTransport` endpoints joined by a simulated radio: bandwidth,
   latency, per-fragment loss, bounded queues and fragment-level strict priority, driven by a
@@ -203,10 +218,20 @@ same file.
 
   `ttl_s` is checked by the sender (it stops retrying) and by the receiver (it rejects with a
   negative ack), using the envelope `t` corrected by the clock offset from the relay's own
-  heartbeats. Each end has a random epoch. When the peer **restarts**, only
-  `replay_on_resync: true` entries re-send (their pending or last value). Everything else
-  pending is dropped, and the new peer rejects retries still addressed to the old epoch, so a
-  rebooted robot never re-runs a stale plan or pause. Services use the same request/retry/dedupe
+  heartbeats. Until that offset is measured (the first heartbeat round trip after link-up or
+  a peer restart) the receiver uses the last heartbeat's one-way estimate, and before any
+  heartbeat it does not check the TTL at all: the sender's TTL still bounds the retries, and
+  a raw `t` would reject everything on machines whose clocks differ by more than `ttl_s`.
+  Each end has a random epoch. When the peer **restarts**, only `replay_on_resync: true`
+  entries re-send: their pending messages, re-addressed to the new epoch, or with nothing
+  pending the last value of a `latest` / `latest_reliable` entry (state, e.g. `/tf_static`).
+  A `reliable` entry (events, e.g. action results) does not re-send a message the old peer
+  acked, since it was already published there. Everything else pending is dropped, and the
+  new peer rejects retries still addressed to the old epoch, so a rebooted robot never re-runs
+  a stale plan or pause. That `stale epoch` nack never cancels a pending message: it is how a
+  sender may first learn of the restart, and by then the pending was dropped or re-addressed.
+  A result applied by the old peer whose ack was lost is re-sent to the new one (at least
+  once across a restart of the receiving process). Services use the same request/retry/dedupe
   pattern (`srv/req`, `srv/rep`, never zenoh `get`) and give up after `timeout_s`. A type-hash
   mismatch (ROS 2 `RIHS01`, from the package's generated `.json`) rejects and counts the message.
   The heartbeat carries the config hash, and a mismatch is logged and shown as
@@ -238,8 +263,13 @@ same file.
   `last_seen`, `clock_offset`, `epoch`, `peer_epoch`, `cfg_match`, and per topic `sent`,
   `acked`, `pending` and `subs`, the subscribers on the far side when the message was applied.
   The console takes Pause/Resume delivery and robot liveness from this topic. ROS subscriber
-  counts mean nothing once the bridge subscribes everything. Both ends spin multi-threaded:
-  proxy servers block in a reentrant group while the far side answers.
+  counts mean nothing once the bridge subscribes everything. Both ends spin multi-threaded
+  (`relay_ros.make_executor()`, 8 threads): proxy servers block in a reentrant group while
+  the far side answers. At most 2 relayed calls per end wait at once (`MAX_PROXY_CALLS`);
+  more, or a call while the link is down (`connected: false`), fail at once with the default
+  response and a warning, so proxies never take the threads that DSG, TF and pose callbacks
+  need. Service clients and publishers are created on the executor thread or before it spins,
+  never on zenoh's callback thread.
 
 Inventory notes (`dcist_launch_system/scripts/fleetlink_inventory.py`):
 * Nothing on the robot subscribes to `spot_executor_node/pause|resume` yet. They are relayed
@@ -273,7 +303,8 @@ fleet_defaults:
     message.
     * `bin/fleetlink-router [PORT]` runs `rmw_zenohd` with
       [`config/fleetlink_router.json5`](config/fleetlink_router.json5): listen
-      `tcp/[::]:7450`, connect to nothing, no scouting, gossip, adminspace or plugins.
+      `tcp/[::]:7450`, connect to nothing, no scouting, gossip, adminspace or plugins, and
+      16-batch data queues (see `transport.py` above).
     * The bridge and the console's receiver connect to it over loopback. The console's
       `--zenoh-connect` defaults to `tcp/127.0.0.1:<fleetlink_port>` when
       `ADT4_FLEET_LINK=fleetlink`.
@@ -337,14 +368,17 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
 * `test_relay` exercises `RelayConfig` / `RelayCore` over the emulator. It covers config
   rejection (both directions, unknown mode/key/class) and the platform filter on the real
   `relay.yaml`; reliable order under 30 % loss and the queue cap; latest_reliable supersede; the
-  latest rate limit; TTL with a 100 s clock skew and expiry; no replay after a robot restart
-  (with the stale-epoch reject); replay to a restarted base; type and config hash mismatch;
-  service round trips both ways under loss; and service timeouts. `test_relay_ros` runs a
+  latest rate limit; TTL with a 100 s clock skew and expiry, and with a ±45 s skew before
+  the offset is known (and after a peer restart); no replay after a robot restart (with the
+  stale-epoch reject); replay to a restarted base (state yes, an acked result no, a pending
+  result exactly once, also when its stale-epoch nack is what reveals the restart); type and
+  config hash mismatch; service round trips both ways under loss; and service timeouts. `test_relay_ros` runs a
   robot graph (domain 90) with `AgentNode` + `relay_config` and a base graph (domain 91) with
   `BaseBridge`, joined only through the throwaway router. Over that link it checks an
   ActionSequenceMsg down, an `action_result` up, `save_dsg` base→robot, `update_holding_state`
   robot→`/willow/…`, a base-side tf2 lookup of the composed and static frames, and
-  `/fleetlink/link_status`. It also checks that the two graphs never see each other.
+  `/fleetlink/link_status`. It also checks that the two graphs never see each other, and that
+  during a dropout excess relayed calls fail at once while the agent's callbacks and C1 go on.
   Mark: `integration`; `-m "not integration"` skips them.
 * `test_fleet_harness` runs fleetlink mode on its real topology, every part a separate process
   (`tests/harness.py`):
@@ -355,7 +389,8 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
   * a `FaultProxy` on each robot's link that can stall, throttle or reset it.
 
   It checks graph isolation (ROS graph API and liveliness tokens) and the per-robot relay round
-  trips. It runs a 30 kB/s saturated link with commands still under 2 s, a stall
+  trips. It runs a 30 kB/s link saturated by ~64 kB grids, where every grid and a ~28 kB C4
+  camera reply arrive and commands still take under 2 s, a stall
   (`FLEETLINK_STALL_S`, 20 s by default, 60 s per the plan) with no #1876 close, C1 back within
   `FLEETLINK_RESUME_S` and the other robot unaffected, and a fleetlink router kill -9 mid-plan
   with no re-execution. About 50 s in all. Teardown kills every process group and checks that

@@ -201,3 +201,77 @@ def test_zenoh_publisher_cache_is_lru_capped():
     tr.put("adt4/r/ctl/ack", b"x", "C0")
     assert sess.pubs[-1].kw["reliability"] == zenoh.Reliability.RELIABLE
     assert tr.can_send("C0")
+
+
+def test_zenoh_defaults_are_valid_and_hold_large_messages():
+    """ZENOH_DEFAULTS parses with zenoh 1.8 (it rejects unknown keys and a queue
+    size over 16), and the data priorities queue 16 x batch_size = 128 kB, so C2
+    deltas, C3 tiles / grids, C4 replies and C5 key frames over 16 kB are not
+    dropped whole on a busy link (the 2-batch default held 16 kB)."""
+    zenoh = pytest.importorskip("zenoh")
+    import json
+
+    from fleetlink.transport import ZENOH_DEFAULTS
+
+    conf = zenoh.Config()
+    for k, v in ZENOH_DEFAULTS.items():
+        conf.insert_json5(k, json.dumps(v))
+    tx = json.loads(conf.get_json("transport/link/tx"))
+    for prio in ("data_high", "data", "data_low"):
+        assert tx["queue"]["size"][prio] * tx["batch_size"] >= 128 * 1024 - 16
+    assert tx["queue"]["size"]["interactive_high"] == 2
+    assert json.loads(conf.get_json("transport/link/tcp/so_sndbuf")) == 16384
+    size = dict(tx["queue"]["size"], data=17)  # zenoh's limit is 16
+    with pytest.raises(Exception, match="size"):
+        zenoh.Config().insert_json5("transport/link/tx/queue/size", json.dumps(size))
+
+
+def test_zenoh_publisher_not_undeclared_while_a_put_is_running():
+    """LRU eviction on one thread must not undeclare a publisher another thread is
+    putting on: the undeclare waits for that put to finish."""
+    pytest.importorskip("zenoh")
+    import threading
+
+    from fleetlink.transport import ZenohTransport
+
+    in_put, release = threading.Event(), threading.Event()
+
+    class Pub:
+        def __init__(self, key):
+            self.key, self.undeclared, self.undeclared_during_put = key, False, False
+            self.busy = False
+
+        def put(self, data):
+            self.busy = True
+            if self.key.endswith("/slow"):
+                in_put.set()
+                release.wait(5)
+            self.busy = False
+
+        def undeclare(self):
+            self.undeclared = True
+            self.undeclared_during_put |= self.busy
+
+    class Session:
+        def __init__(self):
+            self.pubs = {}
+
+        def declare_publisher(self, key, **kw):
+            self.pubs[key] = Pub(key)
+            return self.pubs[key]
+
+    sess = Session()
+    tr = ZenohTransport(session=sess, max_publishers=1)
+    t = threading.Thread(target=tr.put, args=("adt4/r/mesh/slow", b"x", "C3"))
+    t.start()
+    assert in_put.wait(5)
+    tr.put("adt4/r/mesh/other", b"x", "C3")  # evicts "slow" (cap 1) mid-put
+    assert tr.publisher_count() == 1
+    release.set()
+    t.join(5)
+    slow = sess.pubs["adt4/r/mesh/slow"]
+    assert not slow.undeclared_during_put
+    assert slow.undeclared  # freed once its put returned
+    # the cap holds and a re-used key gets a fresh publisher
+    tr.put("adt4/r/mesh/slow", b"x", "C3")
+    assert tr.publisher_count() == 1 and sess.pubs["adt4/r/mesh/other"].undeclared

@@ -17,8 +17,10 @@
 #   cls            fleetlink QoS class (C0 command/ack .. C5 video) used for budgeting
 #   rate_hz        max send rate (latest mode); null = unlimited
 #   ttl_s          drop on the receiver if older than this (clock-offset corrected); null = no ttl
-#   replay_on_resync  resend the last value when the link resyncs. Off for commands so a
-#                  rebooted robot never re-runs a stale plan.
+#   replay_on_resync  when the peer restarts, re-address pending messages to it (and, for
+#                  latest / latest_reliable, resend the last value; a reliable entry never
+#                  resends one the old peer acked). Off for commands so a rebooted robot
+#                  never re-runs a stale plan.
 #   qos            QoS of the republished ROS endpoint on the receiving side
 #                  (reliability: reliable|best_effort, durability: volatile|transient_local, depth)
 #   platform       optional list; only relay for these robot platforms (topology

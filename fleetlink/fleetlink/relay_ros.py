@@ -19,9 +19,15 @@
 Messages cross as CDR bytes (``raw=True`` subscriptions, ``publish(bytes)``), so
 the relay never deserialises them, except TF (composed / aggregated).  All
 publishing and service-client calls are marshalled onto the executor thread
-(rmw_zenoh has had heap corruption publishing from foreign threads).  Proxy
-service servers block in a reentrant callback group: spin the node with a
-``MultiThreadedExecutor``.
+(rmw_zenoh has had heap corruption publishing from foreign threads), and so is
+the creation of every rclpy entity (service clients are created up front).
+
+Proxy service servers block an executor thread in a reentrant callback group
+while the far side answers: spin the node with ``make_executor()`` (a
+``MultiThreadedExecutor`` of :data:`EXECUTOR_THREADS`).  At most
+:data:`MAX_PROXY_CALLS` relayed calls per end wait at once, and a call made while
+the link is down fails at once (default response, warning logged), so proxies
+never take the threads the DSG / TF / pose callbacks need.
 """
 
 from __future__ import annotations
@@ -42,6 +48,17 @@ HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_RELAY_CONFIG = HERE.parent / "config" / "relay.yaml"
 DEFAULT_TOPOLOGY = HERE.parents[1] / "network_diagnostics" / "config" / "topology.yaml"
 DEFAULT_PLATFORM = "spot"  # robots without platform_type in the topology
+# executor threads of fleetlink-agent / fleetlink-bridge (rclpy's default is the CPU
+# count), and the relayed service calls one end lets wait at once: the rest of the
+# threads always stay free for the node's own callbacks
+EXECUTOR_THREADS = 8
+MAX_PROXY_CALLS = 2
+
+
+def make_executor(context=None):
+    from rclpy.executors import MultiThreadedExecutor
+
+    return MultiThreadedExecutor(num_threads=EXECUTOR_THREADS, context=context)
 
 
 def import_type(path: str):
@@ -150,7 +167,7 @@ class _RelayEnd:
     """What both ends share: raw publishers, proxy service servers, real service
     calls, the tick thread."""
 
-    def __init__(self, node, tick_hz: float = 20.0):
+    def __init__(self, node, tick_hz: float = 20.0, max_proxy_calls: int = MAX_PROXY_CALLS):
         from rclpy.callback_groups import ReentrantCallbackGroup
 
         self.node = node
@@ -158,6 +175,8 @@ class _RelayEnd:
         self._marshal = _Marshal(node)
         self._cbg = ReentrantCallbackGroup()
         self._clients: dict[str, object] = {}
+        self._proxy_slots = threading.BoundedSemaphore(max(1, int(max_proxy_calls)))
+        self.proxy_refused = 0  # relayed calls failed at once (link down / busy)
         self._running = True
         self._tick_period = 1.0 / tick_hz
         self._ticker = threading.Thread(
@@ -192,16 +211,28 @@ class _RelayEnd:
 
         cls = import_type(s.type)
 
+        def refuse(why: str, response):
+            self.proxy_refused += 1
+            self.log.warn(f"relayed call {ros_name} failed at once: {why}")
+            return response
+
         def handle(request, response):
-            done = threading.Event()
-            box: dict = {}
+            if not core.connected():
+                return refuse(f"no link to {core.robot}'s peer", response)
+            if not self._proxy_slots.acquire(blocking=False):
+                return refuse("too many relayed calls in progress", response)
+            try:
+                done = threading.Event()
+                box: dict = {}
 
-            def finish(data, err):
-                box["data"], box["err"] = data, err
-                done.set()
+                def finish(data, err):
+                    box["data"], box["err"] = data, err
+                    done.set()
 
-            core.call(s.name, serialize_message(request), finish)
-            done.wait(s.timeout_s + 2.0)
+                core.call(s.name, serialize_message(request), finish)
+                done.wait(s.timeout_s + 2.0)
+            finally:
+                self._proxy_slots.release()
             if box.get("data") is not None:
                 return deserialize_message(box["data"], cls.Response)
             self.log.warn(
@@ -216,11 +247,6 @@ class _RelayEnd:
         from rclpy.serialization import deserialize_message, serialize_message
 
         cls = import_type(s.type)
-        client = self._clients.get(ros_name)
-        if client is None:
-            client = self._clients[ros_name] = self.node.create_client(
-                cls, ros_name, callback_group=self._cbg
-            )
         timer = threading.Timer(s.timeout_s, lambda: reply(None, "timeout"))
         timer.daemon = True
         timer.start()
@@ -233,6 +259,11 @@ class _RelayEnd:
                 reply(None, f"{type(exc).__name__}: {exc}")
 
         def work():
+            client = self._client(cls, ros_name)
+            if client is None:
+                timer.cancel()
+                reply(None, f"no client for {ros_name}")
+                return
             if not client.wait_for_service(timeout_sec=min(5.0, s.timeout_s)):
                 timer.cancel()
                 reply(None, f"service {ros_name} not available")
@@ -245,6 +276,33 @@ class _RelayEnd:
             self._marshal(call)
 
         threading.Thread(target=work, daemon=True, name="fleetlink-srv").start()
+
+    def _create_client(self, cls, ros_name: str):
+        """Executor thread (or before spinning)."""
+        client = self._clients.get(ros_name)
+        if client is None:
+            client = self._clients[ros_name] = self.node.create_client(
+                cls, ros_name, callback_group=self._cbg
+            )
+        return client
+
+    def _client(self, cls, ros_name: str, timeout: float = 5.0):
+        """The client of ``ros_name``; one missing is created on the executor
+        thread (never on zenoh's or this worker thread)."""
+        client = self._clients.get(ros_name)
+        if client is not None:
+            return client
+        done = threading.Event()
+
+        def create():
+            try:
+                self._create_client(cls, ros_name)
+            finally:
+                done.set()
+
+        self._marshal(create)
+        done.wait(timeout)
+        return self._clients.get(ros_name)
 
     def shutdown(self) -> None:
         self._running = False
@@ -316,10 +374,8 @@ class RobotRelay(_RelayEnd):
         self._servers = [
             self._proxy_server(self.core, s, s.name) for s in self.core.srv_out.values()
         ]
-        for s in self.core.srv_in.values():
-            self._clients[s.name] = nd.create_client(
-                import_type(s.type), s.name, callback_group=self._cbg
-            )
+        for s in self.core.srv_in.values():  # base calls robot: the real servers
+            self._create_client(import_type(s.type), s.name)
         self._ticker.start()
         self.log.info(
             f"fleetlink relay robot={robot} platform={platform} cfg={config.hash} "
@@ -494,6 +550,8 @@ class BaseBridge(_RelayEnd):
             )
         for s in core.srv_out.values():  # base calls robot: proxy server here
             self._proxy_server(core, s, s.base_name)
+        for s in core.srv_in.values():  # robot calls base: the real base servers
+            self._create_client(import_type(s.type), s.base_name)
         with self._lock:
             self._cores[robot] = core
         self.log.info(
@@ -575,7 +633,6 @@ def _base_name(topology: dict) -> str:
 
 def main(args=None) -> None:
     import rclpy
-    from rclpy.executors import MultiThreadedExecutor
     from rclpy.node import Node
 
     from fleetlink.agent import zenoh_version_warning
@@ -603,7 +660,7 @@ def main(args=None) -> None:
     if not transport.opened.is_set():
         log.warn(f"no zenoh router at {connect} yet ({transport.open_error}); retrying")
     bridge = BaseBridge(node, transport, config, robots, base=base)
-    executor = MultiThreadedExecutor()
+    executor = make_executor()
     executor.add_node(node)
     try:
         executor.spin()

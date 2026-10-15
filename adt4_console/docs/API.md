@@ -454,6 +454,11 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
   gaps are repaired with `resend` (then resync), C3 tiles through the manifest.
   `Transport.can_send(cls)` is, for zenoh, only a local in-flight counter; congestion is
   signalled by `fb`. C4 queries are sent with DROP; replies inherit the query's QoS.
+  A message larger than one 8 kB zenoh batch is sent as fragments, and a DROP message
+  whose fragments find no free batch in time is dropped whole. The agent and the fleetlink
+  router therefore queue 16 batches (128 kB) on the data priorities (C2, C4, C3/C5) instead
+  of zenoh's 2 (16 kB). A single message over ~128 kB still cannot cross a slow radio
+  (e.g. 30 kB/s), so keep C2 `max_msg_bytes`, tiles and grids below that.
 * **Epochs.** The receiver retires a robot's old epoch, so late messages from the
   previous agent instance are ignored. Seeing a new or first epoch clears the
   mirror and tiles and immediately requests a resync (not rate-limited). C2 is applied in
@@ -502,7 +507,13 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
 
   Classes come from each entry's `cls` (C0 for commands, acks and heartbeats). Everything is
   DROP. A sender epoch change resets the receiver's per-topic state. A peer restart drops
-  pending messages unless `replay_on_resync` is set. Liveness for the console is published by
+  pending messages unless `replay_on_resync` is set. With it, pending messages are
+  re-addressed to the new peer; a `latest` / `latest_reliable` entry with nothing pending
+  re-sends its last value, and a `reliable` entry (events such as action results) does not
+  re-send one the old peer already acked. A `stale epoch` nack never cancels a pending
+  message. The receiver checks `ttl_s` only once it knows the clock offset (after the
+  first heartbeat round trip; meanwhile from the last heartbeat's one-way estimate, and
+  not at all before any heartbeat). Liveness for the console is published by
   fleetlink-bridge as `/fleetlink/link_status` (std_msgs/String JSON per robot,
   `RelayCore.status()`).
 

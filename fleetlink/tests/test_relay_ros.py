@@ -18,6 +18,7 @@ pytestmark = pytest.mark.integration
 
 RELAY_YAML = os.path.join(os.path.dirname(__file__), "..", "config", "relay.yaml")
 ROBOT_DOMAIN, BASE_DOMAIN = 90, 91
+PROXY_DOMAIN = 92
 
 
 def _wait(pred, timeout, step=None):
@@ -146,6 +147,9 @@ def test_relay_topics_services_tf_and_link_status(ros_pair):
 
     robot, base, bridge = ros_pair.robot, ros_pair.base, ros_pair.bridge
     core = bridge.core("euclid")
+    # clients of the real base servers exist up front (created on the executor /
+    # before spinning, never lazily on zenoh's callback thread)
+    assert "/willow/update_holding_state" in bridge._clients
     assert _wait(lambda: core.connected(), 15), "relay heartbeats never arrived"
 
     # graphs are isolated: the base cannot see the robot's agent node
@@ -254,3 +258,102 @@ def test_relay_topics_services_tf_and_link_status(ros_pair):
     names = [n for n, _ in base.get_node_names_and_namespaces()]
     assert "robot_test" not in names and "fleetlink_agent" not in names
     assert "base_test" in names
+
+
+def test_proxy_calls_never_starve_the_agent(zenoh_router, monkeypatch):
+    """A radio dropout while the robot calls a relayed (``dir: up``) service many
+    times: at most MAX_PROXY_CALLS calls wait for the base, the rest fail at once,
+    calls made once the link is known down fail at once, and the agent's own
+    callbacks and C1 ticks keep running throughout."""
+    monkeypatch.setenv(
+        "ZENOH_CONFIG_OVERRIDE",
+        f'connect/endpoints=["{zenoh_router}"];scouting/multicast/enabled=false',
+    )
+    rclpy = pytest.importorskip("rclpy")
+    pytest.importorskip("tf2_ros")
+    pytest.importorskip("hydra_msgs")
+    pytest.importorskip("heracles_ros_interfaces.srv")
+    from heracles_ros_interfaces.srv import UpdateHoldingState
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.parameter import Parameter
+    from rclpy.signals import SignalHandlerOptions
+
+    from fleetlink import relay_ros
+    from fleetlink.agent import AgentNode
+    from fleetlink.relay import RelayConfig, RelayCore
+    from fleetlink.transport import LinkEmulator
+
+    link = LinkEmulator(clock=time.time, bandwidth=None, latency=0.01)
+    puts = []
+    put = link.robot.put
+    link.robot.put = lambda k, d, c: (puts.append((time.time(), k)), put(k, d, c))[1]
+    base = RelayCore("euclid", "base", link.base, RelayConfig.load(RELAY_YAML),
+                     base="willow", on_service=lambda s, req, reply: None)  # fmt: skip
+    running = [True]
+
+    def pump():
+        while running[0]:
+            link.advance()
+            base.tick()
+            time.sleep(0.005)
+
+    ctx = rclpy.Context()
+    rclpy.init(context=ctx, domain_id=PROXY_DOMAIN, signal_handler_options=SignalHandlerOptions.NO)  # fmt: skip
+    ex = relay_ros.make_executor(ctx)
+    assert ex._executor._max_workers == relay_ros.EXECUTOR_THREADS
+    agent_node = rclpy.create_node("fleetlink_agent", namespace="euclid", context=ctx,
+        parameter_overrides=[Parameter("relay_config", value=RELAY_YAML),
+                             Parameter("relay_platform", value="spot")])  # fmt: skip
+    agent = AgentNode(transport=link.robot, node=agent_node)
+    ticks = []
+    agent_node.create_timer(0.05, lambda: ticks.append(time.time()))  # its own group
+    caller = rclpy.create_node("caller", context=ctx)
+    cex = SingleThreadedExecutor(context=ctx)
+    cex.add_node(caller)
+    ex.add_node(agent_node)
+    threads = [threading.Thread(target=f, daemon=True) for f in (pump, ex.spin, cex.spin)]
+    for th in threads:
+        th.start()
+    try:
+        core = agent.relay.core
+        assert _wait(core.connected, 10), "relay heartbeats never arrived"
+        cli = caller.create_client(UpdateHoldingState, "/euclid/update_holding_state")
+        assert cli.wait_for_service(timeout_sec=10)
+
+        link.close_transport(60.0)  # the dropout; the core stays "connected" ~3 s
+        n = relay_ros.EXECUTOR_THREADS + 1  # rmw_zenoh queues 10 requests per service
+        t0 = time.time()
+        done = []
+        for i in range(n):
+            fut = cli.call_async(UpdateHoldingState.Request(is_holding=True, id=f"O({i})"))
+            fut.add_done_callback(lambda f: done.append((time.time(), f.result().success)))
+        # all but MAX_PROXY_CALLS come back at once, with the default response
+        assert _wait(lambda: len(done) >= n - relay_ros.MAX_PROXY_CALLS, 2.0), len(done)
+        assert all(not ok for _, ok in done)
+        assert len(done) == n - relay_ros.MAX_PROXY_CALLS  # the others still wait
+        # the agent's own callbacks and C1 keep going while those wait
+        time.sleep(4.0)
+        t1 = time.time()
+        assert len(done) == n - relay_ros.MAX_PROXY_CALLS
+        win = [t for t in ticks if t0 <= t <= t1]
+        assert len(win) >= 0.6 * (t1 - t0) / 0.05, len(win)
+        states = [t for t, k in puts if k == "adt4/euclid/state" and t0 <= t <= t1]
+        assert len(states) >= 0.6 * 4.0 * (t1 - t0), len(states)  # state_hz 4
+        # the link is known down now: a new call fails at once
+        assert not core.connected()
+        refused = agent.relay.proxy_refused
+        late = []
+        t2 = time.time()
+        f = cli.call_async(UpdateHoldingState.Request(is_holding=True, id="O(late)"))
+        f.add_done_callback(lambda f: late.append(time.time() - t2))
+        assert _wait(lambda: late, 1.0) and late[0] < 1.0
+        assert agent.relay.proxy_refused == refused + 1
+    finally:
+        running[0] = False
+        agent.shutdown()
+        base.close()
+        ex.shutdown(timeout_sec=2)
+        cex.shutdown(timeout_sec=2)
+        for n_ in (agent_node, caller):
+            n_.destroy_node()
+        ctx.try_shutdown()

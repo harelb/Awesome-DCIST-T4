@@ -168,6 +168,19 @@ def test_router_config_is_minimal_and_valid():
     assert json.loads(conf.get_json("adminspace/enabled")) is False
 
 
+def test_router_data_queues_hold_large_messages():
+    """The router fragments what it forwards with 8 kB batches (negotiated with the
+    agent): zenoh's default 2-batch queue drops any DROP message over ~16 kB
+    whenever it is busy.  The data priorities get zenoh's maximum, 16."""
+    zenoh = pytest.importorskip("zenoh")
+    conf = zenoh.Config.from_file(ROUTER_CONFIG)
+    size = json.loads(conf.get_json("transport/link/tx/queue/size"))
+    assert {k: size[k] for k in ("data_high", "data", "data_low")} == dict.fromkeys(
+        ("data_high", "data", "data_low"), 16
+    )
+    assert size["interactive_high"] == 2  # untouched: zenoh default
+
+
 def test_wrapper_refuses_7447_and_bad_ports():
     for arg in ("7447", "abc", "70000"):
         r = subprocess.run(

@@ -19,4 +19,19 @@
   },
   adminspace: { enabled: false },
   plugins: {},
+  /// The router fragments every message it forwards: to the base consumers (bridge,
+  /// console receiver) and, base -> robot, over the radio, where the agent's 8 kB
+  /// batch_size wins the negotiation. With zenoh's default 2 batches per priority, a
+  /// DROP message over ~16 kB (C2 snapshot chunks, C3 tiles and grids, C4 JPEG replies,
+  /// C5 key frames) is dropped whole whenever that queue is busy. 16 (zenoh's maximum)
+  /// on the data priorities, the same as the agent (fleetlink/transport.py ZENOH_DEFAULTS).
+  transport: {
+    link: {
+      tx: {
+        queue: {
+          size: { data_high: 16, data: 16, data_low: 16 },
+        },
+      },
+    },
+  },
 }

@@ -47,9 +47,14 @@ against its envelope ``t`` corrected by the heartbeat clock offset.
 
 **Epochs / no replay.**  Each end has a random epoch.  When the peer's epoch
 *changes* (it restarted), pending messages of entries without
-``replay_on_resync`` are dropped, entries with it re-send their pending (or
-last) value to the new peer, and messages still addressed to the old epoch are
-rejected by the new peer.  So a rebooted robot never re-runs a stale plan.
+``replay_on_resync`` are dropped, entries with it re-address their pending
+messages to the new peer (or, with nothing pending, a ``latest`` /
+``latest_reliable`` entry re-sends its last value; a ``reliable`` one does not
+re-send what the old peer acked), and messages still addressed to the old epoch
+are rejected by the new peer ("stale epoch", a nack that never cancels a pending
+message).  So a rebooted robot never re-runs a stale plan.  The receiver-side
+TTL needs the clock offset: before the first heartbeat round trip it uses the
+last heartbeat's one-way estimate, and before any heartbeat it is skipped.
 
 **Loop prevention.**  :class:`RelayConfig` rejects any topic / service
 configured in both directions, and each end only publishes its inbound
@@ -678,11 +683,26 @@ class RelayCore:
         except Exception:
             return None
 
-    def _peer_time_to_mine(self, t: float) -> float:
-        return float(t) - (self.clock_offset or 0.0)
+    def _offset(self) -> float | None:
+        """Peer clock - my clock: the heartbeat (NTP-style) estimate; before the
+        first round trip, the one-way estimate of the last heartbeat (ages come
+        out short by the one-way latency); None before any heartbeat."""
+        if self.clock_offset is not None:
+            return self.clock_offset
+        if self._peer_hb is not None:
+            return self._peer_hb[0] - self._peer_hb[1]
+        return None
 
-    def _age(self, env: dict, now: float) -> float:
-        return now - self._peer_time_to_mine(env.get("t", now))
+    def _expired(self, env: dict, ttl: float | None, now: float) -> bool:
+        """Receiver-side TTL.  Skipped while the clock offset is unknown (right
+        after link-up and after a peer restart): the raw envelope ``t`` would be
+        off by the clock skew, and the sender's own TTL still bounds its retries."""
+        if ttl is None:
+            return False
+        off = self._offset()
+        if off is None:
+            return False
+        return now - (float(env.get("t", now)) - off) > ttl
 
     def _account_seq(self, env: dict) -> None:
         stream = env.get("stream", "")
@@ -731,7 +751,11 @@ class RelayCore:
                     p.to = self.peer_epoch
                     p.tries = 0
                     p.t_sent = -1e18  # resent by the next tick
-            elif o.last is not None:
+            elif o.last is not None and e.mode != "reliable":
+                # state (latest / latest_reliable, e.g. /tf_static): the new peer
+                # needs the current value.  A reliable entry is a stream of events
+                # (action results): one the old peer acked was applied there, and
+                # re-sending it would publish it twice on the same graph.
                 data, t = o.last
                 self._send_new(o, data, t, now, replay=True)
         for cid, call in list(self._calls.items()):
@@ -896,7 +920,7 @@ class RelayCore:
         if (th and mine and th != mine) or p.get("type") not in (None, e.type):
             st.c["type_mismatch"] += 1
             err = "type mismatch"
-        elif e.ttl_s is not None and self._age(env, now) > e.ttl_s:
+        elif self._expired(env, e.ttl_s, now):
             st.c["expired"] += 1
             err = "expired"
         meta = {"t": env.get("t"), "tseq": tseq, "id": pid, "epoch": env["epoch"]}
@@ -974,6 +998,15 @@ class RelayCore:
             op = p.get("op")
             if op == "hb":
                 self._on_hb(env, p, now, deliver)
+            elif op == "ack" and not p.get("ok", True) and p.get("err") == "stale epoch":
+                # Sent by a new incarnation of the peer to a retry still addressed
+                # to the old one.  _peer_seen() above has already handled the
+                # restart: the pending was dropped, or (replay_on_resync)
+                # re-addressed to the new epoch and is resent next tick.  Popping
+                # it here would lose it (an action_result across a bridge restart).
+                name = self._id_owner.get(p.get("id"))
+                if name in self.out:
+                    self.out[name].c["stale_epoch"] += 1
             elif op == "ack":
                 name = self._id_owner.pop(p.get("id"), None)
                 o = self.out.get(name) if name else None
@@ -1050,7 +1083,7 @@ class RelayCore:
             elif (p.get("th") and self.type_hash(s.type) and p["th"] != self.type_hash(s.type)):  # fmt: skip
                 self.srv_stats[name]["errors"] += 1
                 self._rep(rid, False, "type mismatch", now=now)
-            elif s.ttl_s is not None and self._age(env, now) > s.ttl_s:
+            elif self._expired(env, s.ttl_s, now):
                 self.srv_stats[name]["errors"] += 1
                 self._rep(rid, False, "expired", now=now)
             elif self.on_service is None:

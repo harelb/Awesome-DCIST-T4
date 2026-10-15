@@ -21,6 +21,8 @@ CFG = {
          "mode": "reliable", "cls": "C0", "replay_on_resync": True},
         {"topic": "/{robot}/guards", "type": "pkg/msg/Guards", "dir": "up",
          "mode": "latest", "cls": "C1", "rate_hz": 2.0, "ttl_s": 10},
+        {"topic": "/{robot}/static", "type": "pkg/msg/Static", "dir": "up",
+         "mode": "latest_reliable", "cls": "C0", "replay_on_resync": True},
     ],
     "services": [
         {"service": "/{robot}/hold", "base_name": "/{base}/hold", "type": "pkg/srv/Hold",
@@ -262,6 +264,40 @@ def test_ttl_uses_heartbeat_clock_offset():
     assert pr.robot.status()["rtt"] == pytest.approx(0.1, abs=0.06)
 
 
+@pytest.mark.parametrize("skew", [45.0, -45.0])
+def test_ttl_not_checked_before_clock_offset_known(skew):
+    """Robot clock 45 s off and a plan (ttl 30) published at link-up, before any
+    heartbeat: the receiver cannot correct the envelope ``t`` yet, so it must
+    not reject the plan as expired (or as from the future); it is delivered."""
+    pr = Pair(robot_skew=skew)
+    pr.base.publish("/euclid/plan", b"P1")
+    pr.base.publish("/euclid/cmd", b"pause")  # reliable, ttl 10
+    pr.run(5.0)
+    assert pr.data("robot", "/euclid/plan") == [b"P1"]
+    assert pr.data("robot", "/euclid/cmd") == [b"pause"]
+    st = pr.robot.status()["topics"]
+    assert st["/euclid/plan"]["expired"] == 0 and st["/euclid/cmd"]["expired"] == 0
+    assert pr.base.status()["topics"]["/euclid/plan"]["rejected"] == 0
+    # once the offset is known, the TTL is enforced again (corrected)
+    assert pr.robot.clock_offset == pytest.approx(-skew, abs=0.06)
+
+
+def test_ttl_after_peer_restart_uses_heartbeat_offset():
+    """After a peer restart the NTP offset is reset; until it is re-measured the
+    one-way heartbeat estimate keeps a 45 s skew from expiring commands."""
+    pr = Pair(robot_skew=45.0)
+    pr.run(3.0)
+    pr.base.close()
+    pr.base = pr.new_base()
+    pr.clk.advance(0.05)
+    pr.link.advance()
+    pr.base.tick()  # one heartbeat from the new base, no round trip yet
+    pr.base.publish("/euclid/cmd", b"pause")
+    pr.run(3.0)
+    assert pr.data("robot", "/euclid/cmd") == [b"pause"]
+    assert pr.robot.status()["topics"]["/euclid/cmd"]["expired"] == 0
+
+
 def test_ttl_expired_command_never_delivered():
     pr = Pair()
     pr.run(1.0)
@@ -333,18 +369,66 @@ def test_stale_epoch_retry_rejected_by_new_robot():
 
 
 def test_replay_on_resync_entries_resent_to_new_base():
+    """A restarted base gets the robot's state (latest_reliable ``static``) again,
+    but not an action result the old base already acked and applied: re-sending
+    that would publish it twice on the base graph."""
     pr = Pair()
     pr.run(1.0)
     pr.robot.publish("/euclid/result", b"done 3")
     pr.robot.publish("/euclid/guards", b"g")
+    pr.robot.publish("/euclid/static", b"tf")
     pr.run(1.0)
+    assert pr.data("base", "/euclid/result") == [b"done 3"]
     pr.base.close()
     pr.got["base"].clear()
     pr.base = pr.new_base()
     pr.run(3.0)
-    # result has replay_on_resync: the new base gets the last one; guards do not
-    assert pr.data("base", "/euclid/result") == [b"done 3"]
-    assert pr.data("base", "/euclid/guards") == []
+    assert pr.data("base", "/euclid/static") == [b"tf"]  # state: replayed
+    assert pr.data("base", "/euclid/result") == []  # acked event: not again
+    assert pr.data("base", "/euclid/guards") == []  # no replay_on_resync
+
+
+def test_unacked_result_reaches_restarted_base_exactly_once():
+    """A result still pending when the base restarts is re-addressed to the new
+    base and delivered there once."""
+    pr = Pair()
+    pr.run(1.0)
+    pr.link.close_transport(2.0)
+    pr.robot.publish("/euclid/result", b"done 4")
+    pr.run(1.0)
+    pr.base.close()
+    pr.base = pr.new_base()
+    pr.run(5.0)
+    assert pr.data("base", "/euclid/result") == [b"done 4"]
+    st = pr.robot.status()["topics"]["/euclid/result"]
+    assert st["pending"] == 0 and st["acked"] == 1
+
+
+def test_stale_epoch_nack_does_not_drop_replayed_result():
+    """Base bridge restart while a result is pending: the robot's retry, still
+    addressed to the old base, reaches the new base before its first heartbeat.
+    The new base nacks it ("stale epoch"); that nack is also how the robot learns
+    of the restart and re-addresses the pending.  The nack must not then pop it:
+    the result is delivered, exactly once."""
+    pr = Pair()
+    pr.run(3.0)
+    pr.link.close_transport(3.0)  # radio out t=3..6: the old base never sees it
+    pr.robot.publish("/euclid/result", b"R1")
+    pr.run(1.5)
+    o = pr.robot.out["/euclid/result"]
+    assert [p.to for p in o.pending.values()] == [pr.base.epoch]
+    pr.base.close()
+    pr.got["base"].clear()
+    pr.base = pr.new_base()  # its ticker (heartbeats) has not run yet
+    for _ in range(60):  # link back at t=6; only the robot ticks
+        pr.clk.advance(0.05)
+        pr.link.advance()
+        pr.robot.tick()
+    assert pr.robot.peer_restarts == 1
+    pr.run(10.0)
+    assert pr.data("base", "/euclid/result") == [b"R1"]
+    st = pr.robot.status()["topics"]["/euclid/result"]
+    assert st["pending"] == 0 and st["stale_epoch"] >= 1 and st["rejected"] == 0
 
 
 def test_type_hash_mismatch_rejected_and_counted():

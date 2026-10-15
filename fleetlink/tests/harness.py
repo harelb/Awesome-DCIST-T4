@@ -490,6 +490,7 @@ class Fleet:
         self.robots: dict[str, dict] = {r: {} for r in robots}
         self.state_times: dict[str, list[float]] = defaultdict(list)
         self.bulk_bytes: dict[str, int] = defaultdict(int)
+        self.grid_rx: dict[str, list[tuple[float, int]]] = defaultdict(list)
         self._obs = None
         self.topology = os.path.join(tmp, "topology.yaml")
 
@@ -621,7 +622,10 @@ class Fleet:
 
         # like the console's receiver: zenoh only sends what someone subscribes to
         def on_bulk(key: str, data: bytes) -> None:
-            self.bulk_bytes[key.split("/")[1]] += len(data)
+            robot = key.split("/")[1]
+            self.bulk_bytes[robot] += len(data)
+            if "/grid/" in key:
+                self.grid_rx[robot].append((time.time(), len(data)))
 
         for k in ("adt4/*/grid/**", "adt4/*/mesh/**", "adt4/*/dsg/**"):
             self._obs.subscribe(k, on_bulk)
@@ -689,6 +693,27 @@ class Fleet:
             return None
         res = self.base.wait_for(lambda e: e.get("ev") == "result" and e.get("robot") == robot and e.get("plan_id") == got["plan_id"], max(0.1, deadline - time.time()), since=mb)  # fmt: skip
         return None if res is None else res["rx"] - t0
+
+    def camera_query(self, robot: str, camera: str = "rgb", timeout: float = 10.0,
+                     **params) -> tuple[float | None, dict | None, int]:  # fmt: skip
+        """A C4 query as the console sends it, from the observer on the fleetlink
+        router: (seconds to the reply or None, the decoded reply, reply bytes)."""
+        from fleetlink import media
+
+        done = threading.Event()
+        out: dict = {}
+        t0 = time.time()
+
+        def cb(data):
+            out["data"], out["t"] = data, time.time()
+            done.set()
+
+        self._obs.query(f"adt4/{robot}/media/camera/{camera}", params or None, cb, timeout=timeout)  # fmt: skip
+        done.wait(timeout + 2.0)
+        data = out.get("data")
+        if data is None:
+            return None, None, 0
+        return out["t"] - t0, media.unpack_reply(data), len(data)
 
     def restart_fleetlink_router(self, down_s: float = 2.0, sig=signal.SIGKILL) -> None:
         self.flrouter.stop(sig=sig)
