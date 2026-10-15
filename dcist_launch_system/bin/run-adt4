@@ -28,6 +28,8 @@ ADT4_VARS = [
     "ADT4_SIM_TIME",
     "ADT4_RVIZ_CONFIG",
     "ADT4_ROBOT_COLOR",
+    "ADT4_FLEET_LINK",
+    "ADT4_FLEETLINK_CONNECT",
 ]
 
 
@@ -180,6 +182,29 @@ def _robot_colors(robot_name):
     except Exception as e:
         click.secho(f"Robot colors unavailable ({e}), using defaults", fg="yellow")
         return "", ""
+
+
+def _fleet_env(robot_name, mode=None):
+    """ADT4_FLEET_LINK / ADT4_FLEETLINK_CONNECT / ADT4_FLEETLINK_PORT from topology.yaml.
+
+    Never fails the launch: any problem falls back to router mode (the behaviour
+    before fleetlink mode existed).
+    """
+    try:
+        from dcist_launch_system.fleet_env import fleet_env
+
+        return fleet_env(
+            robot_name,
+            warn=lambda msg: click.secho(f"fleet link: {msg}", fg="yellow"),
+            mode=mode,
+        )
+    except Exception as e:
+        click.secho(f"Fleet link settings unavailable ({e}), router mode", fg="yellow")
+        return {
+            "ADT4_FLEET_LINK": "router",
+            "ADT4_FLEETLINK_CONNECT": "tcp/127.0.0.1:7447",
+            "ADT4_FLEETLINK_PORT": "7450",
+        }
 
 
 def _show_vars(env):
@@ -390,6 +415,14 @@ def main(
             env.pop(var, None)
             if value:
                 env[var] = value
+
+    # fleetlink vs router mode (topology fleet_defaults.fleet_link); explicit
+    # non-empty env values win, and an explicit ADT4_FLEET_LINK picks the mode the
+    # other values are derived for. Always exported: the tmux session `environment`
+    # passes them on, and an unset one would reach the panes as a literal "$VAR".
+    for var, value in _fleet_env(robot_name, env.get("ADT4_FLEET_LINK")).items():
+        if not env.get(var):
+            env[var] = value
 
     if rviz_config:
         rviz_config = pathlib.Path(rviz_config).expanduser().absolute()

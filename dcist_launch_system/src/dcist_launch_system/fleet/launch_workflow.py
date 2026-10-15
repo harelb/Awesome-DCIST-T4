@@ -26,6 +26,8 @@ from typing import Callable, Protocol
 from dcist_launch_system.fleet_helpers import (
     _quote_path,
     deploy_zenoh_config,
+    fleet_link_mode,
+    fleetlink_summary,
     generate_namespaced_rviz,
     generate_zenoh_endpoints,
     rsync_transfer,
@@ -139,7 +141,25 @@ def prior_dest_path(prior_path: str, output_root: str) -> str:
     return f"{output_root}/prior_{pathlib.Path(prior_path).name}"
 
 
-def build_robot_commands(plan: LaunchPlan, runtime_config: dict, output_root: str):
+def fleet_env_prefix(machine_name: str, topo: dict | None) -> str:
+    """``VAR=value ...`` assignments carrying the fleet link mode to ``run-adt4``.
+
+    Empty without a topology (run-adt4 then derives them from its own copy).
+    """
+    if topo is None:
+        return ""
+    from dcist_launch_system.fleet_env import fleet_env
+
+    env = fleet_env(machine_name, topo)
+    keys = ["ADT4_FLEET_LINK", "ADT4_FLEETLINK_CONNECT"]
+    if env.get("ADT4_FLEET_LINK") == "fleetlink":
+        keys.append("ADT4_FLEETLINK_PORT")
+    return "".join(f"{k}={shlex.quote(env[k])} " for k in keys)
+
+
+def build_robot_commands(
+    plan: LaunchPlan, runtime_config: dict, output_root: str, topo: dict | None = None
+):
     """Return ``[(machine, remote_cmd), ...]`` for every selected robot."""
     if not plan.robots:
         raise LaunchError("No robots selected.")
@@ -170,7 +190,7 @@ def build_robot_commands(plan: LaunchPlan, runtime_config: dict, output_root: st
         rprior = plan.prior_path if rname == plan.prior_source else dest_prior
         prior_flag = f" -p {_quote_path(rprior)}" if rprior else ""
         cmd = (
-            f"{_WS_PREFIX}{RUN_ADT4} "
+            f"{_WS_PREFIX}{fleet_env_prefix(m['name'], topo)}{RUN_ADT4} "
             f"{shlex.quote(plan.session)} -n {shlex.quote(m['name'])} "
             f"-c {shlex.quote(m['platform_id'])} "
             f"-o {_quote_path(out_dir)} -y{prior_flag}{record_flag} "
@@ -181,14 +201,19 @@ def build_robot_commands(plan: LaunchPlan, runtime_config: dict, output_root: st
 
 
 def build_base_station_command(
-    bs_machine: dict, bs_session: str, output_root: str, experiment: str, rviz_path=None
+    bs_machine: dict,
+    bs_session: str,
+    output_root: str,
+    experiment: str,
+    rviz_path=None,
+    topo: dict | None = None,
 ) -> str:
     out_dir = _quote_path(f"{output_root}/{experiment}")
     platform = bs_machine.get("platform_id")
     config_flag = f" -c {shlex.quote(platform)}" if platform else ""
     rviz_flag = f" --rviz-config {shlex.quote(rviz_path)}" if rviz_path else ""
     return (
-        f"{_WS_PREFIX}nohup {RUN_ADT4} "
+        f"{_WS_PREFIX}{fleet_env_prefix(bs_machine['name'], topo)}nohup {RUN_ADT4} "
         f"{shlex.quote(bs_session)} -n {shlex.quote(bs_machine['name'])}"
         f"{config_flag} -o {out_dir} -y{rviz_flag} "
         f'--tmuxp-args "-d" '
@@ -196,8 +221,10 @@ def build_base_station_command(
     )
 
 
-def dry_run_lines(plan: LaunchPlan, runtime_config: dict, output_root: str):
-    cmds = build_robot_commands(plan, runtime_config, output_root)
+def dry_run_lines(
+    plan: LaunchPlan, runtime_config: dict, output_root: str, topo: dict | None = None
+):
+    cmds = build_robot_commands(plan, runtime_config, output_root, topo)
     lines = []
     if plan.prior_path and plan.prior_source:
         exp_name = pathlib.Path(plan.prior_path).name
@@ -403,16 +430,24 @@ def run_launch(
     deps = deps or LaunchDeps()
     cb = callbacks
     try:
-        cmds = build_robot_commands(plan, runtime_config, output_root)
+        cmds = build_robot_commands(plan, runtime_config, output_root, topo)
     except LaunchError as e:
         cb.log("warn", str(e))
         return False
 
     bs_machine = runtime_config.get(plan.base_station) if plan.base_station else None
 
-    # Phase 0: zenoh config on the base station only (star topology; robots listen)
+    # Phase 0: zenoh config on the base station only (star topology; robots listen).
+    # In fleetlink mode the endpoints are [] (the deploy clears any robot links
+    # left from router mode): robots reach the base only as fleetlink clients.
     if bs_machine:
         cb.log("heading", "Deploying zenoh config to base station...")
+        if fleet_link_mode(topo) == "fleetlink":
+            cb.log(
+                "dim",
+                "fleetlink mode: base router links to no robots; robots are "
+                + fleetlink_summary(topo),
+            )
         try:
             endpoints = deps.zenoh_endpoints(
                 topo, active_network, bs_machine["name"], robot_filter=plan.robots
@@ -468,13 +503,13 @@ def run_launch(
 
     # Phase 3: base station
     if bs_machine and plan.bs_session:
-        all_ok &= _launch_base_station(plan, bs_machine, output_root, cb, deps)
+        all_ok &= _launch_base_station(plan, bs_machine, output_root, cb, deps, topo)
 
     cb.log("heading", "Launch sequence complete.")
     return all_ok
 
 
-def _launch_base_station(plan, bs_machine, output_root, cb, deps) -> bool:
+def _launch_base_station(plan, bs_machine, output_root, cb, deps, topo=None) -> bool:
     cb.log("heading", "Launching base station...")
     if cb.local_zenohd_running():
         cb.log("dim", "Stopping fleet zenohd (base station will take over)...")
@@ -495,7 +530,7 @@ def _launch_base_station(plan, bs_machine, output_root, cb, deps) -> bool:
             cb.log("warn", f"RViz config generation failed: {e}")
 
     bs_cmd = build_base_station_command(
-        bs_machine, plan.bs_session, output_root, plan.experiment, rviz_path
+        bs_machine, plan.bs_session, output_root, plan.experiment, rviz_path, topo
     )
     cb.log("dim", f"[{bs_machine['user']}@{bs_machine['ip']}] {bs_cmd}")
     rc, _, err = deps.ssh(bs_machine["user"], bs_machine["ip"], bs_cmd, timeout=60)

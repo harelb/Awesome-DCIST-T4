@@ -45,7 +45,29 @@ def zenoh_status(request: Request):
         "port": port,
         "links": _zenoh_links(),
         "reachable": {m["name"]: r is True for m, r in results},
+        **_fleet_link(fleet.topo),
     }
+
+
+def _fleet_link(topo: dict) -> dict:
+    """``fleet_link`` mode, plus in fleetlink mode where the robots connect.
+
+    In fleetlink mode the routers have no links across the radio (the deploy
+    gives every machine an empty connect list); robots are fleetlink clients of
+    the fleetlink router on ``fleetlink_base``.
+    """
+    from dcist_launch_system import fleet_helpers as fh
+
+    mode = fh.fleet_link_mode(topo)
+    out = {"fleet_link": mode}
+    if mode == "fleetlink":
+        out["fleetlink"] = {
+            "base": fh.fleetlink_base(topo),
+            "port": fh.fleetlink_port(topo),
+            "endpoints": fh.generate_fleetlink_endpoints(topo),
+            "summary": fh.fleetlink_summary(topo),
+        }
+    return out
 
 
 @router.get("/colors")

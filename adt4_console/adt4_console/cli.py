@@ -39,7 +39,12 @@ def parse_args(argv=None):
                    help="file graph source: run dir containing hydra/backend")  # fmt: skip
     p.add_argument("--no-ros", action="store_true")
     p.add_argument("--no-fleetlink", action="store_true")
-    p.add_argument("--zenoh-connect", default="tcp/127.0.0.1:7447")
+    p.add_argument(
+        "--zenoh-connect",
+        help="zenoh router for the fleetlink receiver (default: the local fleetlink "
+        "router tcp/127.0.0.1:<zenoh.fleetlink_port> when $ADT4_FLEET_LINK is "
+        "'fleetlink', else the ROS router tcp/127.0.0.1:7447)",
+    )
     p.add_argument(
         "--robots", help="comma-separated robots to plan for (default: topology)"
     )
@@ -64,6 +69,22 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def default_zenoh_connect(topology=None, environ=None) -> str:
+    """The receiver's router: the fleetlink router in fleetlink mode, else 7447."""
+    environ = os.environ if environ is None else environ
+    if environ.get("ADT4_FLEET_LINK") != "fleetlink":
+        return "tcp/127.0.0.1:7447"
+    port = environ.get("ADT4_FLEETLINK_PORT", "")
+    if not port.isdigit():
+        try:
+            from dcist_launch_system import fleet_helpers as fh
+
+            port = fh.fleetlink_port(fh.load_topology(topology))
+        except Exception:  # noqa: BLE001 — never block startup on this
+            port = 7450
+    return f"tcp/127.0.0.1:{port}"
+
+
 def settings_from_args(args):
     from .settings import Settings
 
@@ -82,7 +103,7 @@ def settings_from_args(args):
         maps=_pairs(args.map, "--map"),
         ros=not args.no_ros,
         fleetlink=not args.no_fleetlink,
-        zenoh_connect=args.zenoh_connect,
+        zenoh_connect=args.zenoh_connect or default_zenoh_connect(args.topology),
         robots=[r.strip() for r in args.robots.split(",") if r.strip()]
         if args.robots
         else None,

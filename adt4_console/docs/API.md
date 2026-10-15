@@ -478,6 +478,34 @@ Additions and clarifications, all backward-compatible with the §8 table and Rec
   `/global/ros_system_monitor/table_in`, filtered by `monitor_name == robot`. That is
   where `run-adt4` remaps each robot's `~/table_out`.
 
+* **Generic ROS relay (`adt4/<r>/ros/*`, fleetlink mode).** Code and modes are in
+  `fleetlink/fleetlink/relay.py` (the README has the full table); the allowlist is in
+  `fleetlink/config/relay.yaml`. Every message is a normal envelope whose `t` is the time the
+  message was *created*, and the console Receiver ignores these streams. Keys:
+  * `ros/up/<topic>` and `ros/down/<topic>` (streams `ros/up` / `ros/down`), where `<topic>` is
+    the ROS name without its leading `/`. Transforms use the synthetic names
+    `/_tf/<parent>/<child>` and `/_tf_static`. Payload: `{topic, type, th (type hash, RIHS01),
+    mode, tseq (per topic), to (receiver epoch or null), data (CDR bytes), id?, lo?}`. `id` is
+    present for `reliable` and `latest_reliable`; `lo` (reliable only) is the oldest `tseq` the
+    sender still retries.
+  * `ros/ack/up` (sent by the robot) and `ros/ack/down` (sent by the base), stream `ros/ack`:
+    * `{op: "ack", id, topic, ok, err?, subs?}`. `err` is `expired`, `type mismatch` or
+      `stale epoch`; `subs` is the subscriber count on the receiving graph.
+    * `{op: "hb", t, echo_t, held, cfg, platform, side, lo?}`, once a second. It gives
+      liveness, NTP-style RTT and clock offset, the relay config hash, and the reliable topics'
+      `lo`.
+  * `ros/srv/req` and `ros/srv/rep` (stream `ros/srv`), used in both directions and told apart
+    by `side`:
+    * request `{op: "req", side, id, service, type, th, to, data}`, retried every 1 s until
+      `timeout_s`;
+    * reply `{op: "rep", side, id, ok, err?, data?}`. The server dedupes by `id`.
+
+  Classes come from each entry's `cls` (C0 for commands, acks and heartbeats). Everything is
+  DROP. A sender epoch change resets the receiver's per-topic state. A peer restart drops
+  pending messages unless `replay_on_resync` is set. Liveness for the console is published by
+  fleetlink-bridge as `/fleetlink/link_status` (std_msgs/String JSON per robot,
+  `RelayCore.status()`).
+
 ### Console server (`adt4_console/`)
 
 Additive (clients may ignore):
@@ -503,6 +531,14 @@ Behavioural notes:
   category case (`"O12"` → `"O(12)"`). omniplanner's `get_loc` parses `"{}({})"`.
 * Executor pause/resume publish `std_msgs/Bool(true)` on
   `/<r>/spot_executor_node/pause|resume`. Those are the targets goal_manager remaps to.
+  **Fleetlink mode:** a fresh (< 5 s) `/fleetlink/link_status` exists for the robot (see
+  *Deviations → fleetlink, generic ROS relay*). Then the response adds `via: "fleetlink"`,
+  `delivered` (the robot's relay acked within 3 s) and `link {connected, rtt, loss, last_seen,
+  age_s, cfg_match}`. `subscribers` becomes the **robot-side** subscriber count carried by the
+  ack, or null when not acked; fleetlink-bridge is always the base-side subscriber. If
+  relay.yaml does not carry the topic for that robot, the response has
+  `delivered: false, error: "topic not relayed"`. Without link status (router mode) the
+  response is unchanged. `GET /api/robots/{r}/plan` gains `link` in fleetlink mode.
 * Action results are subscribed on both `/<r>/spot_executor_node/action_result`
   (the contract) and `/<r>/spot_executor/action_result` (what omniplanner's adaptor uses).
 * `GET /api/plan/robots` works without ROS. It is static, from

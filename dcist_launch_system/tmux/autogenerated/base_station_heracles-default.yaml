@@ -13,6 +13,9 @@ environment:
   HERACLES_OPENAI_API_KEY: $ADT4_OPENAI_API_KEY
   HERACLES_EVALUATION_PATH: $ADT4_HERACLES_AGENTS_PATH
   ADT4_ORIGIN_UTM: $ADT4_ORIGIN_UTM
+  ADT4_FLEET_LINK: $ADT4_FLEET_LINK
+  ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
+  ADT4_FLEETLINK_PORT: $ADT4_FLEETLINK_PORT
   ADT4_MONITOR_CONFIG: "{nodes_to_track: {dsg_saver: {}, nlu_rviz_instruction_panel: {}, omniplanner: {}}}"
   ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
   config: default
@@ -48,6 +51,12 @@ windows:
     panes:
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_rviz:=true ${ADT4_RVIZ_CONFIG:+rviz_config:=$ADT4_RVIZ_CONFIG}
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_omniplanner:=true
+  - window_name: fleetlink_base
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - if [ "$ADT4_FLEET_LINK" = fleetlink ]; then $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-router ${ADT4_FLEETLINK_PORT:-7450}; else echo "fleetlink-router not started (ADT4_FLEET_LINK=$ADT4_FLEET_LINK; router mode)"; fi
+      - if [ "$ADT4_FLEET_LINK" = fleetlink ]; then $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-bridge --ros-args -p use_sim_time:=$sim_time -p zenoh_connect:=${ADT4_FLEETLINK_CONNECT:-tcp/127.0.0.1:7450} -p topology:=${ADT4_TOPOLOGY:-$ADT4_WS/src/awesome_dcist_t4/network_diagnostics/config/topology.yaml} -p relay_config:=$ADT4_WS/src/awesome_dcist_t4/fleetlink/config/relay.yaml -p base_name:=$ADT4_ROBOT_NAME; else echo "fleetlink-bridge not started (ADT4_FLEET_LINK=$ADT4_FLEET_LINK; router mode)"; fi
   - window_name: global_status
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled

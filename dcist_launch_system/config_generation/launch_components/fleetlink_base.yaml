@@ -1,0 +1,15 @@
+---
+environment:
+  # set by run-adt4 from topology.yaml (python -m dcist_launch_system.fleet_env)
+  ADT4_FLEET_LINK: $ADT4_FLEET_LINK
+  ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
+  ADT4_FLEETLINK_PORT: $ADT4_FLEETLINK_PORT
+windows:
+  - window_name: fleetlink_base
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      # fleetlink mode only (fleet_defaults.fleet_link: fleetlink): the radio's zenoh router (robot agents connect here)
+      - if [ "$ADT4_FLEET_LINK" = fleetlink ]; then $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-router ${ADT4_FLEETLINK_PORT:-7450}; else echo "fleetlink-router not started (ADT4_FLEET_LINK=$ADT4_FLEET_LINK; router mode)"; fi
+      # fleetlink mode only: relays robot ROS topics / TF / services into the base ROS graph (fleetlink/config/relay.yaml)
+      - if [ "$ADT4_FLEET_LINK" = fleetlink ]; then $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-bridge --ros-args -p use_sim_time:=$sim_time -p zenoh_connect:=${ADT4_FLEETLINK_CONNECT:-tcp/127.0.0.1:7450} -p topology:=${ADT4_TOPOLOGY:-$ADT4_WS/src/awesome_dcist_t4/network_diagnostics/config/topology.yaml} -p relay_config:=$ADT4_WS/src/awesome_dcist_t4/fleetlink/config/relay.yaml -p base_name:=$ADT4_ROBOT_NAME; else echo "fleetlink-bridge not started (ADT4_FLEET_LINK=$ADT4_FLEET_LINK; router mode)"; fi

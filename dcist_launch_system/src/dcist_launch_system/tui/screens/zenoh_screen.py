@@ -18,6 +18,8 @@ from textual.widgets import (
 
 from dcist_launch_system.fleet_helpers import (
     deploy_zenoh_config,
+    fleet_link_mode,
+    fleetlink_summary,
     generate_zenoh_endpoints,
     run_parallel,
 )
@@ -36,11 +38,16 @@ class ZenohScreen(ModalScreen):
         self.ctx = ctx
 
     def compose(self) -> ComposeResult:
+        if fleet_link_mode(self.ctx.topo) == "fleetlink":
+            link = (
+                "fleetlink mode — no router links cross the radio; "
+                f"robots are {fleetlink_summary(self.ctx.topo)}"
+            )
+        else:
+            link = "Base stations connect to robots (star topology)"
         yield Vertical(
             Label("[bold]Zenoh Config Manager[/]"),
-            Label(
-                f"[dim]Network: {self.ctx.active_network} — Base stations connect to robots (star topology)[/]"
-            ),
+            Label(f"[dim]Network: {self.ctx.active_network} — {link}[/]"),
             Rule(),
             DataTable(id="zenoh_table"),
             Rule(),
@@ -76,7 +83,10 @@ class ZenohScreen(ModalScreen):
                 continue
 
             n = len(endpoints)
-            connect_str = f"{n} robot(s)" if n else "none (listen only)"
+            if fleet_link_mode(self.ctx.topo) == "fleetlink":
+                connect_str = fleetlink_summary(self.ctx.topo, mconf["role"])
+            else:
+                connect_str = f"{n} robot(s)" if n else "none (listen only)"
             table.add_row(mname, mconf["role"], connect_str, "Ready", key=mname)
 
         log.write(
@@ -106,6 +116,9 @@ class ZenohScreen(ModalScreen):
                 log.write(f"  {ep}")
         else:
             log.write("  (none — listen only)")
+        if fleet_link_mode(self.ctx.topo) == "fleetlink":
+            role = (self.ctx.runtime_config.get(mname) or {}).get("role")
+            log.write(f"  {fleetlink_summary(self.ctx.topo, role)}")
 
     def action_deploy_all(self):
         log = self.query_one("#zenoh_log", RichLog)

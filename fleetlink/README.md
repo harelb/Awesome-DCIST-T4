@@ -173,6 +173,137 @@ pinned to rmw_zenoh's zenoh version: `eclipse-zenoh==1.8.0` in `install/spark_re
 version is not 1.8.x. Budgets can also be changed live from the console's
 Live link tab (`POST /api/live/{r}/budget`).
 
+## Generic ROS relay (fleetlink mode)
+
+In fleetlink mode each robot's ROS graph stays on the robot, and the ROS topics, services and
+transforms that must cross the radio are relayed by fleetlink. They are listed in
+[`config/relay.yaml`](config/relay.yaml), whose header documents the schema. Both ends load the
+same file.
+
+* **`relay.py`** (pure, no ROS). `RelayConfig` validates the table: it rejects unknown keys,
+  modes, directions or classes, a topic or service configured in **both** directions (the loop
+  prevention), and two same-direction entries whose platforms overlap. It templates `{robot}`
+  (and `{base}` in a service's `base_name`) and filters entries by the robot's topology
+  `platform_type`; a robot without one counts as `spot`. `RelayCore` is one end of one
+  robot↔base link and runs the delivery modes:
+
+  | mode | behavior |
+  |---|---|
+  | `reliable` | in order; queue cap 32 (oldest dropped); retried every 1 s, 30 tries; the receiver acks, dedupes and applies in `tseq` order |
+  | `latest_reliable` | one pending slot: a newer message replaces the pending retry; the receiver applies only `tseq` above the last applied |
+  | `latest` | rate-limited to `rate_hz` (the newest waiting value goes at the next slot), fire and forget |
+
+  `ttl_s` is checked by the sender (it stops retrying) and by the receiver (it rejects with a
+  negative ack), using the envelope `t` corrected by the clock offset from the relay's own
+  heartbeats. Each end has a random epoch. When the peer **restarts**, only
+  `replay_on_resync: true` entries re-send (their pending or last value). Everything else
+  pending is dropped, and the new peer rejects retries still addressed to the old epoch, so a
+  rebooted robot never re-runs a stale plan or pause. Services use the same request/retry/dedupe
+  pattern (`srv/req`, `srv/rep`, never zenoh `get`) and give up after `timeout_s`. A type-hash
+  mismatch (ROS 2 `RIHS01`, from the package's generated `.json`) rejects and counts the message.
+  The heartbeat carries the config hash, and a mismatch is logged and shown as
+  `cfg_match: false`. Everything is congestion-control DROP. Relay messages do not go through
+  the agent's scheduler; `rate_hz` is their only budget.
+* **`relay_ros.py`.** `RobotRelay` runs inside `fleetlink-agent` on the agent's transport. It
+  is enabled with `-p relay_config:=<relay.yaml>` (or `default`), plus optional
+  `relay_platform` and `topology`. Without `relay_config` the agent behaves as before. It
+  subscribes the `up` topics with `raw=True` and the configured QoS, republishes `down` topics,
+  and looks up each configured TF pair (`map → {robot}/base_link`, 5 Hz) in a tf2 buffer.
+  `/tf_static` transforms under `frames_prefix` are sent as one message when they change and
+  again to a restarted base; a frame that is the child of a composed pair is left out, so it
+  never gets two parents. For `dir: up` services (the robot calls, the base answers) it serves
+  proxy servers, and for `dir: down` services it calls the robot's real servers.
+  `BaseBridge` is the `fleetlink-bridge` node, one process for every robot:
+
+  ```bash
+  fleetlink/bin/fleetlink-bridge --ros-args -p zenoh_connect:=tcp/127.0.0.1:7450 \
+      -p topology:=<topology.yaml> -p relay_config:=<relay.yaml> [-p base_name:=willow] [-p robots:=euclid,hamilton]
+  ```
+
+  Robots come from the topology (`role: robot`) and from any relay heartbeat that arrives. On
+  the base graph the bridge subscribes the `down` topics and republishes `up` topics under the
+  same names. Transforms go to `/tf`; static transforms go to `/tf_static`, all robots in one
+  latched message. The bridge serves proxies for `dir: down` services and calls the real base
+  servers (`base_name`, e.g. heracles' `/{base}/update_holding_state`) for `dir: up` ones. It
+  publishes `/fleetlink/link_status`: one `std_msgs/String` JSON per robot, at 1 Hz and right
+  after a down message is acked. The JSON is `RelayCore.status()`: `connected`, `rtt`, `loss`,
+  `last_seen`, `clock_offset`, `epoch`, `peer_epoch`, `cfg_match`, and per topic `sent`,
+  `acked`, `pending` and `subs`, the subscribers on the far side when the message was applied.
+  The console takes Pause/Resume delivery and robot liveness from this topic. ROS subscriber
+  counts mean nothing once the bridge subscribes everything. Both ends spin multi-threaded:
+  proxy servers block in a reentrant group while the far side answers.
+
+Inventory notes (`dcist_launch_system/scripts/fleetlink_inventory.py`):
+* Nothing on the robot subscribes to `spot_executor_node/pause|resume` yet. They are relayed
+  anyway, and the ack's `subs: 0` shows it.
+* `omniplanner_node/llm_response` is not relayed (it is base-local).
+* `/global/ros_system_monitor/table_in` is one global topic for all robots.
+
+## Fleetlink mode
+
+`network_diagnostics/config/topology.yaml` picks how robots and the base station talk:
+
+```yaml
+zenoh:
+  port: 7447                              # every machine's own ROS rmw_zenohd
+  fleetlink_port: 7450                    # the base's fleetlink router
+  fleetlink_networks: [silvus, mit_wifi]  # robot agents try these in order
+fleet_defaults:
+  fleet_link: router      # router | fleetlink
+  fleetlink_base: willow  # base station that runs the fleetlink router
+```
+
+* **`router`** (the default). The base's `rmw_zenohd` connects router-to-router to every
+  robot (the endpoints the fleet tools deploy), so all ROS graphs merge across the radio. The
+  agent connects to its local router `tcp/127.0.0.1:7447`, and the relay is off.
+* **`fleetlink`**. Only fleetlink crosses the radio, and every ROS graph stays on its machine.
+  * `generate_zenoh_endpoints()` returns `[]` for every machine, so a zenoh deploy (fleet TUI,
+    `fleet-adt4 zenoh`, the launch workflow's phase 0, the console's *Deploy config*) clears
+    the base router's robot links.
+  * On the base, the `fleetlink_base` window of the `base_station*` sessions starts
+    `bin/fleetlink-router` and `fleetlink-bridge`. In router mode both panes only print a
+    message.
+    * `bin/fleetlink-router [PORT]` runs `rmw_zenohd` with
+      [`config/fleetlink_router.json5`](config/fleetlink_router.json5): listen
+      `tcp/[::]:7450`, connect to nothing, no scouting, gossip, adminspace or plugins.
+    * The bridge and the console's receiver connect to it over loopback. The console's
+      `--zenoh-connect` defaults to `tcp/127.0.0.1:<fleetlink_port>` when
+      `ADT4_FLEET_LINK=fleetlink`.
+  * On each robot, the agent connects to the fleetlink router as a zenoh client over the radio
+    and runs the ROS relay (`-p relay_config:=default`).
+
+**Environment.** `run-adt4` derives these from the topology unless they are already set
+(`python -m dcist_launch_system.fleet_env <machine> [--network NAME]` prints them as shell
+exports). Problems such as an unknown machine, or a base with no address on any fleetlink
+network, fall back to router mode with a warning and never fail the launch. The fleet launch
+workflow passes the launching machine's view of the topology to each `run-adt4` on the
+command line.
+
+| variable | robot (fleetlink) | base (fleetlink) | router mode |
+|---|---|---|---|
+| `ADT4_FLEET_LINK` | `fleetlink` | `fleetlink` | `router` |
+| `ADT4_FLEETLINK_CONNECT` | `tcp/<base silvus>:7450,tcp/<base mit_wifi>:7450` | `tcp/127.0.0.1:7450` | `tcp/127.0.0.1:7447` |
+| `ADT4_FLEETLINK_PORT` | `7450` | `7450` | `7450` |
+
+**Failover across networks.** The agent gets all of the base's fleetlink endpoints, in
+`fleetlink_networks` order, verified on zenoh 1.8 (`tests/test_fleetlink_router.py`):
+
+* A zenoh *client* opens **one** session, to the first endpoint that answers. When two
+  endpoints reach the same router, there is one TCP link and each message arrives once.
+* When that link drops, the client reconnects to the first endpoint that answers again.
+* It does **not** fail back: once on Wi-Fi, it stays there until that link drops.
+* A refused endpoint (router down) is skipped at once. A black-holed one (radio out of range)
+  costs zenoh's `transport/unicast/open_timeout` (10 s by default) before the next one is
+  tried.
+
+**Switching.** Set `fleet_defaults.fleet_link`, redeploy the zenoh config (in fleetlink mode
+this clears the base router's robot endpoints; back in router mode it restores them), and
+restart the sessions. To force one machine's mode, export `ADT4_FLEET_LINK` before
+`run-adt4`; the other variables are then derived for that mode. Export
+`ADT4_FLEETLINK_CONNECT` as well to point a robot elsewhere, such as a bench base.
+
+**Deferred.** Zenoh access control, so that a robot can only put `adt4/<self>/**`.
+
 ## Tests and benchmark
 
 ```bash
@@ -195,6 +326,17 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
   `test_zenoh_open_without_router_then_connect_and_restart` opens the sessions with nothing on
   `127.0.0.1:17449`, then starts a router there, kills and restarts it.
   They never touch the live router on 7447. They skip when ROS or that port is unavailable.
+* `test_relay` exercises `RelayConfig` / `RelayCore` over the emulator. It covers config
+  rejection (both directions, unknown mode/key/class) and the platform filter on the real
+  `relay.yaml`; reliable order under 30 % loss and the queue cap; latest_reliable supersede; the
+  latest rate limit; TTL with a 100 s clock skew and expiry; no replay after a robot restart
+  (with the stale-epoch reject); replay to a restarted base; type and config hash mismatch;
+  service round trips both ways under loss; and service timeouts. `test_relay_ros` runs a
+  robot graph (domain 90) with `AgentNode` + `relay_config` and a base graph (domain 91) with
+  `BaseBridge`, joined only through the throwaway router. Over that link it checks an
+  ActionSequenceMsg down, an `action_result` up, `save_dsg` base→robot, `update_holding_state`
+  robot→`/willow/…`, a base-side tf2 lookup of the composed and static frames, and
+  `/fleetlink/link_status`. It also checks that the two graphs never see each other.
   Mark: `integration`; `-m "not integration"` skips them.
 * **Benchmark:** `test_integration_pennovation.py` streams the real Pennovation map
   (`/home/harel/data/pennovation_2025/courtyard-alleyways/output/hydra/backend/dsg_with_mesh.json`)

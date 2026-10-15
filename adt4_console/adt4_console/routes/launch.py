@@ -53,7 +53,10 @@ def launch_dry_run(body: LaunchPlanBody, request: Request):
     try:
         with svc.fleet.lock:
             lines = dry_run_lines(
-                _plan(body), svc.fleet.runtime_config, svc.settings.output_root
+                _plan(body),
+                svc.fleet.runtime_config,
+                svc.settings.output_root,
+                svc.fleet.topo,
             )
     except LaunchError as e:
         raise HTTPException(400, str(e)) from None

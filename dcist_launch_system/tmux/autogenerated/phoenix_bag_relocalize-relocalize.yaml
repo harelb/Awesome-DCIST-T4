@@ -21,6 +21,8 @@ environment:
   HERACLES_OPENAI_API_KEY: $ADT4_OPENAI_API_KEY
   HERACLES_EVALUATION_PATH: $ADT4_HERACLES_AGENTS_PATH
   ADT4_ORIGIN_UTM: $ADT4_ORIGIN_UTM
+  ADT4_FLEET_LINK: $ADT4_FLEET_LINK
+  ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
   ADT4_MONITOR_CONFIG: "{nodes_to_track: {fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, hydra_multi: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}}}"
   ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
   config: relocalize
@@ -59,7 +61,7 @@ windows:
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
     panes:
-      - $ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/$ADT4_ROBOT_NAME -p robot_name:=$ADT4_ROBOT_NAME -p use_sim_time:=$sim_time
+      - "$ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/$ADT4_ROBOT_NAME -p robot_name:=$ADT4_ROBOT_NAME -p use_sim_time:=$sim_time -p zenoh_connect:=${ADT4_FLEETLINK_CONNECT:-tcp/127.0.0.1:7447} $([ \"$ADT4_FLEET_LINK\" = fleetlink ] && echo -p relay_config:=default -p topology:=${ADT4_TOPOLOGY:-$ADT4_WS/src/awesome_dcist_t4/network_diagnostics/config/topology.yaml})"
   - window_name: rviz
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled

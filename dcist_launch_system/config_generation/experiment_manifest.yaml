@@ -14,10 +14,10 @@ launch_configs:
   bag_map_lc: [map_lc, rviz]
   bag_relocalize: [relocalize, rviz, relocalize_viz]
   # planning and base station
-  plan_prior: [main, prior_dsg, planning]
-  plan_prior_heracles: [main, heracles_prior_dsg, planning]
+  plan_prior: [main, prior_dsg, planning, fleetlink_base]
+  plan_prior_heracles: [main, heracles_prior_dsg, planning, fleetlink_base]
   # web console instead of rviz (rviz-free base station)
-  plan_prior_web: [main, prior_dsg, planning_web, console]
+  plan_prior_web: [main, prior_dsg, planning_web, console, fleetlink_base]
 # Configs build the set of rosparams that will be loaded
 configs:
   default: []

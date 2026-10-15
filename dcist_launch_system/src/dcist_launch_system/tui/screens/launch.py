@@ -33,6 +33,8 @@ from dcist_launch_system.fleet.launch_workflow import (
 )
 from dcist_launch_system.fleet_helpers import (
     deploy_zenoh_config,
+    fleet_link_mode,
+    fleetlink_summary,
     generate_zenoh_endpoints,
 )
 from dcist_launch_system.tui.context import TuiContext
@@ -249,7 +251,13 @@ class LaunchScreen(ModalScreen):
 
         targets = [self.ctx.runtime_config[bs_names[0]]]
         log.write(f"[bold]Deploying zenoh config to {targets[0]['name']}...[/]")
-        log.write(f"  [dim]Endpoints → robots: {', '.join(robot_names)}[/]")
+        if fleet_link_mode(self.ctx.topo) == "fleetlink":
+            log.write(
+                "  [dim]fleetlink mode: no robot endpoints; robots are "
+                f"{fleetlink_summary(self.ctx.topo)}[/]"
+            )
+        else:
+            log.write(f"  [dim]Endpoints → robots: {', '.join(robot_names)}[/]")
 
         def do_deploy():
             results = []
@@ -317,7 +325,10 @@ class LaunchScreen(ModalScreen):
         log = self.query_one("#launch_log", RichLog)
         try:
             lines = dry_run_lines(
-                self._current_plan(), self.ctx.runtime_config, self.ctx.output_root
+                self._current_plan(),
+                self.ctx.runtime_config,
+                self.ctx.output_root,
+                self.ctx.topo,
             )
         except LaunchError as e:
             log.write(f"[yellow]{e}[/]")

@@ -11,6 +11,8 @@ interface ZenohStatus {
   port: number;
   links: unknown[];
   reachable: Record<string, boolean>;
+  fleet_link?: "router" | "fleetlink";
+  fleetlink?: {base: string | null; port: number; endpoints: string[]; summary: string};
 }
 
 type Cell = {rssi_db?: number | null; quality?: number | string | null; linked?: boolean};
@@ -133,6 +135,16 @@ export function NetworkPage() {
                   </button>
                 </div>
               </div>
+              {z.fleet_link === "fleetlink" && z.fleetlink ? (
+                <>
+                  <h4 className="sub-title">Radio link: fleetlink</h4>
+                  <div className="mono small">{z.fleetlink.summary}</div>
+                  <div className="muted small">
+                    No router links cross the radio. Robot agents try, in order:{" "}
+                    <span className="mono">{z.fleetlink.endpoints.join(", ") || "(base has no fleetlink address)"}</span>
+                  </div>
+                </>
+              ) : null}
               <h4 className="sub-title">Router links ({z.links.length})</h4>
               {z.links.length === 0 ? (
                 <div className="muted small">No links (admin REST on :8000 not reachable or no peers).</div>
