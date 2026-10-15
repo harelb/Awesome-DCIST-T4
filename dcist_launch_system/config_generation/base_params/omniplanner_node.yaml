@@ -5,3 +5,6 @@
     vocalize: false
     deepgram_api_key: $(env ADT4_DEEPGRAM_API_KEY)
     openai_api_key: $(env ADT4_OPENAI_API_KEY)
+    # "name:#hex,..." per-robot plan marker colors (topology.yaml via run-adt4); "none" = defaults.
+    # Never let this substitute to empty: rcl rejects a param file key without a value.
+    robot_colors: $(env ADT4_ROBOT_COLORS none)

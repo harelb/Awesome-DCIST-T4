@@ -215,6 +215,10 @@ Options:
   --help                   Show this message and exit.
 ```
 
+**Per-robot colors.** Each `role: robot` machine in `network_diagnostics/config/topology.yaml` can set `color: "#rrggbb"` (otherwise it gets a palette color by sorted name; `python -m dcist_launch_system.robot_colors` prints the mapping).
+`run-adt4` exports `ADT4_ROBOT_COLORS` / `ADT4_ROBOT_COLOR`, which color the omniplanner plan markers and the spot executor path markers; the web console uses the same mapping.
+For a fleet RViz view with one display group per robot in its color, run `dcist_launch_system/scripts/generate_fleet_rviz.py` and launch with `ADT4_RVIZ_CONFIG=<repo>/dcist_launch_system/rviz/generated/fleet.rviz` (or `--rviz-config`).
+
 > :warning: **Warning** </br>
 > Note tmuxp does weird things with `.zshrc` versus the environment used to invoke tmuxp and you may want to remove `ADT4_OUTPUT_DIR` and `ADT4_PRIOR_MAP` from your `.zshrc` (the base launch component should forward these correctly though from the environment that invoked tmuxp).
 

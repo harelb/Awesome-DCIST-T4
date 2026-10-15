@@ -1424,6 +1424,30 @@ input[type="checkbox"] {
   border-radius: 4px;
   pointer-events: none;
 }
+.robot-legend {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 50%;
+  pointer-events: none;
+}
+.robot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(11, 15, 20, 0.85);
+  border: 1px solid;
+  border-radius: 4px;
+  padding: 1px 7px;
+  font: 600 12px var(--sans);
+  color: #fff;
+  white-space: nowrap;
+}
 .canvas-empty {
   position: absolute;
   inset: 0;
@@ -2482,6 +2506,14 @@ input[type="checkbox"] {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .viewer.phone .robot-legend {
+    bottom: calc(var(--sheet-h, 0px) + 32px);
+    right: 8px;
+    max-width: calc(100% - 16px);
+  }
+  .viewer.phone .robot-chip {
+    font-size: 11px;
   }
   .viewer.phone .pick-banner {
     bottom: calc(var(--sheet-h, 0px) + 36px);

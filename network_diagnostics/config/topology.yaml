@@ -9,6 +9,7 @@ networks:
 machines:
   euclid:
     role: robot
+    color: "#e6194b"
     platform_id: smaug
     platform_type: spot
     desc: Smaug Jockey
@@ -18,6 +19,7 @@ machines:
       silvus: 192.168.100.3
   hamilton:
     role: robot
+    color: "#42d4f4"
     addresses:
       mit_wifi: 10.31.144.106
       silvus: 192.168.100.2
@@ -26,6 +28,7 @@ machines:
     desc: Topaz Jockey
   gauss:
     role: robot
+    color: "#ffe119"
     platform_id: samoyed
     platform_type: phoenix
     desc: Husky Jockey
@@ -33,6 +36,7 @@ machines:
       mit_wifi: 10.29.170.181
   lewis:
     role: robot
+    color: "#3cb44b"
     platform_id: samoyed
     platform_type: phoenix
     desc: Husky Jockey
@@ -42,6 +46,7 @@ machines:
       silvus: 192.168.100.105
   apollo:
     role: robot
+    color: "#f032e6"
     platform_id: apollo
     platform_type: spot
     desc: ARL Spot
@@ -49,6 +54,7 @@ machines:
       silvus: 192.168.100.13
   samoyed:
     role: robot
+    color: "#f58231"
     platform_id: samoyed
     platform_type: phoenix
     desc: ARL Husky

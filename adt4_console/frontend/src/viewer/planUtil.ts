@@ -1,11 +1,8 @@
-import {SOURCE_TINTS} from "../lib/palette";
 import type {RobotPlan} from "../types";
 
-export const robotColor = (name: string) => {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return SOURCE_TINTS[h % SOURCE_TINTS.length];
-};
+// Per-robot colours come from the topology (GET /api/network/colors) so the
+// console matches RViz; SOURCE_TINTS stays for graph sources only.
+export {robotColor, useRobotColorOf} from "../lib/palette";
 
 export function currentActionIndex(plan: RobotPlan | undefined): number {
   if (!plan?.plan) return -1;

@@ -11,6 +11,7 @@ import {PlanPanel, visitGoal} from "./PlanPanel";
 import {ChatPanel} from "./ChatPanel";
 import {LivePanel} from "./LivePanel";
 import {LiveOverlaysPanel} from "./LiveOverlays";
+import {RobotLegend} from "./RobotLegend";
 import {CameraPanel} from "./CameraPanel";
 import {Segmented} from "../components/ui";
 import {readyModels} from "../stores/viewer";
@@ -269,6 +270,7 @@ export default function ViewerPage() {
           </div>
         )}
         {toast && <div className="toast">{toast}</div>}
+        <RobotLegend />
         <div className="vstatus mono">
           {totalNodes.toLocaleString()} nodes{tileText ? ` · tiles ${tileText}` : ""}
           {totalTris ? ` · ${(totalTris / 1e6).toFixed(2)}M tris` : ""}

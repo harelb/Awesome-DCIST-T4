@@ -27,6 +27,7 @@ ADT4_VARS = [
     "ADT4_PRIOR_MAP",
     "ADT4_SIM_TIME",
     "ADT4_RVIZ_CONFIG",
+    "ADT4_ROBOT_COLOR",
 ]
 
 
@@ -163,6 +164,22 @@ def _resolve_output_dir(output_dir, force):
         shutil.rmtree(output_dir)
 
     return output_dir
+
+
+def _robot_colors(robot_name):
+    """Return (all robots as "name:#hex,...", this robot's #hex) from topology.yaml.
+
+    Colors are cosmetic, so any failure (module or topology missing, bad yaml)
+    falls back to empty strings and consumers keep their default colors.
+    """
+    try:
+        from dcist_launch_system import robot_colors as rc
+
+        colors = rc.robot_colors(rc.load_topology())
+        return rc.to_ros_string(colors), colors.get(robot_name, "")
+    except Exception as e:
+        click.secho(f"Robot colors unavailable ({e}), using defaults", fg="yellow")
+        return "", ""
 
 
 def _show_vars(env):
@@ -360,6 +377,19 @@ def main(
     env["ADT4_OUTPUT_DIR"] = str(output_dir)
     if prior_map:
         env["ADT4_PRIOR_MAP"] = str(prior_map)
+
+    # Explicit env overrides win over topology.yaml. Empty values are never
+    # exported: the param files substitute these with a "none" default, and an
+    # empty substitution makes rcl reject the whole params file.
+    all_colors, own_color = _robot_colors(robot_name)
+    for var, value in (
+        ("ADT4_ROBOT_COLORS", all_colors),
+        ("ADT4_ROBOT_COLOR", own_color),
+    ):
+        if not env.get(var):
+            env.pop(var, None)
+            if value:
+                env[var] = value
 
     if rviz_config:
         rviz_config = pathlib.Path(rviz_config).expanduser().absolute()

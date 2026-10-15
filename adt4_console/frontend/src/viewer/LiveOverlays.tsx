@@ -1,5 +1,6 @@
 // 3D overlays for live robots: occupancy grid (textured plane) and executor
-// paths (smooth = cyan dashed, MLP = amber, MLP target = marker).
+// paths in each robot's colour (smooth = lighter dashed, MLP = robot colour,
+// MLP target = darker marker), matching the RViz fleet config.
 import {useEffect, useMemo} from "react";
 import * as THREE from "three";
 import {Line} from "@react-three/drei";
@@ -7,10 +8,12 @@ import {useLiveRobots, useRobots} from "../stores/robots";
 import {gridOpacityOf, gridShown, useOverlays, watchGrid} from "../stores/overlays";
 import {Toggle} from "../components/ui";
 import {lift, type DecodedGrid} from "../lib/overlays";
+import {shade, useRobotColorOf} from "../lib/palette";
 
-export const SMOOTH_COLOR = "#22d3ee";
-export const MLP_COLOR = "#ffb020";
-export const TARGET_COLOR = "#ff5d8f";
+/** Executor overlay colours derived from a robot's colour. */
+export function pathColors(robotHex: string) {
+  return {smooth: shade(robotHex, 1.45), mlp: robotHex, target: shade(robotHex, 0.6)};
+}
 
 
 function GridPlane({grid, opacity}: {grid: DecodedGrid; opacity: number}) {
@@ -48,23 +51,24 @@ function GridLayer({robot}: {robot: string}) {
 function PathLayer({robot}: {robot: string}) {
   const paths = useRobots(s => s.paths[robot]);
   const {showSmooth, showMlp, showTarget} = useOverlays();
+  const c = pathColors(useRobotColorOf()(robot));
   if (!paths) return null;
   const smooth = lift(paths.smooth, 0.15);
   const mlp = lift(paths.mlp, 0.2);
   const t = paths.target;
   return (
     <group>
-      {showSmooth && smooth.length > 1 && <Line points={smooth} color={SMOOTH_COLOR} lineWidth={2.5} dashed dashSize={0.35} gapSize={0.2} />}
-      {showMlp && mlp.length > 1 && <Line points={mlp} color={MLP_COLOR} lineWidth={3} />}
+      {showSmooth && smooth.length > 1 && <Line points={smooth} color={c.smooth} lineWidth={2.5} dashed dashSize={0.35} gapSize={0.2} />}
+      {showMlp && mlp.length > 1 && <Line points={mlp} color={c.mlp} lineWidth={3} />}
       {showTarget && t && (
         <group position={[t[0], t[1], t[2] + 0.25]}>
           <mesh>
             <sphereGeometry args={[0.18, 16, 10]} />
-            <meshBasicMaterial color={TARGET_COLOR} />
+            <meshBasicMaterial color={c.target} />
           </mesh>
           <mesh position={[0, 0, -0.2]} rotation={[0, 0, 0]}>
             <ringGeometry args={[0.35, 0.45, 32]} />
-            <meshBasicMaterial color={TARGET_COLOR} side={THREE.DoubleSide} transparent opacity={0.8} />
+            <meshBasicMaterial color={c.target} side={THREE.DoubleSide} transparent opacity={0.8} />
           </mesh>
         </group>
       )}
@@ -92,7 +96,10 @@ export function LiveOverlaysPanel() {
   const robots = useLiveRobots();
   const st = useOverlays();
   const paths = useRobots(s => s.paths);
+  const colorOf = useRobotColorOf();
   if (!robots.length) return null;
+  // legend swatches: first live robot's shades (each robot draws in its own colour)
+  const legend = pathColors(colorOf(robots[0]));
   return (
     <section className="vsec">
       <header className="vsec-head">
@@ -105,7 +112,15 @@ export function LiveOverlaysPanel() {
         const op = gridOpacityOf(st, r);
         return (
           <div key={r} className="overlay-robot">
-            <Toggle checked={on} onChange={v => st.set({gridOn: {...st.gridOn, [r]: v}})} label={<span>{r}: occupancy</span>} />
+            <Toggle
+              checked={on}
+              onChange={v => st.set({gridOn: {...st.gridOn, [r]: v}})}
+              label={
+                <span>
+                  <span className="swatch" style={{background: colorOf(r)}} /> {r}: occupancy
+                </span>
+              }
+            />
             {on && (
               <>
                 <label className="slider-row">
@@ -126,18 +141,19 @@ export function LiveOverlaysPanel() {
           </div>
         );
       })}
+      <div className="muted small">Paths are drawn per robot in that robot's colour.</div>
       <div className="row gap-sm wrap overlay-path-toggles">
         <label className="mini-check">
           <input type="checkbox" checked={st.showSmooth} onChange={e => st.set({showSmooth: e.target.checked})} />
-          <span className="swatch line" style={{background: SMOOTH_COLOR}} /> smooth path
+          <span className="swatch line" style={{background: legend.smooth}} /> smooth path (lighter)
         </label>
         <label className="mini-check">
           <input type="checkbox" checked={st.showMlp} onChange={e => st.set({showMlp: e.target.checked})} />
-          <span className="swatch line" style={{background: MLP_COLOR}} /> MLP path
+          <span className="swatch line" style={{background: legend.mlp}} /> MLP path (robot colour)
         </label>
         <label className="mini-check">
           <input type="checkbox" checked={st.showTarget} onChange={e => st.set({showTarget: e.target.checked})} />
-          <span className="swatch" style={{background: TARGET_COLOR}} /> MLP target
+          <span className="swatch" style={{background: legend.target}} /> MLP target (darker)
         </label>
       </div>
     </section>

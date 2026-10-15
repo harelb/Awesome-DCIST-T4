@@ -107,6 +107,11 @@ job = {id, kind, title, state: "running"|"waiting"|"succeeded"|"failed"|"cancell
 * `GET /api/network/silvus` → `{matrix: {src: {dst: {rssi_db, quality, linked}} | "error str"}, routing: {...}}` (fleet `silvus` module)
 * `GET /api/network/silvus/route` → `check_silvus_route` result
 * `POST /api/network/iperf` `{machine, seconds: 5}` → job (result = throughput dict)
+* `GET /api/network/colors` → `{colors: {robot: "#rrggbb"}}`: one color per `role: robot`
+  machine (`dcist_launch_system.robot_colors`: the topology `color` field, else the shared
+  20-color palette by sorted name, skipping colors already taken). The same mapping colors
+  RViz (`generate_fleet_rviz.py`) and the planner markers (`ADT4_ROBOT_COLORS`), so a robot
+  looks the same everywhere. Reflects unsaved topology edits.
 
 ## 7. Maps & graph
 

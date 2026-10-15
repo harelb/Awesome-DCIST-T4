@@ -6,12 +6,14 @@ import {ws} from "./ws";
 import {bindFleet, useFleet} from "./stores/fleet";
 import {bindJobs, useJobs} from "./stores/jobs";
 import {bindRobots} from "./stores/robots";
+import {bindRobotColors} from "./stores/robotColors";
 import "./styles.css";
 
 initToken();
 bindFleet();
 bindJobs();
 bindRobots();
+bindRobotColors();
 ws.start();
 void useFleet.getState().load();
 void useJobs.getState().load();

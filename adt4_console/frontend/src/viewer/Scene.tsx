@@ -8,7 +8,7 @@ import {useRobots} from "../stores/robots";
 import {layoutGraph, displayPos, type GraphLayout} from "./layout";
 import {GraphLayers, pickRegistry} from "./GraphLayers";
 import {MeshTiles, type TileStats} from "./MeshTiles";
-import {currentActionIndex, robotColor} from "./planUtil";
+import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -120,6 +120,7 @@ function quatYaw(qw: number, qx: number, qy: number, qz: number) {
 function RobotGlyphs() {
   const states = useRobots(s => s.state);
   const stateAt = useRobots(s => s.stateAt);
+  const robotColor = useRobotColorOf();
   const now = Date.now();
   return (
     <>
@@ -154,6 +155,7 @@ function RobotGlyphs() {
 
 function PlanOverlay() {
   const plans = useRobots(s => s.plan);
+  const robotColor = useRobotColorOf();
   return (
     <>
       {Object.entries(plans).map(([r, plan]) => {

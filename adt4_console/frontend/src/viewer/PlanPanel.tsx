@@ -5,7 +5,7 @@ import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {fmtTime} from "../lib/fuzzy";
 import type {PlanRobot, RobotPlan} from "../types";
 import {Badge, Empty, ErrorBox, Loading, Segmented, Spinner} from "../components/ui";
-import {currentActionIndex, robotColor} from "./planUtil";
+import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {parseSym} from "../codec";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
@@ -215,9 +215,10 @@ export function PlanPanel() {
 }
 
 function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | undefined}) {
+  const colorOf = useRobotColorOf();
   if (!robot) return null;
   const cur = currentActionIndex(plan);
-  const color = robotColor(robot);
+  const color = colorOf(robot);
   return (
     <div className="current-plan">
       <h4 className="sub-title">

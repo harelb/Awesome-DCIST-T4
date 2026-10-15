@@ -48,6 +48,16 @@ def zenoh_status(request: Request):
     }
 
 
+@router.get("/colors")
+def robot_colors(request: Request):
+    """Per-robot display colors (topology ``color`` or the shared palette)."""
+    from dcist_launch_system.robot_colors import robot_colors as colors_for
+
+    fleet = services(request).fleet
+    with fleet.lock:
+        return {"colors": colors_for(fleet.topo)}
+
+
 class DeployBody(BaseModel):
     machines: list[str] | None = None
     robots: list[str] | None = None

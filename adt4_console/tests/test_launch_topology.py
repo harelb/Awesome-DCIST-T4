@@ -135,3 +135,18 @@ def test_topology_edit_delete_save_preserves_file(client, topology_copy):
     assert "newbot" in saved["machines"] and "gauss" not in saved["machines"]
     assert list(saved)[:2] == ["networks", "machines"]  # key order preserved
     assert "machines:  # fleet machines" in topology_copy.read_text()  # comment kept
+
+
+def test_robot_colors_from_topology(client):
+    colors = client.get("/api/network/colors").json()["colors"]
+    topo = client.get("/api/topology").json()
+    robots = {n for n, m in topo["machines"].items() if m.get("role") == "robot"}
+    assert set(colors) == robots
+    assert len(set(colors.values())) == len(colors)  # distinct per robot
+    assert colors["euclid"] == topo["machines"]["euclid"]["color"]
+
+    # Edits keep the color and new robots get an unused palette entry.
+    edit = {"name": "newbot", "role": "robot", "platform": "smaug"}
+    assert client.put("/api/topology/machines/newbot", json=edit).status_code == 200
+    colors = client.get("/api/network/colors").json()["colors"]
+    assert colors["newbot"] not in {c for n, c in colors.items() if n != "newbot"}
