@@ -68,6 +68,62 @@ def load_topology(path=None):
         return yaml.safe_load(f)
 
 
+FLEET_LINK_MODES = ("router", "fleetlink")
+
+
+def validate_topology(topology):
+    """Consistency checks on a topology dict; returns a list of problems (empty = ok).
+
+    * no two machines share an address on the same network;
+    * no two robots share a ``color`` (colors are optional);
+    * ``fleet_defaults.fleet_link`` is one of FLEET_LINK_MODES;
+    * ``fleet_defaults.fleetlink_base`` names a base_station;
+    * ``zenoh.fleetlink_port`` is an int.
+    """
+    problems = []
+    machines = topology.get("machines") or {}
+    seen = {}  # (network, address) -> machine
+    for name, m in sorted(machines.items()):
+        for net, addr in sorted(((m or {}).get("addresses") or {}).items()):
+            other = seen.setdefault((net, str(addr)), name)
+            if other != name:
+                problems.append(f"duplicate {net} address {addr}: {other} and {name}")
+    colors = {}
+    for name, m in sorted(machines.items()):
+        m = m or {}
+        if m.get("role") != "robot" or not m.get("color"):
+            continue
+        c = str(m["color"]).lower()
+        other = colors.setdefault(c, name)
+        if other != name:
+            problems.append(f"duplicate robot color {m['color']}: {other} and {name}")
+    defaults = topology.get("fleet_defaults") or {}
+    mode = defaults.get("fleet_link", "router")
+    if mode not in FLEET_LINK_MODES:
+        problems.append(
+            f"fleet_defaults.fleet_link must be one of {list(FLEET_LINK_MODES)}, "
+            f"got {mode!r}"
+        )
+    base = defaults.get("fleetlink_base")
+    if base is not None:
+        if base not in machines:
+            problems.append(f"fleet_defaults.fleetlink_base {base!r} is not a machine")
+        elif (machines[base] or {}).get("role") != "base_station":
+            problems.append(
+                f"fleet_defaults.fleetlink_base {base!r} is not a base_station"
+            )
+    elif mode == "fleetlink":
+        problems.append("fleet_link is 'fleetlink' but fleetlink_base is not set")
+    port = (topology.get("zenoh") or {}).get("fleetlink_port")
+    if port is not None and (not isinstance(port, int) or isinstance(port, bool)):
+        problems.append(f"zenoh.fleetlink_port must be an int, got {port!r}")
+    networks = topology.get("networks") or {}
+    for net in (topology.get("zenoh") or {}).get("fleetlink_networks") or []:
+        if net not in networks:
+            problems.append(f"zenoh.fleetlink_networks: unknown network {net!r}")
+    return problems
+
+
 def detect_network(topology):
     """Match local IPs against topology subnets to find the active network."""
     result = subprocess.run(

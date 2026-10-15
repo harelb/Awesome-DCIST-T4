@@ -18,3 +18,5 @@ pydantic_settings
 boto3
 textual
 textual-dev
+# fleetlink: must match rmw_zenoh 0.2.11 (zenoh-c 1.8); the agent warns otherwise
+eclipse-zenoh==1.8.0
