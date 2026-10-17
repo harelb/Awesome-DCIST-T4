@@ -102,6 +102,7 @@ backend:
   # PGO solve on EVERY spin once any LC has been seen). false = solve only when new loop
   # closures arrive; the non-solve path still deforms with the cached optimized values.
   optimize_every_update: false
+  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects:

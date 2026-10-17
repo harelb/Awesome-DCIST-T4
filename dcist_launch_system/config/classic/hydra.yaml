@@ -110,6 +110,7 @@ backend:
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   optimize_every_update: false
+  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects: {type: UpdateObjectsFunctor}
