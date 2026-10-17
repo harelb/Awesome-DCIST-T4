@@ -198,34 +198,57 @@ def spark_attributes(attrs) -> dict:
     return out
 
 
-def list_images(folder) -> list[pathlib.Path]:
-    if not folder:
-        return []
-    folder = pathlib.Path(folder)
-    if not folder.is_dir():
-        return []
-    imgs = sorted(folder.glob("frame_*_rgb.jpg"))
-    if not imgs:
-        imgs = sorted(
-            p for p in folder.iterdir() if p.suffix.lower() in (".jpg", ".jpeg")
-        )
-    return imgs[:MAX_IMAGES]
+def open_image_store(*paths):
+    """Open the existing image stores among ``paths`` read-only, else None.
 
-
-def resolve_image_folder(
-    image_folder: str | None, run_dir, sym: str
-) -> pathlib.Path | None:
-    """Stale absolute folder → ``<run>/images/<basename>``; else ``<run>/images/O_<n>``."""
-    if image_folder and os.path.isdir(image_folder):
-        return pathlib.Path(image_folder)
-    if run_dir is None:
+    The reader is the optional ``hydra_image_store`` package; without it (or
+    without a ``store.sqlite``) nodes simply show no images.
+    """
+    found = [
+        str(p)
+        for p in paths
+        if p and (pathlib.Path(str(p)) / "store.sqlite").is_file()
+    ]
+    if not found:
         return None
-    images = pathlib.Path(run_dir) / "images"
-    if image_folder:
-        cand = images / os.path.basename(str(image_folder).rstrip("/"))
-        if cand.is_dir():
-            return cand
-    return None
+    try:
+        from hydra_image_store import ImageStore
+
+        return ImageStore.open(*found)
+    except Exception as e:  # noqa: BLE001
+        log.warning("image store %s unavailable: %s", found, e)
+        return None
+
+
+def node_id_of(sym: str) -> int:
+    """``"O(12)"`` → the spark_dsg NodeSymbol integer id (category << 56 | index)."""
+    c, i = parse_symbol(sym)
+    return (ord(c) << 56) | i
+
+
+def list_images(store, node_id: int) -> list[pathlib.Path]:
+    """Existing rgb files for a node: kept object observations (best first), else
+    the keyframe / sub-keyframe frames anchored to an agent node."""
+    if store is None:
+        return []
+    out: list[pathlib.Path] = []
+    seen = set()
+
+    def add(p):
+        if p is not None and p not in seen and pathlib.Path(p).is_file():
+            seen.add(p)
+            out.append(pathlib.Path(p))
+
+    for o in store.observations(node_id, kept_only=True, order="score"):
+        add(o.rgb_path)
+        if len(out) >= MAX_IMAGES:
+            return out
+    if not out:
+        for f in store.frames_for_agent(node_id, include_subkeyframes=True):
+            add(f.rgb_path)
+            if len(out) >= MAX_IMAGES:
+                break
+    return out[:MAX_IMAGES]
 
 
 # ----------------------------------------------------------------------------
@@ -488,6 +511,8 @@ class FileSource(Source):
         self.label = f"{name} ({self.run_dir.name})"
         self._mtime = None
         self._version = 0
+        self._store = None  # <run>/image_store, opened lazily
+        self._store_lock = threading.Lock()
 
     @staticmethod
     def _resolve(path: pathlib.Path):
@@ -542,10 +567,11 @@ class FileSource(Source):
         if node is None:
             return {}, []
         attrs = node.attributes
-        folder = resolve_image_folder(
-            getattr(attrs, "image_folder", None), self.run_dir, sym
-        )
-        return spark_attributes(attrs), list_images(folder)
+        with self._store_lock:
+            if self._store is None:
+                self._store = open_image_store(self.run_dir / "image_store")
+            images = list_images(self._store, int(node.id.value))
+        return spark_attributes(attrs), images
 
     def trajectory(self):
         return self.loaded().extra.get("trajectory", [])
@@ -564,6 +590,8 @@ class Neo4jSource(Source):
         self._version: int | None = None
         self._db_key_seen: tuple[int, int] | None = None
         self._props_cache: dict[str, dict] = {}
+        self._store = None  # image stores named by _GraphMetadata, opened lazily
+        self._store_lock = threading.Lock()
 
     # -- db access --------------------------------------------------------
     def db(self):
@@ -724,8 +752,56 @@ class Neo4jSource(Source):
             r = readable(v)
             if r is not _DROP:
                 attrs[k] = r
-        folder = resolve_image_folder(props.get("image_folder"), self.run_dir(), sym)
-        return attrs, list_images(folder)
+        return attrs, self.node_images(sym, props)
+
+    def node_images(self, sym: str, props: dict) -> list[pathlib.Path]:
+        """Image files from the heracles ``rgb_path`` properties (Agent, SubKeyframe,
+        Observation), falling back to the image stores in ``_GraphMetadata``."""
+        syms = [f"{c}({i})" for c, i in [parse_symbol(sym)]] + [
+            "%s%d" % parse_symbol(sym)
+        ]
+        raw: list[str] = []
+        if props.get("rgb_path"):
+            raw.append(props["rgb_path"])
+        rows = self.query(
+            "MATCH (n)-[:HAS_OBSERVATION]->(ob:Observation) "
+            "WHERE n.nodeSymbol IN $syms AND ob.rgb_path IS NOT NULL "
+            "RETURN ob.rgb_path AS p ORDER BY coalesce(ob.kept, false) DESC, "
+            "coalesce(ob.score, 0) DESC, ob.timestamp_ns DESC LIMIT $n",
+            syms=syms,
+            n=MAX_IMAGES,
+        )
+        raw += [r["p"] for r in rows]
+        if not rows:  # agents (and anything else anchoring frames)
+            rows = self.query(
+                "MATCH (k:SubKeyframe)-[:ANCHORED_TO]->(a) "
+                "WHERE a.nodeSymbol IN $syms AND k.rgb_path IS NOT NULL "
+                "RETURN k.rgb_path AS p ORDER BY k.timestamp_ns LIMIT $n",
+                syms=syms,
+                n=MAX_IMAGES,
+            )
+            raw += [r["p"] for r in rows]
+        out, seen = [], set()
+        for p in raw:
+            if p not in seen and os.path.isfile(p):
+                seen.add(p)
+                out.append(pathlib.Path(p))
+        if out:
+            return out[:MAX_IMAGES]
+        with self._store_lock:
+            if self._store is None:
+                self._store = open_image_store(*self.image_store_paths())
+            return list_images(self._store, node_id_of(sym))
+
+    def image_store_paths(self) -> list[str]:
+        rec = self.query(
+            "MATCH (m:_GraphMetadata) WHERE m.image_store_paths IS NOT NULL "
+            "RETURN m.image_store_paths AS p LIMIT 1"
+        )
+        p = rec[0]["p"] if rec else None
+        if isinstance(p, str):
+            return [p]
+        return list(p or [])
 
     def trajectory(self):
         recs = self.query(

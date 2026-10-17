@@ -72,6 +72,10 @@ def test_node_detail_images_and_trajectory(gclient):
         and r.headers["content-type"] == "image/jpeg"
     )
     assert gclient.get("/api/graph/file:syn/image/O(0)/5").status_code == 404
+    # agents show the frames anchored to them (keyframe + sub-keyframes)
+    a = gclient.get("/api/graph/file:syn/node/a0").json()
+    assert a["n_images"] == 2
+    assert gclient.get(a["images"][1]).content == JPEG
     assert gclient.get("/api/graph/file:syn/node/O(1)").json()["images"] == []
     assert gclient.get("/api/graph/file:syn/node/O(99)").status_code == 404
     pts = gclient.get("/api/graph/file:syn/trajectory").json()["points"]

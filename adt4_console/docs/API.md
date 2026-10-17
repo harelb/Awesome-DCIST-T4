@@ -119,7 +119,7 @@ Maps:
 * `GET /api/maps` → `{machines: {name: [{name, size, subdirs, is_prior, path}] | {error}}}` (the local machine listed from the filesystem under output_root + configured `--map` dirs)
 * `POST /api/maps/transfer` `{src, experiment, dst?: local, as_name?, include_bags=false, bwlimit_kbps?}` → job (`rsync_transfer` + progress)
 * `POST /api/maps/verify` `{experiment, machines?}` → job; result `{machines:[...], rows:[{path, consistent, cells:{m: str}}]}` (`compare_hashes`)
-* `POST /api/maps/ingest` `{path: RUN_DIR, target: neo4j_name, image_root?}` → job. Steps: load
+* `POST /api/maps/ingest` `{path: RUN_DIR, target: neo4j_name, image_root?}` (`image_root` = image store dir, default `<run>/image_store`) → job. Steps: load
   `hydra/backend/dsg.json` (fall back to `dsg_with_mesh.json`); typed confirm `required_text="wipe"`
   showing current node count of the target; `heracles.utils.load_dsg_to_db`; `store_mesh_path(<run>/hydra/backend/mesh.ply)`;
   `bump_version`; broadcast `graph/neo4j:<name>/version`. Result `{nodes, edges, seconds}`.
@@ -558,10 +558,11 @@ Behavioural notes:
 * `POST /api/maps/transfer`: `bwlimit_kbps` is accepted but ignored, because
   `fleet_helpers.rsync_transfer` has no bandwidth option. The job logs a warning.
   `include_bags=false` excludes `recorded_data/`, the same as the TUI.
-* `POST /api/maps/ingest` also writes `Object.image_folder` (rebased onto
-  `image_root`, default `<run>/images`) and `_GraphMetadata{key:'source'}.file_path`.
-  heracles stores neither for this ingest path, and the console needs them for images
-  on `neo4j:` sources. The `neo4j:` trajectory falls back to the source DSG file when the
+* `POST /api/maps/ingest` also writes `_GraphMetadata{key:'source'}.file_path`, which
+  the console needs for the mesh and trajectory on `neo4j:` sources. Images come from the
+  image store: `neo4j:` sources read `rgb_path` on `Agent`/`SubKeyframe` nodes and on
+  `Object-[:HAS_OBSERVATION]->Observation`, falling back to `_GraphMetadata.image_store_paths`;
+  `file:` sources read `<run>/image_store`. The `neo4j:` trajectory falls back to the source DSG file when the
   DB has no `Agent` nodes (heracles skips keyframes that have no image folder).
 * A `neo4j:` source's `version` is the cached `_State.version`, refreshed by the 2 s
   poller (and right after an ingest).

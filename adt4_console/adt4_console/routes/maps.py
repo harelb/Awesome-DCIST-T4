@@ -241,30 +241,14 @@ def ingest(body: IngestBody, request: Request):
         if not answer:
             job.log("error", "Ingest aborted — database left untouched.")
             return False
-        image_root = body.image_root or (
-            str(run_dir / "images") if (run_dir / "images").is_dir() else None
+        image_store = body.image_root or (
+            str(run_dir / "image_store")
+            if (run_dir / "image_store").is_dir()
+            else None
         )
-        job.log("info", f"Writing to {target.uri} (images: {image_root or 'none'}) ...")
-        load_dsg_to_db(target.uri, target.creds, G, image_folder_root=image_root)
+        job.log("info", f"Writing to {target.uri} (image store: {image_store or 'none'}) ...")
+        load_dsg_to_db(target.uri, target.creds, G, image_store=image_store)
         db = target.db()
-        # heracles keeps no per-object image folder (only Observation nodes, and
-        # only when *_meta.json carry timestamps); record it so the console can
-        # serve object crops straight from Neo4j sources.
-        folders = []
-        for node in G.get_layer(dsg.DsgLayers.OBJECTS).nodes:
-            f = getattr(node.attributes, "image_folder", "") or ""
-            if f:
-                base = os.path.basename(f.rstrip("/"))
-                folders.append(
-                    {"syms": [str(node.id), node.id.str(True), node.id.str(False)],
-                     "f": os.path.join(image_root, base) if image_root else f}
-                )  # fmt: skip
-        if folders:
-            target.query(
-                "UNWIND $rows AS row MATCH (o:Object) WHERE o.nodeSymbol IN row.syms "
-                "SET o.image_folder = row.f",
-                rows=folders,
-            )
         target.query(
             "MERGE (m:_GraphMetadata {key: 'source'}) SET m.file_path = $p",
             p=str(dsg_path),

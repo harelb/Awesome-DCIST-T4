@@ -46,8 +46,6 @@ def build_run(root: pathlib.Path) -> pathlib.Path:
         a.bounding_box = dsg.BoundingBox(
             np.array([0.5, 0.5, 0.5], np.float32), np.array(pos, np.float32)
         )
-        # stale absolute folder from the robot; only the basename is meaningful
-        a.image_folder = f"/media/robot/elsewhere/images/temp/O_{i + 10}"
         G.add_node(dsg.DsgLayers.OBJECTS, dsg.NodeSymbol("O", i), a)
     for i in range(2):
         p = dsg.PlaceNodeAttributes()
@@ -62,9 +60,31 @@ def build_run(root: pathlib.Path) -> pathlib.Path:
     G.insert_edge(dsg.NodeSymbol("P", 0), dsg.NodeSymbol("O", 0))
     G.save(str(backend / "dsg.json"), False)
     (backend / "mesh.ply").write_text(PLY)
-    folder = run / "images" / "O_10"  # images of O(0)
-    folder.mkdir(parents=True)
-    for ts in (2, 1):
-        (folder / f"frame_{ts}_rgb.jpg").write_bytes(JPEG)
-        (folder / f"frame_{ts}_mask.png").write_bytes(b"png")
+    _build_image_store(run)
     return run
+
+
+def _build_image_store(run: pathlib.Path) -> None:
+    """Images of O(0) (two kept observations) and a(0) (keyframe + sub-keyframe)."""
+    from hydra_image_store import FrameKind, ImageStore, make_node_id
+
+    src = run / "src_images"
+    src.mkdir()
+    w = ImageStore.open_writer(run / "image_store", robot_id=0)
+    sid = w.add_sensor("cam", 4, 4, 1.0, 1.0, 2.0, 2.0)
+    fids = {}
+    for ts in (1, 2, 3, 4):
+        f = src / f"{ts}.jpg"
+        f.write_bytes(JPEG)
+        fids[ts] = w.add_frame_ref(
+            sid, ts, kind=FrameKind.OBSERVATION if ts < 3 else FrameKind.KEYFRAME,
+            rgb=f, link="copy",
+        )  # fmt: skip
+    o0 = make_node_id("O", 0)
+    w.bind_track(5, o0)
+    for score, ts in ((0.9, 2), (0.5, 1)):
+        w.add_observation(5, fids[ts], timestamp_ns=ts, score=score, kept=True)
+    a0 = make_node_id("a", 0)
+    w.set_anchor(fids[3], a0)
+    w.set_anchor(fids[4], a0)  # a second frame anchored to the same agent
+    w.close()
