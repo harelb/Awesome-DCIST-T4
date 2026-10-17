@@ -8,6 +8,7 @@ odom_frame: $<env ADT4_ROBOT_NAME>/odom
 robot_frame: $<env ADT4_ROBOT_NAME>/base_link
 map_window: {type: spatial, max_radius_m: 14.0}
 labelspace: {type: from_msg}
+image_store: {max_images_per_object: 1, jpeg_quality: 90, write_depth: true}
 # modules
 input:
   type: RosInput
@@ -35,7 +36,7 @@ active_window:
     min_object_reconstruction_observations: 10
     object_reconstruction_resolution: -0.05  # Positive: voxel size in meters.
     visualizer_classification: false
-    object_image_output_path: $<env ADT4_OUTPUT_DIR>/images
+    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
     projective_integrator:
       num_threads: 8
   khronos_sinks:
@@ -50,8 +51,9 @@ frontend:
   type: GraphBuilder
   agent_extractor:
     type: AgentImageExtractor
-    image_output_path: $<env ADT4_OUTPUT_DIR>/agents
-  subkeyframe_anchor_max_dist_m: 2.0
+    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
+  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
+  frame_anchor_max_dist_m: 2.0
   enable_mesh_objects: false
   serialize_dsg_mesh: true
   clear_object_meshes: true
@@ -80,7 +82,7 @@ frontend:
       - type: TraversabilityVisualizer
 sub_keyframe:
   type: SubKeyframeModule
-  image_output_path: $<env ADT4_OUTPUT_DIR>/subkeyframes
+  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   sensor_name: camera
   gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
   tf_lookup: {wait_duration_s: 0.1, buffer_size_s: 30.0, max_tries: 5}
@@ -94,8 +96,6 @@ backend:
   publish_mesh: true
   min_mesh_separation_s: 10
   add_places_to_deformation_graph: false
-  agent_image_root: $<env ADT4_OUTPUT_DIR>/agents
-  object_image_root: $<env ADT4_OUTPUT_DIR>/images
   optimize_on_lc: true
   # Upstream #154 gated our "solve only on new loop closures" fix behind this flag and
   # defaulted it true, which restores the old have_loopclosures_ latch (a full ~1.86 s
@@ -108,7 +108,6 @@ backend:
       type: GenericUpdateFunctor
       verbosity: 0
       layer: OBJECTS
-      image_root: $<env ADT4_OUTPUT_DIR>/images
       node_matcher: {type: IoUNodeMatcher, min_same_iou: 0.1, min_cross_iou: 0.3}
       merge_proposer: {strategy: {type: Pairwise}}
     traversability: {type: UpdateRegionGrowingTraversabilityFunctor, layer: MESH_PLACES}
