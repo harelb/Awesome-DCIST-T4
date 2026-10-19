@@ -8,7 +8,7 @@ odom_frame: $<env ADT4_ROBOT_NAME>/odom
 robot_frame: $<env ADT4_ROBOT_NAME>/base_link
 map_window: {type: spatial, max_radius_m: 14.0}
 labelspace: {type: from_msg}
-image_store: {max_images_per_object: 1, jpeg_quality: 90, write_depth: true}
+image_store: {max_images_per_object: 1, jpeg_quality: 90, write_depth: true, on_existing: rotate, session_artifacts_dir: $<env ADT4_OUTPUT_DIR>/hydra}
 # modules
 input:
   type: RosInput
