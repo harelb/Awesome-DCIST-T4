@@ -159,7 +159,7 @@ export function LayersPanel() {
 }
 
 export function DisplayPanel() {
-  const {showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, set} = useViewer();
+  const {showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, focusOthers, set} = useViewer();
   return (
     <section className="vsec">
       <header className="vsec-head">
@@ -197,6 +197,20 @@ export function DisplayPanel() {
       <Toggle checked={showBBoxes} onChange={v => set({showBBoxes: v})} label="Object bounding boxes" />
       <Toggle checked={showText} onChange={v => set({showText: v})} label="Text labels" />
       <Toggle checked={showTrajectory} onChange={v => set({showTrajectory: v})} label="Agent trajectory" />
+      <label className="slider-row">
+        <span>Other robots</span>
+        <select
+          className="input input-sm"
+          value={focusOthers}
+          onChange={e => set({focusOthers: e.target.value as typeof focusOthers})}
+          aria-label="Robots not in focus"
+          title="How the robots that are not in focus are drawn (live map, paths, plan, glyph) while one robot is focused"
+        >
+          <option value="dim">Dim when focused</option>
+          <option value="hide">Hide when focused</option>
+          <option value="show">Always full</option>
+        </select>
+      </label>
     </section>
   );
 }

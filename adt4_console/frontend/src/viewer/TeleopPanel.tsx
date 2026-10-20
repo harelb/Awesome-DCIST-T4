@@ -1,9 +1,13 @@
 // Teleop tab: drive a Spot through its executor (which holds the lease).
 // Keys drive only while this panel has focus AND Drive is armed; arming asks
 // for confirmation once per browser session and shows a red ARMED banner.
-// Losing focus, hiding the page or switching robots disarms. The console and
-// the robot each run a 0.5 s deadman, so a dead browser or radio stops it.
-import {useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent} from "react";
+// Losing focus, hiding the page or changing the robot focus disarms. The
+// console and the robot each run a 0.5 s deadman, so a dead browser or radio
+// stops it.
+// The panel drives the viewer's focused robot only (useFocusedRobot). With
+// "all robots" in focus it drives nothing: it offers one button per robot,
+// which focuses that robot; arming is still a separate, explicit step.
+import {useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent} from "react";
 import {useViewer} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
@@ -25,6 +29,8 @@ import {
 import type {PlanRobot, TeleopView} from "../types";
 import {Badge, Empty, ErrorBox, Loading, Modal, Spinner} from "../components/ui";
 import {LeaseControl} from "./LeaseControl";
+import {FocusChip} from "./RobotFocusPicker";
+import {useFocusedRobot} from "./useRobotFocus";
 import "./teleop.css";
 
 const POLL_MS = 3000;
@@ -107,12 +113,12 @@ export function Joystick({enabled, onMove}: {enabled: boolean; onMove: (xy: {x: 
 
 export function TeleopPanel() {
   const robots = useApi<PlanRobot[]>("api/plan/robots");
-  const planRobot = useViewer(s => s.planRobot);
-  const [robot, setRobot] = useState<string | null>(null);
+  const focused = useFocusedRobot();
+  const setFocus = useViewer(s => s.setFocus);
   const list = robots.data ?? [];
-  useEffect(() => {
-    if (!robot && list.length) setRobot(planRobot && list.some(r => r.robot === planRobot) ? planRobot : list[0].robot);
-  }, [list, robot, planRobot]);
+  // only ever the robot the operator focused; never a default pick
+  const robot = focused && list.some(r => r.robot === focused) ? focused : null;
+  const teleopViews = useRobots(s => s.teleop);
 
   const view = useRobots(s => (robot ? s.teleop[robot] : undefined));
   // initial fetch + slow poll (the hub pushes the executor's state as it comes)
@@ -150,18 +156,27 @@ export function TeleopPanel() {
   speedRef.current = speed;
   strafeRef.current = strafe;
 
-  // one driver (velocity socket) per robot; switching robots disarms
-  useEffect(() => {
+  const armedRef = useRef(false);
+  armedRef.current = armed;
+  // one driver (velocity socket) per robot; a focus change disarms (zero +
+  // release) before anything else can reach the new robot. Layout effect: the
+  // cleanup runs in the same commit as the focus change, so no key handler
+  // can still talk to the old driver in between.
+  useLayoutEffect(() => {
     if (!robot) return;
     const d = new TeleopDriver(teleopWsUrl(robot), s => setDrv(s));
     driver.current = d;
     return () => {
+      const was = armedRef.current || d.isArmed;
       d.disarm();
       driver.current = null;
       held.current.clear();
       joy.current = null;
+      armedRef.current = false;
       setArmed(false);
       setCmd(ZERO);
+      setDrv({connected: false, rttMs: null, acked: null, error: null, sent: 0});
+      if (was) setNote(`Disarmed: robot focus changed (was driving ${robot})`);
     };
   }, [robot]);
 
@@ -266,6 +281,34 @@ export function TeleopPanel() {
   if (robots.loading && !robots.data) return <Loading label="Loading robots" />;
   if (robots.error && !robots.data) return <ErrorBox error={robots.error} onRetry={robots.reload} />;
   if (!list.length) return <Empty title="No robots">The console drives robots given with --robots.</Empty>;
+  if (!focused)
+    return (
+      <div className="teleop-panel teleop-pick" aria-label="Teleop">
+        <div className="teleop-pick-title">Pick a robot to drive</div>
+        <div className="muted small">Teleop drives the focused robot only. Picking one focuses the whole viewer on it (camera, map, plan); arming Drive is a separate step.</div>
+        {note && <div className="small muted">{note}</div>}
+        <div className="teleop-pick-list">
+          {list.map(r => {
+            const st = teleopViews[r.robot]?.state;
+            return (
+              <button key={r.robot} className="btn teleop-pick-btn" onClick={() => setFocus(r.robot)} data-testid={`teleop-pick-${r.robot}`}>
+                <span className="teleop-pick-name">{r.robot}</span>
+                <span className="small muted">{st ? (st.allowed ? "executor ready" : `executor: ${st.interlock || "refuses"}`) : "no teleop state yet"}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  if (!robot)
+    return (
+      <Empty title={`${focused} has no executor here`}>
+        The console drives robots given with --robots ({list.map(r => r.robot).join(", ")}).{" "}
+        <button className="btn btn-xs" onClick={() => setFocus("all")}>
+          All robots
+        </button>
+      </Empty>
+    );
 
   const st = view?.state ?? null;
   const rosDown = view?.ros === false;
@@ -291,18 +334,12 @@ export function TeleopPanel() {
           <strong>ARMED</strong> · driving {robot} · W/S A/D Q/E · Shift slow · Space stop · Esc disarm
         </div>
       ) : (
-        <div className="teleop-hint muted small">Drive arms the keys and joystick. They work only while this panel has focus; the robot stops within 0.5 s when they stop.</div>
+        <div className="teleop-hint muted small">Drive arms the keys and joystick. They work only while this panel has focus (clicking the map or camera disarms); the robot stops within 0.5 s when they stop.</div>
       )}
 
       <div className="row gap between">
-        <select className="input" value={robot ?? ""} onChange={e => setRobot(e.target.value)} aria-label="Teleop robot">
-          {list.map(r => (
-            <option key={r.robot} value={r.robot}>
-              {r.robot}
-            </option>
-          ))}
-        </select>
-        {robot && <LeaseControl robot={robot} />}
+        <FocusChip robot={robot} />
+        <LeaseControl robot={robot} />
       </div>
 
       <div className="teleop-buttons">
@@ -449,7 +486,7 @@ export function TeleopPanel() {
           }
         >
           <p className="confirm-msg">
-            Keys W/S A/D Q/E and the joystick will move {robot} (up to {CAPS.vx} m/s). Keep the robot in sight and the E-stop in reach. Driving works only while this panel has focus; clicking elsewhere disarms.
+            Keys W/S A/D Q/E and the joystick will move {robot} (up to {CAPS.vx} m/s). Keep the robot in sight and the E-stop in reach. Driving works only while this panel has focus; clicking elsewhere (the map, the camera) or changing the robot focus disarms.
             The executor refuses while a plan is executing: pause it first. You are asked once per browser session.
           </p>
         </Modal>

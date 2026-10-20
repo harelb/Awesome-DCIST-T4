@@ -1,4 +1,4 @@
-// Map viewer pane chrome: splitters between the docked panels and the canvas,
+// Robot viewer pane chrome: splitters between the docked panels and the canvas,
 // floating windows for popped-out side-panel tabs, and the "tab host" that
 // keeps a tab's React tree mounted while it moves between the dock and a
 // window (so camera streams / chat state survive docking and dragging).

@@ -8,6 +8,8 @@ import type {Cls, LinkInfo, LiveResponse} from "../types";
 import {Badge, Dot, Empty, ErrorBox, Sparkline, Toggle, type Tone} from "../components/ui";
 import {FleetTotalsRow, LinkTotalsTable} from "../components/Bandwidth";
 import type {Link} from "../lib/netstats";
+import {FocusChip} from "./RobotFocusPicker";
+import {useFocusedRobot} from "./useRobotFocus";
 
 const CLASSES: {cls: Cls; name: string; color: string}[] = [
   {cls: "C1", name: "state", color: "#35d07f"},
@@ -120,12 +122,22 @@ export function LivePanel() {
       window.clearInterval(id);
     };
   }, []);
-  const robots = Object.entries(link);
-  if (err && !robots.length) return <ErrorBox error={err} />;
-  if (loaded && !robots.length) return <Empty title="No live robots">fleetlink has not heard from any robot. Is the console running with fleetlink enabled?</Empty>;
+  const focused = useFocusedRobot();
+  const all = Object.entries(link);
+  // a robot focus shows that robot's link only (fleet totals with "all robots")
+  const robots = focused ? all.filter(([r]) => r === focused) : all;
+  if (err && !all.length) return <ErrorBox error={err} />;
+  if (loaded && !all.length) return <Empty title="No live robots">fleetlink has not heard from any robot. Is the console running with fleetlink enabled?</Empty>;
   return (
     <div className="live-panel">
-      {robots.length > 0 && <FleetTotalsRow links={link as Record<string, Link>} />}
+      {focused && (
+        <div className="row gap-sm">
+          <FocusChip robot={focused} />
+          <span className="muted small">{all.length > 1 ? `${all.length - 1} other robot${all.length > 2 ? "s" : ""} hidden` : ""}</span>
+        </div>
+      )}
+      {focused && loaded && !robots.length && <Empty title={`No link from ${focused}`}>fleetlink has not heard from {focused}.</Empty>}
+      {!focused && robots.length > 0 && <FleetTotalsRow links={link as Record<string, Link>} />}
       {robots.map(([r, l]) => {
         const srcId = `live:${r}`;
         const src = sources[srcId];

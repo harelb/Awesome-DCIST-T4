@@ -28,7 +28,10 @@ import {Icon} from "../components/Shell";
 import {BottomSheet} from "./BottomSheet";
 import {ControlsHelpButton, TopViewHint} from "./ControlsHelp";
 import {FloatingWindow, Splitter, TabPortal, TabSlot, useElementSize, usePaneLayout, useTabHosts, useTabTearOff} from "./Panes";
-import {FLOAT_MQ, LEFT, MIN_CANVAS, PANE_TABS, RIGHT, clampWidths, dock, popOut, raise, updateWin, type PaneTab} from "./paneLayout";
+import {CAM_H, FLOAT_MQ, LEFT, MIN_CANVAS, PANE_TABS, RIGHT, clampCameraH, clampWidths, dock, driveOn, popOut, raise, stripTabs, toggleDrive, updateWin, type PaneTab} from "./paneLayout";
+import {RobotFocusPicker} from "./RobotFocusPicker";
+import {useFocusedRobot, useRobotRoster} from "./useRobotFocus";
+import {cycleFocus} from "./robotFocus";
 
 type Tab = PaneTab;
 const TAB_TITLE: Record<Tab, string> = {inspect: "Inspect", plan: "Plan", teleop: "Teleop", chat: "Chat", images: "Images", live: "Live link", camera: "Camera"};
@@ -53,6 +56,10 @@ export default function ViewerPage() {
   const rightRef = useRef<HTMLElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
   const hosts = useTabHosts(PANE_TABS);
+  const camPaneRef = useRef<HTMLElement>(null);
+  const focused = useFocusedRobot();
+  const roster = useRobotRoster();
+  const drive = driveOn(layout, focused);
   // phones show one panel at a time, as a bottom sheet
   const phoneRef = useRef(isPhone);
   phoneRef.current = isPhone;
@@ -129,6 +136,20 @@ export default function ViewerPage() {
     const id = window.setTimeout(() => setToast(null), 3500);
     return () => window.clearTimeout(id);
   }, [toast]);
+
+  // [ / ] cycle the robot focus (all -> each robot -> all)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "[" && e.key !== "]") return;
+      const t = e.target as HTMLElement | null;
+      if (e.ctrlKey || e.metaKey || e.altKey || (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)))) return;
+      const st = useViewer.getState();
+      st.setFocus(cycleFocus(focused ?? "all", roster, e.key === "]" ? 1 : -1));
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focused, roster]);
 
   const enabled = useMemo(() => v.order.map(id => v.sources[id]).filter(s => s?.enabled), [v.order, v.sources]);
 
@@ -222,9 +243,14 @@ export default function ViewerPage() {
     </>
   );
 
-  // the docked side panel shows the selected tab, or the first tab that is not floating
-  const dockTab: Tab | null = !floats(tab) ? tab : (PANE_TABS.find(t => !floats(t)) ?? null);
-  const mounted = (t: Tab) => floats(t) || (rightOpen && t === dockTab);
+  // drive layout: the camera has its own pane (desktop: above the side-panel
+  // tabs; phone: picture-in-picture over the map) unless it floats
+  const strip = stripTabs(drive, floats("camera"));
+  const camPinned = drive && !isPhone && rightOpen && !floats("camera");
+  const camPip = drive && isPhone && !floats("camera");
+  // the docked side panel shows the selected tab, or the first strip tab that is not floating
+  const dockTab: Tab | null = strip.includes(tab) && !floats(tab) ? tab : (strip.find(t => !floats(t)) ?? null);
+  const mounted = (t: Tab) => floats(t) || (rightOpen && t === dockTab) || (t === "camera" && (camPinned || camPip));
   const pop = useCallback(
     (t: Tab, at?: {x: number; y: number}) => {
       const r = viewerRef.current?.getBoundingClientRect();
@@ -238,8 +264,19 @@ export default function ViewerPage() {
     setTabRaw(t);
     setRightOpen(true);
   };
+  const wasDrive = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (wasDrive.current === drive) return;
+    const first = wasDrive.current === null;
+    wasDrive.current = drive;
+    // entering the drive layout (or opening the page in it) brings Teleop forward
+    if (drive && (!first || focused)) {
+      setTab("teleop");
+      if (!floatsRef.current("teleop")) setRightOpen(true);
+    }
+  }, [drive, focused, setTab, setRightOpen]);
   const canTear = useCallback((t: Tab) => !floats(t), [floats]);
-  const onStripDown = useTabTearOff(stripRef, PANE_TABS, canTear, useCallback((t: Tab, x: number, y: number) => pop(t, {x, y}), [pop]));
+  const onStripDown = useTabTearOff(stripRef, strip, canTear, useCallback((t: Tab, x: number, y: number) => pop(t, {x, y}), [pop]));
   const tabContent = (t: Tab) => {
     switch (t) {
       case "inspect":
@@ -255,7 +292,7 @@ export default function ViewerPage() {
       case "live":
         return <LivePanel />;
       case "camera":
-        return <CameraPanel />;
+        return <CameraPanel compact={camPip || camPinned} />;
     }
   };
   const tabs = (
@@ -264,7 +301,7 @@ export default function ViewerPage() {
         ariaLabel="Side panel"
         value={dockTab ?? tab}
         onChange={setTab}
-        options={PANE_TABS.map(t => ({
+        options={strip.map(t => ({
           value: t,
           label: floats(t) ? (
             <>
@@ -294,7 +331,17 @@ export default function ViewerPage() {
   );
   const widths = clampWidths(layout.leftW, layout.rightW, area.w || window.innerWidth, leftOpen, rightOpen, "right");
   const splitMax = (side: "left" | "right") => Math.min(side === "left" ? LEFT.max : RIGHT.max, (area.w || window.innerWidth) - MIN_CANVAS - (side === "left" ? (rightOpen ? widths.rightW : 0) : leftOpen ? widths.leftW : 0));
-  const follow = (
+  // a focused robot: follow is an on/off toggle for that robot; all robots: pick one to follow
+  const follow = focused ? (
+    <button
+      className={`btn btn-sm panel-btn follow-btn ${v.follow === focused ? "on" : ""}`}
+      aria-pressed={v.follow === focused}
+      onClick={() => v.set({follow: v.follow === focused ? null : focused})}
+      title={`Keep the camera on ${focused}`}
+    >
+      Follow
+    </button>
+  ) : (
     <select className="input input-sm follow-select" value={v.follow ?? ""} onChange={e => v.set({follow: e.target.value || null})} aria-label="Follow robot">
       <option value="">{isPhone ? "Follow" : "Follow: off"}</option>
       {robots.map(r => (
@@ -303,6 +350,27 @@ export default function ViewerPage() {
         </option>
       ))}
     </select>
+  );
+  const driveBtn = (
+    <button
+      className={`btn btn-sm panel-btn drive-btn ${drive ? "on" : ""}`}
+      aria-pressed={drive}
+      data-testid="drive-layout"
+      onClick={() => setLayout(l => toggleDrive(l, focused))}
+      title={drive ? "Drive layout on: camera pinned over Teleop · click for the standard layout" : "Drive layout: map, the focused robot's camera and Teleop side by side"}
+    >
+      {isPhone ? "Drive" : "Drive layout"}
+    </button>
+  );
+  const camHead = (
+    <header className="drive-cam-head">
+      <span className="small muted">{focused ? `Camera · ${focused}` : "Cameras · all robots"}</span>
+      {wide && (
+        <button className="pop-btn" onClick={() => pop("camera")} aria-label="Pop out Camera" title="Pop the camera out into a floating window">
+          ⧉
+        </button>
+      )}
+    </header>
   );
   const camera = (
     <Segmented
@@ -372,8 +440,6 @@ export default function ViewerPage() {
               </button>
               <span className="grow" />
               {camera}
-              {follow}
-              <ScreenshotButton onDone={setToast} compact />
               <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={false} compact />
               <button className={`btn icon-only panel-btn ${rightOpen ? "on" : ""}`} onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel" aria-pressed={rightOpen}>
                 <Icon name="panel" size={20} />
@@ -386,11 +452,13 @@ export default function ViewerPage() {
               <button className="btn btn-sm panel-btn" onClick={() => setLeftOpen(o => !o)} aria-label="Toggle layers panel">
                 {leftOpen ? "Hide panel" : "Layers"}
               </button>
+              <RobotFocusPicker />
               <SearchBox onPicked={showInspect} />
             </div>
             <div className="vtoolbar top-right">
-              {camera}
               {follow}
+              {driveBtn}
+              {camera}
               <ScreenshotButton onDone={setToast} />
               <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={wide} />
               <button className="btn btn-sm panel-btn" onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel">
@@ -398,6 +466,20 @@ export default function ViewerPage() {
               </button>
             </div>
           </>
+        )}
+        {isPhone && !searchOpen && (
+          <div className="vtoolbar phone-bar phone-bar2">
+            <RobotFocusPicker compact />
+            <span className="grow" />
+            <ScreenshotButton onDone={setToast} compact />
+            {follow}
+            {driveBtn}
+          </div>
+        )}
+        {camPip && (
+          <section className="drive-pip" aria-label="Camera">
+            <TabSlot host={hosts.camera} />
+          </section>
         )}
         {v.pickMode === "goto" && (
           <div className="pick-banner">
@@ -429,7 +511,26 @@ export default function ViewerPage() {
         />
       )}
       {rightOpen && !isPhone && (
-        <aside ref={rightRef} className="vpanel vright" aria-label="Inspector and planning" style={wide ? {width: widths.rightW} : undefined}>
+        <aside ref={rightRef} className={`vpanel vright ${camPinned ? "drive" : ""}`} aria-label="Inspector and planning" style={wide ? {width: widths.rightW} : undefined}>
+          {camPinned && (
+            <>
+              <section ref={camPaneRef} className="drive-cam" aria-label="Camera" style={{height: clampCameraH(layout.cameraH, area.h || window.innerHeight)}}>
+                {camHead}
+                <TabSlot host={hosts.camera} />
+              </section>
+              <Splitter
+                side="top"
+                orientation="horizontal"
+                label="Resize camera pane"
+                value={clampCameraH(layout.cameraH, area.h || window.innerHeight)}
+                min={CAM_H.min}
+                max={clampCameraH(CAM_H.max, area.h || window.innerHeight)}
+                target={camPaneRef}
+                onCommit={h => setLayout(l => ({...l, cameraH: h}))}
+                onReset={() => setLayout(l => ({...l, cameraH: CAM_H.def}))}
+              />
+            </>
+          )}
           {tabs}
           {rightBody}
         </aside>
@@ -464,7 +565,7 @@ export default function ViewerPage() {
         </BottomSheet>
       )}
       {isPhone && rightOpen && (
-        <BottomSheet key="right" label="Inspector and planning" head={tabs} host={viewerRef} onClose={() => setRightOpen(false)}>
+        <BottomSheet key="right" label="Inspector and planning" head={tabs} host={viewerRef} onClose={() => setRightOpen(false)} initial={camPip ? "peek" : "half"}>
           {rightBody}
         </BottomSheet>
       )}

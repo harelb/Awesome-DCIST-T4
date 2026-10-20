@@ -1,7 +1,7 @@
 """The active launch: which experiment runs on which robots, against which prior map.
 
 After a launch that used a prior map, the prior is registered as a ``file:`` graph
-source from this machine's copy (paired by run_id) and the Map viewer opens with that
+source from this machine's copy (paired by run_id) and the Robot viewer opens with that
 prior plus ``live:<robot>`` for every launched robot.  The record is kept in a JSON file
 (``settings.launch_state_path``) so a console restart mid-run restores both.
 """

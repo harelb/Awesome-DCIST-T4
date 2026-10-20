@@ -1,4 +1,4 @@
-// Map viewer "Images" tab: open-vocabulary search over the robots' stored
+// Robot viewer "Images" tab: open-vocabulary search over the robots' stored
 // keyframes, separate from chat. SigLIP2 ranks the keyframe pool; SAM3 then
 // detects + reprojects (dry run: nothing is written until "Add to Neo4j").
 // "SigLIP2 only" just browses the ranked frames ("where might X be").
@@ -6,6 +6,7 @@ import {useCallback, useEffect, useRef, useState} from "react";
 import {Badge, Dot, Modal, Segmented, Spinner, Toggle} from "../components/ui";
 import {errorText} from "../lib/api";
 import {useViewer} from "../stores/viewer";
+import {useFocusedRobot} from "./useRobotFocus";
 import {
   DEFAULT_PARAMS,
   MODE_LABEL,
@@ -16,6 +17,7 @@ import {
   fetchHealth,
   fmtSecs,
   fmtVec,
+  poolForFocus,
   pushHistory,
   rleDecode,
   runQuery,
@@ -72,6 +74,20 @@ export function SearchImagesPanel() {
     const id = window.setInterval(() => void loadHealth(), HEALTH_POLL_MS);
     return () => window.clearInterval(id);
   }, [loadHealth]);
+
+  // the robot focus picks that robot's keyframe pool (once per focus change;
+  // the operator can still pick another pool afterwards)
+  const focused = useFocusedRobot();
+  const healthSources = health?.sources;
+  const poolFor = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (poolFor.current === focused || (focused && !healthSources)) return;
+    poolFor.current = focused;
+    setParams(p => {
+      const source = poolForFocus(healthSources, focused, p.source);
+      return source === p.source ? p : {...p, source};
+    });
+  }, [focused, healthSources]);
 
   const current = history.find(h => h.id === currentId) ?? null;
   const set = (patch: Partial<SearchParams>) => setParams(p => ({...p, ...patch}));

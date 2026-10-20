@@ -1,5 +1,11 @@
 import {describe, expect, it} from "vitest";
 import {
+  CAM_H,
+  PANE_TABS,
+  clampCameraH,
+  driveOn,
+  stripTabs,
+  toggleDrive,
   LAYOUT_KEY,
   LEFT,
   MIN_CANVAS,
@@ -183,5 +189,47 @@ describe("pop out / dock / raise", () => {
     expect(raise(l, "camera")).toBe(l);
     expect(updateWin(l, "plan", {x: 1})).toBe(l);
     expect(dock(l, "plan")).toBe(l);
+  });
+});
+
+describe("drive layout", () => {
+  it("defaults to automatic (on while a robot is focused)", () => {
+    const l = defaultLayout();
+    expect(l.drive).toBeNull();
+    expect(driveOn(l, null)).toBe(false);
+    expect(driveOn(l, "euclid")).toBe(true);
+  });
+
+  it("the toggle records the operator's choice against what is in effect", () => {
+    let l = defaultLayout();
+    l = toggleDrive(l, "euclid"); // auto-on -> off
+    expect(l.drive).toBe(false);
+    expect(driveOn(l, "euclid")).toBe(false);
+    l = toggleDrive(l, null); // off -> on, also for all robots
+    expect(driveOn(l, null)).toBe(true);
+  });
+
+  it("persists the choice and the camera pane height; junk falls back", () => {
+    const s = memStore();
+    saveLayout({...defaultLayout(), drive: true, cameraH: 420}, s);
+    expect(loadLayout(s)).toMatchObject({drive: true, cameraH: 420});
+    expect(sanitizeLayout({drive: "yes", cameraH: "big"})).toMatchObject({drive: null, cameraH: CAM_H.def});
+    expect(sanitizeLayout({drive: false, cameraH: 5}).cameraH).toBe(CAM_H.min);
+    expect(sanitizeLayout({cameraH: 1e6}).cameraH).toBe(CAM_H.max);
+    // an old (v1, pre-drive) layout keeps its widths and gets the automatic drive layout
+    expect(sanitizeLayout({leftW: 300, rightW: 400, windows: {}, order: []})).toMatchObject({leftW: 300, rightW: 400, drive: null});
+  });
+
+  it("the camera leaves the tab strip only while it is pinned (not floating)", () => {
+    expect(stripTabs(false, false)).toEqual(PANE_TABS);
+    expect(stripTabs(true, false)).not.toContain("camera");
+    expect(stripTabs(true, false)).toContain("teleop");
+    expect(stripTabs(true, true)).toEqual(PANE_TABS);
+  });
+
+  it("camera pane height leaves room for the tabs below", () => {
+    expect(clampCameraH(300, 1000)).toBe(300);
+    expect(clampCameraH(900, 700)).toBe(480);
+    expect(clampCameraH(10, 1000)).toBe(CAM_H.min);
   });
 });

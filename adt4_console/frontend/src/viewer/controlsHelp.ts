@@ -1,4 +1,4 @@
-// Operator controls legend for the map viewer: the single place to update when
+// Operator controls legend for the robot viewer: the single place to update when
 // a control changes (Scene.tsx camera bindings, picking, Panes.tsx windows).
 export type HelpMode = "3d" | "top";
 export interface HelpEntry {
@@ -71,9 +71,19 @@ export const COMMON_HELP: HelpSection[] = [
       {keys: "Shift", does: "Slow (30 % of the speed slider)"},
       {keys: "Space", does: "Stop driving (zero velocity)"},
       {keys: "Joystick", does: "Touch drive: up = forward, sideways = turn (or strafe)"},
-      {keys: "Click outside / switch tab", does: "Disarms; the robot stops within 0.5 s"},
+      {keys: "Click outside / switch tab / change focus", does: "Disarms; the robot stops within 0.5 s"},
       {keys: "Stop", does: "Halt the robot, end teleop and cancel the plan"},
       {keys: "Stand / Sit · Pause / Resume", does: "Posture · pause the plan to teleop, resume hands back"},
+    ],
+  },
+  {
+    title: "Robot focus",
+    entries: [
+      {keys: "Focus picker (toolbar)", does: "All robots or one robot: camera, teleop, plan, live link and the map follow it"},
+      {keys: "[ / ]", does: "Previous / next robot (All robots is in the cycle)"},
+      {keys: "Legend chip · camera tile", does: "Focus that robot (focused chip: back to all)"},
+      {keys: "Drive layout", does: "Map + the focused robot's camera + Teleop at once (on by default while a robot is focused)"},
+      {keys: "Follow", does: "Keep the 3D camera on the focused robot"},
     ],
   },
   {
