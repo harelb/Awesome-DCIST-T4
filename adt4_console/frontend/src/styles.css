@@ -2706,3 +2706,16 @@ input[type="checkbox"] {
   text-transform: none;
   letter-spacing: 0;
 }
+
+/* Spot lease: refusal notice with a Take lease button (LeaseControl.tsx) */
+.lease-refusal {
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  background: var(--warn-bg);
+}
+.lease-control {
+  align-items: center;
+}

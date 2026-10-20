@@ -4,6 +4,7 @@ import {getToken} from "../lib/auth";
 import {errorText, postJSON} from "../lib/api";
 import {Badge, Spinner} from "../components/ui";
 import {sendGoal} from "./PlanPanel";
+import {LeaseRefusalNotice} from "./LeaseControl";
 
 export type ChatItem =
   | {type: "user"; text: string}
@@ -247,6 +248,7 @@ export function ChatPanel() {
         })}
         {busy && <Spinner label="thinking" />}
       </div>
+      <LeaseRefusalNotice robot={planRobot} />
       <div className="chat-input">
         <textarea
           className="input"

@@ -979,6 +979,8 @@ def guards_to_dict(msg) -> dict:
         "power_known": bool(msg.power_known),
         "lease_owned": bool(msg.lease_owned),
         "lease_known": bool(msg.lease_known),
+        # newer field: robots built before it have no lease_owner
+        "lease_owner": str(getattr(msg, "lease_owner", "") or ""),
         "faults": list(msg.faults),
         "notes": msg.notes,
         "t": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,

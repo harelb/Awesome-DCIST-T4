@@ -126,3 +126,19 @@ def test_c2_respects_budget_and_sends_closest_first():
     total = sum(len(d) for k, d, c in tr.sent if c == "C2")
     assert total <= 600 * 61 * 1.1 + 600
     assert core.sent.diff(*core._target).empty()
+
+
+def test_guards_to_dict_lease_owner():
+    from types import SimpleNamespace
+
+    from fleetlink.agent import guards_to_dict
+
+    msg = SimpleNamespace(
+        robot_name="hamilton", battery_percent=50.0, battery_known=True,
+        estop_pressed=False, estop_known=True, powered_on=True, power_known=True,
+        lease_owned=False, lease_known=True, faults=[], notes="Idle",
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=0)),
+    )  # fmt: skip
+    assert guards_to_dict(msg)["lease_owner"] == ""  # robot built before the field
+    msg.lease_owner = "bosdyn.android.spotapp tablet"
+    assert guards_to_dict(msg)["lease_owner"] == "bosdyn.android.spotapp tablet"

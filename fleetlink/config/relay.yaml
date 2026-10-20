@@ -214,13 +214,30 @@ services:
     ttl_s: 10
     timeout_s: 10
     platform: [spot]
-  # console stop_save / core pane; server is in the robot's hydra (unverified in-repo)
-  - service: /{robot}/shutdown
+  # console Stop & save, called in this order (the core window's shutdown pane runs the
+  # same pair). hydra_ros_node's ~/shutdown (ianvs spinAndWait) answers at once, then
+  # hydra saves and exits; roman_map_node pickles its map before answering.
+  - service: /{robot}/hydra/shutdown
     type: std_srvs/srv/Empty
     dir: down
     cls: C0
     ttl_s: 30
     timeout_s: 10
+  - service: /{robot}/roman/shutdown
+    type: std_srvs/srv/Empty
+    dir: down
+    cls: C0
+    ttl_s: 30
+    timeout_s: 170
+  # console "Take lease": the executor forcibly takes the Spot lease (e.g. from the
+  # tablet). Short ttl: a take-lease that arrives late must not fire.
+  - service: /{robot}/spot_executor_node/take_lease
+    type: std_srvs/srv/Trigger
+    dir: down
+    cls: C0
+    ttl_s: 10
+    timeout_s: 15
+    platform: [spot]
   - service: /{robot}/dsg_saver/save_dsg
     type: dcist_launch_system_msgs/srv/SaveDsg
     dir: down

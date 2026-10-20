@@ -166,6 +166,7 @@ def test_plan_routes_without_ros(client):
     assert client.post("/api/robots/euclid/save_dsg", json={}).status_code == 503
     assert client.get("/api/robots/euclid/plan").json() == {
         "goals": [], "plan": None, "results": [], "llm": [], "status": [],
+        "lease": None,
     }  # fmt: skip
     # natural language defaults to the planner's configured (LLM) domain, and
     # unknown domain types are rejected before anything is published

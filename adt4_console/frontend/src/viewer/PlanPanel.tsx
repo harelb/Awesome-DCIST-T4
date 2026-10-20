@@ -7,6 +7,7 @@ import type {PlanRobot, RobotPlan} from "../types";
 import {Badge, Empty, ErrorBox, Loading, Segmented, Spinner} from "../components/ui";
 import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {parseSym} from "../codec";
+import {LeaseControl, LeaseRefusalNotice} from "./LeaseControl";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
 export function pddlSymbol(sym: string): string {
@@ -89,6 +90,7 @@ export function PlanPanel() {
           ))}
         </select>
         <div className="row gap-sm">
+          {planRobot && <LeaseControl robot={planRobot} />}
           <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Pause", () => postJSON(`api/robots/${planRobot}/executor/pause`))}>
             Pause
           </button>
@@ -208,6 +210,7 @@ export function PlanPanel() {
       )}
 
       {msg && <div className={`inline-msg ${msg.ok ? "tone-ok" : "tone-err"}`}>{msg.text}</div>}
+      <LeaseRefusalNotice robot={planRobot} />
 
       <CurrentPlan robot={planRobot} plan={plan} />
     </div>

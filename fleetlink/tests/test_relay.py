@@ -107,6 +107,18 @@ def test_real_relay_yaml_loads_and_filters_platforms():
     hold = spot.services["/euclid/update_holding_state"]
     assert hold.base_name == "/willow/update_holding_state" and hold.dir == "up"
     assert "/gauss/update_holding_state" not in husky.services
+    # Stop & save: hydra then roman, both robots; no bare /<robot>/shutdown
+    for robot, res in (("euclid", spot), ("gauss", husky)):
+        for srv in ("hydra/shutdown", "roman/shutdown"):
+            s = res.services[f"/{robot}/{srv}"]
+            assert s.dir == "down" and s.type == "std_srvs/srv/Empty"
+        assert f"/{robot}/shutdown" not in res.services
+    # roman pickles its map before answering: the relay must wait for it
+    assert spot.services["/euclid/roman/shutdown"].timeout_s >= 120
+    take = spot.services["/euclid/spot_executor_node/take_lease"]
+    assert take.dir == "down" and take.type == "std_srvs/srv/Trigger"
+    assert "/gauss/spot_executor_node/take_lease" not in husky.services
+    assert "/euclid/spot_executor_node/runtime_guards" in spot.topics
     assert "/_tf/map/euclid/base_link" in spot.topics and "/_tf_static" in spot.topics
     assert len(cfg.hash) == 12
 

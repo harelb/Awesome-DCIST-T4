@@ -124,3 +124,14 @@ def executor(robot: str, cmd: str, request: Request):
     if cmd not in ("pause", "resume"):
         raise HTTPException(404, f"unknown executor command {cmd}")
     return _ros(request).executor_cmd(robot, cmd)
+
+
+@router.post("/robots/{robot}/take_lease")
+def take_lease(robot: str, request: Request):
+    """Forcibly take robot's Spot lease (e.g. from the tablet).  The planner may
+    then command the robot; the UI asks for an explicit confirmation first."""
+    ros = _ros(request)
+    try:
+        return ros.take_lease(robot)
+    except TimeoutError as e:
+        raise HTTPException(504, str(e)) from None

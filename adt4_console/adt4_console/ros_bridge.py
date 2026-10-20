@@ -168,6 +168,7 @@ class RobotPlanState:
         self.results = collections.deque(maxlen=100)
         self.llm = collections.deque(maxlen=20)
         self.status = collections.deque(maxlen=50)  # omniplanner ~/plan_status
+        self.lease: dict | None = None  # from the executor's runtime guards
 
     def to_dict(self) -> dict:
         return {
@@ -176,7 +177,24 @@ class RobotPlanState:
             "results": list(self.results),
             "llm": list(self.llm),
             "status": list(self.status),
+            "lease": self.lease,
         }
+
+
+def lease_from_guards(msg) -> dict:
+    """RuntimeGuardsMsg -> {known, owned, owner, t}.  ``lease_owner`` is newer
+    than the message's other fields: a robot built before it reports ""."""
+    return {
+        "known": bool(msg.lease_known),
+        "owned": bool(msg.lease_owned),
+        "owner": str(getattr(msg, "lease_owner", "") or ""),
+        "t": time.time(),
+    }
+
+
+# re-send an unchanged lease view this often (the UI ages it out without one)
+LEASE_REPUBLISH_S = 5.0
+TAKE_LEASE_TIMEOUT_S = 20.0
 
 
 class RosBridge:
@@ -340,6 +358,11 @@ class RosBridge:
             except Exception:  # noqa: BLE001
                 pass
 
+    def has_service(self, name: str) -> bool:
+        """Whether any node on the local ROS graph serves ``name``."""
+        names = self.run(lambda: self.node.get_service_names_and_types())
+        return any(n == name for n, _ in names)
+
     # ---------------------------------------------------------- subscriptions
     def _subscribe_status(self) -> None:
         cls = import_type("ros_system_monitor_msgs/msg/StatusTable")
@@ -458,6 +481,19 @@ class RosBridge:
                 lambda m: self._on_result(robot, m),
                 10,
             )
+        # lease state for the UI (fleetlink relays this topic up, so it is on the
+        # base graph in both modes)
+        try:
+            guards = import_type("robot_executor_msgs/msg/RuntimeGuardsMsg")
+        except Exception as e:  # noqa: BLE001
+            log.warning("no RuntimeGuardsMsg (%s): lease state unavailable", e)
+        else:
+            n.create_subscription(
+                guards,
+                f"/{robot}/spot_executor_node/runtime_guards",
+                lambda m: self._on_guards(robot, m),
+                1,
+            )
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)
@@ -471,6 +507,20 @@ class RosBridge:
         robot = st.get("robot") or self._last_goal_robot or default_robot
         self._plan[robot].status.append(st)
         self._publish_plan(robot)
+
+    def _on_guards(self, robot, msg) -> None:
+        st = self._plan[robot]
+        new = lease_from_guards(msg)
+        old = st.lease
+        st.lease = new
+        same = old is not None and all(
+            old[k] == new[k] for k in ("known", "owned", "owner")
+        )
+        if not same or new["t"] - old.get("_pub", 0.0) >= LEASE_REPUBLISH_S:
+            new["_pub"] = new["t"]
+            self._publish_plan(robot)
+        else:
+            new["_pub"] = old.get("_pub", 0.0)
 
     def _on_llm(self, robot, msg) -> None:
         self._plan[robot].llm.append(msg.data)
@@ -496,6 +546,8 @@ class RosBridge:
     # --------------------------------------------------------------- planning
     def plan(self, robot: str) -> dict:
         d = self._plan[robot].to_dict()
+        if d["lease"] is not None:
+            d["lease"] = {k: v for k, v in d["lease"].items() if k != "_pub"}
         link = self.link_summary(self.link_status(robot))
         if link is not None:
             d["link"] = link  # fleetlink mode: the relay's view of the robot
@@ -534,6 +586,21 @@ class RosBridge:
         self._plan[robot].goals.append(entry)
         self._publish_plan(robot)
         return {"ok": True, "topic": topic, "msg": fields, "subscribers": subs}
+
+    def take_lease(self, robot: str) -> dict:
+        """Ask the robot's executor to forcibly take the Spot lease
+        (``~/take_lease``, std_srvs/Trigger).  In fleetlink mode the bridge
+        serves the relayed service; a relay failure comes back as an empty
+        default response, reported as such."""
+        name = f"/{robot}/spot_executor_node/take_lease"
+        res = self.call_service(
+            name, "std_srvs/srv/Trigger", {}, timeout=TAKE_LEASE_TIMEOUT_S
+        )
+        ok = bool(res.get("success"))
+        message = str(res.get("message") or "")
+        if not ok and not message:
+            message = "no answer from the executor (relayed call failed or timed out)"
+        return {"ok": ok, "message": message, "service": name}
 
     def executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
         """Publish Pause/Resume.  Router mode: ``subscribers`` is the ROS match

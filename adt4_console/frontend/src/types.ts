@@ -200,13 +200,32 @@ export interface PlanAction {
   point?: [number, number, number] | null;
 }
 
+/** omniplanner ~/plan_status: one entry per handled goal. ``refusals`` names
+ *  the robots the runtime dispatch guards refused ({robot: reason}). */
+export interface PlanStatus {
+  plugin: string;
+  robot: string;
+  ok: boolean;
+  error: string;
+  t: number;
+  refusals?: Record<string, string>;
+}
+
+/** Spot lease from the executor's runtime guards (``t``: console seconds). */
+export interface LeaseInfo {
+  known: boolean;
+  owned: boolean;
+  owner: string;
+  t?: number;
+}
+
 export interface RobotPlan {
   goals: {t: number; kind: string; topic: string; msg: unknown}[];
   plan: null | {plan_id: string; robot_name: string; t: number; actions: PlanAction[]};
   results: ActionResult[];
   llm: string[];
-  /** omniplanner ~/plan_status: one entry per handled goal */
-  status?: {plugin: string; robot: string; ok: boolean; error: string; t: number}[];
+  status?: PlanStatus[];
+  lease?: LeaseInfo | null;
 }
 
 export interface PlanRobot {
