@@ -3,13 +3,13 @@ import {useViewer, readyModels, srcPath} from "../stores/viewer";
 import {layerInfo, searchNodes} from "../lib/graphModel";
 import {nodeColor, LAYER_COLORS, rgbCss} from "../lib/palette";
 import {errorText, getJSON} from "../lib/api";
-import {withToken} from "../lib/auth";
-import {Badge, Dot, Empty, Modal, Spinner, Toggle} from "../components/ui";
+import {Badge, Dot, Empty, Spinner, Toggle} from "../components/ui";
 import type {NodeDetail} from "../types";
 import {displayPos, defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
+import {ObjectImages, SearchThumb, useImaged} from "./objectImages";
 
 const KIND_LABEL: Record<string, string> = {neo4j: "Neo4j", file: "file", live: "live"};
 
@@ -186,7 +186,7 @@ export function DisplayPanel() {
         <input type="range" min={0} max={1} step={0.05} value={meshOpacity} onChange={e => set({meshOpacity: Number(e.target.value)})} />
         <span className="mono small">{Math.round(meshOpacity * 100)}%</span>
       </label>
-      <Toggle checked={meshCull} onChange={v => set({meshCull: v})} label="Cull mesh back faces (hide ceilings, like RViz)" />
+      <Toggle checked={meshCull} onChange={v => set({meshCull: v})} label="Cull mesh back faces (hide ceilings)" />
       <Toggle checked={meshClipOn} onChange={v => set({meshClipOn: v})} label="Clip mesh above a height" />
       {meshClipOn && (
         <label className="slider-row">
@@ -202,10 +202,11 @@ export function DisplayPanel() {
   );
 }
 
-export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?: () => void} = {}) {
+export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?: (src: string, sym: string) => void} = {}) {
   const {query, set, select, fly, sources, flat, stackHeight, vizStyle} = useViewer();
   const [open, setOpen] = useState(false);
   const revs = Object.values(sources).map(s => s.rev).join(",");
+  const imaged = useImaged(readyModels().map(({id}) => ({id, rev: sources[id]?.rev ?? 0})));
   const results = useMemo(() => {
     const out: {src: string; sym: string; text: string; kind: string; label: number; color: [number, number, number]}[] = [];
     for (const {id, model} of readyModels()) {
@@ -225,7 +226,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
     select({src: r.src, sym: r.sym});
     fly(displayPos(n, flat, stackHeight, vizStyle));
     setOpen(false);
-    onPicked?.();
+    onPicked?.(r.src, r.sym);
   };
   return (
     <div className="searchbox">
@@ -253,13 +254,31 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
       {query && <span className="search-count mono">{results.length >= 200 ? "200+" : results.length} hits</span>}
       {open && query.trim() && results.length > 0 && (
         <ul className="search-results">
-          {results.slice(0, 40).map(r => (
-            <li key={r.src + r.sym} onMouseDown={e => e.preventDefault()} onClick={() => go(r)}>
-              <span className="swatch" style={{background: rgbCss(r.kind === "objects" ? nodeColor(r.label, r.color) : (LAYER_COLORS as Record<string, [number, number, number]>)[r.kind] ?? [200, 200, 200])}} />
-              <span className="sr-text">{r.text}</span>
-              <span className="mono small muted">{r.sym}</span>
-            </li>
-          ))}
+          {results.slice(0, 40).map(r => {
+            const color = rgbCss(r.kind === "objects" ? nodeColor(r.label, r.color) : (LAYER_COLORS as Record<string, [number, number, number]>)[r.kind] ?? [200, 200, 200]);
+            if (r.kind !== "objects")
+              return (
+                <li key={r.src + r.sym} onMouseDown={e => e.preventDefault()} onClick={() => go(r)}>
+                  <span className="swatch" style={{background: color}} />
+                  <span className="sr-text">{r.text}</span>
+                  <span className="mono small muted">{r.sym}</span>
+                </li>
+              );
+            const set_ = imaged[r.src];
+            const has = set_ ? set_.has(r.sym) : null;
+            return (
+              <li key={r.src + r.sym} className="has-thumb" onMouseDown={e => e.preventDefault()} onClick={() => go(r)}>
+                <SearchThumb src={r.src} sym={r.sym} has={has} color={color} />
+                <span className="sr-main">
+                  <span className="sr-text">{r.text}</span>
+                  <span className="sr-sub small">
+                    <span className="mono muted">{r.sym}</span>
+                    {has === false && <span className="muted">no image</span>}
+                  </span>
+                </span>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -268,10 +287,9 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
 
 export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string) => void; onGoto: (src: string, sym: string) => void}) {
   const {selected, sources, fly, flat, stackHeight, select, vizStyle} = useViewer();
-  const [detail, setDetail] = useState<NodeDetail | null>(null);
+  const [detail, setDetail] = useState<(NodeDetail & {masks?: boolean[]}) | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [lightbox, setLightbox] = useState<number | null>(null);
   const node = selected ? sources[selected.src]?.model?.nodes.get(selected.sym) : null;
   const model = selected ? sources[selected.src]?.model : null;
   useEffect(() => {
@@ -280,7 +298,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
     if (!selected) return;
     const ctl = new AbortController();
     setLoading(true);
-    getJSON<NodeDetail>(`${srcPath(selected.src)}/node/${encodeURIComponent(selected.sym)}`, ctl.signal)
+    getJSON<NodeDetail & {masks?: boolean[]}>(`${srcPath(selected.src)}/node/${encodeURIComponent(selected.sym)}`, ctl.signal)
       .then(setDetail)
       .catch(e => !ctl.signal.aborted && setErr(errorText(e)))
       .finally(() => !ctl.signal.aborted && setLoading(false));
@@ -295,6 +313,8 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
     );
   const info = layerInfo(node.layer, node.part);
   const images = detail?.images ?? [];
+  const isObject = info.kind === "objects";
+  const imagesEl = <ObjectImages images={images} masks={detail?.masks} title={model.displayName(node)} isObject={isObject} />;
   const color = info.kind === "objects" ? nodeColor(node.label, node.color) : (LAYER_COLORS as Record<string, [number, number, number]>)[info.kind] ?? [200, 200, 200];
   return (
     <div className="inspector">
@@ -323,6 +343,8 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
           </button>
         )}
       </div>
+      {isObject && imagesEl}
+      {isObject && loading && !detail && <div className="obj-hero-wait muted small">Loading images…</div>}
       <table className="table compact kv-table">
         <tbody>
           <tr>
@@ -359,31 +381,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
       </table>
       {loading && <Spinner label="Loading attributes" />}
       {err && <div className="inline-err small">{err}</div>}
-      {images.length > 0 && (
-        <>
-          <h4 className="sub-title">Images ({images.length})</h4>
-          <div className="image-strip">
-            {images.map((u, i) => (
-              <button key={u} className="thumb" onClick={() => setLightbox(i)} aria-label={`Image ${i + 1}`}>
-                <img src={withToken(u)} loading="lazy" alt={`${node.sym} frame ${i + 1}`} />
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-      {lightbox !== null && images[lightbox] && (
-        <Modal title={`${model.displayName(node)}: frame ${lightbox + 1}/${images.length}`} onClose={() => setLightbox(null)} wide>
-          <img className="lightbox-img" src={withToken(images[lightbox])} alt="" />
-          <div className="row gap center">
-            <button className="btn btn-sm" disabled={lightbox === 0} onClick={() => setLightbox(lightbox - 1)}>
-              Previous
-            </button>
-            <button className="btn btn-sm" disabled={lightbox >= images.length - 1} onClick={() => setLightbox(lightbox + 1)}>
-              Next
-            </button>
-          </div>
-        </Modal>
-      )}
+      {!isObject && imagesEl}
     </div>
   );
 }

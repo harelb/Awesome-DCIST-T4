@@ -1,0 +1,82 @@
+/* Object images: search-list thumbnails + Inspect hero (see objectImages.tsx). */
+.search-results li.has-thumb {
+  padding: 4px 8px 4px 4px;
+}
+.sr-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  border-left-width: 3px;
+  display: grid;
+  place-items: center;
+}
+.sr-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.sr-thumb-empty {
+  background: var(--bg-1);
+}
+.sr-thumb-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+.sr-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sr-sub {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+.sr-img-n {
+  color: var(--accent);
+}
+.obj-images {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.obj-images-head .sub-title {
+  margin: 0;
+}
+.obj-hero {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg);
+  cursor: zoom-in;
+  width: 100%;
+}
+.obj-hero img {
+  display: block;
+  width: 100%;
+  max-height: 46vh;
+  object-fit: contain;
+  background: #000;
+}
+.obj-hero-tag {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+}

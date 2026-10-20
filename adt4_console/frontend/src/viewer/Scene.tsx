@@ -7,6 +7,7 @@ import {useViewer, type SourceView} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {layoutGraph, displayPos, type GraphLayout} from "./layout";
 import {GraphLayers, pickRegistry} from "./GraphLayers";
+import {pickBox, type BoxSet} from "../lib/bboxPick";
 import {MeshTiles, type TileStats} from "./MeshTiles";
 import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
@@ -106,6 +107,23 @@ function Picker({cb}: {cb: SceneCallbacks}) {
       }
       const ray = new THREE.Raycaster();
       ray.setFromCamera(new THREE.Vector2((x / rect.width) * 2 - 1, -(y / rect.height) * 2 + 1), camera);
+      // object bounding boxes (inspect mode, boxes shown): nodes inside a box were
+      // tried first; overlapping boxes resolve to the smallest one
+      const vs = useViewer.getState();
+      if (vs.showBBoxes && vs.pickMode === "inspect") {
+        const sets: [string, BoxSet][] = [];
+        for (const [src, layers] of pickRegistry) {
+          if (!enabled[src]?.enabled || !enabled[src]?.showGraph) continue;
+          for (const l of layers.values()) if (l.boxes) sets.push([src, {syms: l.syms, boxes: l.boxes}]);
+        }
+        const o = ray.ray.origin;
+        const d = ray.ray.direction;
+        const hit = pickBox([o.x, o.y, o.z], [d.x, d.y, d.z], sets);
+        if (hit) {
+          cbRef.current.onNode(hit.key, hit.sym);
+          return;
+        }
+      }
       const groups: THREE.Object3D[] = [];
       scene.traverse(o => {
         if (o.userData.meshGroup && o.visible) groups.push(o);

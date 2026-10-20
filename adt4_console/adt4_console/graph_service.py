@@ -226,21 +226,64 @@ def node_id_of(sym: str) -> int:
     return (ord(c) << 56) | i
 
 
-def list_images(store, node_id: int) -> list[pathlib.Path]:
+@dataclass(frozen=True, eq=False)
+class NodeImage:
+    """One displayable image of a node: the rgb file plus, for object
+    observations, where its segmentation mask lives (store RLE / PNG)."""
+
+    path: pathlib.Path
+    obs: object = None  # hydra_image_store Observation (kept object observation)
+    store: object = None  # the ImageStore that decodes ``obs``' mask
+    mask_path: pathlib.Path | None = None  # Neo4j Observation.mask_path
+    mask_rle: str | None = None  # Neo4j Observation.mask_rle (sensor-sized)
+    bbox2d: tuple | None = None  # min_x, min_y, max_x, max_y
+
+    @property
+    def has_mask(self) -> bool:
+        if self.obs is not None:
+            mp = getattr(self.obs, "mask_path", None)
+            return bool(getattr(self.obs, "mask_rle", None)) or (
+                mp is not None and pathlib.Path(mp).is_file()
+            )
+        return bool(self.mask_rle) or (
+            self.mask_path is not None and self.mask_path.is_file()
+        )
+
+    def mask(self, shape: tuple[int, int] | None = None):
+        """Boolean HxW mask, or None (no mask / undecodable)."""
+        try:
+            if self.obs is not None and self.store is not None:
+                return self.store.mask(self.obs)
+            if self.mask_rle and shape is not None:
+                from hydra_image_store.codec import rle_decode
+
+                return rle_decode(self.mask_rle, shape)
+            if self.mask_path is not None and self.mask_path.is_file():
+                from PIL import Image
+
+                a = np.asarray(Image.open(self.mask_path))
+                return (a[..., 0] if a.ndim == 3 else a) > 0
+        except Exception as e:  # noqa: BLE001
+            log.warning("mask for %s undecodable: %s", self.path, e)
+        return None
+
+
+def list_images(store, node_id: int) -> list[NodeImage]:
     """Existing rgb files for a node: kept object observations (best first), else
     the keyframe / sub-keyframe frames anchored to an agent node."""
     if store is None:
         return []
-    out: list[pathlib.Path] = []
+    out: list[NodeImage] = []
     seen = set()
 
-    def add(p):
+    def add(p, obs=None):
         if p is not None and p not in seen and pathlib.Path(p).is_file():
             seen.add(p)
-            out.append(pathlib.Path(p))
+            bb = getattr(obs, "bbox2d", None) if obs is not None else None
+            out.append(NodeImage(pathlib.Path(p), obs=obs, store=store, bbox2d=bb))
 
     for o in store.observations(node_id, kept_only=True, order="score"):
-        add(o.rgb_path)
+        add(o.rgb_path, o)
         if len(out) >= MAX_IMAGES:
             return out
     if not out:
@@ -249,6 +292,31 @@ def list_images(store, node_id: int) -> list[pathlib.Path]:
             if len(out) >= MAX_IMAGES:
                 break
     return out[:MAX_IMAGES]
+
+
+def symbol_of(node_id: int) -> str:
+    """spark_dsg NodeSymbol integer id → ``"O(12)"``."""
+    return f"{chr((node_id >> 56) & 0xFF)}({node_id & ((1 << 56) - 1)})"
+
+
+def imaged_store_nodes(store) -> set[str]:
+    """Symbols of the (canonical) nodes that have a kept observation with an rgb
+    frame — the objects the search list shows a thumbnail for."""
+    if store is None:
+        return set()
+    out = set()
+    try:
+        rows = store._query(  # noqa: SLF001 (one cheap DISTINCT, no public API for it)
+            "SELECT DISTINCT b.node_id FROM track_bindings b"
+            " JOIN observations o ON o.robot_id = b.robot_id AND o.track_id = b.track_id"
+            " JOIN frames f ON f.frame_id = o.frame_id"
+            " WHERE o.kept != 0 AND f.rgb_path IS NOT NULL"
+        )
+        for _, r in rows:
+            out.add(symbol_of(store.canonical(int(r[0]))))
+    except Exception as e:  # noqa: BLE001
+        log.warning("imaged nodes query failed: %s", e)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -292,8 +360,30 @@ class Source:
         return None
 
     def node_detail_extra(self, sym: str, loaded: Loaded) -> tuple[dict, list]:
-        """(attributes, image paths)."""
+        """(attributes, [NodeImage])."""
         return {}, []
+
+    def image_store(self):
+        """The ImageStore behind this source's images (None = none)."""
+        return None
+
+    def imaged(self) -> list[str]:
+        """Symbols of nodes with object images (the search thumbnails), cached
+        per version (sources whose store grows while loaded re-read on a TTL)."""
+        try:
+            v = self.version()
+        except Exception:  # noqa: BLE001
+            v = None
+        cached = getattr(self, "_imaged_cache", None)
+        now = time.monotonic()
+        if cached and cached[0] == v and (self.cacheable or now - cached[1] < 10.0):
+            return cached[2]
+        syms = sorted(self._imaged_syms())
+        self._imaged_cache = (v, now, syms)
+        return syms
+
+    def _imaged_syms(self) -> set[str]:
+        return imaged_store_nodes(self.image_store())
 
     def trajectory(self) -> list:
         return _records_trajectory(self.loaded())
@@ -419,9 +509,14 @@ class Source:
                 f"/api/graph/{self.id}/image/{key}/{i}" for i in range(len(images))
             ],
             "n_images": len(images),
+            # per image: a segmentation mask exists (?mask=1 overlays it)
+            "masks": [im.has_mask for im in images],
         }
 
     def image_path(self, sym: str, i: int) -> pathlib.Path:
+        return self.image(sym, i).path
+
+    def image(self, sym: str, i: int) -> NodeImage:
         loaded = self.loaded()
         try:
             key = canonical_symbol(sym)
@@ -432,7 +527,8 @@ class Source:
         _, images = self.node_detail_extra(key, loaded)
         if not 0 <= i < len(images):
             raise NotFound(f"no image {i} for {sym}")
-        return images[i]
+        im = images[i]
+        return im if isinstance(im, NodeImage) else NodeImage(pathlib.Path(im))
 
     def info(self) -> dict:
         try:
@@ -567,14 +663,35 @@ class FileSource(Source):
         if node is None:
             return {}, []
         attrs = node.attributes
+        store = self.image_store()
+        with self._store_lock:
+            images = list_images(store, int(node.id.value))
+        return spark_attributes(attrs), images
+
+    def image_store(self):
         with self._store_lock:
             if self._store is None:
                 self._store = open_image_store(self.run_dir / "image_store")
-            images = list_images(self._store, int(node.id.value))
-        return spark_attributes(attrs), images
+            return self._store
 
     def trajectory(self):
         return self.loaded().extra.get("trajectory", [])
+
+
+def _neo4j_image(r: dict) -> NodeImage:
+    """A heracles Observation row → NodeImage (mask PNG / sensor-sized RLE)."""
+    mp = r.get("mp")
+    rle = r.get("rle")
+    if rle is not None and not isinstance(rle, str):
+        rle = json.dumps(list(rle))
+    bb = r.get("bb")
+    bb = tuple(int(v) for v in bb) if bb is not None and len(bb) == 4 else None
+    return NodeImage(
+        pathlib.Path(r["p"]),
+        mask_path=pathlib.Path(mp) if mp else None,
+        mask_rle=rle or None,
+        bbox2d=bb,
+    )
 
 
 class Neo4jSource(Source):
@@ -760,18 +877,19 @@ class Neo4jSource(Source):
         syms = [f"{c}({i})" for c, i in [parse_symbol(sym)]] + [
             "%s%d" % parse_symbol(sym)
         ]
-        raw: list[str] = []
+        raw: list[dict] = []
         if props.get("rgb_path"):
-            raw.append(props["rgb_path"])
+            raw.append({"p": props["rgb_path"]})
         rows = self.query(
             "MATCH (n)-[:HAS_OBSERVATION]->(ob:Observation) "
             "WHERE n.nodeSymbol IN $syms AND ob.rgb_path IS NOT NULL "
-            "RETURN ob.rgb_path AS p ORDER BY coalesce(ob.kept, false) DESC, "
+            "RETURN ob.rgb_path AS p, ob.mask_path AS mp, ob.mask_rle AS rle, "
+            "ob.bbox2d AS bb ORDER BY coalesce(ob.kept, false) DESC, "
             "coalesce(ob.score, 0) DESC, ob.timestamp_ns DESC LIMIT $n",
             syms=syms,
             n=MAX_IMAGES,
         )
-        raw += [r["p"] for r in rows]
+        raw += [dict(r) for r in rows]
         if not rows:  # agents (and anything else anchoring frames)
             rows = self.query(
                 "MATCH (k:SubKeyframe)-[:ANCHORED_TO]->(a) "
@@ -780,18 +898,39 @@ class Neo4jSource(Source):
                 syms=syms,
                 n=MAX_IMAGES,
             )
-            raw += [r["p"] for r in rows]
+            raw += [dict(r) for r in rows]
         out, seen = [], set()
-        for p in raw:
-            if p not in seen and os.path.isfile(p):
+        for r in raw:
+            p = r.get("p")
+            if p and p not in seen and os.path.isfile(p):
                 seen.add(p)
-                out.append(pathlib.Path(p))
+                out.append(_neo4j_image(r))
         if out:
             return out[:MAX_IMAGES]
+        store = self.image_store()
+        with self._store_lock:
+            return list_images(store, node_id_of(sym))
+
+    def image_store(self):
         with self._store_lock:
             if self._store is None:
                 self._store = open_image_store(*self.image_store_paths())
-            return list_images(self._store, node_id_of(sym))
+            return self._store
+
+    def _imaged_syms(self) -> set[str]:
+        out = set()
+        try:
+            for r in self.query(
+                "MATCH (n)-[:HAS_OBSERVATION]->(ob:Observation) "
+                "WHERE ob.rgb_path IS NOT NULL RETURN DISTINCT n.nodeSymbol AS s"
+            ):
+                try:
+                    out.add(canonical_symbol(str(r["s"])))
+                except ValueError:
+                    pass
+        except Exception as e:  # noqa: BLE001
+            log.warning("imaged nodes (neo4j) failed: %s", e)
+        return out | super()._imaged_syms()
 
     def image_store_paths(self) -> list[str]:
         rec = self.query(
@@ -873,6 +1012,39 @@ class LiveSource(Source):
     def tiles(self) -> dict:
         rx = self.live.receiver
         return dict(rx.tiles(self.name) or {}) if rx is not None else {}
+
+    def image_store(self):
+        """The base's live mirror of this robot's image store, when mirroring is on
+        (``<live_store_root>/<robot>/<store_id>/image_store``); else None. The
+        mirror carries frames, so object images only appear once observations
+        do; nodes without images simply show none."""
+        root = getattr(self.live, "store_root", None)
+        if not root:
+            return None
+        now = time.monotonic()
+        cur = getattr(self, "_mirror", None)  # (store dirs, store, scanned at)
+        if cur is not None and now - cur[2] < 5.0:
+            return cur[1]
+        found = sorted(
+            str(p.parent)
+            for p in pathlib.Path(root, self.name).glob("*/image_store/store.sqlite")
+        )
+        if cur is not None and cur[0] == found and (cur[1] is not None or not found):
+            self._mirror = (found, cur[1], now)
+            return cur[1]
+        # a new store id (robot restart) or the first frames arrived: reopen; an old
+        # handle is left to the GC since a request may still be reading it
+        store = open_image_store(*found) if found else None
+        self._mirror = (found, store, now)
+        return store
+
+    def node_detail_extra(self, sym, loaded):
+        try:
+            images = list_images(self.image_store(), node_id_of(sym))
+        except Exception as e:  # noqa: BLE001
+            log.debug("live images for %s: %s", sym, e)
+            images = []
+        return {}, images
 
     def node_count(self):
         rx = self.live.receiver

@@ -96,6 +96,12 @@ export default function ViewerPage() {
     setTab("plan");
   }, []);
 
+  // a picked search result: the Inspect tab (object images) comes to the front
+  const showInspect = useCallback(() => {
+    setTab("inspect");
+    setRightOpen(true);
+  }, [setRightOpen]);
+
   const cb: SceneCallbacks = useMemo(
     () => ({
       onNode: (src, sym) => {
@@ -223,7 +229,13 @@ export default function ViewerPage() {
         {isPhone ? (
           searchOpen ? (
             <div className="vtoolbar phone-bar phone-search">
-              <SearchBox autoFocus onPicked={() => setSearchOpen(false)} />
+              <SearchBox
+                autoFocus
+                onPicked={() => {
+                  setSearchOpen(false);
+                  showInspect();
+                }}
+              />
               <button className="btn icon-only" onClick={() => setSearchOpen(false)} aria-label="Close search">
                 ×
               </button>
@@ -250,7 +262,7 @@ export default function ViewerPage() {
               <button className="btn btn-sm panel-btn" onClick={() => setLeftOpen(o => !o)} aria-label="Toggle layers panel">
                 {leftOpen ? "Hide panel" : "Layers"}
               </button>
-              <SearchBox />
+              <SearchBox onPicked={showInspect} />
             </div>
             <div className="vtoolbar top-right">
               {camera}

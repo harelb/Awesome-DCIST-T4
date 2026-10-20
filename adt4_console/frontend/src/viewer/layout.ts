@@ -45,6 +45,9 @@ export interface LayerBuffers {
   opacity: number;
   /** spheres or cubes (hydra `use_sphere`) */
   shape: "sphere" | "box";
+  /** object layers: displayed bounding boxes, 6 floats per sym (min xyz, max xyz),
+   *  NaN where a node has none — used to pick objects by their wireframe box */
+  boxes?: Float32Array;
 }
 
 export interface GraphLayout {
@@ -244,6 +247,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     const positions = new Float32Array(shown.length * 3);
     const colors = new Float32Array(shown.length * 3);
     const syms: string[] = new Array(shown.length);
+    const boxes = info.kind === "objects" ? new Float32Array(shown.length * 6).fill(NaN) : undefined;
     shown.forEach((n, i) => {
       positions[i * 3] = n.pos[0];
       positions[i * 3 + 1] = n.pos[1];
@@ -255,6 +259,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
       syms[i] = n.sym;
       if (info.kind === "objects" && n.bbox) {
         const b = n.bbox;
+        boxes?.set([b[0], b[1], b[2] + z, b[3], b[4], b[5] + z], i * 6);
         const corners: number[][] = [];
         for (let cz = 0; cz < 2; cz++)
           for (let cy = 0; cy < 2; cy++)
@@ -292,8 +297,8 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     const h = HYDRA_LAYERS[info.kind];
     layers.push(
       style === "hydra"
-        ? {key, info, syms, positions, colors, size: h.sphere ? h.scale / 2 : h.scale / 1.4, opacity: h.alpha, shape: h.sphere ? "sphere" : "box"}
-        : {key, info, syms, positions, colors, size: NODE_SIZE[info.kind], opacity: 1, shape: info.kind === "objects" ? "box" : "sphere"},
+        ? {key, info, syms, positions, colors, size: h.sphere ? h.scale / 2 : h.scale / 1.4, opacity: h.alpha, shape: h.sphere ? "sphere" : "box", boxes}
+        : {key, info, syms, positions, colors, size: NODE_SIZE[info.kind], opacity: 1, shape: info.kind === "objects" ? "box" : "sphere", boxes},
     );
   }
   layers.sort((a, b) => a.info.order - b.info.order || a.key.localeCompare(b.key));
