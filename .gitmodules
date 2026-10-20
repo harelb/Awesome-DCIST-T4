@@ -54,7 +54,7 @@
 	url = git@github.com:fishberg/ros2_gps-dcist.git
 [submodule "tx_rx_monitor"]
 	path = tx_rx_monitor
-	url = git@github.com:fishberg/ros2_tx-rx-monitor-dcist.git
+	url = git@github.com:harelb/ros2_tx-rx-monitor-dcist.git
 [submodule "dsg_updater"]
 	path = dsg_updater
 	url = git@github.com:toyat522/dsg_updater.git
