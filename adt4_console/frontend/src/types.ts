@@ -130,12 +130,81 @@ export interface MapEntry {
   image_store?: ImageStoreInfo | null;
   sessions?: number;
   error?: string;
+  /** run identity: run_info.json (launch), .adt4_origin.json (copy) or a fallback */
+  identity?: RunIdentity | null;
+  /** present on a transferred copy */
+  origin?: RunOrigin | null;
+  /** robot run: its copy on the base station */
+  copy?: CopyLink | null;
+  /** base copy: the robot run it copies */
+  copy_of?: CopyOf | null;
+}
+
+export interface RunIdentity {
+  run_id: string;
+  source: "run_info" | "origin" | "fallback";
+  experiment?: string;
+  robot?: string | null;
+  started_at?: string;
+  host?: string;
+}
+
+export interface RunOrigin {
+  run_id: string;
+  source_machine: string;
+  source_path: string;
+  transferred_at: string;
+  images?: string;
+  compression?: string;
+  robot?: string;
+  experiment?: string;
+}
+
+export type CopyState = "in_sync" | "outdated" | "not_copied" | "unknown";
+
+export interface CopyLink {
+  state: CopyState;
+  machine: string;
+  name?: string;
+  path?: string;
+  matched_by?: "run_id" | "origin" | "contents";
+  transferred_at?: string | null;
+}
+
+export interface CopyOf {
+  machine: string;
+  name: string;
+  path: string;
+  state: CopyState;
+  matched_by?: string;
 }
 
 export interface MapsResponse {
   machines: Record<string, MapEntry[] | {error: string}>;
   /** machines whose sizes are still being measured in the background */
   pending?: string[];
+  /** the machine copies are paired against (this host) */
+  base?: string;
+}
+
+export interface TransferPlan {
+  run_id: string;
+  robot: string;
+  dest_name: string;
+  dest_path: string;
+  status: "new" | "update" | "up_to_date" | "collision";
+  state: CopyState;
+  send_store: boolean;
+  note: string;
+}
+
+export interface ActiveLaunch {
+  active: {
+    experiment: string;
+    robots: string[];
+    prior: null | {label: string; local_path: string | null; source_id: string | null; pending: boolean; source_machine: string; path: string; run_id: string | null};
+  } | null;
+  default_sources: string[];
 }
 
 export interface GraphSource {

@@ -4,7 +4,8 @@ Lifted out of ``tui/screens/launch.py`` so the Textual TUI, the click CLI and
 the web console all drive the exact same sequence:
 
     Phase 0   deploy zenoh config to the base station
-    Phase 1   ensure the prior map is present on every robot (rsync)
+    Phase 1   ensure the prior map is present on every robot (rsync), skipping
+              robots that already hold a run with the prior's run_id
     Phase 1.5 detect / kill an existing ``adt4_system`` tmux session
     Phase 2   detect / remove an existing output dir (typed confirm if >= 1 GB)
               then ``run-adt4`` on each robot
@@ -158,9 +159,17 @@ def fleet_env_prefix(machine_name: str, topo: dict | None) -> str:
 
 
 def build_robot_commands(
-    plan: LaunchPlan, runtime_config: dict, output_root: str, topo: dict | None = None
+    plan: LaunchPlan,
+    runtime_config: dict,
+    output_root: str,
+    topo: dict | None = None,
+    prior_overrides: dict | None = None,
 ):
-    """Return ``[(machine, remote_cmd), ...]`` for every selected robot."""
+    """Return ``[(machine, remote_cmd), ...]`` for every selected robot.
+
+    ``prior_overrides``: robot -> prior path on that robot, when Phase 1 found the
+    prior run already there under another name (same run_id).
+    """
     if not plan.robots:
         raise LaunchError("No robots selected.")
     if not plan.session:
@@ -188,6 +197,8 @@ def build_robot_commands(
     for rname in plan.robots:
         m = runtime_config[rname]
         rprior = plan.prior_path if rname == plan.prior_source else dest_prior
+        if prior_overrides and rname in prior_overrides:
+            rprior = prior_overrides[rname]
         prior_flag = f" -p {_quote_path(rprior)}" if rprior else ""
         cmd = (
             f"{_WS_PREFIX}{fleet_env_prefix(m['name'], topo)}{RUN_ADT4} "
@@ -252,31 +263,113 @@ class LaunchDeps:
     rviz: Callable = generate_namespaced_rviz
     parallel: Callable = run_parallel
     sleep: Callable = time.sleep
+    # scan(machine, root, only=None) -> run_scan identity entries, or None when the
+    # machine cannot be scanned (then Phase 1 falls back to comparing names)
+    scan: Callable | None = None
+
+
+def scan_identities(deps, machine: dict, root: str, only=None):
+    """Light ``run_scan`` (identity only) of ``root`` on ``machine``; None on failure."""
+    if deps.scan is not None:
+        return deps.scan(machine, root, only)
+    from dcist_launch_system.fleet.maps import parse_scan_output, remote_scan_command
+
+    try:
+        rc, out, _ = deps.ssh(
+            machine["user"],
+            machine["ip"],
+            remote_scan_command(root, None, 0, only, light=True),
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if rc != 0:
+        return None
+    try:
+        return parse_scan_output(out)
+    except ValueError:
+        return None
+
+
+def prior_identity(prior_path, prior_source, runtime_config, deps) -> dict | None:
+    """The prior run's scan entry (identity + origin) on its source machine."""
+    src = runtime_config.get(prior_source)
+    if not src or not prior_path:
+        return None
+    p = pathlib.PurePosixPath(prior_path)
+    runs = scan_identities(deps, src, str(p.parent), [p.name])
+    if not runs:
+        return None
+    from dcist_launch_system.fleet.run_identity import canonical_id
+
+    entry = runs[0]
+    return entry if canonical_id(entry) else None
 
 
 def ensure_prior_on(
-    prior_path, prior_source, target, runtime_config, output_root, cb, deps
+    prior_path,
+    prior_source,
+    target,
+    runtime_config,
+    output_root,
+    cb,
+    deps,
+    prior_entry: dict | None = None,
 ):
-    """Transfer the prior map to ``target`` unless it is already present."""
+    """Make the prior map available on ``target``; returns its path there (None = failed).
+
+    With the prior's identity (``prior_entry``) the target's runs are matched by
+    run_id: a run already holding it (the original, an earlier ``prior_*`` copy, a
+    copy under any name) is used as is.  ``prior_<name>`` taken by a different run is
+    never merged into; a ``__N`` suffix is picked instead.  Without an identity
+    (scan failed) the old rule applies: ``prior_<name>`` with hydra/ + roman/ counts.
+    """
+    from dcist_launch_system.fleet import run_identity as ri
+
     dest_path = prior_dest_path(prior_path, output_root)
     dest_name = pathlib.Path(dest_path).name
-    _, out, _ = deps.ssh(
-        target["user"],
-        target["ip"],
-        f"test -d {_quote_path(dest_path + '/hydra')} && "
-        f"test -d {_quote_path(dest_path + '/roman')} && echo OK",
-        timeout=10,
-    )
-    if "OK" in out:
-        cb.log("dim", f"{target['name']}: prior map already present ({dest_name})")
-        cb.progress(target["name"], 100)
-        return True
+    prior_id = ri.canonical_id(prior_entry) if prior_entry else None
+    runs = scan_identities(deps, target, output_root) if prior_id else None
+    if runs is not None:
+        for r in runs:
+            if prior_id in ri.entry_ids(r) and all(
+                d in r.get("subdirs", []) for d in ("hydra", "roman")
+            ):
+                path = f"{output_root}/{r['name']}"
+                cb.log(
+                    "dim",
+                    f"{target['name']}: prior run already present as {r['name']} "
+                    f"(run {prior_id[:8]}), no transfer",
+                )
+                cb.progress(target["name"], 100)
+                return path
+        existing = {r["name"]: ri.entry_ids(r) for r in runs if r.get("name")}
+        dest_name, status = ri.choose_dest_name(dest_name, existing, prior_id)
+        if status.startswith("collision"):
+            cb.log(
+                "warn",
+                f"{target['name']}: {pathlib.Path(dest_path).name} holds a different "
+                f"run; copying the prior to {dest_name} instead",
+            )
+        dest_path = f"{output_root}/{dest_name}"
+    else:
+        _, out, _ = deps.ssh(
+            target["user"],
+            target["ip"],
+            f"test -d {_quote_path(dest_path + '/hydra')} && "
+            f"test -d {_quote_path(dest_path + '/roman')} && echo OK",
+            timeout=10,
+        )
+        if "OK" in out:
+            cb.log("dim", f"{target['name']}: prior map already present ({dest_name})")
+            cb.progress(target["name"], 100)
+            return dest_path
 
     cb.log("info", f"Transferring prior map to {target['name']}...")
     src = runtime_config.get(prior_source)
     if not src:
         cb.log("error", f"Source machine '{prior_source}' not found in config.")
-        return False
+        return None
 
     ok, method, msg = deps.rsync(
         src["user"],
@@ -291,10 +384,18 @@ def ensure_prior_on(
     )
     if not ok:
         cb.log("error", f"{target['name']}: prior map transfer FAILED: {msg}")
-        return False
+        return None
+    if prior_id:  # mark the copy so the next launch finds it by run_id
+        origin = ri.make_origin(dict(prior_entry), prior_source, "all", "none")
+        deps.ssh(
+            target["user"],
+            target["ip"],
+            ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin),
+            timeout=10,
+        )
     cb.progress(target["name"], 100)
-    cb.log("ok", f"{target['name']}: prior map transferred ({method})")
-    return True
+    cb.log("ok", f"{target['name']}: prior map transferred to {dest_name} ({method})")
+    return dest_path
 
 
 def _resolve_session_conflicts(targets, cb, deps) -> bool:
@@ -466,10 +567,23 @@ def run_launch(
     # Phase 1: prior maps
     if plan.prior_path and plan.prior_source:
         cb.log("heading", "Phase 1: Ensuring prior maps on all robots...")
+        from dcist_launch_system.fleet.run_identity import canonical_id
+
+        prior_entry = prior_identity(
+            plan.prior_path, plan.prior_source, runtime_config, deps
+        )
+        if prior_entry:
+            cb.log(
+                "dim",
+                f"prior run id {canonical_id(prior_entry)} "
+                f"({prior_entry['identity'].get('source')})",
+            )
+        overrides = {}
+        default_dest = prior_dest_path(plan.prior_path, output_root)
         for m, _ in cmds:
             if m["name"] == plan.prior_source:
                 continue
-            if not ensure_prior_on(
+            path = ensure_prior_on(
                 plan.prior_path,
                 plan.prior_source,
                 m,
@@ -477,9 +591,17 @@ def run_launch(
                 output_root,
                 cb,
                 deps,
-            ):
+                prior_entry,
+            )
+            if not path:
                 cb.log("error", f"ABORT: could not transfer prior to {m['name']}")
                 return False
+            if path != default_dest:
+                overrides[m["name"]] = path
+        if overrides:
+            cmds = build_robot_commands(
+                plan, runtime_config, output_root, topo, prior_overrides=overrides
+            )
 
     # Phase 1.5: running tmux sessions
     if not _resolve_session_conflicts([m for m, _ in cmds], cb, deps):

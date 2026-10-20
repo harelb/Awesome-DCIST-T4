@@ -61,6 +61,7 @@ def remote_scan_command(
     known: dict | None = None,
     budget: float | None = None,
     only: list[str] | None = None,
+    light: bool = False,
 ) -> str:
     """Shell command that runs ``fleet.run_scan`` on a remote machine and prints JSON.
 
@@ -74,7 +75,9 @@ def remote_scan_command(
     src = (pathlib.Path(__file__).with_name("run_scan.py")).read_bytes()
     code = base64.b64encode(src).decode()
     args = base64.b64encode(
-        json.dumps({"root": root, "known": known or {}, "budget": budget, "only": only}).encode()
+        json.dumps(
+            {"root": root, "known": known or {}, "budget": budget, "only": only, "light": light}
+        ).encode()
     ).decode()
     return _REMOTE_PY + f'"$PY" -c "$(echo {code} | base64 -d)" {args}'
 

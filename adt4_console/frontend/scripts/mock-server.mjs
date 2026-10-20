@@ -122,18 +122,39 @@ const topology = {
   },
 };
 const sessions = ["spot_mapping", "spot_relocalize", "spot_openset", "phoenix_mapping", "phoenix_relocalize", "base_station", "base_station_prior", "base_station_rviz", "spot_isaac_bag", "spot_bag_replay"];
+// run identity (run_identity.pair_copies): hamilton's runs and their copies on willow
+const rid = n => `5f0c${n}e2a-91b7-4c1e-8d3a-0b6f2c9e41d${n}`;
+const ham = (name, n, state, size, extra = {}) => ({
+  name, size, subdirs: ["hydra", "roman", "spot_executor"], is_prior: true, path: `~/adt4_output/${name}`, abs_path: `/home/swarm/adt4_output/${name}`,
+  has_dsg: true, has_dsg_mesh: true, has_mesh: true, mtime: now() - n * 86400,
+  identity: {run_id: rid(n), source: "run_info", robot: "hamilton"},
+  copy: state === "not_copied" ? {state, machine: "willow"} : {state, machine: "willow", name: `${name}__hamilton`, path: `/home/rrg/adt4_output/${name}__hamilton`, matched_by: "run_id", transferred_at: "2026-10-20T03:58:12+00:00"},
+  ...extra,
+});
+const willowCopy = (name, n, state, size) => ({
+  name: `${name}__hamilton`, size, subdirs: ["hydra", "image_store", "roman", "spot_executor"], is_prior: true, path: `/home/rrg/adt4_output/${name}__hamilton`,
+  has_dsg: true, has_dsg_mesh: true, has_mesh: true, mtime: now() - n * 86400 + 3600,
+  identity: {run_id: rid(n), source: "run_info", robot: "hamilton"},
+  origin: {run_id: rid(n), source_machine: "hamilton", source_path: `/home/swarm/adt4_output/${name}`, transferred_at: "2026-10-20T03:58:12+00:00", images: "keyframes", compression: "fast"},
+  copy_of: {machine: "hamilton", name, path: `/home/swarm/adt4_output/${name}`, state, matched_by: "run_id"},
+});
 const mapsData = {
+  base: "willow",
   machines: {
     willow: [
-      {name: "bldg45_floor2_0930", size: "3.1G", subdirs: ["hydra", "roman", "images", "rosbag"], is_prior: true, path: "/home/rrg/adt4_output/bldg45_floor2_0930"},
-      {name: "map_20261008_1412", size: "1.4G", subdirs: ["hydra", "images"], is_prior: false, path: "/home/rrg/adt4_output/map_20261008_1412"},
-      {name: "west_point_day2", size: "6.8G", subdirs: ["hydra", "roman", "images", "rosbag"], is_prior: false, path: "/home/rrg/adt4_output/west_point_day2"},
+      {name: "map_20261019_2308", size: "52M", subdirs: ["hydra", "roman"], is_prior: true, path: "/home/rrg/adt4_output/map_20261019_2308", mtime: now() - 3000, identity: {run_id: rid(9), source: "run_info", robot: "willow"}},
+      willowCopy("map_20261019_2308", 0, "in_sync", "1.4G"),
+      willowCopy("building45_101526", 4, "outdated", "880M"),
+      {name: "bldg45_floor2_0930", size: "3.1G", subdirs: ["hydra", "roman", "images", "rosbag"], is_prior: true, path: "/home/rrg/adt4_output/bldg45_floor2_0930", mtime: now() - 20 * 86400},
+    ],
+    hamilton: [
+      ham("map_20261019_2308", 0, "in_sync", "2.2G"),
+      ham("building45_101526", 4, "outdated", "1.1G"),
+      ham("nstf_test_fl_20261019", 1, "not_copied", "640M"),
     ],
     euclid: [
-      {name: "map_20261009_0905", size: "2.2G", subdirs: ["hydra", "images", "rosbag"], is_prior: false, path: "/home/swarm/adt4_output/map_20261009_0905"},
-      {name: "prior_bldg45_floor2_0930", size: "3.1G", subdirs: ["hydra", "roman"], is_prior: true, path: "/home/swarm/adt4_output/prior_bldg45_floor2_0930"},
+      {name: "map_20261019_2308", size: "1.9G", subdirs: ["hydra", "roman", "image_store"], is_prior: true, path: "~/adt4_output/map_20261019_2308", abs_path: "/home/swarm/adt4_output/map_20261019_2308", mtime: now() - 2900, identity: {run_id: rid(7), source: "run_info", robot: "euclid"}, copy: {state: "not_copied", machine: "willow"}},
     ],
-    hamilton: [{name: "map_20261009_0905", size: "1.9G", subdirs: ["hydra", "images"], is_prior: false, path: "/home/swarm/adt4_output/map_20261009_0905"}],
     lewis: {error: "ssh: connect to host 10.29.202.81 port 22: No route to host"},
   },
 };
@@ -454,6 +475,28 @@ route("POST", "/api/maps/transfer", async (q, r) => {
     c.log("ok", "done");
   })});
 });
+route("GET", "/api/maps/transfer/plan", (q, r, m, url) => {
+  const src = url.searchParams.get("src");
+  const exp = url.searchParams.get("experiment");
+  const run = (mapsData.machines[src] ?? []).find?.(e => e.name === exp);
+  const c = run?.copy;
+  const dest = c?.name ?? `${exp}__${src}`;
+  const status = !c || c.state === "not_copied" ? (exp === "nstf_test_fl_20261019" ? "collision" : "new") : c.state === "in_sync" ? "up_to_date" : "update";
+  const name = status === "collision" ? `${dest}__2` : dest;
+  const note = {
+    up_to_date: `willow:${dest} is already an up-to-date copy`,
+    update: `updating willow:${dest} (robot changed since the copy)`,
+    new: `new copy willow:${name}`,
+    collision: `willow:${dest} holds a different run; copying to ${name} instead`,
+  }[status];
+  json(r, 200, {run_id: run?.identity?.run_id ?? "?", robot: src, dest_name: name, dest_path: `~/adt4_output/${name}`, status, state: c?.state ?? "not_copied", send_store: status !== "update", note});
+});
+route("GET", "/api/launch/active", (q, r) =>
+  json(r, 200, {
+    active: {experiment: "reloc_20261020_0010", robots: ["euclid"], prior: {label: "prior: bldg45_floor2_0930 (willow)", source_id: "file:bldg45_floor2_0930", local_path: "/home/rrg/adt4_output/bldg45_floor2_0930", pending: false, source_machine: "willow", path: "/home/rrg/adt4_output/bldg45_floor2_0930", run_id: null}},
+    default_sources: ["file:bldg45_floor2_0930", "live:euclid"],
+  }),
+);
 route("POST", "/api/maps/verify", async (q, r) => {
   const b = await readBody(q);
   const ms = b.machines?.length ? b.machines : ["willow", "euclid"];

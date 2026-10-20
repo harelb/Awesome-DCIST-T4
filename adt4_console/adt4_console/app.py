@@ -65,6 +65,7 @@ class Services:
     chat: ChatService
     launch_deps: object = None  # fleet.launch_workflow.LaunchDeps (None → real)
     helpers: object = field(default_factory=_fleet_helpers)  # fleet_helpers (or a fake)
+    launch_state: object = None  # launch_state.LaunchState
 
     def start(self) -> None:
         if self.settings.fleet_poll:
@@ -102,6 +103,10 @@ def build_services(
     svc = Services(settings, hub, jobs, fleet, graph, ros, live, chat, launch_deps)
     if helpers is not None:
         svc.helpers = helpers
+    from . import launch_state
+
+    svc.launch_state = launch_state.LaunchState(settings.launch_state_path)
+    launch_state.restore(svc)
     return svc
 
 
