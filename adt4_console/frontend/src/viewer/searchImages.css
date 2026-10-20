@@ -124,6 +124,19 @@
   border-color: var(--accent-2);
   color: var(--text);
 }
+/* SAM3 feature-cache hit rate of the search */
+.simg-chip-hit {
+  border-color: var(--ok);
+  color: var(--text);
+}
+.simg-chip-miss {
+  border-color: var(--warn);
+  color: var(--text);
+}
+.simg-seen-multi {
+  color: var(--text);
+  font-weight: 600;
+}
 /* candidates: one column docked, more when a floating window is wide */
 .simg-grid {
   display: grid;

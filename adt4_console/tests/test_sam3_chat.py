@@ -153,7 +153,8 @@ def test_openai_searches_images_when_map_has_nothing(svc_client, sam3, monkeypat
     # dry run requested with the serving budgets
     path, body = sam3.calls[0]
     assert path == "/query" and body["dry_run"] is True and body["prompt"] == "fire extinguisher"
-    assert body["max_frames"] == 30
+    assert body["max_frames"] == 30 and body["patience"] == 3
+    assert body["render"] == "best" and body["max_views"] == 3
     # the model saw a compact summary, no images
     tool_msgs = [m for m in fake.chat.completions.calls[-1]["messages"] if m["role"] == "tool"]
     seen = json.loads(tool_msgs[1]["content"])

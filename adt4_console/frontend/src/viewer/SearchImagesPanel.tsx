@@ -9,6 +9,7 @@ import {useViewer} from "../stores/viewer";
 import {
   DEFAULT_PARAMS,
   MODE_LABEL,
+  cacheChip,
   commitCandidate,
   discardPending,
   fetchFrame,
@@ -19,14 +20,17 @@ import {
   rleDecode,
   runQuery,
   runRank,
+  seenIn,
   sourceLabel,
   sourceOptions,
   timingRows,
+  viewImageUrl,
   visibleCandidates,
   visibleFrames,
   type CandState,
   type HistoryEntry,
   type RankedFrame,
+  type Sam3CacheStats,
   type Sam3Candidate,
   type Sam3Health,
   type Sam3Mode,
@@ -123,11 +127,11 @@ export function SearchImagesPanel() {
     }
   };
 
-  const showViews = (c: Sam3Candidate, i = 0) =>
+  const showViews = (c: Sam3Candidate, pendingId: string | null | undefined, i = 0) =>
     setShown({
       title: `${c.label} #${c.index}`,
       i,
-      frames: c.views.map((v, k) => ({key: v.frame_key, fallback: v.image_uri, view: v, caption: `view ${k + 1}/${c.views.length}${v.score != null ? ` · SAM3 ${v.score.toFixed(2)}` : ""}${v.source ? ` · ${sourceLabel(v.source)}` : ""}`})),
+      frames: c.views.map((v, k) => ({key: v.frame_key, fallback: v.image_uri ?? (pendingId ? viewImageUrl(pendingId, c.index, v.view ?? k, 1280) : null), view: v, caption: `view ${k + 1}/${c.views.length}${v.score != null ? ` · SAM3 ${v.score.toFixed(2)}` : ""}${v.source ? ` · ${sourceLabel(v.source)}` : ""}`})),
     });
   const showRanked = (frames: RankedFrame[], i: number) =>
     setShown({
@@ -229,7 +233,7 @@ export function SearchImagesPanel() {
             onAdd={c => void add(current, c)}
             onDismiss={c => void dismiss(current, c)}
             onFly={p => fly(p as [number, number, number])}
-            onShowViews={showViews}
+            onShowViews={(c, i) => showViews(c, current.result?.pending_id, i)}
             onShowRanked={showRanked}
             onRetry={() => void search(current.params)}
           />
@@ -318,10 +322,18 @@ function HealthBar({health, onRetry}: {health: Sam3Health | null; onRetry: () =>
           · {(health.keyframes ?? 0).toLocaleString()} keyframes · {health.pending ?? 0} pending
           {health.conf_threshold !== undefined && ` · conf ${health.conf_threshold}`}
           {health.embed_model && ` · ${health.embed_model.split("/").pop()}`}
+          {featureCacheText(health)}
         </span>
       </span>
     </div>
   );
+}
+
+function featureCacheText(h: Sam3Health): string {
+  const fc = h.feature_cache;
+  if (!fc || !fc.pool) return "";
+  const n = fc.pool_cached ?? 0;
+  return n >= fc.pool ? " · SAM3 features cached" : ` · SAM3 features ${n.toLocaleString()}/${fc.pool.toLocaleString()}${fc.building ? " (building)" : ""}`;
 }
 
 function BusyLine({kind, since}: {kind: SearchKind; since: number}) {
@@ -338,9 +350,10 @@ function BusyLine({kind, since}: {kind: SearchKind; since: number}) {
   );
 }
 
-function Timings({t, total}: {t: Record<string, number> | undefined; total?: number}) {
+function Timings({t, total, cache}: {t: Record<string, number> | undefined; total?: number; cache?: Sam3CacheStats}) {
   const rows = timingRows(t);
-  if (!rows.length) return null;
+  const chip = cacheChip(cache);
+  if (!rows.length && !chip) return null;
   return (
     <div className="simg-timings mono small" aria-label="Timing breakdown">
       {rows.map(([k, v]) => (
@@ -348,6 +361,11 @@ function Timings({t, total}: {t: Record<string, number> | undefined; total?: num
           {k} {fmtSecs(v)}
         </span>
       ))}
+      {chip && (
+        <span className={`simg-chip ${cache && cache.hits < cache.frames ? "simg-chip-miss" : "simg-chip-hit"}`} title={chip.title}>
+          {chip.text}
+        </span>
+      )}
       {total !== undefined && <span className="simg-chip simg-chip-total">total {fmtSecs(total)}</span>}
     </div>
   );
@@ -427,6 +445,12 @@ function EntryView({
       <div className="simg-summary small">
         <span>
           <strong>“{p.prompt}”</strong> · {r.candidates.length} candidate{r.candidates.length === 1 ? "" : "s"}
+          {r.detections !== undefined && r.detections > r.candidates.length && (
+            <span className="muted" title="Detections of the same object in several frames are grouped into one candidate">
+              {" "}
+              (from {r.detections} detections)
+            </span>
+          )}
           {hidden > 0 && <span className="muted"> ({hidden} below min score)</span>}
           <span className="muted">
             {r.pool !== undefined && ` · pool ${r.pool.toLocaleString()}`} · {sourceLabel(r.source ?? p.source)} · {p.mode}
@@ -439,22 +463,23 @@ function EntryView({
           </button>
         )}
       </div>
-      <Timings t={r.timings} total={r.elapsed_s} />
+      <Timings t={r.timings} total={r.elapsed_s} cache={r.cache} />
       {r.candidates.length === 0 && <div className="muted small simg-empty">{r.note ?? "SAM3 found nothing in these keyframes. Try SigLIP2 only to see what ranks highest, lower SAM3 conf, or the batched mode."}</div>}
       <div className="simg-grid">
         {cands.map(c => (
-          <CandidateCard key={c.index} c={c} st={e.status[c.index]} expiresIn={r.expires_in_s} onAdd={() => onAdd(c)} onDismiss={() => onDismiss(c)} onFly={() => onFly(c.centroid)} onShow={i => onShowViews(c, i)} />
+          <CandidateCard key={c.index} c={c} pendingId={r.pending_id} st={e.status[c.index]} expiresIn={r.expires_in_s} onAdd={() => onAdd(c)} onDismiss={() => onDismiss(c)} onFly={() => onFly(c.centroid)} onShow={i => onShowViews(c, i)} />
         ))}
       </div>
     </>
   );
 }
 
-function CandidateCard({c, st, onAdd, onDismiss, onFly, onShow}: {c: Sam3Candidate; st?: CandState; expiresIn?: number; onAdd: () => void; onDismiss: () => void; onFly: () => void; onShow: (i: number) => void}) {
+function CandidateCard({c, pendingId, st, onAdd, onDismiss, onFly, onShow}: {c: Sam3Candidate; pendingId?: string | null; st?: CandState; expiresIn?: number; onAdd: () => void; onDismiss: () => void; onFly: () => void; onShow: (i: number) => void}) {
   const [vi, setVi] = useState(0);
   const views = c.views;
   const v = views[vi];
-  const img = v?.image_uri ?? c.image_uri;
+  // rendered by the server only on request: otherwise lazy-load this view's image
+  const img = v?.image_uri ?? (v && pendingId ? viewImageUrl(pendingId, c.index, v.view ?? vi) : c.image_uri);
   const done = st && (st.state === "added" || st.state === "discarded");
   const size = c.bbox_min && c.bbox_max ? c.bbox_max.map((x, k) => Math.abs(x - c.bbox_min[k])) : null;
   return (
@@ -462,7 +487,7 @@ function CandidateCard({c, st, onAdd, onDismiss, onFly, onShow}: {c: Sam3Candida
       <div className="simg-card-img">
         {img ? (
           <button className="simg-img-btn" onClick={() => onShow(vi)} aria-label="Show full frame">
-            <img src={img} alt={`SAM3 mask of ${c.label}, view ${vi + 1}`} />
+            <img src={img} alt={`SAM3 mask of ${c.label}, view ${vi + 1}`} loading="lazy" decoding="async" />
           </button>
         ) : (
           <div className="simg-noimg muted small">no image</div>
@@ -496,7 +521,10 @@ function CandidateCard({c, st, onAdd, onDismiss, onFly, onShow}: {c: Sam3Candida
           {size && <span className="muted"> · {fmtVec(size, 1)} m</span>}
         </div>
         <div className="small muted">
-          {c.num_views} view{c.num_views === 1 ? "" : "s"} · {c.num_points.toLocaleString()} pts
+          <span className={(c.num_frames ?? 1) > 1 ? "simg-seen-multi" : undefined} title={c.frame_keys?.length ? `keyframes: ${c.frame_keys.join(", ")}` : undefined}>
+            {seenIn(c)}
+          </span>
+          {c.num_views > (c.num_frames ?? c.num_views) && ` (${c.num_views} detections)`} · {c.num_points.toLocaleString()} pts
           {v?.score != null && ` · view ${v.score.toFixed(2)}`}
         </div>
         {c.would_merge_into ? (

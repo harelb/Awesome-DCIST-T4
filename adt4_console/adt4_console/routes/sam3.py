@@ -5,7 +5,9 @@
 - ``POST /api/sam3/rank``: SigLIP2-only ranking of the keyframe pool (no SAM3).
 - ``GET /api/sam3/health``: server status (always 200; ``ok: false`` + a clear
   message when the server is down).
-- ``GET /api/sam3/frame?key=``: a full keyframe (raw JPEG data URI).
+- ``GET /api/sam3/frame?key=``: a full keyframe (raw JPEG data URI), or with
+  ``pending_id`` + ``index`` (+ ``view``) a dry-run candidate view, mask drawn;
+  ``/api/sam3/frame.jpg`` is the same as an image (lazy thumbnails).
 - ``POST /api/sam3/commit`` and ``/discard``: see below.
 
 Chat's ``search_robot_images`` streams dry-run candidates; the operator's
@@ -20,7 +22,7 @@ import logging
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from .. import sam3_client
@@ -50,7 +52,11 @@ class QueryBody(BaseModel):
     source: str | None = None
     conf: float | None = Field(default=None, gt=0.0, lt=1.0)
     min_ts: int | None = None
-    max_views: int = Field(default=6, ge=1, le=20)
+    max_views: int = Field(default=sam3_client.QUERY_MAX_VIEWS, ge=1, le=20)
+    # "none": views come as metadata + mask RLE; the panel lazy-loads each image
+    # from GET /api/sam3/frame.jpg (pending_id/index/view) when it is shown
+    render: Literal["all", "best", "none"] = "none"
+    association: Literal["cluster", "centroid"] | None = None
 
 
 class RankBody(BaseModel):
@@ -134,11 +140,41 @@ def rank(body: RankBody, request: Request):
     )
 
 
+def _frame_args(key, pending_id, index):
+    if not key and not pending_id:
+        raise HTTPException(422, "key or pending_id + index required")
+    if pending_id and index is None:
+        raise HTTPException(422, "pending_id needs index")
+
+
 @router.get("/frame")
-def frame(request: Request, key: str = Query(min_length=1),
-          max_dim: int = Query(1280, ge=64, le=4096)):
+def frame(request: Request, key: str | None = Query(None, min_length=1),
+          max_dim: int = Query(1280, ge=64, le=4096),
+          pending_id: str | None = Query(None, min_length=1),
+          index: int | None = Query(None, ge=0), view: int = Query(0, ge=0)):
+    """A keyframe (raw), or a dry-run candidate view with its mask (JSON data URI)."""
+    _frame_args(key, pending_id, index)
     s = services(request).settings
-    return _forward(lambda: sam3_client.frame(key, s.sam3_url, max_dim))
+    return _forward(lambda: sam3_client.frame(key, s.sam3_url, max_dim, pending_id=pending_id,
+                                              index=index, view=view))
+
+
+@router.get("/frame.jpg")
+def frame_jpg(request: Request, key: str | None = Query(None, min_length=1),
+              max_dim: int = Query(480, ge=64, le=4096),
+              pending_id: str | None = Query(None, min_length=1),
+              index: int | None = Query(None, ge=0), view: int = Query(0, ge=0)):
+    """Same as ``/frame`` as an image, for ``<img loading="lazy">`` thumbnails."""
+    _frame_args(key, pending_id, index)
+    s = services(request).settings
+    out = _forward(lambda: sam3_client.frame(key, s.sam3_url, max_dim, pending_id=pending_id,
+                                             index=index, view=view))
+    try:
+        data, media = sam3_client.data_uri_bytes(out.get("uri"))
+    except sam3_client.Sam3Error as e:
+        raise HTTPException(502, str(e)) from None
+    # a pending view never changes; the raw frame neither
+    return Response(data, media_type=media, headers={"Cache-Control": "private, max-age=600"})
 
 
 @router.post("/commit")
