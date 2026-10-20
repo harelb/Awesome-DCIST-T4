@@ -77,6 +77,14 @@ def parse_args(argv=None):
         default=os.environ.get("SAM3_QUERY_SERVER_URL", "http://127.0.0.1:8077"),
         help="SAM3 query server used by chat's robot-image search",
     )
+    p.add_argument(
+        "--terminal",
+        action="store_true",
+        default=os.environ.get("ADT4_CONSOLE_TERMINAL", "") not in ("", "0", "false"),
+        help="allow browser terminals (ssh) on fleet machines from the Fleet page; "
+        "anyone who can reach the console gets a shell, so pair it with --token "
+        "off a closed network",
+    )
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
 
@@ -125,6 +133,7 @@ def settings_from_args(args):
         llm_model=args.llm_model,
         llm_budget_usd=args.llm_budget_usd,
         planner_ns=args.planner_ns,
+        terminal=args.terminal,
         sam3_url=args.sam3_url,
         launch_state_path="~/.adt4_console/active_launch.json",
     )

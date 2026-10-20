@@ -20,6 +20,8 @@ export interface ConsoleConfig {
   sessions: string[];
   fleet_defaults: Record<string, unknown>;
   robots: string[];
+  /** browser terminals on fleet machines (console --terminal) */
+  terminal?: boolean;
 }
 
 export interface Machine {

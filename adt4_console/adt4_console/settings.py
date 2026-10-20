@@ -36,6 +36,8 @@ class Settings:
     # here; None = memory only (tests).  cli.py sets ~/.adt4_console/active_launch.json
     launch_state_path: str | None = None
     planner_ns: str | None = None  # omniplanner namespace (base station name)
+    # browser terminals on fleet machines (a shell for anyone who can reach the console)
+    terminal: bool = False
     static_dir: pathlib.Path = STATIC_DIR
 
     # background work (tests switch these off)

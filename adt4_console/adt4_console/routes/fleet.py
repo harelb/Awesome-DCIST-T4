@@ -70,6 +70,7 @@ def config(request: Request):
         "fleet_defaults": fleet.topo.get("fleet_defaults", {}),
         "robots": s.robots or fleet.robots(),
         "topology_path": fleet.topology_path,
+        "terminal": s.terminal,
     }
 
 

@@ -166,10 +166,11 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         plan,
         sam3,
         teleop,
+        terminal,
         ws,
     )
 
-    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, ws):
+    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal, ws):
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 
