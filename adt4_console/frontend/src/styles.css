@@ -2944,3 +2944,45 @@ input[type="checkbox"] {
 .mini-check.disabled {
   opacity: 0.55;
 }
+
+/* fleet: tmux session chips with actions, browser terminal */
+.session-chip {
+  gap: 3px;
+  padding-right: 3px;
+}
+.chip-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.chip-btn:hover:not(:disabled) {
+  background: var(--bg-2);
+  color: var(--text);
+}
+.chip-btn-danger:hover:not(:disabled) {
+  color: var(--err);
+}
+.chip-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.cell-actions .btn + .btn {
+  margin-left: 6px;
+}
+.terminal-host {
+  height: min(65vh, 640px);
+  min-height: 240px;
+  background: #0b0f14;
+  border-radius: var(--radius);
+  padding: 4px;
+  overflow: hidden;
+}
+.modal-foot .grow {
+  flex: 1;
+  min-width: 0;
+}

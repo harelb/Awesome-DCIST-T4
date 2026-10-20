@@ -203,6 +203,9 @@ HYDRA_SHUTDOWN_TIMEOUT_S = 15.0
 ROMAN_SHUTDOWN_TIMEOUT_S = 180.0  # > fleetlink relay timeout_s (170) + 2
 HYDRA_EXIT_WAIT_S = 600.0
 HYDRA_EXIT_POLL_S = 2.0
+# teardown: after Ctrl-C, how long nodes get to exit before the session is killed
+TEARDOWN_WAIT_S = 30.0
+SHELLS = {"zsh", "bash", "sh", "fish", "dash"}
 
 
 def _wait_hydra_exit(svc, job, robot: str) -> bool | None:
@@ -228,9 +231,88 @@ def _wait_hydra_exit(svc, job, robot: str) -> bool | None:
     return False
 
 
+def _wait_hydra_exit_ssh(svc, job, m) -> bool | None:
+    """Like _wait_hydra_exit, by looking for the hydra process on the robot."""
+    t0 = time.monotonic()
+    last_note = t0
+    while time.monotonic() - t0 < HYDRA_EXIT_WAIT_S:
+        rc, out, _ = svc.helpers.ssh_cmd(
+            m["user"], m["ip"], "pgrep -f hydra_ros_node >/dev/null && echo up || echo gone"
+        )
+        if rc != 0 or out.strip() not in ("up", "gone"):
+            return None
+        if out.strip() == "gone":
+            return True
+        if time.monotonic() - last_note >= 30:
+            last_note = time.monotonic()
+            job.log("dim", f"hydra still saving ({time.monotonic() - t0:.0f} s) ...")
+        time.sleep(HYDRA_EXIT_POLL_S)
+    return False
+
+
+def _teardown_stack(svc, job, robot: str, m) -> bool:
+    """Ctrl-C every pane of the ADT4 session, give the nodes TEARDOWN_WAIT_S to
+    exit, then kill the session."""
+    from dcist_launch_system.fleet.launch_workflow import TMUX_SESSION_NAME
+
+    from ..terminal import session_command
+
+    session = TMUX_SESSION_NAME
+    user, ip = m["user"], m["ip"]
+    job.log("info", f"Stopping the rest of the stack on {robot} (Ctrl-C every pane of {session}) ...")
+    rc, out, err = svc.helpers.ssh_cmd(user, ip, session_command("stop", session), timeout=10)
+    if rc != 0:
+        job.log("dim", f"{robot}: no {session} session to stop ({err or out or rc})")
+        return True
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < TEARDOWN_WAIT_S:
+        time.sleep(HYDRA_EXIT_POLL_S)
+        rc, out, _ = svc.helpers.ssh_cmd(
+            user, ip, f"tmux list-panes -s -t {session} -F '#{{pane_current_command}}'"
+        )
+        busy = [c for c in out.split() if c not in SHELLS] if rc == 0 else []
+        if not busy:
+            break
+    else:
+        job.log("dim", f"{robot}: still running after {TEARDOWN_WAIT_S:.0f} s: {', '.join(sorted(set(busy)))}; killing")
+    rc, out, err = svc.helpers.ssh_cmd(user, ip, session_command("kill", session), timeout=10)
+    if rc != 0 and "can't find session" not in (err or out):
+        job.log("error", f"{robot}: kill {session} failed: {err or out or rc}")
+        return False
+    job.log("ok", f"{robot}: {session} stopped and closed")
+    return True
+
+
+class StopSaveBody(BaseModel):
+    # after saving, Ctrl-C and kill the robot's whole ADT4 tmux session
+    teardown: bool = True
+
+
 @router.post("/robots/{robot}/stop_save")
-def stop_save(robot: str, request: Request):
+def stop_save(robot: str, request: Request, body: StopSaveBody | None = None):
     svc = services(request)
+    teardown = body.teardown if body else True
+
+    def finish(job, result, hydra_exited):
+        """Tear the stack down once hydra's save is known to be done."""
+        if not teardown or result is False:
+            return result
+        m = svc.fleet.machine(robot)
+        if m is None:
+            job.log("warn", f"{robot} is not in the topology; cannot stop its tmux session")
+            return result
+        if hydra_exited is None:
+            job.log("info", "Waiting for hydra to finish saving and exit ...")
+            hydra_exited = _wait_hydra_exit_ssh(svc, job, m)
+            if hydra_exited:
+                job.log("ok", f"{robot}: hydra saved and exited")
+        if hydra_exited is False:
+            job.log("warn", f"{robot}: hydra is still saving; left the stack running (kill it from Fleet when it is done)")
+            return {**result, "teardown": False}
+        if hydra_exited is None:
+            job.log("warn", f"{robot}: cannot tell whether hydra finished saving; left the stack running")
+            return {**result, "teardown": False}
+        return {**result, "teardown": _teardown_stack(svc, job, robot, m)}
 
     def run(job):
         if svc.ros.available:
@@ -286,12 +368,16 @@ def stop_save(robot: str, request: Request):
                             f"{robot}: hydra still running after "
                             f"{HYDRA_EXIT_WAIT_S:.0f} s; check its pane",
                         )
-                return {
-                    "method": "service",
-                    "hydra": True,
-                    "roman": roman_ok,
-                    "hydra_exited": hydra_saved,
-                }
+                return finish(
+                    job,
+                    {
+                        "method": "service",
+                        "hydra": True,
+                        "roman": roman_ok,
+                        "hydra_exited": hydra_saved,
+                    },
+                    hydra_saved,
+                )
         else:
             job.log("dim", "ROS unavailable; using tmux fallback")
         m = svc.fleet.machine(robot)
@@ -303,7 +389,7 @@ def stop_save(robot: str, request: Request):
         job.log("info", f"tmux fallback: running the core shutdown pane on {robot} ...")
         ok, msg = svc.helpers.stop_save_via_tmux(m["user"], m["ip"], robot=robot)
         job.log("ok" if ok else "error", f"{robot}: {msg}")
-        return {"method": "tmux", "detail": msg} if ok else False
+        return finish(job, {"method": "tmux", "detail": msg}, None) if ok else False
 
     job = svc.jobs.start("stop_save", f"Stop & save {robot}", run)
     return {"job_id": job.id}

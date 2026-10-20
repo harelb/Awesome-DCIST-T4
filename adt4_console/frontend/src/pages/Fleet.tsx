@@ -1,9 +1,10 @@
 import {useState} from "react";
 import {useFleet} from "../stores/fleet";
 import {trackJob} from "../stores/jobs";
-import {errorText, postJSON} from "../lib/api";
+import {errorText, postJSON, useApi} from "../lib/api";
 import {fmtAgo} from "../lib/fuzzy";
-import type {Machine, NodeStatus, RemoteStatus, RobotNodes} from "../types";
+import type {ConsoleConfig, Machine, NodeStatus, RemoteStatus, RobotNodes} from "../types";
+import {TerminalModal} from "../components/Terminal";
 import {Badge, Card, Dot, Empty, ErrorBox, Loading, Modal, PageHeader, Spinner, type Tone} from "../components/ui";
 
 export const jobIdOf = (r: unknown): string | null => {
@@ -51,7 +52,33 @@ function diskTone(d?: string): Tone {
   return v > 90 ? "err" : v > 75 ? "warn" : "ok";
 }
 
-function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m: Machine) => void}) {
+type SessionAction = "stop" | "kill";
+interface SessionTarget {
+  m: Machine;
+  session: string;
+  action: SessionAction;
+}
+interface TermTarget {
+  m: Machine;
+  session: string | null;
+}
+
+function MachineRow({
+  m,
+  st,
+  terminal,
+  onStop,
+  onSession,
+  onTerminal,
+}: {
+  m: Machine;
+  st?: RemoteStatus;
+  terminal: boolean;
+  onStop: (m: Machine) => void;
+  onSession: (t: SessionTarget) => void;
+  onTerminal: (t: TermTarget) => void;
+}) {
+  const canShell = terminal && !!m.online && (!!m.ssh || !!m.local);
   const tmux = st?.tmux_sessions && st.tmux_sessions !== "none" && st.tmux_sessions !== "N/A" ? st.tmux_sessions.split(",").map(s => s.trim()) : [];
   return (
     <tr className={m.online ? "" : "row-dim"}>
@@ -79,11 +106,24 @@ function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m:
       <td data-label="tmux">
         {tmux.length ? (
           <div className="chips">
-            {tmux.map(t => (
-              <span key={t} className="chip mono">
-                {t}
-              </span>
-            ))}
+            {tmux.map(name => {
+              return (
+                <span key={name} className="chip mono session-chip">
+                  {name}
+                  {canShell && (
+                    <button className="chip-btn" title={`attach to ${name} in a terminal`} onClick={() => onTerminal({m, session: name})}>
+                      ⌨
+                    </button>
+                  )}
+                  <button className="chip-btn" title={`Ctrl-C every pane of ${name}`} disabled={!m.online} onClick={() => onSession({m, session: name, action: "stop"})}>
+                    ■
+                  </button>
+                  <button className="chip-btn chip-btn-danger" title={`kill tmux session ${name}`} disabled={!m.online} onClick={() => onSession({m, session: name, action: "kill"})}>
+                    ✕
+                  </button>
+                </span>
+              );
+            })}
           </div>
         ) : (
           <span className="muted">none</span>
@@ -106,6 +146,11 @@ function MachineRow({m, st, onStop}: {m: Machine; st?: RemoteStatus; onStop: (m:
       </td>
       <td data-label="radio" className="mono small">{na(st?.radio)}</td>
       <td className="cell-actions">
+        {canShell && (
+          <button className="btn btn-sm" title={`shell on ${m.name} (ssh ${m.user}@${m.ip})`} onClick={() => onTerminal({m, session: null})}>
+            Terminal
+          </button>
+        )}
         {m.role === "robot" && (
           <button className="btn btn-sm btn-danger-outline" disabled={!m.online} onClick={() => onStop(m)}>
             Stop &amp; Save
@@ -168,6 +213,11 @@ export function FleetPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [stopTarget, setStopTarget] = useState<Machine | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
+  const [sessionTarget, setSessionTarget] = useState<SessionTarget | null>(null);
+  const [termTarget, setTermTarget] = useState<TermTarget | null>(null);
+  const [teardown, setTeardown] = useState(true);
+  const config = useApi<ConsoleConfig>("api/config");
+  const terminal = !!config.data?.terminal;
 
   const refresh = async () => {
     setRefreshing(true);
@@ -187,9 +237,21 @@ export function FleetPage() {
   const stopSave = async (m: Machine) => {
     setStopTarget(null);
     try {
-      const r = await postJSON(`api/robots/${encodeURIComponent(m.name)}/stop_save`);
+      const r = await postJSON(`api/robots/${encodeURIComponent(m.name)}/stop_save`, {teardown});
       const id = jobIdOf(r);
       if (id) trackJob(id, `Stop & save ${m.name}`);
+    } catch (e) {
+      setActionErr(errorText(e));
+    }
+  };
+
+  const sessionAction = async ({m, session, action}: SessionTarget) => {
+    setSessionTarget(null);
+    setActionErr(null);
+    try {
+      await postJSON(`api/fleet/${encodeURIComponent(m.name)}/tmux/${encodeURIComponent(session)}/${action}`);
+      // the session list refreshes with the next status poll; ask for one now
+      setTimeout(() => void load(), action === "kill" ? 1500 : 4000);
     } catch (e) {
       setActionErr(errorText(e));
     }
@@ -243,7 +305,15 @@ export function FleetPage() {
                 {[...list]
                   .sort((a, b) => Number(b.online) - Number(a.online) || a.role.localeCompare(b.role) || a.name.localeCompare(b.name))
                   .map(m => (
-                    <MachineRow key={m.name} m={m} st={status?.machines?.[m.name]} onStop={setStopTarget} />
+                    <MachineRow
+                      key={m.name}
+                      m={m}
+                      st={status?.machines?.[m.name]}
+                      terminal={terminal}
+                      onStop={setStopTarget}
+                      onSession={setSessionTarget}
+                      onTerminal={setTermTarget}
+                    />
                   ))}
               </tbody>
             </table>
@@ -258,6 +328,41 @@ export function FleetPage() {
           <RobotNodesCard key={r} robot={r} info={info} />
         ))}
       </div>
+      {sessionTarget && (
+        <Modal
+          title={`${sessionTarget.action === "kill" ? "Kill" : "Stop"} ${sessionTarget.session} on ${sessionTarget.m.name}?`}
+          tone={sessionTarget.action === "kill" ? "err" : "warn"}
+          onClose={() => setSessionTarget(null)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setSessionTarget(null)}>
+                Cancel
+              </button>
+              <button className="btn btn-danger" onClick={() => sessionAction(sessionTarget)}>
+                {sessionTarget.action === "kill" ? "Kill session" : "Send Ctrl-C"}
+              </button>
+            </>
+          }
+        >
+          {sessionTarget.action === "kill" ? (
+            <p>
+              Runs <span className="mono">tmux kill-session -t {sessionTarget.session}</span>: every process in it gets SIGHUP at once, nothing is
+              saved.
+            </p>
+          ) : (
+            <p>
+              Sends Ctrl-C to every pane of <span className="mono">{sessionTarget.session}</span>, so each node shuts down the way it would in the
+              terminal. The panes stay open (shells); kill the session afterwards to close them.
+            </p>
+          )}
+          {sessionTarget.session === "adt4_system" && sessionTarget.m.role === "robot" && (
+            <p className="tone-warn">
+              Hydra and ROMAN do not save their maps on Ctrl-C or kill. Use <strong>Stop &amp; Save</strong> first if this run's map matters.
+            </p>
+          )}
+        </Modal>
+      )}
+      {termTarget && <TerminalModal machine={termTarget.m.name} session={termTarget.session} onClose={() => setTermTarget(null)} />}
       {stopTarget && (
         <Modal
           title={`Stop & save ${stopTarget.name}?`}
@@ -279,6 +384,13 @@ export function FleetPage() {
             hydra saves its scene graph and mesh and exits, ROMAN saves its map. If hydra's service does not answer, runs the same calls in the
             robot's core shutdown pane over ssh. Progress is in the job log.
           </p>
+          <label className="row gap">
+            <input type="checkbox" checked={teardown} onChange={e => setTeardown(e.target.checked)} />
+            <span>
+              Then shut down the rest of the stack: once hydra has exited, Ctrl-C every pane of <span className="mono">adt4_system</span> and kill the
+              session. If hydra is still saving after 10 min the stack is left running.
+            </span>
+          </label>
         </Modal>
       )}
     </div>

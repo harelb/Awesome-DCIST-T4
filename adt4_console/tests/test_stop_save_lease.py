@@ -12,13 +12,31 @@ from tests.conftest import make_client
 
 
 class FakeHelpers:
-    def __init__(self, result=(True, "shutdown requested from pane core.1")):
+    """stop_save_via_tmux plus a robot whose hydra exits after ``hydra_polls``
+    checks and whose panes are shells once Ctrl-C was sent."""
+
+    def __init__(self, result=(True, "shutdown requested from pane core.1"), hydra_polls=1):
         self.result = result
         self.calls = []
+        self.ssh = []
+        self.hydra_polls = hydra_polls
+        self.stopped = False
 
     def stop_save_via_tmux(self, user, ip, robot=None):
         self.calls.append((user, ip, robot))
         return self.result
+
+    def ssh_cmd(self, user, ip, cmd, timeout=5):
+        self.ssh.append(cmd)
+        if cmd.startswith("pgrep -f hydra_ros_node"):
+            self.hydra_polls -= 1
+            return 0, "up" if self.hydra_polls > 0 else "gone", ""
+        if "send-keys" in cmd:
+            self.stopped = True
+            return 0, "", ""
+        if "list-panes" in cmd:
+            return 0, "zsh\nzsh" if self.stopped else "hydra_ros_node\nzsh", ""
+        return 0, "", ""
 
 
 def _fake_ros(svc, monkeypatch, fail=(), link=None, services_up=()):
@@ -73,9 +91,13 @@ def test_stop_save_calls_hydra_then_roman(app, monkeypatch):
         "hydra": True,
         "roman": True,
         "hydra_exited": True,
+        "teardown": True,
     }
     assert "ROMAN map saved" in log and "hydra saved and exited" in log
     assert not helpers.calls
+    # then the rest of the stack: Ctrl-C every pane, wait for shells, kill
+    assert "C-c" in helpers.ssh[0] and helpers.ssh[-1] == "tmux kill-session -t adt4_system"
+    assert "adt4_system stopped and closed" in log
 
 
 def test_stop_save_roman_failure_is_a_warning(app, monkeypatch):
@@ -210,3 +232,39 @@ def test_lease_state_from_guards_in_plan():
     # a robot built before lease_owner
     rb._on_guards("euclid", _guards(True))
     assert rb.plan("euclid")["lease"]["owner"] == ""
+
+
+def test_stop_save_without_teardown_leaves_the_session(app, monkeypatch):
+    client, svc, helpers = app
+    _fake_ros(svc, monkeypatch, services_up={"/hamilton/hydra/shutdown"})
+    r = client.post("/api/robots/hamilton/stop_save", json={"teardown": False})
+    job, log = _job(client, svc, r.json()["job_id"])
+    assert job["state"] == "succeeded", log
+    assert "teardown" not in job["result"] and not helpers.ssh
+
+
+def test_stop_save_tmux_waits_for_hydra_before_teardown(app):
+    client, svc, helpers = app
+    helpers.hydra_polls = 3  # hydra still saving for two checks
+    job, log = _job(
+        client, svc, client.post("/api/robots/hamilton/stop_save").json()["job_id"]
+    )
+    assert job["state"] == "succeeded", log
+    pgreps = [c for c in helpers.ssh if c.startswith("pgrep")]
+    assert len(pgreps) == 3
+    # no Ctrl-C before hydra exited
+    first_keys = next(i for i, c in enumerate(helpers.ssh) if "send-keys" in c)
+    assert first_keys > helpers.ssh.index(pgreps[-1])
+    assert job["result"]["teardown"] is True
+
+
+def test_stop_save_never_kills_a_hydra_that_is_still_saving(app, monkeypatch):
+    client, svc, helpers = app
+    monkeypatch.setattr(launch_routes, "HYDRA_EXIT_WAIT_S", 0.05)
+    helpers.hydra_polls = 10**6
+    job, log = _job(
+        client, svc, client.post("/api/robots/hamilton/stop_save").json()["job_id"]
+    )
+    assert job["result"]["teardown"] is False
+    assert "hydra is still saving" in log
+    assert not any("send-keys" in c or "kill-session" in c for c in helpers.ssh)
