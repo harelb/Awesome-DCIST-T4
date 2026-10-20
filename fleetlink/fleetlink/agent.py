@@ -262,6 +262,8 @@ class AgentCore:
         self._tiles_dirty = False
         # state
         self.pose: dict | None = None
+        # global frame -> scene-graph frame (``frame_align``), None until looked up
+        self.frame_align: dict | None = None
         self.guards: dict = {}
         self.health: dict = {}
         self.results: deque = deque(maxlen=10)
@@ -349,6 +351,12 @@ class AgentCore:
         """``{x, y, z, qw, qx, qy, qz, frame, t}``."""
         with self._lock:
             self.pose = dict(pose)
+
+    def on_frame_align(self, align: dict | None) -> None:
+        """``{parent, child, T: [x, y, z, qw, qx, qy, qz], stamp, ok, reason}``
+        (see :func:`frame_align_ok` / :func:`frame_align_failed`)."""
+        with self._lock:
+            self.frame_align = None if align is None else dict(align)
 
     def on_guards(self, guards: dict) -> None:
         with self._lock:
@@ -833,7 +841,22 @@ class AgentCore:
                 "seqs": {"dsg": self.seq["dsg/delta"] - 1},
                 "video": self.video.state(),
                 "store": self._store_state(),
+                **self._frame_align_state(),
             }
+
+    def _frame_align_state(self) -> dict:
+        """Optional ``frame_align`` key (absent until the first lookup, so old
+        consoles see the payload they always saw).  ``age_s`` = robot clock now
+        minus the transform stamp, so the base needs no clock-offset estimate."""
+        fa = self.frame_align
+        if fa is None:
+            return {}
+        fa = dict(fa)
+        st = fa.get("stamp")
+        fa["age_s"] = (
+            round(max(0.0, self.clock() - st), 3) if st else None
+        )  # stamp 0: static TF
+        return {"frame_align": fa}
 
     def stats(self) -> dict:
         s = self.sched
@@ -1073,6 +1096,69 @@ def transform_points(pts: np.ndarray, tf) -> np.ndarray:
     return pts @ R.T + np.array([t.x, t.y, t.z])
 
 
+def frame_align_ok(tf, parent: str, child: str) -> dict:
+    """``frame_align`` from a geometry_msgs/TransformStamped ``parent <- child``:
+    ``T`` maps points in ``child`` (the scene-graph / odom frame every live layer
+    is sent in) into ``parent`` (the global frame).  ``stamp`` 0 = static TF."""
+    t, q = tf.transform.translation, tf.transform.rotation
+    st = tf.header.stamp
+    return {
+        "parent": parent,
+        "child": child,
+        "T": [float(v) for v in (t.x, t.y, t.z, q.w, q.x, q.y, q.z)],
+        "stamp": st.sec + st.nanosec * 1e-9,
+        "ok": True,
+        "reason": "",
+    }
+
+
+def frame_align_identity(frame: str) -> dict:
+    """The scene graph already lives in the global frame."""
+    return {
+        "parent": frame,
+        "child": frame,
+        "T": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "stamp": 0.0,
+        "ok": True,
+        "reason": "",
+    }
+
+
+def frame_align_failed(parent: str, child: str, reason: str) -> dict:
+    """No ``parent <- child`` transform (not relocalized / no global frame)."""
+    return {
+        "parent": parent,
+        "child": child,
+        "T": None,
+        "stamp": None,
+        "ok": False,
+        "reason": " ".join(str(reason).split())[:200],
+    }
+
+
+def lookup_frame_align(tf_buffer, parent: str, child: str) -> dict:
+    """Latest ``parent <- child`` from a tf2 buffer as a ``frame_align`` dict."""
+    if not child:
+        return frame_align_failed(parent, child, "scene-graph frame unknown")
+    if child == parent:
+        return frame_align_identity(parent)
+    if tf_buffer is None:
+        return frame_align_failed(parent, child, "tf2_ros unavailable")
+    try:
+        from rclpy.time import Time
+
+        latest = Time()
+    except ImportError:  # unit tests with a fake buffer
+        latest = 0
+    try:
+        tf = tf_buffer.lookup_transform(parent, child, latest)
+    except Exception as exc:  # noqa: BLE001  (tf2 Lookup/Connectivity/Extrapolation)
+        return frame_align_failed(
+            parent, child, f"not relocalized: {type(exc).__name__}: {exc}"
+        )
+    return frame_align_ok(tf, parent, child)
+
+
 class AgentNode:
     """rclpy wrapper: subscriptions + TF pose → :class:`AgentCore`.
 
@@ -1103,6 +1189,11 @@ class AgentNode:
         self._dsg_frame = ""
         self.body_frame = p("body_frame", f"{robot}/body")
         self.fallback_map_frame = p("fallback_map_frame", f"{robot}/map")
+        # the global frame prior maps / the planner use; ``global_frame <- DSG
+        # frame`` (relocalization: map -> <robot>/odom) goes out as ``frame_align``
+        # so the console can draw the live layers over the prior map.  "" = off.
+        self.global_frame = p("global_frame", "map")
+        frame_align_hz = p("frame_align_hz", 1.0)
         dsg_topic = p("dsg_topic", "hydra/backend/dsg")
         guards_topic = p("guards_topic", "spot_executor_node/runtime_guards")
         result_topic = p("result_topic", "spot_executor_node/action_result")
@@ -1256,6 +1347,8 @@ class AgentNode:
         except ImportError:
             self.log.warn("tf2_ros unavailable: no pose")
         nd.create_timer(1.0 / max(cfg["state_hz"], 1.0), self._update_pose)
+        if self.global_frame and frame_align_hz > 0:
+            nd.create_timer(1.0 / frame_align_hz, self._update_frame_align)
 
         # generic ROS relay (relay.yaml); off unless ``relay_config`` is set, so
         # router-mode deployments behave exactly as before
@@ -1493,6 +1586,11 @@ class AgentNode:
                 }
             )
             return
+
+    def _update_frame_align(self) -> None:
+        self.core.on_frame_align(
+            lookup_frame_align(self._tf_buffer, self.global_frame, self._map_frame())
+        )
 
     def _tick_loop(self) -> None:
         while self._running:

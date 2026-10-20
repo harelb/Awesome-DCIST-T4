@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
-import {useRobots} from "../stores/robots";
+import {frameAlignOf, useRobots} from "../stores/robots";
+import {AlignStatus} from "./RobotLegend";
 import {useViewer} from "../stores/viewer";
 import {errorText, getJSON, postJSON} from "../lib/api";
 import {fmtRate} from "../lib/fuzzy";
@@ -159,6 +160,11 @@ export function LivePanel() {
                 <div className="stat-v mono">{l.tiles ?? 0}</div>
                 <div className="stat-k">tiles</div>
               </div>
+            </div>
+            <div className="live-align small">
+              <span className="muted">frame</span>
+              <AlignStatus robot={r} />
+              {!frameAlignOf(r) && <span className="muted">no alignment reported (older agent)</span>}
             </div>
             <div className="muted small mono">
               drops {l.drops ?? 0} · gaps {l.gaps ?? 0} · resyncs {l.resyncs ?? 0}

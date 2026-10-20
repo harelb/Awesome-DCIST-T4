@@ -4,7 +4,9 @@ import {Canvas, useThree} from "@react-three/fiber";
 import {CameraControls, Html, Line} from "@react-three/drei";
 import CameraControlsImpl from "camera-controls";
 import {useViewer, type SourceView} from "../stores/viewer";
-import {useRobots} from "../stores/robots";
+import {frameAlignOf, sourceMatrix, useRobots} from "../stores/robots";
+import {applyPoint, invertRay, poseInGlobal, robotOfSource} from "../lib/frameAlign";
+import {AlignedGroup} from "./AlignedGroup";
 import {layoutGraph, displayPos, type GraphLayout} from "./layout";
 import {GraphLayers, pickRegistry} from "./GraphLayers";
 import {pickBox, type BoxSet} from "../lib/bboxPick";
@@ -57,7 +59,8 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
   useEffect(() => {
     if (layout) onLayout(src.id, layout);
   }, [layout, src.id, onLayout]);
-  return (
+  const robot = robotOfSource(src.id);
+  const content = (
     <group>
       {src.showMesh && src.manifest && (
         <MeshTiles
@@ -88,6 +91,8 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
       )}
     </group>
   );
+  // a live source is in its robot's scene-graph frame: draw it in the global frame
+  return robot ? <AlignedGroup robot={robot}>{content}</AlignedGroup> : content;
 }
 
 /** Click picking: nearest projected node within a few pixels, else the mesh surface. */
@@ -114,10 +119,14 @@ function Picker({cb}: {cb: SceneCallbacks}) {
       let best: {src: string; sym: string; d: number; depth: number} | null = null;
       for (const [src, layers] of pickRegistry) {
         if (!enabled[src]?.enabled || !enabled[src]?.showGraph) continue;
+        // layout positions are in the source's own frame (live: robot odom)
+        const m = sourceMatrix(src);
         for (const l of layers.values()) {
           const p = l.positions;
           for (let i = 0; i < l.syms.length; i++) {
-            v.set(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]).project(camera);
+            v.set(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+            if (m) v.applyMatrix4(m);
+            v.project(camera);
             if (v.z > 1 || v.z < -1) continue;
             const sx = ((v.x + 1) / 2) * rect.width;
             const sy = ((1 - v.y) / 2) * rect.height;
@@ -138,14 +147,20 @@ function Picker({cb}: {cb: SceneCallbacks}) {
       // tried first; overlapping boxes resolve to the smallest one
       const vs = useViewer.getState();
       if (vs.showBBoxes && vs.pickMode === "inspect") {
-        const sets: [string, BoxSet][] = [];
-        for (const [src, layers] of pickRegistry) {
-          if (!enabled[src]?.enabled || !enabled[src]?.showGraph) continue;
-          for (const l of layers.values()) if (l.boxes) sets.push([src, {syms: l.syms, boxes: l.boxes}]);
-        }
         const o = ray.ray.origin;
         const d = ray.ray.direction;
-        const hit = pickBox([o.x, o.y, o.z], [d.x, d.y, d.z], sets);
+        // boxes are in each source's own frame: test the ray in that frame
+        // (rigid transforms keep volumes, and ray parameters stay comparable)
+        let hit: ReturnType<typeof pickBox<string>> = null;
+        for (const [src, layers] of pickRegistry) {
+          if (!enabled[src]?.enabled || !enabled[src]?.showGraph) continue;
+          const sets: [string, BoxSet][] = [];
+          for (const l of layers.values()) if (l.boxes) sets.push([src, {syms: l.syms, boxes: l.boxes}]);
+          if (!sets.length) continue;
+          const r = invertRay(sourceMatrix(src), [o.x, o.y, o.z], [d.x, d.y, d.z]);
+          const h = pickBox(r.o, r.d, sets);
+          if (h && (!hit || h.volume < hit.volume * 0.999 || (h.volume <= hit.volume * 1.001 && h.t < hit.t))) hit = h;
+        }
         if (hit) {
           cbRef.current.onNode(hit.key, hit.sym);
           return;
@@ -193,7 +208,8 @@ function RobotGlyphs() {
         const color = robotColor(r);
         const stale = now - (stateAt[r] ?? 0) > 5000;
         return (
-          <group key={r} position={[p.x, p.y, p.z]} rotation={[0, 0, yaw]}>
+          <AlignedGroup key={r} robot={r} frame={p.frame}>
+          <group position={[p.x, p.y, p.z]} rotation={[0, 0, yaw]}>
             <mesh position={[0.35, 0, 0.3]} rotation={[0, 0, -Math.PI / 2]}>
               <coneGeometry args={[0.32, 0.9, 3]} />
               <meshBasicMaterial color={color} transparent opacity={stale ? 0.4 : 1} />
@@ -209,12 +225,15 @@ function RobotGlyphs() {
               </div>
             </Html>
           </group>
+          </AlignedGroup>
         );
       })}
     </>
   );
 }
 
+// Plans come from omniplanner in the frame of the scene graph it plans on
+// (relocalize / fleet: the global map), so they are drawn as is.
 function PlanOverlay() {
   const plans = useRobots(s => s.plan);
   const robotColor = useRobotColorOf();
@@ -266,9 +285,10 @@ function PlanOverlay() {
 function Markers() {
   const {selected, highlight, sources, flat, stackHeight, gotoDraft, vizStyle} = useViewer();
   const heights = useViewStyle(s => s.heights);
+  useRobots(s => s.state); // re-place markers on live sources when alignments change
   const findPos = (src: string, sym: string): [number, number, number] | null => {
     const n = sources[src]?.model?.nodes.get(sym);
-    return n ? displayPos(n, flat, stackHeight, vizStyle, heights) : null;
+    return n ? applyPoint(sourceMatrix(src), displayPos(n, flat, stackHeight, vizStyle, heights)) : null;
   };
   const sel = selected ? findPos(selected.src, selected.sym) : null;
   const selNode = selected ? sources[selected.src]?.model?.nodes.get(selected.sym) : null;
@@ -384,9 +404,10 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
     if (!follow) return;
     let last: [number, number] | null = null;
     const apply = () => {
-      const p = useRobots.getState().state[follow]?.pose;
+      const raw = useRobots.getState().state[follow]?.pose;
       const c = ref.current;
-      if (!p || !c) return;
+      if (!raw || !c) return;
+      const p = poseInGlobal(raw, frameAlignOf(follow));
       if (last && Math.hypot(p.x - last[0], p.y - last[1]) < 0.02) return;
       last = [p.x, p.y];
       void c.moveTo(p.x, p.y, p.z, true);

@@ -4,7 +4,8 @@ import {useViewer} from "../stores/viewer";
 import {getJSON} from "../lib/api";
 import {pickDefaultSources} from "../lib/runCopies";
 import type {ActiveLaunch} from "../types";
-import {useRobots} from "../stores/robots";
+import {sourceMatrix, useRobots} from "../stores/robots";
+import {applyPoint, nearestGotoPlace} from "../lib/frameAlign";
 import {layerInfo, nearestPlace} from "../lib/graphModel";
 import {Scene, type SceneCallbacks} from "./Scene";
 import type {GraphLayout} from "./layout";
@@ -135,7 +136,8 @@ export default function ViewerPage() {
     const model = st.sources[src]?.model;
     const n = model?.nodes.get(sym);
     if (!n || !model) return;
-    st.set({gotoDraft: [...st.gotoDraft, {src, sym, pos: n.pos, label: model.displayName(n)}]});
+    // drawn in the global frame (a live source's nodes are in the robot's frame)
+    st.set({gotoDraft: [...st.gotoDraft, {src, sym, pos: applyPoint(sourceMatrix(src), n.pos), label: model.displayName(n)}]});
     setTab("plan");
   }, [setTab]);
 
@@ -165,13 +167,9 @@ export default function ViewerPage() {
       onPoint: p => {
         const st = useViewer.getState();
         if (st.pickMode !== "goto") return;
-        let best: {src: string; sym: string; d: number} | null = null;
-        for (const {id, model} of readyModels()) {
-          const n = nearestPlace(model, p, {maxDist: 15});
-          if (!n) continue;
-          const d = Math.hypot(n.pos[0] - p[0], n.pos[1] - p[1]);
-          if (!best || d < best.d) best = {src: id, sym: n.sym, d};
-        }
+        // the click is in the global frame; a live source's places are in its
+        // robot's frame (goals go to the planner as node symbols, not points)
+        const best = nearestGotoPlace(readyModels(), p, sourceMatrix);
         if (best) addGoto(best.src, best.sym);
         else setToast("No place within 15 m of that point");
       },

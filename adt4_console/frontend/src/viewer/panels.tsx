@@ -9,6 +9,8 @@ import {displayPos, defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
+import {applyPoint} from "../lib/frameAlign";
+import {sourceMatrix} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged} from "./objectImages";
 import {useViewStyle} from "../stores/viewStyle";
 import {BackgroundControl, HeightsControl, RegionControls} from "./StylePanels";
@@ -222,7 +224,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
     const n = sources[r.src]?.model?.nodes.get(r.sym);
     if (!n) return;
     select({src: r.src, sym: r.sym});
-    fly(displayPos(n, flat, stackHeight, vizStyle, heights));
+    fly(applyPoint(sourceMatrix(r.src), displayPos(n, flat, stackHeight, vizStyle, heights)));
     setOpen(false);
     onPicked?.(r.src, r.sym);
   };
@@ -330,7 +332,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
         </button>
       </div>
       <div className="row gap-sm wrap">
-        <button className="btn btn-sm" onClick={() => fly(displayPos(node, flat, stackHeight, vizStyle, heights))}>
+        <button className="btn btn-sm" onClick={() => fly(applyPoint(sourceMatrix(selected.src), displayPos(node, flat, stackHeight, vizStyle, heights)))}>
           Fly to
         </button>
         <button className="btn btn-sm" onClick={() => onGoto(selected.src, selected.sym)}>

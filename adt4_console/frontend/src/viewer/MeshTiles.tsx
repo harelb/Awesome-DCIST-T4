@@ -8,7 +8,7 @@
 // above a height over the floor for views from inside or at grazing angles.
 import {useEffect, useRef, useState} from "react";
 import * as THREE from "three";
-import {useThree} from "@react-three/fiber";
+import {useFrame, useThree} from "@react-three/fiber";
 import {decodeTile} from "../codec";
 import {getMsgpack} from "../lib/api";
 import type {TileManifest} from "../types";
@@ -47,7 +47,10 @@ class TileLoader {
   private inflight = new Set<string>();
   private disposed = false;
   material: THREE.MeshLambertMaterial;
-  /** keeps z <= floor + height when clipping is on */
+  /** keeps z <= floor + height when clipping is on, in the tiles' own frame */
+  localClip = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+  /** `localClip` in world space (three.js clipping planes are world space; a
+   *  live source's group carries its robot's global-frame alignment) */
   clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
   clipHeight: number | null = null;
   private tileMinZ = new Map<string, number>();
@@ -134,6 +137,12 @@ class TileLoader {
     return zs.length ? zs[Math.floor(zs.length * 0.1)] : 0;
   }
 
+  /** Re-derive the world clip plane from the group's current world matrix. */
+  syncClip() {
+    this.group.updateWorldMatrix(true, false);
+    this.clipPlane.copy(this.localClip).applyMatrix4(this.group.matrixWorld);
+  }
+
   setCull(on: boolean) {
     const side = on ? THREE.FrontSide : THREE.DoubleSide;
     if (this.material.side !== side) {
@@ -156,7 +165,8 @@ class TileLoader {
       }
       return;
     }
-    this.clipPlane.constant = this.floorZ() + this.clipHeight;
+    this.localClip.constant = this.floorZ() + this.clipHeight;
+    this.syncClip();
     if (!this.material.clippingPlanes?.length) {
       this.material.clippingPlanes = [this.clipPlane];
       this.material.needsUpdate = true;
@@ -270,7 +280,10 @@ export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = 
       src,
       () => {
         const c = ctlRef.current;
-        return c?.getTarget ? c.getTarget(new THREE.Vector3()) : camera.position.clone();
+        const t = c?.getTarget ? c.getTarget(new THREE.Vector3()) : camera.position.clone();
+        // tiles are in the source's own frame (live: the robot's odom frame)
+        l.group.updateWorldMatrix(true, false);
+        return l.group.worldToLocal(t);
       },
       () => {
         invalidate();
@@ -306,6 +319,10 @@ export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = 
     loader.setColorMode(colorMode, uniformColor);
     invalidate();
   }, [loader, colorMode, uniformColor, invalidate]);
+  // follow the alignment group (it glides on loop closures) with the clip plane
+  useFrame(() => {
+    if (loader && loader.clipHeight !== null) loader.syncClip();
+  });
   if (!loader) return null;
   // picking is done by viewer/Scene.tsx Picker (on click only), so no R3F handlers here:
   // per-pointermove raycasts against ~1.6M triangles would stall the frame.

@@ -1,6 +1,8 @@
 import {useMemo} from "react";
 import {create} from "zustand";
-import type {Cls, LinkInfo, RobotPlan, RobotState} from "../types";
+import type * as THREE from "three";
+import type {Cls, FrameAlign, LinkInfo, RobotPlan, RobotState} from "../types";
+import {alignMatrix, layerMatrix, robotOfSource} from "../lib/frameAlign";
 import {parsePaths, type RobotPaths} from "../lib/overlays";
 import {ws} from "../ws";
 
@@ -65,4 +67,26 @@ export function useLiveRobots(): string[] {
   const state = useRobots(s => s.state);
   const link = useRobots(s => s.link);
   return useMemo(() => [...new Set([...Object.keys(link), ...Object.keys(state)])].sort(), [state, link]);
+}
+
+/** A robot's global-frame alignment: the C1 state's (WebSocket, 4 Hz), else
+ *  the /api/live link table's (polled). */
+export function frameAlignOf(robot: string, s: Pick<RobotsStore, "state" | "link"> = useRobots.getState()): FrameAlign | undefined {
+  return s.state[robot]?.frame_align ?? s.link[robot]?.frame_align ?? undefined;
+}
+
+export function useFrameAlign(robot: string | null): FrameAlign | undefined {
+  return useRobots(s => (robot ? frameAlignOf(robot, s) : undefined));
+}
+
+/** Matrix a graph source is drawn with: a live source's robot alignment (its
+ *  scene graph is in the alignment's child frame), identity (null) otherwise. */
+export function sourceMatrix(srcId: string): THREE.Matrix4 | null {
+  const r = robotOfSource(srcId);
+  return r ? alignMatrix(frameAlignOf(r)) : null;
+}
+
+/** Matrix for one of `robot`'s layers expressed in `frame`. */
+export function robotLayerMatrix(robot: string, frame?: string | null): THREE.Matrix4 | null {
+  return layerMatrix(frameAlignOf(robot), frame);
 }
