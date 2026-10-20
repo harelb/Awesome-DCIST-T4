@@ -16,21 +16,36 @@ import {CameraPanel} from "./CameraPanel";
 import {Segmented} from "../components/ui";
 import {readyModels} from "../stores/viewer";
 import {useWsStatus} from "../ws";
-import {useIsPhone} from "../lib/media";
+import {useIsPhone, useMedia} from "../lib/media";
 import {Icon} from "../components/Shell";
 import {BottomSheet} from "./BottomSheet";
+import {ControlsHelpButton, TopViewHint} from "./ControlsHelp";
+import {FloatingWindow, Splitter, TabPortal, TabSlot, useElementSize, usePaneLayout, useTabHosts, useTabTearOff} from "./Panes";
+import {FLOAT_MQ, LEFT, MIN_CANVAS, PANE_TABS, RIGHT, clampWidths, dock, popOut, raise, updateWin, type PaneTab} from "./paneLayout";
 
-type Tab = "inspect" | "plan" | "chat" | "live" | "camera";
+type Tab = PaneTab;
+const TAB_TITLE: Record<Tab, string> = {inspect: "Inspect", plan: "Plan", chat: "Chat", live: "Live link", camera: "Camera"};
 
 export default function ViewerPage() {
   const v = useViewer();
   const [params] = useSearchParams();
-  const [tab, setTab] = useState<Tab>("inspect");
+  const [tab, setTabRaw] = useState<Tab>("inspect");
   const isPhone = useIsPhone();
+  // pane layout: splitter widths + popped-out tabs (floating windows only on wide screens)
+  const [layout, setLayout, resetLayout] = usePaneLayout();
+  const wide = useMedia(FLOAT_MQ) && !isPhone;
+  const floats = useCallback((t: Tab) => wide && !!layout.windows[t], [wide, layout.windows]);
+  const floatsRef = useRef(floats);
+  floatsRef.current = floats;
   const [leftOpen, setLeftOpenRaw] = useState(() => window.innerWidth > 1100);
   const [rightOpen, setRightOpenRaw] = useState(() => window.innerWidth > 900);
   const [searchOpen, setSearchOpen] = useState(false);
   const viewerRef = useRef<HTMLDivElement>(null);
+  const area = useElementSize(viewerRef);
+  const leftRef = useRef<HTMLElement>(null);
+  const rightRef = useRef<HTMLElement>(null);
+  const stripRef = useRef<HTMLDivElement>(null);
+  const hosts = useTabHosts(PANE_TABS);
   // phones show one panel at a time, as a bottom sheet
   const phoneRef = useRef(isPhone);
   phoneRef.current = isPhone;
@@ -48,6 +63,21 @@ export default function ViewerPage() {
       return next;
     });
   }, []);
+  /** Bring a tab forward: raise (and restore) its floating window, else select it in the side panel. */
+  const setTab = useCallback(
+    (t: Tab) => {
+      if (floatsRef.current(t)) setLayout(l => updateWin(raise(l, t), t, {min: false}));
+      else setTabRaw(t);
+    },
+    [setLayout],
+  );
+  const showTab = useCallback(
+    (t: Tab) => {
+      setTab(t);
+      if (!floatsRef.current(t)) setRightOpen(true);
+    },
+    [setTab, setRightOpen],
+  );
   const [stats, setStats] = useState<Record<string, TileStats>>({});
   const [bounds, setBounds] = useState<{min: number[]; max: number[]} | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -94,7 +124,7 @@ export default function ViewerPage() {
     if (!n || !model) return;
     st.set({gotoDraft: [...st.gotoDraft, {src, sym, pos: n.pos, label: model.displayName(n)}]});
     setTab("plan");
-  }, []);
+  }, [setTab]);
 
   // a picked search result: the Inspect tab (object images) comes to the front
   const showInspect = useCallback(() => {
@@ -117,8 +147,7 @@ export default function ViewerPage() {
           return;
         }
         st.select({src, sym});
-        setTab("inspect");
-        setRightOpen(true);
+        showTab("inspect");
       },
       onPoint: p => {
         const st = useViewer.getState();
@@ -141,7 +170,7 @@ export default function ViewerPage() {
         if (l.bounds) setBounds(b => b ?? l.bounds);
       },
     }),
-    [addGoto, setRightOpen],
+    [addGoto, showTab],
   );
 
   const onVisit = (src: string, sym: string) => {
@@ -164,31 +193,90 @@ export default function ViewerPage() {
       <LayersPanel />
       <LiveOverlaysPanel />
       <DisplayPanel />
+      {!isPhone && (
+        <section className="vsec">
+          <header className="vsec-head">
+            <h4>Layout</h4>
+          </header>
+          <div className="layout-row">
+            <span className="muted small">{wide ? "Drag pane edges to resize; pop side-panel tabs out with ⧉." : "Pane widths are fixed on narrow screens."}</span>
+            <button className="btn btn-xs" onClick={resetLayout} title="Default pane widths, dock all floating windows">
+              Reset layout
+            </button>
+          </div>
+        </section>
+      )}
     </>
   );
+
+  // the docked side panel shows the selected tab, or the first tab that is not floating
+  const dockTab: Tab | null = !floats(tab) ? tab : (PANE_TABS.find(t => !floats(t)) ?? null);
+  const mounted = (t: Tab) => floats(t) || (rightOpen && t === dockTab);
+  const pop = useCallback(
+    (t: Tab, at?: {x: number; y: number}) => {
+      const r = viewerRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setLayout(l => popOut(l, t, r.width, r.height, at && {x: at.x - r.left, y: at.y - r.top}));
+    },
+    [setLayout],
+  );
+  const dockWin = (t: Tab) => {
+    setLayout(l => dock(l, t));
+    setTabRaw(t);
+    setRightOpen(true);
+  };
+  const canTear = useCallback((t: Tab) => !floats(t), [floats]);
+  const onStripDown = useTabTearOff(stripRef, PANE_TABS, canTear, useCallback((t: Tab, x: number, y: number) => pop(t, {x, y}), [pop]));
+  const tabContent = (t: Tab) => {
+    switch (t) {
+      case "inspect":
+        return <Inspector onVisit={onVisit} onGoto={addGoto} />;
+      case "plan":
+        return <PlanPanel />;
+      case "chat":
+        return <ChatPanel />;
+      case "live":
+        return <LivePanel />;
+      case "camera":
+        return <CameraPanel />;
+    }
+  };
   const tabs = (
-    <Segmented<Tab>
-      ariaLabel="Side panel"
-      value={tab}
-      onChange={setTab}
-      options={[
-        {value: "inspect", label: "Inspect"},
-        {value: "plan", label: "Plan"},
-        {value: "chat", label: "Chat"},
-        {value: "live", label: isPhone ? "Link" : "Live link"},
-        {value: "camera", label: "Camera"},
-      ]}
-    />
+    <div className="vright-head" ref={stripRef} onPointerDown={wide ? onStripDown : undefined}>
+      <Segmented<Tab>
+        ariaLabel="Side panel"
+        value={dockTab ?? tab}
+        onChange={setTab}
+        options={PANE_TABS.map(t => ({
+          value: t,
+          label: floats(t) ? (
+            <>
+              {TAB_TITLE[t]}
+              <span className="tab-float-mark" title="In a floating window" aria-label="(floating)">
+                ⧉
+              </span>
+            </>
+          ) : t === "live" && isPhone ? (
+            "Link"
+          ) : (
+            TAB_TITLE[t]
+          ),
+        }))}
+      />
+      {wide && (
+        <button className="pop-btn" disabled={!dockTab} onClick={() => dockTab && pop(dockTab)} aria-label={dockTab ? `Pop out ${TAB_TITLE[dockTab]}` : "Pop out"} title="Pop out into a floating window (or drag a tab out)">
+          ⧉
+        </button>
+      )}
+    </div>
   );
   const rightBody = (
     <div className="vright-body">
-      {tab === "inspect" && <Inspector onVisit={onVisit} onGoto={addGoto} />}
-      {tab === "plan" && <PlanPanel />}
-      {tab === "chat" && <ChatPanel />}
-      {tab === "live" && <LivePanel />}
-      {tab === "camera" && <CameraPanel />}
+      {dockTab ? <TabSlot key={dockTab} host={hosts[dockTab]} /> : <div className="dock-empty muted">Every tab is in a floating window. Dock one with ⇥ or drag its title bar onto the tab strip.</div>}
     </div>
   );
+  const widths = clampWidths(layout.leftW, layout.rightW, area.w || window.innerWidth, leftOpen, rightOpen, "right");
+  const splitMax = (side: "left" | "right") => Math.min(side === "left" ? LEFT.max : RIGHT.max, (area.w || window.innerWidth) - MIN_CANVAS - (side === "left" ? (rightOpen ? widths.rightW : 0) : leftOpen ? widths.leftW : 0));
   const follow = (
     <select className="input input-sm follow-select" value={v.follow ?? ""} onChange={e => v.set({follow: e.target.value || null})} aria-label="Follow robot">
       <option value="">{isPhone ? "Follow" : "Follow: off"}</option>
@@ -213,10 +301,27 @@ export default function ViewerPage() {
 
   return (
     <div ref={viewerRef} className={`viewer ${leftOpen ? "left-open" : ""} ${rightOpen ? "right-open" : ""} ${isPhone ? "phone" : ""}`}>
+      {PANE_TABS.filter(mounted).map(t => (
+        <TabPortal key={t} host={hosts[t]}>
+          {tabContent(t)}
+        </TabPortal>
+      ))}
       {leftOpen && !isPhone && (
-        <aside className="vpanel vleft" aria-label="Sources and layers">
+        <aside ref={leftRef} className="vpanel vleft" aria-label="Sources and layers" style={wide ? {width: widths.leftW} : undefined}>
           {leftPanel}
         </aside>
+      )}
+      {leftOpen && wide && (
+        <Splitter
+          side="left"
+          label="Resize layers panel"
+          value={widths.leftW}
+          min={LEFT.min}
+          max={splitMax("left")}
+          target={leftRef}
+          onCommit={w => setLayout(l => ({...l, leftW: w}))}
+          onReset={() => setLayout(l => ({...l, leftW: LEFT.def}))}
+        />
       )}
       <div className="vcanvas">
         {enabled.length === 0 && (
@@ -251,6 +356,7 @@ export default function ViewerPage() {
               <span className="grow" />
               {camera}
               {follow}
+              <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={false} compact />
               <button className={`btn icon-only panel-btn ${rightOpen ? "on" : ""}`} onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel" aria-pressed={rightOpen}>
                 <Icon name="panel" size={20} />
               </button>
@@ -267,6 +373,7 @@ export default function ViewerPage() {
             <div className="vtoolbar top-right">
               {camera}
               {follow}
+              <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={wide} />
               <button className="btn btn-sm panel-btn" onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel">
                 {rightOpen ? "Hide" : "Panel"}
               </button>
@@ -282,6 +389,7 @@ export default function ViewerPage() {
           </div>
         )}
         {toast && <div className="toast">{toast}</div>}
+        <TopViewHint active={v.topDown} />
         <RobotLegend />
         <div className="vstatus mono">
           {totalNodes.toLocaleString()} nodes{tileText ? ` · tiles ${tileText}` : ""}
@@ -289,12 +397,48 @@ export default function ViewerPage() {
           {v.flat ? " · flat" : ""}
         </div>
       </div>
+      {rightOpen && wide && (
+        <Splitter
+          side="right"
+          label="Resize side panel"
+          value={widths.rightW}
+          min={RIGHT.min}
+          max={splitMax("right")}
+          target={rightRef}
+          onCommit={w => setLayout(l => ({...l, rightW: w}))}
+          onReset={() => setLayout(l => ({...l, rightW: RIGHT.def}))}
+        />
+      )}
       {rightOpen && !isPhone && (
-        <aside className="vpanel vright" aria-label="Inspector and planning">
+        <aside ref={rightRef} className="vpanel vright" aria-label="Inspector and planning" style={wide ? {width: widths.rightW} : undefined}>
           {tabs}
           {rightBody}
         </aside>
       )}
+      {wide &&
+        // stable DOM order (moving a window's node mid-click would swallow the click); stacking via z-index
+        PANE_TABS.map(t => {
+          const w = layout.windows[t];
+          const i = layout.order.indexOf(t);
+          if (!w) return null;
+          return (
+            <FloatingWindow
+              key={t}
+              title={TAB_TITLE[t]}
+              win={w}
+              z={60 + i}
+              area={area}
+              areaRef={viewerRef}
+              dockTarget={stripRef}
+              onChange={patch => setLayout(l => updateWin(l, t, patch))}
+              onRaise={() => setLayout(l => raise(l, t))}
+              onDock={() => dockWin(t)}
+              onClose={() => setLayout(l => dock(l, t))}
+            >
+              <TabSlot host={hosts[t]} />
+            </FloatingWindow>
+          );
+        })}
       {isPhone && leftOpen && (
         <BottomSheet key="left" label="Sources and layers" host={viewerRef} onClose={() => setLeftOpen(false)}>
           {leftPanel}
