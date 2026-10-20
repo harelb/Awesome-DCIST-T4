@@ -2,6 +2,18 @@
 import type {NodeRecord} from "../codec";
 import {GraphModel, layerInfo, type LayerInfo} from "../lib/graphModel";
 import {LAYER_COLORS, nodeColor} from "../lib/palette";
+import {
+  colorKeyOf,
+  convexHull,
+  heightKeyOf,
+  heightScale,
+  overrideColor,
+  placeFootprint,
+  uniformOf,
+  type ColorOpts,
+  type Heights,
+  type RGB,
+} from "./style";
 
 /** "hydra": mimic the ADT4 hydra_visualizer default config
  *  (dcist_launch_system/config_generation/base_params/hydra_visualizer.yaml);
@@ -18,6 +30,12 @@ export interface LayoutOpts {
   style?: VizStyle; // default "classic"
   /** collect text labels (hydra text adapters) */
   text?: boolean;
+  /** per-layer height overrides (units of `stackHeight`) */
+  heights?: Heights;
+  /** colour overrides + region colouring */
+  colors?: ColorOpts;
+  /** room / region convex-hull fills */
+  regionHulls?: boolean;
 }
 
 export interface TextLabel {
@@ -60,6 +78,9 @@ export interface GraphLayout {
   placeFill: {positions: Float32Array; colors: Float32Array} | null;
   /** hydra RegionGrowingBoundaryPlugin boundary: state-coloured line list (segment pairs) */
   placeBoundary: {positions: Float32Array; colors: Float32Array} | null;
+  /** room / region hulls: fill triangles + outline segments (linear RGB vertex colours) */
+  regionFill: {positions: Float32Array; colors: Float32Array} | null;
+  regionOutline: {positions: Float32Array; colors: Float32Array} | null;
   texts: TextLabel[];
   edgeCounts: Record<string, number>;
   agentPath: Float32Array | null;
@@ -115,15 +136,67 @@ export const COLORBREWER: [number, number, number][] = [
   [253, 191, 111], [255, 127, 0], [202, 178, 214], [106, 61, 154], [255, 255, 153], [177, 89, 40],
 ];
 
-export function zOffset(info: LayerInfo, flat: boolean, stack: number, style: VizStyle = "classic"): number {
+export function zOffset(info: LayerInfo, flat: boolean, stack: number, style: VizStyle = "classic", heights?: Heights): number {
   if (flat) return 0;
+  const hk = heightKeyOf(info.kind);
+  if (hk) return heightScale(hk, style, heights) * stack;
   return (style === "hydra" ? HYDRA_LAYERS[info.kind].z : info.order) * stack;
 }
 
+/** z offset of object bounding boxes (follows the object nodes unless set). */
+export function bboxZOffset(flat: boolean, stack: number, style: VizStyle = "classic", heights?: Heights): number {
+  return flat ? 0 : heightScale("bboxes", style, heights) * stack;
+}
+
 /** Displayed position of a node (true position + layer stacking offset). */
-export function displayPos(n: NodeRecord, flat: boolean, stack: number, style: VizStyle = "classic"): [number, number, number] {
+export function displayPos(n: NodeRecord, flat: boolean, stack: number, style: VizStyle = "classic", heights?: Heights): [number, number, number] {
   const info = layerInfo(n.layer, n.part);
-  return [n.pos[0], n.pos[1], n.pos[2] + zOffset(info, flat, stack, style)];
+  return [n.pos[0], n.pos[1], n.pos[2] + zOffset(info, flat, stack, style, heights)];
+}
+
+/** Region (room) colour: user override, else the hydra IdColorAdapter colorbrewer. */
+export function regionColor(n: NodeRecord, colors?: ColorOpts): RGB {
+  return overrideColor("rooms", colors, null) ?? COLORBREWER[symIndex(n.sym) % COLORBREWER.length];
+}
+
+/** Final node colour: region parent (places), user override, else the style colour. */
+export function nodeDisplayColor(
+  n: NodeRecord,
+  info: LayerInfo,
+  style: VizStyle,
+  model: GraphModel | null,
+  colors?: ColorOpts,
+  parent?: NodeRecord | null,
+): RGB {
+  if (info.kind === "places" && parent && colors?.placesByRegion) return regionColor(parent, colors);
+  const key = colorKeyOf(info.kind);
+  const label = key === "objects" && n.label >= 0 ? {id: n.label, name: model ? labelSpaceName(model, n) : ""} : null;
+  const o = overrideColor(key, colors, label);
+  if (o) return o;
+  if (info.kind === "rooms" && colors?.placesByRegion && style !== "hydra") return regionColor(n, colors);
+  return styleColor(n, info, style);
+}
+
+/** Label name from the graph's labelspace only ("" when it has none). */
+export function labelSpaceName(model: GraphModel, n: NodeRecord): string {
+  if (n.label < 0) return "";
+  const ls = model.labelspaces[`${n.layer}/${n.part}`] ?? model.labelspaces[`${n.layer}/0`];
+  return ls?.[String(n.label)] ?? "";
+}
+
+/** place sym -> parent room / region node (via room <-> place edges). */
+export function regionParents(model: GraphModel): Map<string, NodeRecord> {
+  const out = new Map<string, NodeRecord>();
+  for (const [s, d] of model.edges.values()) {
+    const a = model.nodes.get(s);
+    const b = model.nodes.get(d);
+    if (!a || !b) continue;
+    const ka = layerInfo(a.layer, a.part).kind;
+    const kb = layerInfo(b.layer, b.part).kind;
+    if (ka === "rooms" && kb === "places") out.set(b.sym, a);
+    else if (kb === "rooms" && ka === "places") out.set(a.sym, b);
+  }
+  return out;
 }
 
 /** Node colour per style (0..255 sRGB). */
@@ -232,6 +305,13 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
   const lineBCol: number[] = [];
   const texts: TextLabel[] = [];
   const style: VizStyle = opts.style ?? "classic";
+  const heights = opts.heights;
+  const colors = opts.colors;
+  const hasRooms = [...groups.values()].some(g => layerInfo(g[0].layer, g[0].part).kind === "rooms");
+  const parents = hasRooms && (colors?.placesByRegion || opts.regionHulls) ? regionParents(model) : new Map<string, NodeRecord>();
+  const bboxColor = uniformOf("bboxes", colors);
+  const bbRgb = bboxColor ? hexRgbLin(bboxColor) : null;
+  const bz = bboxZOffset(opts.flat, opts.stackHeight, style, heights);
   for (const [key, nodes] of groups) {
     const info = layerInfo(nodes[0].layer, nodes[0].part);
     for (const n of nodes)
@@ -242,33 +322,33 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
         }
       }
     if (opts.hiddenLayers[key]) continue;
-    const z = zOffset(info, opts.flat, opts.stackHeight, style);
+    const z = zOffset(info, opts.flat, opts.stackHeight, style, heights);
     const shown = opts.labelFilter && info.kind === "objects" ? nodes.filter(n => opts.labelFilter!.has(n.label)) : nodes;
     const positions = new Float32Array(shown.length * 3);
-    const colors = new Float32Array(shown.length * 3);
+    const nodeColors = new Float32Array(shown.length * 3);
     const syms: string[] = new Array(shown.length);
     const boxes = info.kind === "objects" ? new Float32Array(shown.length * 6).fill(NaN) : undefined;
     shown.forEach((n, i) => {
       positions[i * 3] = n.pos[0];
       positions[i * 3 + 1] = n.pos[1];
       positions[i * 3 + 2] = n.pos[2] + z;
-      const c = styleColor(n, info, style);
-      colors[i * 3] = c[0] / 255;
-      colors[i * 3 + 1] = c[1] / 255;
-      colors[i * 3 + 2] = c[2] / 255;
+      const c = nodeDisplayColor(n, info, style, model, colors, parents.get(n.sym));
+      nodeColors[i * 3] = c[0] / 255;
+      nodeColors[i * 3 + 1] = c[1] / 255;
+      nodeColors[i * 3 + 2] = c[2] / 255;
       syms[i] = n.sym;
       if (info.kind === "objects" && n.bbox) {
         const b = n.bbox;
-        boxes?.set([b[0], b[1], b[2] + z, b[3], b[4], b[5] + z], i * 6);
+        boxes?.set([b[0], b[1], b[2] + bz, b[3], b[4], b[5] + bz], i * 6);
         const corners: number[][] = [];
         for (let cz = 0; cz < 2; cz++)
           for (let cy = 0; cy < 2; cy++)
-            for (let cx = 0; cx < 2; cx++) corners.push([cx ? b[3] : b[0], cy ? b[4] : b[1], (cz ? b[5] : b[2]) + z]);
+            for (let cx = 0; cx < 2; cx++) corners.push([cx ? b[3] : b[0], cy ? b[4] : b[1], (cz ? b[5] : b[2]) + bz]);
+        const r = bbRgb ? bbRgb[0] : lin(nodeColors[i * 3]);
+        const g = bbRgb ? bbRgb[1] : lin(nodeColors[i * 3 + 1]);
+        const bl = bbRgb ? bbRgb[2] : lin(nodeColors[i * 3 + 2]);
         for (const [a, bb] of BOX_EDGES) {
           bbPos.push(...corners[a], ...corners[bb]);
-          const r = lin(colors[i * 3]);
-          const g = lin(colors[i * 3 + 1]);
-          const bl = lin(colors[i * 3 + 2]);
           bbCol.push(r, g, bl, r, g, bl);
         }
       }
@@ -290,15 +370,19 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
       for (const n of shown) {
         let text = n.sym; // IdTextAdapter
         if (info.kind === "objects") text = `${model.labelName(n) || n.name || "?"} ${n.sym}`; // LabelIdTextAdapter
-        else if (info.kind === "rooms" || info.kind === "buildings") text = n.name ? `${n.name} ${n.sym}` : n.sym; // NameIdTextAdapter
+        else if (info.kind === "rooms" || info.kind === "buildings") {
+          // NameIdTextAdapter; rooms without a name fall back to their labelspace class
+          const nm = n.name || labelSpaceName(model, n);
+          text = nm ? `${nm} ${n.sym}` : n.sym;
+        }
         texts.push({pos: [n.pos[0], n.pos[1], n.pos[2] + z + dz], text, kind: info.kind});
       }
     }
     const h = HYDRA_LAYERS[info.kind];
     layers.push(
       style === "hydra"
-        ? {key, info, syms, positions, colors, size: h.sphere ? h.scale / 2 : h.scale / 1.4, opacity: h.alpha, shape: h.sphere ? "sphere" : "box", boxes}
-        : {key, info, syms, positions, colors, size: NODE_SIZE[info.kind], opacity: 1, shape: info.kind === "objects" ? "box" : "sphere", boxes},
+        ? {key, info, syms, positions, colors: nodeColors, size: h.sphere ? h.scale / 2 : h.scale / 1.4, opacity: h.alpha, shape: h.sphere ? "sphere" : "box", boxes}
+        : {key, info, syms, positions, colors: nodeColors, size: NODE_SIZE[info.kind], opacity: 1, shape: info.kind === "objects" ? "box" : "sphere", boxes},
     );
   }
   layers.sort((a, b) => a.info.order - b.info.order || a.key.localeCompare(b.key));
@@ -315,15 +399,15 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     counts[kind] = (counts[kind] ?? 0) + 1;
     if (opts.edgeKinds[kind] === false || (opts.edgeKinds[kind] === undefined && !defaultEdgeOn(kind, style))) continue;
     if (opts.hiddenLayers[`${a.layer}/${a.part}`] || opts.hiddenLayers[`${b.layer}/${b.part}`]) continue;
-    const pa = displayPos(a, opts.flat, opts.stackHeight, style);
-    const pb = displayPos(b, opts.flat, opts.stackHeight, style);
+    const pa = displayPos(a, opts.flat, opts.stackHeight, style, heights);
+    const pb = displayPos(b, opts.flat, opts.stackHeight, style, heights);
     let arr = buckets.get(kind);
     if (!arr) buckets.set(kind, (arr = []));
     arr.push(...pa, ...pb);
-    if (style === "hydra" && kind === "objects-places") {
+    if (style === "hydra" && kind === "objects-places" && !uniformOf("edges", colors)) {
       // interlayer 3 -> 2: use_child_color (the object's colour)
       const child = layerInfo(a.layer, a.part).kind === "objects" ? a : b;
-      const c = styleColor(child, layerInfo(child.layer, child.part), style);
+      const c = nodeDisplayColor(child, layerInfo(child.layer, child.part), style, model, colors);
       let ca = colBuckets.get(kind);
       if (!ca) colBuckets.set(kind, (ca = []));
       const r = lin(c[0] / 255);
@@ -343,8 +427,10 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
   if (agents.length > 1) {
     agents.sort((a, b) => symIndex(a.sym) - symIndex(b.sym));
     agentPath = new Float32Array(agents.length * 3);
-    agents.forEach((n, i) => agentPath!.set(displayPos(n, opts.flat, opts.stackHeight, style), i * 3));
+    agents.forEach((n, i) => agentPath!.set(displayPos(n, opts.flat, opts.stackHeight, style, heights), i * 3));
   }
+
+  const hulls = hasRooms && opts.regionHulls ? regionHulls(model, parents, opts) : null;
 
   return {
     layers,
@@ -354,9 +440,72 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     texts,
     placeFill: fillPos.length ? {positions: new Float32Array(fillPos), colors: new Float32Array(fillCol)} : null,
     placeBoundary: lineBPos.length ? {positions: new Float32Array(lineBPos), colors: new Float32Array(lineBCol)} : null,
+    regionFill: hulls?.fill ?? null,
+    regionOutline: hulls?.outline ?? null,
     edgeCounts: counts,
     agentPath,
     bounds: Number.isFinite(min[0]) ? robustBounds(model) : null,
+  };
+}
+
+function hexRgbLin(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const v = parseInt(m[1], 16);
+  return [lin(((v >> 16) & 255) / 255), lin(((v >> 8) & 255) / 255), lin((v & 255) / 255)];
+}
+
+/** Convex hull of each room / region's member-place footprints, drawn just
+ *  under the members' displayed height (the places layer). Rooms whose layer
+ *  is hidden get no hull. */
+export function regionHulls(
+  model: GraphModel,
+  parents: Map<string, NodeRecord>,
+  opts: Pick<LayoutOpts, "hiddenLayers" | "flat" | "stackHeight" | "style" | "heights" | "colors">,
+): {fill: {positions: Float32Array; colors: Float32Array}; outline: {positions: Float32Array; colors: Float32Array}} | null {
+  const style = opts.style ?? "classic";
+  const members = new Map<string, {room: NodeRecord; pts: [number, number][]; z: number; n: number}>();
+  for (const [sym, room] of parents) {
+    if (opts.hiddenLayers[`${room.layer}/${room.part}`]) continue;
+    const p = model.nodes.get(sym);
+    if (!p) continue;
+    let m = members.get(room.sym);
+    if (!m) members.set(room.sym, (m = {room, pts: [], z: 0, n: 0}));
+    m.pts.push(...placeFootprint(p));
+    m.z += displayPos(p, opts.flat, opts.stackHeight, style, opts.heights)[2];
+    m.n++;
+  }
+  const fp: number[] = [];
+  const fc: number[] = [];
+  const op: number[] = [];
+  const oc: number[] = [];
+  for (const m of members.values()) {
+    const hull = convexHull(m.pts);
+    if (hull.length < 3) continue;
+    const z = m.z / m.n - 0.04;
+    const c = regionColor(m.room, opts.colors);
+    const r = lin(c[0] / 255);
+    const g = lin(c[1] / 255);
+    const b = lin(c[2] / 255);
+    let cx = 0;
+    let cy = 0;
+    for (const [x, y] of hull) {
+      cx += x / hull.length;
+      cy += y / hull.length;
+    }
+    for (let i = 0; i < hull.length; i++) {
+      const a = hull[i];
+      const bb = hull[(i + 1) % hull.length];
+      fp.push(cx, cy, z, a[0], a[1], z, bb[0], bb[1], z);
+      for (let k = 0; k < 3; k++) fc.push(r, g, b);
+      op.push(a[0], a[1], z, bb[0], bb[1], z);
+      oc.push(r, g, b, r, g, b);
+    }
+  }
+  if (!fp.length) return null;
+  return {
+    fill: {positions: new Float32Array(fp), colors: new Float32Array(fc)},
+    outline: {positions: new Float32Array(op), colors: new Float32Array(oc)},
   };
 }
 

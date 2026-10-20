@@ -13,6 +13,24 @@ import {decodeTile} from "../codec";
 import {getMsgpack} from "../lib/api";
 import type {TileManifest} from "../types";
 import {srcPath} from "../stores/viewer";
+import type {MeshColorMode} from "./style";
+
+/** GLSL turbo-like colormap (polynomial fit, Google "Turbo"), t in 0..1 -> sRGB. */
+const TURBO_GLSL = `
+vec3 adt4Turbo(float t) {
+  t = clamp(t, 0.0, 1.0);
+  const vec4 kr = vec4(0.13572138, 4.61539260, -42.66032258, 132.13108234);
+  const vec4 kg = vec4(0.09140261, 2.19418839, 4.84296658, -14.18503333);
+  const vec4 kb = vec4(0.10667330, 12.64194608, -60.58204836, 110.36276771);
+  const vec2 kr2 = vec2(-152.94239396, 59.28637943);
+  const vec2 kg2 = vec2(4.27729857, 2.82956604);
+  const vec2 kb2 = vec2(-89.90310912, 27.34824973);
+  vec4 v4 = vec4(1.0, t, t * t, t * t * t);
+  vec2 v2 = v4.zw * v4.z;
+  return vec3(dot(v4, kr) + dot(v2, kr2), dot(v4, kg) + dot(v2, kg2), dot(v4, kb) + dot(v2, kb2));
+}
+`;
+const MESH_MODE: Record<MeshColorMode, number> = {rgb: 0, uniform: 1, height: 2};
 
 const CONCURRENCY = 6;
 
@@ -33,6 +51,14 @@ class TileLoader {
   clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
   clipHeight: number | null = null;
   private tileMinZ = new Map<string, number>();
+  private tileMaxZ = new Map<string, number>();
+  /** shader uniforms for the colour mode (rgb / uniform / height colormap) */
+  uniforms = {
+    uMeshMode: {value: 0},
+    uMeshColor: {value: new THREE.Color("#b0b0b0")},
+    uZMin: {value: 0},
+    uZMax: {value: 3},
+  };
   triangles = 0;
   total = 0;
 
@@ -43,11 +69,23 @@ class TileLoader {
   ) {
     this.material = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.FrontSide});
     // tile colours are sRGB bytes; three treats vertex colours as linear, so decode here
+    // colour mode: 0 vertex RGB, 1 uniform colour, 2 height colormap (world z)
     this.material.onBeforeCompile = shader => {
-      shader.vertexShader = shader.vertexShader.replace(
-        "#include <color_vertex>",
-        "#include <color_vertex>\n#ifdef USE_COLOR\n  vColor.rgb = pow(vColor.rgb, vec3(2.2));\n#endif",
-      );
+      Object.assign(shader.uniforms, this.uniforms);
+      shader.vertexShader =
+        "uniform int uMeshMode;\nuniform vec3 uMeshColor;\nuniform float uZMin;\nuniform float uZMax;\n" +
+        TURBO_GLSL +
+        shader.vertexShader.replace(
+          "#include <color_vertex>",
+          [
+            "#include <color_vertex>",
+            "#ifdef USE_COLOR",
+            "  if (uMeshMode == 1) vColor.rgb = uMeshColor;",
+            "  else if (uMeshMode == 2) vColor.rgb = pow(adt4Turbo(((modelMatrix * vec4(position, 1.0)).z - uZMin) / max(uZMax - uZMin, 1e-3)), vec3(2.2));",
+            "  else vColor.rgb = pow(vColor.rgb, vec3(2.2));",
+            "#endif",
+          ].join("\n"),
+        );
     };
     this.group.name = `mesh:${src}`;
   }
@@ -74,6 +112,22 @@ class TileLoader {
     this.pump();
   }
 
+  setColorMode(mode: MeshColorMode, color: string) {
+    this.uniforms.uMeshMode.value = MESH_MODE[mode] ?? 0;
+    this.uniforms.uMeshColor.value.set(color);
+    this.updateZRange();
+  }
+
+  /** Height colormap range: floor .. a high percentile of tile tops (clip height when clipping). */
+  private updateZRange() {
+    const lo = this.floorZ();
+    const tops = [...this.tileMaxZ.values()].sort((a, b) => a - b);
+    let hi = tops.length ? tops[Math.floor(tops.length * 0.9)] : lo + 3;
+    if (this.clipHeight !== null) hi = Math.min(hi, lo + this.clipHeight);
+    this.uniforms.uZMin.value = lo;
+    this.uniforms.uZMax.value = Math.max(hi, lo + 0.5);
+  }
+
   /** Floor height: low percentile of the tiles' lowest vertices (robust to pits). */
   floorZ(): number {
     const zs = [...this.tileMinZ.values()].sort((a, b) => a - b);
@@ -91,6 +145,7 @@ class TileLoader {
   setClip(height: number | null) {
     this.clipHeight = height;
     this.updateClip();
+    this.updateZRange();
   }
 
   private updateClip() {
@@ -110,6 +165,7 @@ class TileLoader {
 
   private drop(k: string, mesh: THREE.Mesh) {
     this.tileMinZ.delete(k);
+    this.tileMaxZ.delete(k);
     this.group.remove(mesh);
     this.triangles -= mesh.geometry.index ? mesh.geometry.index.count / 3 : 0;
     mesh.geometry.dispose();
@@ -157,7 +213,11 @@ class TileLoader {
       if (old) this.drop(key, old.mesh);
       this.group.add(mesh);
       this.have.set(key, {hash: t.hash || hash, mesh});
-      if (g.boundingBox && Number.isFinite(g.boundingBox.min.z)) this.tileMinZ.set(key, g.boundingBox.min.z);
+      if (g.boundingBox && Number.isFinite(g.boundingBox.min.z)) {
+        this.tileMinZ.set(key, g.boundingBox.min.z);
+        this.tileMaxZ.set(key, g.boundingBox.max.z);
+      }
+      this.updateZRange();
       if (this.clipHeight !== null) this.updateClip();
       this.triangles += t.indices.length / 3;
       this.onChange();
@@ -180,7 +240,7 @@ class TileLoader {
   }
 }
 
-export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = true, clipHeight = null, onStats}: {
+export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = true, clipHeight = null, colorMode = "rgb", uniformColor = "#b0b0b0", onStats}: {
   src: string;
   manifest: TileManifest | null;
   manifestRev: number;
@@ -189,6 +249,8 @@ export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = 
   cullBackfaces?: boolean;
   /** metres above the floor; null = no clipping */
   clipHeight?: number | null;
+  colorMode?: MeshColorMode;
+  uniformColor?: string;
   onStats?: (s: TileStats) => void;
 }) {
   const {controls, invalidate, camera} = useThree() as unknown as {
@@ -239,6 +301,11 @@ export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = 
     loader.setClip(clipHeight);
     invalidate();
   }, [loader, cullBackfaces, clipHeight, invalidate]);
+  useEffect(() => {
+    if (!loader) return;
+    loader.setColorMode(colorMode, uniformColor);
+    invalidate();
+  }, [loader, colorMode, uniformColor, invalidate]);
   if (!loader) return null;
   // picking is done by viewer/Scene.tsx Picker (on click only), so no R3F handlers here:
   // per-pointermove raycasts against ~1.6M triangles would stall the frame.

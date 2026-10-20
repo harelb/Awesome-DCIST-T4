@@ -65,6 +65,7 @@ export const COMMON_HELP: HelpSection[] = [
     title: "Keys",
     entries: [
       {keys: "Enter (search)", does: "Pick the first hit"},
+      {keys: "P", does: "Save a screenshot of the 3D view"},
       {keys: "Esc", does: "Clear search (in the box) · close this card / dialogs"},
       {keys: "/", does: "Focus search (Maps page)"},
     ],

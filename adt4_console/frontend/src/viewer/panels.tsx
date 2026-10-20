@@ -10,6 +10,8 @@ import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
 import {ObjectImages, SearchThumb, useImaged} from "./objectImages";
+import {useViewStyle} from "../stores/viewStyle";
+import {BackgroundControl, HeightsControl, RegionControls} from "./StylePanels";
 
 const KIND_LABEL: Record<string, string> = {neo4j: "Neo4j", file: "file", live: "live"};
 
@@ -114,6 +116,7 @@ export function LayersPanel() {
       <header className="vsec-head">
         <h4>Layers</h4>
       </header>
+      {layers.some(([, l]) => l.kind === "rooms") && <RegionControls />}
       <ul className="layer-list">
         {layers.map(([k, l]) => (
           <li key={k}>
@@ -126,7 +129,7 @@ export function LayersPanel() {
                     hydra && HYDRA_SWATCH[l.kind] ? HYDRA_SWATCH[l.kind] : rgbCss((LAYER_COLORS as Record<string, [number, number, number]>)[l.kind] ?? [230, 25, 75]),
                 }}
               />
-              <span className="layer-name">{l.name}</span>
+              <span className="layer-name">{l.kind === "rooms" ? "rooms / regions" : l.name}</span>
               <span className="mono small muted count-r">{l.count.toLocaleString()}</span>
             </label>
           </li>
@@ -154,7 +157,7 @@ export function LayersPanel() {
 }
 
 export function DisplayPanel() {
-  const {flat, stackHeight, showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, set} = useViewer();
+  const {showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, set} = useViewer();
   return (
     <section className="vsec">
       <header className="vsec-head">
@@ -173,14 +176,8 @@ export function DisplayPanel() {
           <option value="classic">Classic console</option>
         </select>
       </label>
-      <Toggle checked={flat} onChange={v => set({flat: v})} label="Flat (no layer stacking)" />
-      {!flat && (
-        <label className="slider-row">
-          <span>Layer spacing</span>
-          <input type="range" min={0.5} max={10} step={0.5} value={stackHeight} onChange={e => set({stackHeight: Number(e.target.value)})} />
-          <span className="mono small">{stackHeight} m</span>
-        </label>
-      )}
+      <BackgroundControl />
+      <HeightsControl />
       <label className="slider-row">
         <span>Mesh opacity</span>
         <input type="range" min={0} max={1} step={0.05} value={meshOpacity} onChange={e => set({meshOpacity: Number(e.target.value)})} />
@@ -204,6 +201,7 @@ export function DisplayPanel() {
 
 export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?: (src: string, sym: string) => void} = {}) {
   const {query, set, select, fly, sources, flat, stackHeight, vizStyle} = useViewer();
+  const heights = useViewStyle(s => s.heights);
   const [open, setOpen] = useState(false);
   const revs = Object.values(sources).map(s => s.rev).join(",");
   const imaged = useImaged(readyModels().map(({id}) => ({id, rev: sources[id]?.rev ?? 0})));
@@ -224,7 +222,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
     const n = sources[r.src]?.model?.nodes.get(r.sym);
     if (!n) return;
     select({src: r.src, sym: r.sym});
-    fly(displayPos(n, flat, stackHeight, vizStyle));
+    fly(displayPos(n, flat, stackHeight, vizStyle, heights));
     setOpen(false);
     onPicked?.(r.src, r.sym);
   };
@@ -287,6 +285,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
 
 export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string) => void; onGoto: (src: string, sym: string) => void}) {
   const {selected, sources, fly, flat, stackHeight, select, vizStyle} = useViewer();
+  const heights = useViewStyle(s => s.heights);
   const [detail, setDetail] = useState<(NodeDetail & {masks?: boolean[]}) | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -331,7 +330,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
         </button>
       </div>
       <div className="row gap-sm wrap">
-        <button className="btn btn-sm" onClick={() => fly(displayPos(node, flat, stackHeight, vizStyle))}>
+        <button className="btn btn-sm" onClick={() => fly(displayPos(node, flat, stackHeight, vizStyle, heights))}>
           Fly to
         </button>
         <button className="btn btn-sm" onClick={() => onGoto(selected.src, selected.sym)}>

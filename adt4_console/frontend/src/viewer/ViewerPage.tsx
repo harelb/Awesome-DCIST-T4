@@ -7,6 +7,7 @@ import {Scene, type SceneCallbacks} from "./Scene";
 import type {GraphLayout} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {DisplayPanel, Inspector, LayersPanel, SearchBox, SourcesPanel} from "./panels";
+import {ColorsPanel, ScreenshotButton} from "./StylePanels";
 import {PlanPanel, visitGoal} from "./PlanPanel";
 import {ChatPanel} from "./ChatPanel";
 import {LivePanel} from "./LivePanel";
@@ -194,6 +195,7 @@ export default function ViewerPage() {
       <LayersPanel />
       <LiveOverlaysPanel />
       <DisplayPanel />
+      <ColorsPanel />
       {!isPhone && (
         <section className="vsec">
           <header className="vsec-head">
@@ -359,6 +361,7 @@ export default function ViewerPage() {
               <span className="grow" />
               {camera}
               {follow}
+              <ScreenshotButton onDone={setToast} compact />
               <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={false} compact />
               <button className={`btn icon-only panel-btn ${rightOpen ? "on" : ""}`} onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel" aria-pressed={rightOpen}>
                 <Icon name="panel" size={20} />
@@ -376,6 +379,7 @@ export default function ViewerPage() {
             <div className="vtoolbar top-right">
               {camera}
               {follow}
+              <ScreenshotButton onDone={setToast} />
               <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={wide} />
               <button className="btn btn-sm panel-btn" onClick={() => setRightOpen(o => !o)} aria-label="Toggle side panel">
                 {rightOpen ? "Hide" : "Panel"}

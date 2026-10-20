@@ -7,6 +7,7 @@ import {LineSegmentsGeometry} from "three/examples/jsm/lines/LineSegmentsGeometr
 import {LineMaterial} from "three/examples/jsm/lines/LineMaterial.js";
 import type {GraphLayout, LayerBuffers, TextLabel, VizStyle} from "./layout";
 import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES, PLACE_BOUNDARY} from "./layout";
+import {REGION_FILL_ALPHA, uniformOf, type ColorOpts} from "./style";
 
 /** Displayed node positions per source, used by the click picker. */
 export const pickRegistry = new Map<string, Map<string, LayerBuffers>>();
@@ -93,6 +94,25 @@ function PlaceFill({positions, colors}: {positions: Float32Array; colors: Float3
   );
 }
 
+/** Room / region convex hulls: translucent fill + outline in the region colour. */
+function RegionHulls({fill, outline}: {fill: {positions: Float32Array; colors: Float32Array}; outline: {positions: Float32Array; colors: Float32Array} | null}) {
+  const geom = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(fill.positions, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(fill.colors, 3));
+    return g;
+  }, [fill]);
+  useLayoutEffect(() => () => geom.dispose(), [geom]);
+  return (
+    <group name="region-hulls">
+      <mesh geometry={geom} frustumCulled={false} renderOrder={-2} raycast={() => {}}>
+        <meshBasicMaterial vertexColors transparent opacity={REGION_FILL_ALPHA} side={THREE.DoubleSide} depthWrite={false} />
+      </mesh>
+      {outline && <Segments positions={outline.positions} colors={outline.colors} opacity={0.95} />}
+    </group>
+  );
+}
+
 function TextLabels({texts}: {texts: TextLabel[]}) {
   return (
     <>
@@ -120,7 +140,7 @@ function Segments({positions, colors, color, opacity = 1}: {positions: Float32Ar
   );
 }
 
-export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, edgeKinds, style = "classic", showText = false}: {
+export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, edgeKinds, style = "classic", showText = false, colors, edgeInk = "#000000"}: {
   src: string;
   layout: GraphLayout;
   showBBoxes: boolean;
@@ -129,7 +149,16 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
   edgeKinds: Record<string, boolean>;
   style?: VizStyle;
   showText?: boolean;
+  colors?: ColorOpts;
+  /** colour for hydra's black edges, swapped for a light grey on dark backgrounds */
+  edgeInk?: string;
 }) {
+  const edgeUniform = uniformOf("edges", colors);
+  const trajUniform = uniformOf("trajectory", colors);
+  const hydraEdgeColor = (kind: string) => {
+    const c = HYDRA_EDGES[kind]?.color ?? "#000000";
+    return c === "#000000" ? edgeInk : c;
+  };
   const hydra = style === "hydra";
   useLayoutEffect(() => {
     pickRegistry.set(src, new Map(layout.layers.map(l => [l.key, l])));
@@ -150,23 +179,24 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
       {showBBoxes && layout.bboxes.positions.length > 0 && <Segments positions={layout.bboxes.positions} colors={layout.bboxes.colors} opacity={0.9} />}
       {hydra && layout.placeFill && <PlaceFill positions={layout.placeFill.positions} colors={layout.placeFill.colors} />}
       {hydra && layout.placeBoundary && <PlaceBoundary positions={layout.placeBoundary.positions} colors={layout.placeBoundary.colors} />}
+      {layout.regionFill && <RegionHulls fill={layout.regionFill} outline={layout.regionOutline} />}
       {Object.entries(layout.edges).map(([kind, pos]) =>
         (edgeKinds[kind] ?? defaultEdgeOn(kind, style)) && kind !== "agents-agents" ? (
           hydra ? (
             <Segments
               key={kind}
               positions={pos}
-              colors={layout.edgeColors[kind]}
-              color={HYDRA_EDGES[kind]?.color ?? "#000000"}
+              colors={edgeUniform ? undefined : layout.edgeColors[kind]}
+              color={edgeUniform ?? hydraEdgeColor(kind)}
               opacity={HYDRA_EDGES[kind]?.alpha ?? 0.5}
             />
           ) : (
-            <Segments key={kind} positions={pos} color={EDGE_COLORS[kind] ?? "#7f8b96"} opacity={kind === "places-places" ? 0.55 : 0.35} />
+            <Segments key={kind} positions={pos} color={edgeUniform ?? EDGE_COLORS[kind] ?? "#7f8b96"} opacity={kind === "places-places" ? 0.55 : 0.35} />
           )
         ) : null,
       )}
       {showTrajectory && trajPoints && trajPoints.length > 1 && (
-        <Line points={trajPoints} color={hydra ? HYDRA_EDGES["agents-agents"].color : EDGE_COLORS["agents-agents"]} lineWidth={hydra ? 2 : 2.5} />
+        <Line points={trajPoints} color={trajUniform ?? (hydra ? HYDRA_EDGES["agents-agents"].color : EDGE_COLORS["agents-agents"])} lineWidth={hydra ? 2 : 2.5} />
       )}
       {showText && layout.texts.length > 0 && <TextLabels texts={layout.texts} />}
     </group>
