@@ -104,6 +104,8 @@ if [ "$install_spark" = true ]; then
     fi
     pip install -r install/spark_requirements.txt
     pip install -e ./semantic_inference/semantic_inference
+    # reader/writer for hydra's image store (console, heracles, agentic_navigation)
+    pip install -e "./hydra/hydra_image_store[images]"
 
     # install fast-downward
     if [ ! -d $ADT4_WS/src/fast_downward ]; then
