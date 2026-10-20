@@ -72,6 +72,9 @@ interface ViewerStore {
   flyTo: {target: [number, number, number]; nonce: number} | null;
   pickMode: PickMode;
   gotoDraft: {sym: string; src: string; pos: [number, number, number]; label: string}[];
+  /** phone full-screen drive view open (DriveFullscreen); the Teleop tab
+   *  stands down while it is, so only one of them ever streams velocities */
+  driveFull: boolean;
   /** default sources (active launch) to enable as soon as they appear in the catalog */
   pendingEnable: string[];
   // actions
@@ -142,6 +145,7 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   flyTo: null,
   pickMode: "inspect",
   gotoDraft: [],
+  driveFull: false,
   pendingEnable: [],
 
   loadCatalog: async () => {

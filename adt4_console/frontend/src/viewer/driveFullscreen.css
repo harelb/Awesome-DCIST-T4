@@ -1,0 +1,331 @@
+/* Full-screen drive view (DriveFullscreen.tsx). Fixed over the whole page so
+   it also works where element full screen does not (iPhone Safari). */
+.drive-full {
+  position: fixed;
+  inset: 0;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 90;
+  background: #000;
+  color: #fff;
+  overflow: hidden;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.drive-full.view-map {
+  background: transparent;
+  pointer-events: none; /* the map under it takes the touches above the sticks */
+}
+.drive-full.view-map > .dfs-zone,
+.drive-full.view-map > .dfs-top,
+.drive-full.view-map > .dfs-menu {
+  pointer-events: auto;
+}
+.drive-full.view-map > .dfs-picture {
+  display: none;
+}
+.drive-full.armed {
+  box-shadow: inset 0 0 0 3px var(--err);
+}
+
+/* picture: fills the screen, letterboxed */
+.dfs-picture {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+.dfs-picture .camera-frame.bare {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  min-height: 0;
+  background: #000;
+}
+.dfs-picture .camera-frame.bare canvas,
+.dfs-picture .camera-frame.bare img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.dfs-grid,
+.dfs-grid-video {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: calc(env(safe-area-inset-top) + 56px) 4px 4px;
+}
+.dfs-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 4px;
+}
+.dfs-grid-video .camera-grid-controls,
+.dfs-grid-video .grid-cam-chips,
+.dfs-grid-video .camera-tile-bar {
+  display: none;
+}
+.dfs-tile {
+  position: relative;
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  min-height: 0;
+}
+.dfs-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.dfs-tile-name {
+  position: absolute;
+  left: 4px;
+  bottom: 2px;
+  font-size: 11px;
+  text-shadow: 0 0 3px #000;
+}
+
+/* stick area: whole screen under the bars; on the map only the lower half */
+.dfs-zone {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+.drive-full.view-map .dfs-zone {
+  top: 50%;
+  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.35));
+}
+.dfs-zone-hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 64px);
+  transform: translateX(-50%);
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+  text-shadow: 0 0 4px #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.dfs-stick {
+  position: absolute;
+  pointer-events: none;
+}
+.dfs-stick-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.1);
+}
+.dfs-stick.turn .dfs-stick-ring {
+  inset: 32% 0;
+  border-radius: 999px;
+}
+.dfs-stick-knob {
+  position: absolute;
+  left: 30%;
+  top: 30%;
+  width: 40%;
+  height: 40%;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+}
+.drive-full:not(.armed) .dfs-stick {
+  opacity: 0.45;
+}
+.dfs-stick.held .dfs-stick-ring {
+  border-color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.16);
+}
+.drive-full.armed .dfs-stick.held .dfs-stick-knob {
+  background: rgba(255, 90, 95, 0.9);
+}
+.dfs-stick-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.7);
+  text-shadow: 0 0 3px #000;
+}
+
+/* bars */
+.dfs-top,
+.dfs-bottom {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: calc(env(safe-area-inset-left) + 8px);
+  padding-right: calc(env(safe-area-inset-right) + 8px);
+}
+.dfs-top {
+  top: 0;
+  padding-top: calc(env(safe-area-inset-top) + 8px);
+  padding-bottom: 8px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent);
+}
+.dfs-bottom {
+  bottom: 0;
+  padding-bottom: calc(env(safe-area-inset-bottom) + 6px);
+  padding-top: 6px;
+  pointer-events: none;
+  justify-content: center;
+}
+.dfs-bottom > * {
+  pointer-events: auto;
+}
+.dfs-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+}
+.dfs-btn:disabled {
+  opacity: 0.5;
+}
+.dfs-exit {
+  padding: 0;
+  font-size: 18px;
+}
+.dfs-view {
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dfs-robot {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+  text-shadow: 0 0 3px #000;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.dfs-arm.on {
+  background: var(--err);
+  border-color: var(--err);
+  letter-spacing: 0.08em;
+}
+.dfs-stop {
+  background: #c62828;
+  border-color: #ff8a80;
+  min-width: 72px;
+  letter-spacing: 0.1em;
+}
+.dfs-menu {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 60px);
+  left: calc(env(safe-area-inset-left) + 8px);
+  max-height: calc(100% - 140px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 190px;
+  padding: 6px;
+  border-radius: 10px;
+  background: rgba(16, 20, 26, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  z-index: 2;
+}
+.dfs-menu > button {
+  min-height: 44px;
+  text-align: left;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 15px;
+}
+.dfs-menu > button.on {
+  background: rgba(79, 195, 247, 0.25);
+}
+.dfs-menu-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.dfs-menu-row .btn {
+  flex: 1;
+  min-height: 40px;
+}
+.dfs-speed {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 18px;
+  padding: 2px 10px;
+}
+.dfs-speed input {
+  width: min(32vw, 180px);
+  min-height: 32px;
+}
+.dfs-status {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 10px;
+  padding: 2px 8px;
+}
+.dfs-status.moving {
+  color: #fff;
+  background: rgba(198, 40, 40, 0.75);
+}
+.dfs-note {
+  position: absolute;
+  left: 50%;
+  top: calc(env(safe-area-inset-top) + 62px);
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  font-size: 13px;
+  pointer-events: none;
+  text-align: center;
+}
+.dfs-note.err {
+  background: rgba(198, 40, 40, 0.85);
+}
+.drive-full .modal-backdrop {
+  pointer-events: auto;
+}
+
+/* the page under the view does not scroll / bounce while it is open */
+html.drive-full-open,
+html.drive-full-open body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+html.drive-full-map .vcanvas {
+  position: fixed;
+  inset: 0;
+  z-index: 89;
+}
+html.drive-full-map .vcanvas > :not(.scene-canvas) {
+  display: none !important;
+}

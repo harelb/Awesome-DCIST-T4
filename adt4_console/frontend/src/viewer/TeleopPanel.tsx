@@ -16,6 +16,7 @@ import {
   TeleopDriver,
   ZERO,
   armConfirmed,
+  captureTouches,
   isDriveKey,
   joystickToTwist,
   keysToTwist,
@@ -87,6 +88,9 @@ export function Joystick({enabled, onMove}: {enabled: boolean; onMove: (xy: {x: 
     if (!enabled && active.current != null) end();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
+  // phones: without this the touch scrolls the sheet (pointercancel ends the
+  // drag at once) and its synthesized focus change disarms the panel
+  useEffect(() => (ref.current ? captureTouches(ref.current) : undefined), []);
   return (
     <div
       ref={ref}
@@ -201,8 +205,14 @@ export function TeleopPanel() {
     if (why) setNote(`Disarmed: ${why}`);
   }, []);
 
+  // the full-screen drive view takes over: one velocity stream at a time
+  const driveFull = useViewer(s => s.driveFull);
+  useEffect(() => {
+    if (driveFull && armedRef.current) disarm("full-screen drive opened");
+  }, [driveFull, disarm]);
+
   const doArm = () => {
-    if (!driver.current) return;
+    if (!driver.current || useViewer.getState().driveFull) return;
     driver.current.arm();
     setArmed(true);
     setNote(null);

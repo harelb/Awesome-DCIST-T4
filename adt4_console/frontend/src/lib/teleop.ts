@@ -77,6 +77,121 @@ export function joystickToTwist(x: number, y: number, speed: number, strafe = fa
   });
 }
 
+/** A stick deflection: ``x``/``y`` in [-1, 1] (right / up positive). */
+export interface Stick {
+  x: number;
+  y: number;
+}
+
+/** Deflection of a touch at ``p`` on a stick centred at ``origin`` with
+ *  ``radius`` px (screen y grows down). Clamped to the unit circle; an
+ *  x-only stick (the turn stick) ignores vertical motion. */
+export function stickVector(origin: {x: number; y: number}, p: {x: number; y: number}, radius: number, xOnly = false): Stick {
+  let x = (p.x - origin.x) / radius;
+  let y = xOnly ? 0 : -(p.y - origin.y) / radius;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return {x: 0, y: 0};
+  const n = Math.hypot(x, y);
+  if (n > 1) {
+    x /= n;
+    y /= n;
+  }
+  return {x: x + 0, y: y + 0}; // no -0
+}
+
+/** Axis dead zone, then linear to full scale. */
+const deadZone = (v: number) => {
+  const a = Math.min(1, Math.abs(v));
+  return a <= DEAD_ZONE ? 0 : (Math.sign(v) * (a - DEAD_ZONE)) / (1 - DEAD_ZONE);
+};
+
+/** Two sticks like Spot's tablet app: ``move`` drives forward/back (up/down)
+ *  and strafes (sideways); ``turn`` yaws (sideways; right turns right). Axis
+ *  dead zones, so a slightly crooked push forward does not also strafe. */
+export function sticksToTwist(move: Stick | null, turn: Stick | null, speed: number): Twist {
+  const s = Math.max(0, Math.min(1, speed));
+  const vx = move ? deadZone(move.y) * CAPS.vx * s : 0;
+  const vy = move ? -deadZone(move.x) * CAPS.vy * s : 0;
+  const wz = turn ? -deadZone(turn.x) * CAPS.wz * s : 0;
+  return clampTwist({vx: vx || 0, vy: vy || 0, wz: wz || 0});
+}
+
+export type StickId = "move" | "turn";
+
+interface Grab {
+  id: StickId;
+  origin: {x: number; y: number};
+  value: Stick;
+}
+
+/** Multi-touch for the two sticks. A touch landing in the left half of the
+ *  area grabs ``move``, the right half ``turn``; the stick centres where the
+ *  finger landed (nothing small to aim at). One finger per stick: a second
+ *  finger on a held stick is ignored, and lifting a finger releases only its
+ *  own stick. */
+export class StickTracker {
+  private grabs = new Map<number, Grab>();
+
+  constructor(public radius: number) {}
+
+  /** ``x``/``y`` relative to the touch area, ``width`` its width (px). */
+  down(pointerId: number, x: number, y: number, width: number): StickId | null {
+    const held = this.grabs.get(pointerId);
+    if (held) return held.id;
+    const id: StickId = x < width / 2 ? "move" : "turn";
+    for (const g of this.grabs.values()) if (g.id === id) return null;
+    this.grabs.set(pointerId, {id, origin: {x, y}, value: {x: 0, y: 0}});
+    return id;
+  }
+
+  move(pointerId: number, x: number, y: number): StickId | null {
+    const g = this.grabs.get(pointerId);
+    if (!g) return null;
+    g.value = stickVector(g.origin, {x, y}, this.radius, g.id === "turn");
+    return g.id;
+  }
+
+  up(pointerId: number): StickId | null {
+    const g = this.grabs.get(pointerId);
+    this.grabs.delete(pointerId);
+    return g?.id ?? null;
+  }
+
+  clear() {
+    this.grabs.clear();
+  }
+
+  get size() {
+    return this.grabs.size;
+  }
+
+  get(id: StickId): {origin: {x: number; y: number}; value: Stick} | null {
+    for (const g of this.grabs.values()) if (g.id === id) return {origin: g.origin, value: g.value};
+    return null;
+  }
+
+  twist(speed: number): Twist {
+    return sticksToTwist(this.get("move")?.value ?? null, this.get("turn")?.value ?? null, speed);
+  }
+}
+
+const TOUCH_EVENTS = ["touchstart", "touchmove", "touchend", "gesturestart", "gesturechange"];
+
+/** Keep the browser from turning touches on ``el`` into scrolling, pinch
+ *  zoom, selection or synthesized mouse / focus events. iOS Safari does not
+ *  reliably honour ``touch-action: none`` inside a scrolling container, and
+ *  React's touch listeners are passive (cannot preventDefault), so this is a
+ *  native non-passive listener. Pointer events still fire. Returns the
+ *  cleanup. */
+export function captureTouches(el: HTMLElement): () => void {
+  const stop = (e: Event) => {
+    if (e.cancelable) e.preventDefault();
+  };
+  for (const t of TOUCH_EVENTS) el.addEventListener(t, stop, {passive: false});
+  return () => {
+    for (const t of TOUCH_EVENTS) el.removeEventListener(t, stop);
+  };
+}
+
 /** Whether arming was confirmed before in this browser session. */
 export function armConfirmed(storage: Pick<Storage, "getItem"> | null | undefined = safeSession()): boolean {
   try {

@@ -18,6 +18,7 @@ import {LivePanel} from "./LivePanel";
 import {LiveOverlaysPanel} from "./LiveOverlays";
 import {RobotLegend} from "./RobotLegend";
 import {CameraPanel} from "./CameraPanel";
+import {DriveFullscreen, requestPageFullscreen} from "./DriveFullscreen";
 import {TeleopPanel} from "./TeleopPanel";
 import {SearchImagesPanel} from "./SearchImagesPanel";
 import {Segmented} from "../components/ui";
@@ -372,6 +373,27 @@ export default function ViewerPage() {
       )}
     </header>
   );
+  // full-screen drive (phones, touch tablets): offered in the drive layout
+  // with a robot in focus
+  const coarse = useMedia("(pointer: coarse)");
+  useEffect(() => {
+    if (!focused && useViewer.getState().driveFull) useViewer.getState().set({driveFull: false});
+  }, [focused]);
+  const fullBtn =
+    drive && focused && (isPhone || coarse) ? (
+      <button
+        className="btn btn-sm panel-btn drive-full-btn"
+        data-testid="drive-full-open"
+        onClick={() => {
+          requestPageFullscreen();
+          setRightOpen(false);
+          v.set({driveFull: true});
+        }}
+        title={`Drive ${focused} full screen: camera with two sticks`}
+      >
+        ⛶ {isPhone ? "Full" : "Full screen"}
+      </button>
+    ) : null;
   const camera = (
     <Segmented
       ariaLabel="Camera"
@@ -458,6 +480,7 @@ export default function ViewerPage() {
             <div className="vtoolbar top-right">
               {follow}
               {driveBtn}
+              {fullBtn}
               {camera}
               <ScreenshotButton onDone={setToast} />
               <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={wide} />
@@ -474,6 +497,7 @@ export default function ViewerPage() {
             <ScreenshotButton onDone={setToast} compact />
             {follow}
             {driveBtn}
+            {fullBtn}
           </div>
         )}
         {camPip && (
@@ -559,6 +583,7 @@ export default function ViewerPage() {
             </FloatingWindow>
           );
         })}
+      {v.driveFull && focused && <DriveFullscreen key={focused} robot={focused} onExit={() => v.set({driveFull: false})} />}
       {isPhone && leftOpen && (
         <BottomSheet key="left" label="Sources and layers" host={viewerRef} onClose={() => setLeftOpen(false)}>
           {leftPanel}
