@@ -218,7 +218,8 @@ def test_commit_errors_carry_real_reason(svc_client, sam3):
     assert r.status_code == 404 and "expired" in r.json()["detail"]
     svc.settings.sam3_url = "http://127.0.0.1:9"
     r = client.post("/api/sam3/discard", json={"pending_id": "p-1"})
-    assert r.status_code == 503 and "SAM3 query server unreachable" in r.json()["detail"]
+    assert r.status_code == 503 and "SAM3 query server not running on" in r.json()["detail"]
+    assert "unreachable at http://127.0.0.1:9" in r.json()["detail"]
 
 
 # ------------------------------------------------------------- anthropic path

@@ -244,6 +244,25 @@ token usage and persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget
 Without credentials a deterministic fallback answers "find/go to <label>" queries by
 matching object labels in the selected graph source and proposing a goto goal.
 
+### 10.1 Image search (SAM3 query server, Map viewer "Images" tab)
+
+Forwarded to the SAM3 query server (`--sam3-url`, agentic_navigation
+`sam3_frontend/query_server.py`); nothing is written until a commit.
+
+- `GET /api/sam3/health` → always 200: `{ok, url, server: "host:port", status, keyframes,
+  pending, busy, conf_threshold, embed_model, sources: [{id, keyframes}]}`, or
+  `{ok: false, error: "SAM3 query server not running on willow:8077", detail}`.
+- `POST /api/sam3/query` `{prompt, mode: frustum|batched|topk, top_k, max_frames, patience,
+  source?: all|prior|live|live/<robot>/<epoch>, conf?: (0,1), min_ts?, max_views}` → the
+  server's dry-run reply (`pending_id`, `candidates` with masked views, `would_merge_into`,
+  `timings`, `pool`, `conf`). 503 when the server is down, its 4xx passed through.
+- `POST /api/sam3/rank` `{prompt, top_k, source?, min_ts?, thumb_dim}` → SigLIP2-only
+  ranking (no SAM3): `{pool, frames: [{rank, frame_key, score, source, camera_position,
+  thumb_uri}], timings}`.
+- `GET /api/sam3/frame?key=<frame_key>&max_dim=` → `{uri, width, height}` (raw keyframe).
+- `POST /api/sam3/commit` `{pending_id, index, src?}` / `POST /api/sam3/discard`
+  `{pending_id}`: write (or drop) a candidate; a commit refreshes the Neo4j source(s).
+
 ## 11. RViz replacement: occupancy grid, executor paths, cameras, graph stats
 
 Added in phase 6 so operators can drop RViz. Everything here is additive: no existing
