@@ -27,6 +27,47 @@ STATIC_QOS = QoSProfile(
 )
 
 
+NOMINAL = "nominal"
+WARNING = "warning"
+FLEETLINK_IDLE_NOTES = "Idle: fleetlink-bridge relays robot TF"
+
+
+def relay_status(msg_counts, last_msg_time, t_now, dt, stale_after_s, fleetlink):
+    """Return ``(NOMINAL | WARNING, notes)`` for the heartbeat.
+
+    ``msg_counts`` maps every robot whose network TF was ever subscribed to its
+    message count since the last heartbeat (``dt`` seconds ago); ``last_msg_time``
+    holds each robot's last message time (monotonic, same clock as ``t_now``).
+
+    In fleetlink mode robot graphs stay on the robots and fleetlink-bridge relays
+    their TF, so this node idling is expected: robots without fresh TF (including
+    ones relayed earlier, e.g. before a switch from router mode) are not a warning.
+    """
+    stale = []
+    rates = []
+    for robot in sorted(msg_counts):
+        last = last_msg_time.get(robot)
+        if last is None or t_now - last > stale_after_s:
+            age = "never" if last is None else f"{t_now - last:.0f} s ago"
+            stale.append(f"{robot} ({age})")
+        else:
+            rate = msg_counts[robot] / dt if dt > 0 else 0.0
+            rates.append(f"{robot} {rate:.1f} Hz")
+
+    if fleetlink:
+        if rates:
+            return NOMINAL, f"Relaying {', '.join(rates)}"
+        return NOMINAL, FLEETLINK_IDLE_NOTES
+    if not msg_counts:
+        return WARNING, "No robots found on /<robot>/network/tf"
+    if stale:
+        notes = f"Stale TF: {', '.join(stale)}"
+        if rates:
+            notes += f". OK: {', '.join(rates)}"
+        return WARNING, notes
+    return NOMINAL, f"Relaying {', '.join(rates)}"
+
+
 class TfRelay(Node):
     def __init__(self):
         super().__init__("tf_relay")
@@ -134,34 +175,18 @@ class TfRelay(Node):
         dt = t_now - self.last_hb_time
         self.last_hb_time = t_now
 
-        robots = sorted(self.msg_counts)
-        stale = []
-        rates = []
-        for robot in robots:
-            last = self.last_msg_time.get(robot)
-            if last is None or t_now - last > self.stale_after_s:
-                age = "never" if last is None else f"{t_now - last:.0f} s ago"
-                stale.append(f"{robot} ({age})")
-            else:
-                rates.append(f"{robot} {self.msg_counts[robot] / dt:.1f} Hz")
-
+        level, notes = relay_status(
+            self.msg_counts,
+            self.last_msg_time,
+            t_now,
+            dt,
+            self.stale_after_s,
+            fleetlink=os.environ.get("ADT4_FLEET_LINK") == "fleetlink",
+        )
+        for robot in self.msg_counts:
             self.msg_counts[robot] = 0
 
-        if not robots and os.environ.get("ADT4_FLEET_LINK") == "fleetlink":
-            # robot graphs stay local in fleetlink mode; fleetlink-bridge relays their TF
-            status = NodeInfoMsg.NOMINAL
-            notes = "Idle: fleetlink-bridge relays robot TF"
-        elif not robots:
-            status = NodeInfoMsg.WARNING
-            notes = "No robots found on /<robot>/network/tf"
-        elif stale:
-            status = NodeInfoMsg.WARNING
-            notes = f"Stale TF: {', '.join(stale)}"
-            if rates:
-                notes += f". OK: {', '.join(rates)}"
-        else:
-            status = NodeInfoMsg.NOMINAL
-            notes = f"Relaying {', '.join(rates)}"
+        status = NodeInfoMsg.NOMINAL if level == NOMINAL else NodeInfoMsg.WARNING
 
         msg = NodeInfoMsg()
         msg.nickname = "tf_relay"
