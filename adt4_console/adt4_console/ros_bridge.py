@@ -169,6 +169,7 @@ class RobotPlanState:
         self.llm = collections.deque(maxlen=20)
         self.status = collections.deque(maxlen=50)  # omniplanner ~/plan_status
         self.lease: dict | None = None  # from the executor's runtime guards
+        self.teleop: dict | None = None  # the executor's ~/teleop_state
 
     def to_dict(self) -> dict:
         return {
@@ -358,6 +359,21 @@ class RosBridge:
             except Exception:  # noqa: BLE001
                 pass
 
+    def publish_now(self, topic: str, msg_type: str, fields: dict) -> None:
+        """Publish without waiting for subscriber matches (teleop streams at
+        10 Hz: a lost first message is harmless, a 2 s wait is not).  ``fields``
+        may nest (e.g. Twist ``{"linear": {"x": ..}}``)."""
+        from rosidl_runtime_py.set_message import set_message_fields
+
+        cls = import_type(msg_type)
+
+        def go():
+            msg = cls()
+            set_message_fields(msg, fields)
+            self._publisher(topic, cls).publish(msg)
+
+        self.run(go, timeout=1.0)
+
     def has_service(self, name: str) -> bool:
         """Whether any node on the local ROS graph serves ``name``."""
         names = self.run(lambda: self.node.get_service_names_and_types())
@@ -494,6 +510,40 @@ class RosBridge:
                 lambda m: self._on_guards(robot, m),
                 1,
             )
+        # teleop state (Teleop panel); relayed up by fleetlink like the guards
+        n.create_subscription(
+            string,
+            f"/{robot}/spot_executor_node/teleop_state",
+            lambda m: self._on_teleop_state(robot, m),
+            1,
+        )
+
+    def _on_teleop_state(self, robot, msg) -> None:
+        from .teleop_service import parse_teleop_state
+
+        st = parse_teleop_state(msg.data)
+        if st is None:
+            return
+        self._plan[robot].teleop = st
+        if self.hub is not None:
+            self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
+
+    def teleop(self, robot: str) -> dict:
+        """Teleop panel view: the executor's teleop state (None when stale or
+        never seen), the lease, the fleetlink link (fleetlink mode)."""
+        from .teleop_service import TELEOP_STATE_FRESH_S
+
+        st = self._plan[robot].teleop
+        fresh = st is not None and time.time() - st.get("rx_t", 0) < TELEOP_STATE_FRESH_S
+        lease = self._plan[robot].lease
+        if lease is not None:
+            lease = {k: v for k, v in lease.items() if k != "_pub"}
+        return {
+            "robot": robot,
+            "state": st if fresh else None,
+            "lease": lease,
+            "link": self.link_summary(self.link_status(robot)),
+        }
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)

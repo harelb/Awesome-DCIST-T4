@@ -3,8 +3,8 @@
 // Every storage access is wrapped: the layout falls back to defaults when
 // storage is blocked, empty or holds junk.
 
-export type PaneTab = "inspect" | "plan" | "chat" | "images" | "live" | "camera";
-export const PANE_TABS: PaneTab[] = ["inspect", "plan", "chat", "images", "live", "camera"];
+export type PaneTab = "inspect" | "plan" | "teleop" | "chat" | "images" | "live" | "camera";
+export const PANE_TABS: PaneTab[] = ["inspect", "plan", "teleop", "chat", "images", "live", "camera"];
 
 export interface WinRect {
   x: number;
@@ -43,6 +43,7 @@ export const FLOAT_MQ = "(min-width: 901px)";
 const DEFAULT_SIZE: Record<PaneTab, {w: number; h: number}> = {
   inspect: {w: 380, h: 520},
   plan: {w: 400, h: 560},
+  teleop: {w: 420, h: 760},
   chat: {w: 400, h: 560},
   images: {w: 560, h: 640},
   live: {w: 380, h: 480},

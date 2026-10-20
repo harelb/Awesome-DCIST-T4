@@ -25,6 +25,7 @@ from .jobs import JobManager
 from .live_service import LiveService
 from .ros_bridge import RosBridge, RosUnavailable
 from .settings import Settings
+from .teleop_service import TeleopService
 
 log = logging.getLogger(__name__)
 
@@ -66,18 +67,23 @@ class Services:
     launch_deps: object = None  # fleet.launch_workflow.LaunchDeps (None → real)
     helpers: object = field(default_factory=_fleet_helpers)  # fleet_helpers (or a fake)
     launch_state: object = None  # launch_state.LaunchState
+    teleop: TeleopService | None = None
 
     def start(self) -> None:
         if self.settings.fleet_poll:
             self.fleet.start()
         robots = self.settings.robots or self.fleet.robots()
         self.ros.start(robots)
+        if self.teleop is not None:
+            self.teleop.start()
         self.live.start()
         self.graph.start()
         self.graph.warm()
 
     def stop(self) -> None:
-        for svc in (self.live, self.ros, self.graph, self.fleet):
+        for svc in (self.teleop, self.live, self.ros, self.graph, self.fleet):
+            if svc is None:
+                continue
             try:
                 svc.stop()
             except Exception:  # noqa: BLE001
@@ -101,6 +107,10 @@ def build_services(
     ros = RosBridge(settings, hub, fleet)
     chat = ChatService(settings, graph, live, ros)
     svc = Services(settings, hub, jobs, fleet, graph, ros, live, chat, launch_deps)
+    # late-bound so tests can swap svc.ros.publish_now
+    svc.teleop = TeleopService(
+        lambda topic, t, fields: svc.ros.publish_now(topic, t, fields), hub
+    )
     if helpers is not None:
         svc.helpers = helpers
     from . import launch_state
@@ -155,10 +165,11 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         network,
         plan,
         sam3,
+        teleop,
         ws,
     )
 
-    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, ws):
+    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, ws):
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 

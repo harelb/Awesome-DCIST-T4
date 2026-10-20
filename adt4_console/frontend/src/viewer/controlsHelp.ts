@@ -62,6 +62,21 @@ export const COMMON_HELP: HelpSection[] = [
     ],
   },
   {
+    title: "Teleop tab: drive a Spot",
+    entries: [
+      {keys: "Drive", does: "Arm driving (asks once per session; red ARMED banner)"},
+      {keys: "W / S", does: "Forward / back (panel focused and armed)"},
+      {keys: "A / D", does: "Strafe left / right"},
+      {keys: "Q / E", does: "Turn left / right"},
+      {keys: "Shift", does: "Slow (30 % of the speed slider)"},
+      {keys: "Space", does: "Stop driving (zero velocity)"},
+      {keys: "Joystick", does: "Touch drive: up = forward, sideways = turn (or strafe)"},
+      {keys: "Click outside / switch tab", does: "Disarms; the robot stops within 0.5 s"},
+      {keys: "Stop", does: "Halt the robot, end teleop and cancel the plan"},
+      {keys: "Stand / Sit · Pause / Resume", does: "Posture · pause the plan to teleop, resume hands back"},
+    ],
+  },
+  {
     title: "Keys",
     entries: [
       {keys: "Enter (search)", does: "Pick the first hit"},

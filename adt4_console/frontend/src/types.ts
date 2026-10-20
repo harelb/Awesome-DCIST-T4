@@ -304,6 +304,41 @@ export interface LeaseInfo {
   t?: number;
 }
 
+/** spot_executor_node ~/teleop_state (JSON), as relayed by the console. */
+export interface TeleopState {
+  active: boolean;
+  allowed: boolean;
+  interlock: string;
+  busy: string;
+  standing: boolean | null;
+  commanded: {vx: number; vy: number; wz: number};
+  caps: {vx: number; vy: number; wz: number};
+  deadman_s: number;
+  cmd_age_s: number | null;
+  last_reject: string;
+  last_event: string;
+  commands: number;
+  rejected: number;
+  plan_executing: boolean;
+  plan_paused: boolean;
+  robot?: string;
+  executor?: string;
+  t?: number;
+  rx_t?: number;
+}
+
+/** GET /api/robots/<r>/teleop and hub topic robot/<r>/teleop. */
+export interface TeleopView {
+  robot: string;
+  state: TeleopState | null;
+  lease?: LeaseInfo | null;
+  link?: {connected?: boolean; rtt?: number | null; loss?: number | null; age_s?: number | null} | null;
+  session?: {owner: string; moving: boolean; age_s: number; sent: number; deadman_stops: number} | null;
+  caps?: {vx: number; vy: number; wz: number};
+  deadman_s?: number;
+  ros?: boolean;
+}
+
 export interface RobotPlan {
   goals: {t: number; kind: string; topic: string; msg: unknown}[];
   plan: null | {plan_id: string; robot_name: string; t: number; actions: PlanAction[]};

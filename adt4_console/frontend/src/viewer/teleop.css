@@ -1,0 +1,138 @@
+/* Teleop tab (TeleopPanel.tsx). */
+.teleop-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  outline: none;
+  padding: 2px;
+  border-radius: var(--radius);
+}
+.teleop-panel:focus-visible {
+  box-shadow: 0 0 0 2px var(--line-2);
+}
+.teleop-panel.armed {
+  box-shadow: 0 0 0 2px var(--err);
+}
+.teleop-armed {
+  background: var(--err);
+  color: #fff;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  letter-spacing: 0.02em;
+  animation: teleop-pulse 1.6s ease-in-out infinite;
+}
+.teleop-armed strong {
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+@keyframes teleop-pulse {
+  50% {
+    background: #c9373c;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .teleop-armed {
+    animation: none;
+  }
+}
+.teleop-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.teleop-buttons .btn {
+  min-height: 48px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.teleop-stop {
+  grid-column: 1 / -1;
+  min-height: 56px !important;
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+  font-size: 18px !important;
+  letter-spacing: 0.1em;
+}
+@media (hover: hover) {
+  .teleop-stop:hover:not(:disabled) {
+    background: #ff787c;
+  }
+}
+.teleop-drive-row {
+  align-items: center;
+}
+.teleop-drive {
+  min-width: 108px;
+  min-height: 44px;
+  font-size: 15px;
+}
+.teleop-speed {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.teleop-speed input {
+  width: 100%;
+}
+.teleop-joy-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.joystick {
+  position: relative;
+  width: 128px;
+  height: 128px;
+  flex: none;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.joystick.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.joy-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--line-2);
+  background: radial-gradient(circle, var(--bg-3) 0%, var(--bg-1) 70%);
+}
+.joy-knob {
+  position: absolute;
+  left: 25%;
+  top: 25%;
+  width: 50%;
+  height: 50%;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.85;
+  transition: transform 0.08s;
+}
+.joystick.disabled .joy-knob {
+  background: var(--line-2);
+}
+.teleop-panel.armed .joy-knob {
+  background: var(--err);
+}
+.teleop-readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.teleop-readouts .kv-v {
+  word-break: normal;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}

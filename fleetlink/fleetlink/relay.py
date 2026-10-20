@@ -44,6 +44,9 @@ Delivery modes (per topic):
 ``ttl_s`` is checked on both ends: the sender stops retrying, the receiver
 rejects (``ok: false, err: "expired"``) a message older than that, measured
 against its envelope ``t`` corrected by the heartbeat clock offset.
+``ttl_strict`` (latest entries, e.g. teleop velocity) fails closed: no
+round-trip offset yet means expired, and a latest value that waited past its
+ttl for a rate slot is dropped on the sender.
 
 **Epochs / no replay.**  Each end has a random epoch.  When the peer's epoch
 *changes* (it restarted), pending messages of entries without
@@ -91,6 +94,7 @@ _TOPIC_KEYS = {
     "cls",
     "rate_hz",
     "ttl_s",
+    "ttl_strict",
     "replay_on_resync",
     "qos",
     "platform",
@@ -136,6 +140,7 @@ class Entry:
     cls: str
     rate_hz: float | None = None
     ttl_s: float | None = None
+    ttl_strict: bool = False
     replay_on_resync: bool = False
     qos: dict = field(default_factory=lambda: dict(DEFAULT_QOS))
     platform: tuple | None = None
@@ -284,6 +289,13 @@ class RelayConfig:
         if qos["durability"] not in ("volatile", "transient_local"):
             raise self._err(f"{what}: qos.durability {qos['durability']!r}")
         mode = t["mode"]
+        ttl_strict = bool(t.get("ttl_strict", False))
+        if ttl_strict and t.get("ttl_s") is None:
+            raise self._err(f"{what}: ttl_strict needs ttl_s")
+        if ttl_strict and mode != "latest":
+            # a strict ttl drops until the clock offset is measured; only a
+            # stream that is resent continuously may lose its first messages
+            raise self._err(f"{what}: ttl_strict is only for mode latest")
         return {
             "topic": str(t["topic"]),
             "type": str(t["type"]),
@@ -292,6 +304,7 @@ class RelayConfig:
             "cls": t.get("cls") or ("C1" if mode == "latest" else "C0"),
             "rate_hz": _num(t.get("rate_hz"), f"{what}.rate_hz"),
             "ttl_s": _num(t.get("ttl_s"), f"{what}.ttl_s"),
+            "ttl_strict": ttl_strict,
             "replay_on_resync": bool(t.get("replay_on_resync", False)),
             "qos": {**qos, "depth": int(qos.get("depth") or 10)},
             "platform": _platforms(t.get("platform")),
@@ -383,6 +396,7 @@ class RelayConfig:
                 cls=t["cls"],
                 rate_hz=t["rate_hz"],
                 ttl_s=t["ttl_s"],
+                ttl_strict=t["ttl_strict"],
                 replay_on_resync=t["replay_on_resync"],
                 qos=dict(t["qos"]),
                 platform=t["platform"],
@@ -693,15 +707,20 @@ class RelayCore:
             return self._peer_hb[0] - self._peer_hb[1]
         return None
 
-    def _expired(self, env: dict, ttl: float | None, now: float) -> bool:
+    def _expired(
+        self, env: dict, ttl: float | None, now: float, strict: bool = False
+    ) -> bool:
         """Receiver-side TTL.  Skipped while the clock offset is unknown (right
         after link-up and after a peer restart): the raw envelope ``t`` would be
-        off by the clock skew, and the sender's own TTL still bounds its retries."""
+        off by the clock skew, and the sender's own TTL still bounds its retries.
+        ``strict`` (``ttl_strict``, e.g. teleop velocity) fails closed instead:
+        until the round-trip offset is measured every message counts as expired,
+        so a delayed motion command can never be applied."""
         if ttl is None:
             return False
-        off = self._offset()
+        off = self.clock_offset if strict else self._offset()
         if off is None:
-            return False
+            return strict
         return now - (float(env.get("t", now)) - off) > ttl
 
     def _account_seq(self, env: dict) -> None:
@@ -920,7 +939,7 @@ class RelayCore:
         if (th and mine and th != mine) or p.get("type") not in (None, e.type):
             st.c["type_mismatch"] += 1
             err = "type mismatch"
-        elif self._expired(env, e.ttl_s, now):
+        elif self._expired(env, e.ttl_s, now, e.ttl_strict):
             st.c["expired"] += 1
             err = "expired"
         meta = {"t": env.get("t"), "tseq": tseq, "id": pid, "epoch": env["epoch"]}
@@ -1202,7 +1221,11 @@ class RelayCore:
             not e.rate_hz or now - o.t_last_send >= 1.0 / e.rate_hz
         ):
             data, t = o.latest_wait
-            self._send_new(o, data, t, now)
+            if e.ttl_s is not None and now - t > e.ttl_s:
+                o.latest_wait = None  # went stale waiting for its slot
+                o.c["expired"] += 1
+            else:
+                self._send_new(o, data, t, now)
         for pid, p in list(o.pending.items()):
             if e.ttl_s is not None and now - p.t > e.ttl_s:
                 del o.pending[pid]

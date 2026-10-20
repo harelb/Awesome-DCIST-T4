@@ -18,6 +18,7 @@ import {LivePanel} from "./LivePanel";
 import {LiveOverlaysPanel} from "./LiveOverlays";
 import {RobotLegend} from "./RobotLegend";
 import {CameraPanel} from "./CameraPanel";
+import {TeleopPanel} from "./TeleopPanel";
 import {SearchImagesPanel} from "./SearchImagesPanel";
 import {Segmented} from "../components/ui";
 import {readyModels} from "../stores/viewer";
@@ -30,7 +31,7 @@ import {FloatingWindow, Splitter, TabPortal, TabSlot, useElementSize, usePaneLay
 import {FLOAT_MQ, LEFT, MIN_CANVAS, PANE_TABS, RIGHT, clampWidths, dock, popOut, raise, updateWin, type PaneTab} from "./paneLayout";
 
 type Tab = PaneTab;
-const TAB_TITLE: Record<Tab, string> = {inspect: "Inspect", plan: "Plan", chat: "Chat", images: "Images", live: "Live link", camera: "Camera"};
+const TAB_TITLE: Record<Tab, string> = {inspect: "Inspect", plan: "Plan", teleop: "Teleop", chat: "Chat", images: "Images", live: "Live link", camera: "Camera"};
 
 export default function ViewerPage() {
   const v = useViewer();
@@ -245,6 +246,8 @@ export default function ViewerPage() {
         return <Inspector onVisit={onVisit} onGoto={addGoto} />;
       case "plan":
         return <PlanPanel />;
+      case "teleop":
+        return <TeleopPanel />;
       case "chat":
         return <ChatPanel />;
       case "images":

@@ -526,3 +526,101 @@ def test_service_timeout_when_link_is_down():
     pr.base.call("/euclid/save", b"s", lambda d, e: out.append((d, e)))
     pr.run(3.5)
     assert out == [(None, "timeout")]
+
+
+# ----------------------------------------------------------------- teleop
+
+
+TELEOP = {
+    "version": 1,
+    "topics": [
+        {"topic": "/{robot}/cmd_vel", "type": "geometry_msgs/msg/Twist", "dir": "down",
+         "mode": "latest", "cls": "C0", "rate_hz": 10.0, "ttl_s": 0.5, "ttl_strict": True},
+    ],
+}  # fmt: skip
+
+
+def test_relay_yaml_teleop_entries():
+    cfg = RelayConfig.load(RELAY_YAML)
+    spot = cfg.resolve("euclid", "spot", base="willow")
+    husky = cfg.resolve("gauss", "phoenix", base="willow")
+    vel = spot.topics["/euclid/spot_executor_node/cmd_vel"]
+    assert vel.type == "geometry_msgs/msg/Twist" and vel.dir == "down"
+    assert vel.mode == "latest" and vel.cls in ("C0", "C1")
+    assert vel.ttl_s is not None and vel.ttl_s <= 0.5 and vel.ttl_strict
+    assert vel.rate_hz and 5 <= vel.rate_hz <= 20
+    assert not vel.replay_on_resync  # a restarted robot never replays motion
+    assert "/gauss/spot_executor_node/cmd_vel" not in husky.topics
+    for srv in ("stand", "sit"):
+        s = spot.services[f"/euclid/spot_executor_node/{srv}"]
+        assert s.dir == "down" and s.type == "std_srvs/srv/Trigger" and s.cls == "C0"
+        assert s.ttl_s is not None and s.ttl_s <= 10 and s.timeout_s >= 10
+        assert f"/gauss/spot_executor_node/{srv}" not in husky.services
+    st = spot.topics["/euclid/spot_executor_node/teleop_state"]
+    assert st.dir == "up" and st.type == "std_msgs/msg/String"
+
+
+@pytest.mark.parametrize(
+    "entry, msg",
+    [
+        ({"mode": "latest", "ttl_strict": True}, "needs ttl_s"),
+        ({"mode": "reliable", "ttl_s": 1, "ttl_strict": True}, "only for mode latest"),
+    ],
+)
+def test_ttl_strict_validation(entry, msg):
+    t = {"topic": "/x", "type": "a/msg/B", "dir": "down", **entry}
+    with pytest.raises(RelayConfigError, match=msg):
+        RelayConfig({"version": 1, "topics": [t]})
+
+
+def test_strict_ttl_drops_until_clock_offset_measured():
+    """Before the first heartbeat round trip, a strict entry cannot tell how old a
+    velocity command is: it is dropped, not applied."""
+    pr = Pair(cfg=TELEOP, robot_skew=45.0)
+    pr.base.publish("/euclid/cmd_vel", b"v0")  # at link-up, no heartbeat yet
+    pr.run(0.2)
+    assert pr.data("robot", "/euclid/cmd_vel") == []
+    assert pr.robot.status()["topics"]["/euclid/cmd_vel"]["expired"] == 1
+    pr.run(3.0)  # offset measured
+    assert pr.robot.clock_offset is not None
+    pr.base.publish("/euclid/cmd_vel", b"v1")
+    pr.run(0.3)
+    assert pr.data("robot", "/euclid/cmd_vel") == [b"v1"]
+
+
+def test_strict_ttl_drops_radio_delayed_velocity():
+    """One-way 0.7 s: every command is older than its 0.5 s ttl on arrival, so
+    nothing moves the robot (the executor deadman then holds it still)."""
+    pr = Pair(cfg=TELEOP, latency=0.7)
+    pr.run(5.0)
+    assert pr.robot.clock_offset is not None
+    for i in range(10):
+        pr.base.publish("/euclid/cmd_vel", b"v%d" % i)
+        pr.run(0.1)
+    pr.run(2.0)
+    assert pr.data("robot", "/euclid/cmd_vel") == []
+    assert pr.robot.status()["topics"]["/euclid/cmd_vel"]["expired"] >= 1
+
+
+def test_velocity_stream_delivered_on_good_link():
+    pr = Pair(cfg=TELEOP, latency=0.05)
+    pr.run(3.0)
+    for i in range(10):
+        pr.base.publish("/euclid/cmd_vel", b"v%d" % i)
+        pr.run(0.1)
+    pr.run(0.3)
+    got = pr.data("robot", "/euclid/cmd_vel")
+    assert len(got) >= 8 and got[-1] == b"v9"
+
+
+def test_stale_latest_value_dropped_on_sender():
+    """A latest value that waits for its rate slot longer than its ttl is dropped
+    on the sender instead of being sent late."""
+    cfg = {"version": 1, "topics": [dict(TELEOP["topics"][0], rate_hz=0.5)]}
+    pr = Pair(cfg=cfg)
+    pr.run(3.0)
+    pr.base.publish("/euclid/cmd_vel", b"go")
+    pr.base.publish("/euclid/cmd_vel", b"late")  # waits ~2 s for the next slot
+    pr.run(3.0)
+    assert pr.data("robot", "/euclid/cmd_vel") == [b"go"]
+    assert pr.base.status()["topics"]["/euclid/cmd_vel"]["expired"] == 1

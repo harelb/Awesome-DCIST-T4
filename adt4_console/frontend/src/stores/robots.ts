@@ -1,7 +1,7 @@
 import {useMemo} from "react";
 import {create} from "zustand";
 import type * as THREE from "three";
-import type {Cls, FrameAlign, LinkInfo, RobotPlan, RobotState} from "../types";
+import type {Cls, FrameAlign, LinkInfo, RobotPlan, RobotState, TeleopView} from "../types";
 import {alignMatrix, layerMatrix, robotOfSource} from "../lib/frameAlign";
 import {parsePaths, type RobotPaths} from "../lib/overlays";
 import {ws} from "../ws";
@@ -12,6 +12,7 @@ interface RobotsStore {
   state: Record<string, RobotState>;
   stateAt: Record<string, number>;
   plan: Record<string, RobotPlan>;
+  teleop: Record<string, TeleopView>;
   paths: Record<string, RobotPaths>;
   link: Record<string, LinkInfo>;
   rateHistory: Record<string, Record<Cls, number[]>>;
@@ -22,6 +23,7 @@ export const useRobots = create<RobotsStore>(set => ({
   state: {},
   stateAt: {},
   plan: {},
+  teleop: {},
   paths: {},
   link: {},
   rateHistory: {},
@@ -39,7 +41,7 @@ export const useRobots = create<RobotsStore>(set => ({
 
 export function bindRobots() {
   ws.on("robot/", (d, f) => {
-    const m = /^robot\/([^/]+)\/(state|plan|paths)$/.exec(f.topic);
+    const m = /^robot\/([^/]+)\/(state|plan|paths|teleop)$/.exec(f.topic);
     if (!m) return;
     const [, r, kind] = m;
     if (kind === "paths") {
@@ -52,7 +54,8 @@ export function bindRobots() {
           delete paths[r];
           return {paths};
         });
-    } else if (kind === "state")
+    } else if (kind === "teleop") useRobots.setState(s => ({teleop: {...s.teleop, [r]: d as TeleopView}}));
+    else if (kind === "state")
       useRobots.setState(s => ({state: {...s.state, [r]: d as RobotState}, stateAt: {...s.stateAt, [r]: Date.now()}}));
     else useRobots.setState(s => ({plan: {...s.plan, [r]: d as RobotPlan}}));
   });

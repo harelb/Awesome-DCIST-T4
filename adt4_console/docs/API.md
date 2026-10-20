@@ -272,6 +272,28 @@ robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.ya
   `/<planner_ns>/omniplanner_node/plan_status` (one JSON String per handled goal — the only
   place planning failures are reported).
 
+### 9a. Teleop (Teleop tab; `routes/teleop.py`, `teleop_service.py`)
+
+Driving goes through `spot_executor_node`, which holds the Spot lease (never
+`spot_twist_node`). fleetlink relays `cmd_vel` (latest, 10 Hz, strict 0.5 s ttl),
+`stand`/`sit` (C0 services, ttl 5 s) and `teleop_state` (up, 2 Hz).
+
+* `GET /api/robots/{r}/teleop` → `{robot, state, lease, link, session, caps, deadman_s, ros}`;
+  `state` is the executor's `~/teleop_state` JSON (`active, allowed, interlock, busy, standing,
+  commanded, caps, last_reject, last_event, plan_executing, plan_paused, executor, ...`) or
+  `null` when older than 5 s. Pushed on the hub as `robot/{r}/teleop`.
+* `POST /api/robots/{r}/teleop/stand|sit` → `{ok, message, service}` (executor `~/stand|sit`
+  Trigger; 504 on timeout). `stop` zeroes `cmd_vel` and publishes `~/stop` (ends teleop,
+  cancels the plan, halts the robot). `pause|resume` = `executor/pause|resume`.
+* `WS /api/robots/{r}/teleop/ws` (JSON text): in `{type: "cmd", vx, vy, wz, seq, t}`,
+  `{type: "ping", seq, t}`, `{type: "release"}`; out `{type: "ack", sent, cmd, seq, t}`,
+  `{type: "pong", seq, t}`, `{type: "error", error}`. One driver per robot (another session
+  gets `error` until the first closes or idles 3 s). Server-side deadman: a moving robot
+  whose driver sends nothing for 0.3 s, or whose socket closes, gets one zero command.
+  Idle zeros are not forwarded. Velocities are clamped to vx 0.6, vy 0.4, wz 0.8.
+* `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
+  clients without the socket (409 when another session drives).
+
 ## 10. Chat (optional LLM)
 
 `POST /api/chat` `{message, robot?, src?}` → NDJSON stream of `{type: "text", text}` /
