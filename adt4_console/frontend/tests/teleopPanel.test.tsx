@@ -60,7 +60,7 @@ describe("TeleopPanel", () => {
         }
         if (u.startsWith("api/plan/robots")) return json([{robot: "hamilton", plugins: []}, {robot: "euclid", plugins: []}]);
         if (u.includes("/teleop"))
-          return json({robot: "hamilton", state: {active: false, allowed: true, interlock: "", busy: "", standing: true, commanded: {vx: 0, vy: 0, wz: 0}, caps: {vx: 0.6, vy: 0.4, wz: 0.8}, deadman_s: 0.5, cmd_age_s: null, last_reject: "", last_event: "", commands: 0, rejected: 0, plan_executing: false, plan_paused: false, executor: "Idle"}, lease: null, link: null, ros: true});
+          return json({robot: "hamilton", state: {active: false, allowed: true, interlock: "", busy: "", standing: true, commanded: {vx: 0, vy: 0, wz: 0}, caps: {vx: 1.6, vy: 0.4, wz: 0.8}, deadman_s: 0.5, cmd_age_s: null, last_reject: "", last_event: "", commands: 0, rejected: 0, plan_executing: false, plan_paused: false, executor: "Idle"}, lease: null, link: null, ros: true});
         if (u.startsWith("api/time")) return json({t: Date.now() / 1000});
         return json({});
       }),
@@ -106,7 +106,7 @@ describe("TeleopPanel", () => {
     expect(document.querySelector(".teleop-armed")?.textContent).toContain("ARMED");
     expect(document.activeElement).toBe(panel());
     key("keydown", "KeyW");
-    expect(cmds().at(-1)).toMatchObject({vx: 0.3}); // 50 % default speed
+    expect(cmds().at(-1)).toMatchObject({vx: 0.4}); // 25 % default speed of 1.6 m/s
     key("keydown", "KeyQ");
     key("keyup", "KeyW");
     key("keyup", "KeyQ");
@@ -130,7 +130,7 @@ describe("TeleopPanel", () => {
     act(() => drive().click());
     await act(async () => new Promise(r => setTimeout(r, 0)));
     key("keydown", "KeyD", {shiftKey: true});
-    expect(cmds().at(-1)?.vy).toBeCloseTo(-0.4 * 0.5 * 0.3);
+    expect(cmds().at(-1)?.vy).toBeCloseTo(-0.4 * 0.25 * 0.3);
     key("keydown", "Space");
     expect(cmds().at(-1)).toMatchObject({vx: 0, vy: 0, wz: 0});
     Object.defineProperty(document, "visibilityState", {value: "hidden", configurable: true});
@@ -173,7 +173,7 @@ describe("TeleopPanel", () => {
     act(() => drive().click());
     await act(async () => new Promise(r => setTimeout(r, 0)));
     key("keydown", "KeyW");
-    expect(cmds().at(-1)).toMatchObject({vx: 0.3});
+    expect(cmds().at(-1)).toMatchObject({vx: 0.4});
     expect(sockets[0].url).toContain("/robots/hamilton/teleop/ws");
     act(() => useViewer.getState().setFocus("euclid"));
     const sent = sockets[0].sent;

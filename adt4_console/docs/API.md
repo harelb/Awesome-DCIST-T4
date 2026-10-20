@@ -290,7 +290,7 @@ Driving goes through `spot_executor_node`, which holds the Spot lease (never
   `{type: "pong", seq, t}`, `{type: "error", error}`. One driver per robot (another session
   gets `error` until the first closes or idles 3 s). Server-side deadman: a moving robot
   whose driver sends nothing for 0.3 s, or whose socket closes, gets one zero command.
-  Idle zeros are not forwarded. Velocities are clamped to vx 0.6, vy 0.4, wz 0.8.
+  Idle zeros are not forwarded. Velocities are clamped to vx 1.6 (Spot top speed), vy 0.4, wz 0.8.
 * `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
   clients without the socket (409 when another session drives).
 

@@ -730,7 +730,7 @@ route("GET", "/api/robots/([^/]+)/camera/([^/]+)\\.jpg", (q, r, m, url) => {
 });
 const teleop = {};
 const teleopState = robot =>
-  (teleop[robot] ??= {active: false, allowed: true, interlock: "", busy: "", standing: true, commanded: {vx: 0, vy: 0, wz: 0}, caps: {vx: 0.6, vy: 0.4, wz: 0.8}, deadman_s: 0.5, cmd_age_s: null, last_reject: "", last_event: "", commands: 0, rejected: 0, plan_executing: false, plan_paused: false, executor: "Idle"});
+  (teleop[robot] ??= {active: false, allowed: true, interlock: "", busy: "", standing: true, commanded: {vx: 0, vy: 0, wz: 0}, caps: {vx: 1.6, vy: 0.4, wz: 0.8}, deadman_s: 0.5, cmd_age_s: null, last_reject: "", last_event: "", commands: 0, rejected: 0, plan_executing: false, plan_paused: false, executor: "Idle"});
 const teleopView = robot => ({robot, state: teleopState(robot), lease: null, link: {rtt: 0.04}, ros: ROS});
 route("GET", "/api/robots/([^/]+)/teleop", (q, r, m) => json(r, 200, teleopView(decodeURIComponent(m[1]))));
 route("POST", "/api/robots/([^/]+)/teleop/(stand|sit|stop|pause|resume)", (q, r, m) => {

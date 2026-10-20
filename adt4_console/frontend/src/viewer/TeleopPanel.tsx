@@ -142,7 +142,8 @@ export function TeleopPanel() {
   const [drv, setDrv] = useState<DriverStatus>({connected: false, rttMs: null, acked: null, error: null, sent: 0});
   const [armed, setArmed] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  const [speed, setSpeed] = useState(0.5);
+  // starts at 0.4 m/s forward; the slider goes up to Spot's 1.6 m/s
+  const [speed, setSpeed] = useState(0.25);
   const [strafe, setStrafe] = useState(false);
   const [cmd, setCmd] = useState<Twist>(ZERO);
   const [note, setNote] = useState<string | null>(null);

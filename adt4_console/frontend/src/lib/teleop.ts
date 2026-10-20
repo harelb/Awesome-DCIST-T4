@@ -9,7 +9,7 @@ import {withToken} from "./auth";
 
 /** Robot hard caps (spot_executor.teleop.HARD_MAX); body frame: +x forward,
  *  +y left, +wz counter-clockwise (turn left). */
-export const CAPS = {vx: 0.6, vy: 0.4, wz: 0.8};
+export const CAPS = {vx: 1.6, vy: 0.4, wz: 0.8};
 export const SEND_HZ = 10;
 export const PING_MS = 1000;
 /** Shift = slow: this fraction of the slider speed. */

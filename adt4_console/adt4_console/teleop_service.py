@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 CMD_VEL_TYPE = "geometry_msgs/msg/Twist"
 # Must match spot_executor.teleop.HARD_MAX (the robot clamps again).
-CAPS = {"vx": 0.6, "vy": 0.4, "wz": 0.8}
+CAPS = {"vx": 1.6, "vy": 0.4, "wz": 0.8}
 # Zero the robot if the browser stops sending for this long (< the 0.5 s budget:
 # the watchdog runs every WATCHDOG_S and publishing takes a moment).
 DEADMAN_S = 0.3
