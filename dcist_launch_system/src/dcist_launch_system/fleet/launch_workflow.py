@@ -18,8 +18,10 @@ front-end answers (``True`` / ``False``) or gives up (``None``).
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shlex
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
@@ -31,6 +33,7 @@ from dcist_launch_system.fleet_helpers import (
     fleetlink_summary,
     generate_namespaced_rviz,
     generate_zenoh_endpoints,
+    get_local_ips,
     rsync_transfer,
     run_parallel,
     ssh_cmd,
@@ -218,15 +221,18 @@ def build_base_station_command(
     experiment: str,
     rviz_path=None,
     topo: dict | None = None,
+    prior_path: str | None = None,
 ) -> str:
     out_dir = _quote_path(f"{output_root}/{experiment}")
     platform = bs_machine.get("platform_id")
     config_flag = f" -c {shlex.quote(platform)}" if platform else ""
     rviz_flag = f" --rviz-config {shlex.quote(rviz_path)}" if rviz_path else ""
+    # the base station publishes the prior (prior_dsg) and seeds Neo4j from it (heracles)
+    prior_flag = f" -p {_quote_path(prior_path)}" if prior_path else ""
     return (
         f"{_WS_PREFIX}{fleet_env_prefix(bs_machine['name'], topo)}nohup {RUN_ADT4} "
         f"{shlex.quote(bs_session)} -n {shlex.quote(bs_machine['name'])}"
-        f"{config_flag} -o {out_dir} -y{rviz_flag} "
+        f"{config_flag} -o {out_dir} -y{prior_flag}{rviz_flag} "
         f'--tmuxp-args "-d" '
         f">/dev/null 2>&1 &"
     )
@@ -263,6 +269,7 @@ class LaunchDeps:
     rviz: Callable = generate_namespaced_rviz
     parallel: Callable = run_parallel
     sleep: Callable = time.sleep
+    local_ips: Callable = get_local_ips
     # scan(machine, root, only=None) -> run_scan identity entries, or None when the
     # machine cannot be scanned (then Phase 1 falls back to comparing names)
     scan: Callable | None = None
@@ -537,6 +544,13 @@ def run_launch(
         return False
 
     bs_machine = runtime_config.get(plan.base_station) if plan.base_station else None
+    if bs_machine and not plan.bs_session:
+        bs_machine = None
+    bs_is_robot = bool(bs_machine) and any(m["name"] == bs_machine["name"] for m, _ in cmds)
+    bs_prior = plan.prior_path
+    if bs_machine and plan.prior_path and plan.prior_source:
+        if bs_machine["name"] != plan.prior_source:
+            bs_prior = prior_dest_path(plan.prior_path, output_root)
 
     # Phase 0: zenoh config on the base station only (star topology; robots listen).
     # In fleetlink mode the endpoints are [] (the deploy clears any robot links
@@ -598,13 +612,40 @@ def run_launch(
                 return False
             if path != default_dest:
                 overrides[m["name"]] = path
+        if bs_machine and not bs_is_robot and bs_machine["name"] != plan.prior_source:
+            bs_prior = ensure_prior_on(
+                plan.prior_path,
+                plan.prior_source,
+                bs_machine,
+                runtime_config,
+                output_root,
+                cb,
+                deps,
+                prior_entry,
+            )
+            if not bs_prior:
+                cb.log("error", f"ABORT: could not transfer prior to {bs_machine['name']}")
+                return False
         if overrides:
             cmds = build_robot_commands(
                 plan, runtime_config, output_root, topo, prior_overrides=overrides
             )
 
-    # Phase 1.5: running tmux sessions
-    if not _resolve_session_conflicts([m for m, _ in cmds], cb, deps):
+    # Phase 1.5: running tmux sessions (the base station's too: a session left from
+    # an earlier launch would keep running with the old prior, or none)
+    targets = [m for m, _ in cmds]
+    if bs_machine and not bs_is_robot:
+        if _hosts_this_process(bs_machine, deps):
+            cb.log(
+                "warn",
+                f"{bs_machine['name']}: '{TMUX_SESSION_NAME}' runs this launcher, so it "
+                "is not restarted; restart the base station from a terminal to load "
+                "the new prior",
+            )
+            bs_machine = None
+        else:
+            targets.append(bs_machine)
+    if not _resolve_session_conflicts(targets, cb, deps):
         return False
 
     # Phase 2: output dirs, then launch robots
@@ -624,14 +665,35 @@ def run_launch(
             cb.log("error", f"{m['name']}: FAILED (rc={rc}) {err}")
 
     # Phase 3: base station
-    if bs_machine and plan.bs_session:
-        all_ok &= _launch_base_station(plan, bs_machine, output_root, cb, deps, topo)
+    if bs_machine and not bs_is_robot:
+        all_ok &= _launch_base_station(
+            plan, bs_machine, output_root, cb, deps, topo, prior_path=bs_prior
+        )
 
     cb.log("heading", "Launch sequence complete.")
     return all_ok
 
 
-def _launch_base_station(plan, bs_machine, output_root, cb, deps, topo=None) -> bool:
+def _hosts_this_process(machine, deps) -> bool:
+    """True if this process runs inside ``machine``'s ADT4 tmux session (e.g. the
+    web console as a window of base_station_web), which killing it would end."""
+    if not os.environ.get("TMUX") or machine.get("ip") not in deps.local_ips():
+        return False
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "#S"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out == TMUX_SESSION_NAME
+
+
+def _launch_base_station(
+    plan, bs_machine, output_root, cb, deps, topo=None, prior_path=None
+) -> bool:
     cb.log("heading", "Launching base station...")
     if cb.local_zenohd_running():
         cb.log("dim", "Stopping fleet zenohd (base station will take over)...")
@@ -652,8 +714,16 @@ def _launch_base_station(plan, bs_machine, output_root, cb, deps, topo=None) -> 
             cb.log("warn", f"RViz config generation failed: {e}")
 
     bs_cmd = build_base_station_command(
-        bs_machine, plan.bs_session, output_root, plan.experiment, rviz_path, topo
+        bs_machine,
+        plan.bs_session,
+        output_root,
+        plan.experiment,
+        rviz_path,
+        topo,
+        prior_path=prior_path,
     )
+    if prior_path:
+        cb.log("dim", f"{bs_machine['name']}: prior {prior_path}")
     cb.log("dim", f"[{bs_machine['user']}@{bs_machine['ip']}] {bs_cmd}")
     rc, _, err = deps.ssh(bs_machine["user"], bs_machine["ip"], bs_cmd, timeout=60)
 

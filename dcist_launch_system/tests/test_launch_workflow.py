@@ -211,7 +211,8 @@ def test_default_selection_mapping_and_relocalize():
 
 
 def test_happy_path_launches_robot_and_base_station():
-    ssh = FakeSsh({"tmux has-session": (0, "OK", "", "10.0.0.9")})
+    # the post-launch check finds the base station's session; nothing ran before
+    ssh = FakeSsh({"&& echo OK": (0, "OK", "", "10.0.0.9")})
     rec = Recorder(zenohd=True)
     plan = LaunchPlan(
         robots=["smaug"],
@@ -226,6 +227,70 @@ def test_happy_path_launches_robot_and_base_station():
     assert any("run-adt4 spot-default" in c for c in ssh.cmds_for("10.0.0.1"))
     assert any("nohup" in c for c in ssh.cmds_for("10.0.0.9"))
     assert "base station launched" in rec.text()
+
+
+def test_base_station_command_passes_the_prior():
+    cmd = build_base_station_command(
+        RUNTIME["willow"], "base_station-default", OUT, "e1", prior_path="~/adt4_output/p"
+    )
+    assert " -p ~/adt4_output/p" in cmd
+    assert " -p " not in build_base_station_command(RUNTIME["willow"], "b", OUT, "e1")
+
+
+def _reloc_plan(source):
+    return LaunchPlan(
+        robots=["smaug"],
+        session="spot-relocalize",
+        experiment="e",
+        mode="relocalize",
+        prior_path="~/adt4_output/p",
+        prior_source=source,
+        base_station="willow",
+        bs_session="base_station-default",
+    )
+
+
+def _bs_launch(ssh):
+    return next(c for c in ssh.cmds_for("10.0.0.9") if "nohup" in c)
+
+
+def test_relocalize_base_station_gets_the_prior():
+    # prior on the base station: it loads its own copy
+    ssh = FakeSsh({"&& echo OK": (0, "OK", "", "10.0.0.9")})
+    assert run(_reloc_plan("willow"), ssh, Recorder()) is True
+    assert " -p ~/adt4_output/p" in _bs_launch(ssh)
+    # prior on a robot: the base station gets prior_<name> like the other machines
+    ssh = FakeSsh({"&& echo OK": (0, "OK", "", "10.0.0.9")})
+    calls = []
+    rec = Recorder()
+    assert run(_reloc_plan("smaug"), ssh, rec, rsync=lambda *a, **k: calls.append(a) or (True, "direct", "ok")) is True
+    assert " -p ~/adt4_output/prior_p" in _bs_launch(ssh)
+    assert rec.pct.get("willow") == 100
+
+
+def test_running_base_station_session_is_replaced():
+    # a session left from the mapping run must not keep running with no prior
+    ssh = FakeSsh({"2>/dev/null": (0, "OK", "", "10.0.0.9")})
+    rec = Recorder(answers=[True])
+    assert run(_reloc_plan("willow"), ssh, rec) is True
+    [req] = rec.requests
+    assert req.detail["machines"] == ["willow"]
+    cmds = ssh.cmds_for("10.0.0.9")
+    kill = next(i for i, c in enumerate(cmds) if "kill-session" in c)
+    launch = next(i for i, c in enumerate(cmds) if "nohup" in c)
+    assert kill < launch
+
+
+def test_base_station_session_hosting_the_launcher_is_left_alone(monkeypatch):
+    import dcist_launch_system.fleet.launch_workflow as lw
+
+    monkeypatch.setattr(lw, "_hosts_this_process", lambda m, deps: True)
+    ssh = FakeSsh({"2>/dev/null": (0, "OK", "", "10.0.0.9")})
+    rec = Recorder(answers=[True])
+    run(_reloc_plan("willow"), ssh, rec)
+    assert rec.requests == []
+    assert not any("kill-session" in c or "nohup" in c for c in ssh.cmds_for("10.0.0.9"))
+    assert "restart the base station from a terminal" in rec.text()
 
 
 def test_session_check_uses_real_tmux_session_name():
