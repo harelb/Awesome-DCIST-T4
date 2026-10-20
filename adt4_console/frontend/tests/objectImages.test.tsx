@@ -5,7 +5,7 @@ import type {NodeRecord} from "../src/codec";
 import {GraphModel} from "../src/lib/graphModel";
 import {pickBox, rayBox, type BoxSet} from "../src/lib/bboxPick";
 import {layoutGraph} from "../src/viewer/layout";
-import {imageUrl, nodeImageBase, ObjectImages, SearchThumb} from "../src/viewer/objectImages";
+import {frameBadge, imageUrl, nodeImageBase, ObjectImages, SearchThumb} from "../src/viewer/objectImages";
 
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -119,5 +119,28 @@ describe("object image components", () => {
     expect(c.querySelector(".obj-hero")).toBeNull();
     expect(c.querySelectorAll(".image-strip img").length).toBe(2);
     expect(c.querySelector(".toggle")).toBeNull();
+  });
+
+  it("inspect: agents with frame info get the nearest frame large with a distance badge", () => {
+    const info = [
+      {kind: "subkeyframe" as const, own: false, dist_m: 0.42, yaw_deg: 12.3, frame_id: 7, anchor: "a(14)"},
+      {kind: "keyframe" as const, own: false, dist_m: 0.9, yaw_deg: 3, frame_id: 5, anchor: "a(15)"},
+    ];
+    const c = mount(<ObjectImages images={["/a/0", "/a/1"]} masks={[false, false]} info={info} title="a(14)" sym="a(14)" isObject={false} />);
+    expect(c.querySelector(".obj-hero img")!.getAttribute("src")).toBe("/a/0?w=720");
+    expect(c.querySelector(".obj-hero-tag")!.textContent).toBe("sub-keyframe · 0.42 m, 12° from a(14)");
+    expect(c.querySelectorAll(".image-strip img").length).toBe(1);
+    expect(c.querySelector(".thumb-tag")!.textContent).toBe("keyframe · 0.90 m · 3°");
+    expect(c.querySelector(".thumb")!.getAttribute("title")).toContain("anchored to a(15)");
+  });
+});
+
+describe("frame badges", () => {
+  it("labels own keyframes and nearest frames", () => {
+    expect(frameBadge({kind: "keyframe", own: true, dist_m: 0, yaw_deg: 0}, "a(1)", true)).toBe("keyframe");
+    expect(frameBadge({kind: "subkeyframe", dist_m: 0.4239, yaw_deg: null}, "a(1)", true)).toBe("sub-keyframe · 0.42 m from a(1)");
+    expect(frameBadge({kind: "subkeyframe", dist_m: null, yaw_deg: null})).toBe("sub-keyframe");
+    expect(frameBadge({kind: null})).toBe("");
+    expect(frameBadge(undefined)).toBe("");
   });
 });

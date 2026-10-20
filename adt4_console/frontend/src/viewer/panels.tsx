@@ -11,7 +11,7 @@ import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
 import {applyPoint} from "../lib/frameAlign";
 import {sourceMatrix} from "../stores/robots";
-import {ObjectImages, SearchThumb, useImaged} from "./objectImages";
+import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
 import {useViewStyle} from "../stores/viewStyle";
 import {BackgroundControl, HeightsControl, RegionControls} from "./StylePanels";
 
@@ -288,7 +288,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
 export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string) => void; onGoto: (src: string, sym: string) => void}) {
   const {selected, sources, fly, flat, stackHeight, select, vizStyle} = useViewer();
   const heights = useViewStyle(s => s.heights);
-  const [detail, setDetail] = useState<(NodeDetail & {masks?: boolean[]}) | null>(null);
+  const [detail, setDetail] = useState<(NodeDetail & {masks?: boolean[]; image_info?: ImageInfo[]}) | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const node = selected ? sources[selected.src]?.model?.nodes.get(selected.sym) : null;
@@ -299,7 +299,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
     if (!selected) return;
     const ctl = new AbortController();
     setLoading(true);
-    getJSON<NodeDetail & {masks?: boolean[]}>(`${srcPath(selected.src)}/node/${encodeURIComponent(selected.sym)}`, ctl.signal)
+    getJSON<NodeDetail & {masks?: boolean[]; image_info?: ImageInfo[]}>(`${srcPath(selected.src)}/node/${encodeURIComponent(selected.sym)}`, ctl.signal)
       .then(setDetail)
       .catch(e => !ctl.signal.aborted && setErr(errorText(e)))
       .finally(() => !ctl.signal.aborted && setLoading(false));
@@ -315,7 +315,10 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
   const info = layerInfo(node.layer, node.part);
   const images = detail?.images ?? [];
   const isObject = info.kind === "objects";
-  const imagesEl = <ObjectImages images={images} masks={detail?.masks} title={model.displayName(node)} isObject={isObject} />;
+  const isAgent = info.kind === "agents";
+  const imagesEl = (
+    <ObjectImages images={images} masks={detail?.masks} info={detail?.image_info} title={model.displayName(node)} sym={node.sym} isObject={isObject} />
+  );
   const color = info.kind === "objects" ? nodeColor(node.label, node.color) : (LAYER_COLORS as Record<string, [number, number, number]>)[info.kind] ?? [200, 200, 200];
   return (
     <div className="inspector">
@@ -344,8 +347,8 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
           </button>
         )}
       </div>
-      {isObject && imagesEl}
-      {isObject && loading && !detail && <div className="obj-hero-wait muted small">Loading images…</div>}
+      {(isObject || isAgent) && imagesEl}
+      {(isObject || isAgent) && loading && !detail && <div className="obj-hero-wait muted small">Loading images…</div>}
       <table className="table compact kv-table">
         <tbody>
           <tr>
@@ -382,7 +385,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
       </table>
       {loading && <Spinner label="Loading attributes" />}
       {err && <div className="inline-err small">{err}</div>}
-      {!isObject && imagesEl}
+      {!isObject && !isAgent && imagesEl}
     </div>
   );
 }

@@ -81,6 +81,7 @@ def test_imaged_lists_objects_with_kept_images(gclient):
 def test_node_detail_reports_masks(gclient):
     d = gclient.get("/api/graph/file:syn/node/O(0)").json()
     assert d["n_images"] == 2 and d["masks"] == [True, False]
+    assert [i["kind"] for i in d["image_info"]] == [None, None]  # object images, not agent frames
     assert gclient.get("/api/graph/file:syn/node/O(1)").json()["masks"] == []
 
 
