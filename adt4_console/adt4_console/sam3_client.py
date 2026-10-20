@@ -8,12 +8,16 @@ agentic_navigation (the console runs in spark_env, which does not carry it):
   (detection only; nothing is written until a commit)
 - ``POST /commit {pending_id, index}`` → ``{symbol, created|merged}``
 - ``POST /discard {pending_id}``
+- ``POST /rank {prompt, top_k, source}`` → SigLIP2-ranked keyframes (no SAM3)
+- ``GET /health`` / ``GET /frame?key=`` (the console's "Search images" tool)
 """
 
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 
 # Serving budgets, same values as agentic_navigation query_client (a narrower
@@ -36,13 +40,28 @@ class Sam3Error(RuntimeError):
         self.status = status
 
 
-def _post(base_url: str, path: str, payload: dict, timeout_s: float) -> dict:
+def server_label(base_url: str) -> str:
+    """``host:port`` of the server for operator-facing errors; a loopback URL
+    names this machine (e.g. ``willow:8077``)."""
+    u = urllib.parse.urlsplit(base_url)
+    host = u.hostname or "?"
+    if host in ("127.0.0.1", "localhost", "0.0.0.0", "::1"):
+        host = socket.gethostname()
+    return f"{host}:{u.port or 80}"
+
+
+def not_running_message(base_url: str) -> str:
+    return f"SAM3 query server not running on {server_label(base_url)}"
+
+
+def _post(base_url: str, path: str, payload: dict | None, timeout_s: float) -> dict:
+    """POST ``payload`` as JSON (``None``: a GET) and decode the JSON reply."""
     base = base_url.rstrip("/")
     req = urllib.request.Request(
         base + path,
-        data=json.dumps(payload).encode(),
+        data=None if payload is None else json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
-        method="POST",
+        method="GET" if payload is None else "POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -62,8 +81,16 @@ def _post(base_url: str, path: str, payload: dict, timeout_s: float) -> dict:
             f"SAM3 server HTTP {e.code}: {(detail or str(e.reason))[:300]}", e.code
         ) from None
     except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            raise Sam3Unavailable(
+                f"{not_running_message(base)} (unreachable at {base}: connection refused)"
+            ) from None
         raise Sam3Unavailable(
             f"SAM3 query server unreachable at {base} ({e.reason})"
+        ) from None
+    except ConnectionRefusedError:
+        raise Sam3Unavailable(
+            f"{not_running_message(base)} (unreachable at {base}: connection refused)"
         ) from None
     except (TimeoutError, OSError) as e:
         raise Sam3Unavailable(f"SAM3 query server at {base}: {e}") from None
@@ -88,6 +115,45 @@ def query(prompt: str, base_url: str, timeout_s: float = 180.0, dry_run=True) ->
         },
         timeout_s,
     )
+
+
+#: knobs the "Search images" tool may pass through to ``POST /query``
+QUERY_KNOBS = ("mode", "top_k", "max_frames", "patience", "min_ts", "source", "conf",
+               "max_views")
+
+
+def query_with(prompt: str, base_url: str, timeout_s: float = 180.0, **knobs) -> dict:
+    """Dry-run ``/query`` with explicit knobs (unset ones get the serving
+    budgets); never writes -- confirm a candidate with :func:`commit`."""
+    payload = {
+        "prompt": prompt,
+        "mode": QUERY_MODE,
+        "top_k": QUERY_TOP_K,
+        "max_frames": QUERY_MAX_FRAMES,
+        "patience": QUERY_PATIENCE,
+    }
+    payload.update({k: v for k, v in knobs.items() if k in QUERY_KNOBS and v is not None})
+    payload["dry_run"] = True
+    return _post(base_url, "/query", payload, timeout_s)
+
+
+def rank(prompt: str, base_url: str, top_k: int = 24, source: str | None = None,
+         min_ts: int | None = None, thumb_dim: int = 320, timeout_s: float = 60.0) -> dict:
+    payload = {"prompt": prompt, "top_k": int(top_k), "thumb_dim": int(thumb_dim)}
+    if source:
+        payload["source"] = source
+    if min_ts is not None:
+        payload["min_ts"] = int(min_ts)
+    return _post(base_url, "/rank", payload, timeout_s)
+
+
+def health(base_url: str, timeout_s: float = 3.0) -> dict:
+    return _post(base_url, "/health", None, timeout_s)
+
+
+def frame(key: str, base_url: str, max_dim: int = 1280, timeout_s: float = 30.0) -> dict:
+    q = urllib.parse.urlencode({"key": key, "max_dim": int(max_dim)})
+    return _post(base_url, f"/frame?{q}", None, timeout_s)
 
 
 def commit(pending_id: str, index: int, base_url: str, timeout_s: float = 60.0) -> dict:

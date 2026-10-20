@@ -1,0 +1,329 @@
+/* Map viewer "Images" tab (SearchImagesPanel.tsx): SigLIP2 + SAM3 image search. */
+.simg {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+.simg .grow {
+  flex: 1;
+  min-width: 0;
+}
+.simg-health {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  line-height: 1.35;
+}
+.simg-down {
+  border-color: rgba(255, 90, 95, 0.5);
+  background: var(--err-bg);
+}
+.simg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.simg-query {
+  display: flex;
+  gap: 6px;
+}
+.simg-query .input {
+  flex: 1;
+  min-width: 0;
+}
+.simg-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.simg-source {
+  flex: 1;
+  min-width: 140px;
+}
+.simg-knobs summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-2);
+  user-select: none;
+}
+.simg-knobs summary .mono {
+  margin-left: 4px;
+}
+.simg-knob-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px 10px;
+  margin-top: 8px;
+  align-items: end;
+}
+.simg-knob-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.simg-knob-grid label.dim {
+  opacity: 0.5;
+}
+.simg-knob-grid .input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.simg-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.simg-empty {
+  padding: 8px 2px;
+}
+.simg-busy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.simg-error {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 8px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 90, 95, 0.5);
+  background: var(--err-bg);
+  font-size: 13px;
+}
+.simg-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.simg-timings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.simg-chip {
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--text-2);
+}
+.simg-chip-total {
+  border-color: var(--accent-2);
+  color: var(--text);
+}
+/* candidates: one column docked, more when a floating window is wide */
+.simg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.simg-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.simg-card.is-added {
+  border-color: rgba(53, 208, 127, 0.6);
+}
+.simg-card.is-discarded {
+  opacity: 0.5;
+}
+.simg-card-img {
+  position: relative;
+  background: #000;
+}
+.simg-img-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+.simg-card-img img {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+}
+.simg-noimg {
+  display: grid;
+  place-items: center;
+  height: 120px;
+}
+.simg-carousel {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+}
+.simg-carousel .icon-btn {
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+}
+.simg-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px;
+}
+.simg-card-body .badge {
+  align-self: flex-start;
+}
+.simg-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.simg-pos {
+  overflow-wrap: anywhere;
+}
+.simg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+/* SigLIP2-only ranking grid */
+.simg-rank-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+.simg-rank {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.simg-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+  cursor: zoom-in;
+}
+.simg-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.simg-rank-n {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+}
+.simg-rank figcaption {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+}
+/* history */
+.simg-history summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-2);
+}
+.simg-history ul {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.simg-history li {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+.simg-hist-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg-1);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.simg-hist-item.on {
+  border-color: var(--accent-2);
+  background: var(--info-bg);
+}
+.simg-hist-prompt {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* full frame viewer */
+.simg-frame {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 auto 8px;
+  line-height: 0;
+}
+.simg-frame img {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+}
+.simg-mask,
+.simg-box {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.simg-box rect {
+  fill: none;
+  stroke: #ff00ff;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
