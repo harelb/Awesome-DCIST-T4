@@ -1,7 +1,7 @@
 ---
 networks:
   mit_wifi:
-    subnet: 10.29.0.0/16
+    subnet: 10.28.0.0/14  # MIT WiFi hands out both 10.29.x and 10.31.x
   penn_wifi:
     subnet: 192.168.129.0/24
   silvus:
