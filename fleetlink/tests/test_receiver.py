@@ -219,3 +219,41 @@ def test_manifest_requests_missing_tiles_and_removes_stale():
     assert set(rx.tiles("r")) == {"a"}
     assert _reqs(tr, "tiles")[-1]["args"]["keys"] == ["c"]
     assert ("r", "tiles", {"changed": [], "removed": ["b"]}) in events
+
+
+def test_byte_totals_per_direction_and_session():
+    tr, clock, rx, events = _rx()
+    recs, _, _ = synthetic_records(4)
+    items = list(recs.items())
+    _first_contact(rx, tr, items)
+    link = rx.link("r")
+    assert link["rx_total_B"] == sum(link["bytes"].values()) > 0
+    tx_sent = sum(len(d) for k, d, c in tr.sent if k.endswith("/ctl/req"))
+    assert link["tx_total_B"] == tx_sent > 0  # the resync request
+    assert link["sessions"] == 1 and link["connected_since"] == 100.0
+    assert link["rx_session_B"] == link["rx_total_B"]
+    assert link["since_s"] == 0.0
+
+    rx.tick()  # starts the rate window
+    clock.advance(1.5)
+    rx.tick()  # pings / fb go out: counted base -> robot
+    assert rx.link("r")["tx_total_B"] == sum(
+        len(d) for k, d, c in tr.sent if k.endswith("/ctl/req")
+    )
+    assert rx.link("r")["rx_rate_Bps"] > 0 and rx.link("r")["tx_rate_Bps"] > 0
+
+    clock.advance(10.0)  # silence > connected_timeout, then the robot is back
+    before = rx.link("r")
+    _c2(rx, 1, _delta(dict(items[1:2])))
+    after = rx.link("r")
+    assert after["sessions"] == 2 and after["connected_since"] == clock()
+    n = after["rx_total_B"] - before["rx_total_B"]
+    assert n > 0 and after["rx_session_B"] == n
+    assert after["tx_session_B"] == after["tx_total_B"] - before["tx_total_B"]
+    assert after["since_s"] == clock() - 100.0
+
+    # agent restart (new epoch) starts a new session too, counting its first message
+    _c2(rx, 0, _delta(dict(items[2:3])), epoch="E2")
+    restarted = rx.link("r")
+    assert restarted["sessions"] == 3
+    assert restarted["rx_session_B"] == restarted["rx_total_B"] - after["rx_total_B"]

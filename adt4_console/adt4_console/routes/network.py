@@ -70,6 +70,15 @@ def _fleet_link(topo: dict) -> dict:
     return out
 
 
+@router.get("/interfaces")
+def interfaces(request: Request):
+    """Per-machine interface rates + totals parsed from the tx_rx_monitor status
+    notes, with the interface that most likely carries the radio link."""
+    from ..netstats import interfaces_payload
+
+    return interfaces_payload(services(request).fleet)
+
+
 @router.get("/colors")
 def robot_colors(request: Request):
     """Per-robot display colors (topology ``color`` or the shared palette)."""

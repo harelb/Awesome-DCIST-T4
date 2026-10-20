@@ -5,6 +5,7 @@ import {useFleet} from "../stores/fleet";
 import {Badge, Card, Dot, Empty, ErrorBox, Field, Loading, Modal, PageHeader, Spinner} from "../components/ui";
 import {JobStateBadge} from "../components/Jobs";
 import {jobIdOf} from "./Fleet";
+import {BandwidthSection} from "../components/Bandwidth";
 
 interface ZenohStatus {
   local_zenohd: {running: boolean; [k: string]: unknown};
@@ -40,7 +41,7 @@ function linkText(l: unknown): string {
 export function NetworkPage() {
   const zenoh = useApi<ZenohStatus>("api/network/zenoh", 10_000);
   const silvus = useApi<SilvusStatus>("api/network/silvus", 15_000);
-  const machines = useFleet(s => s.machines?.machines ?? []);
+  const machines = useFleet(s => s.machines)?.machines ?? []; // selector must return a stable value (zustand 5)
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ok: boolean; text: string} | null>(null);
   const [deploy, setDeploy] = useState(false);
@@ -198,6 +199,8 @@ export function NetworkPage() {
           )}
         </Card>
       </div>
+
+      <BandwidthSection />
 
       <Card
         title="Silvus radio mesh"

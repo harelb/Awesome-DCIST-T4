@@ -1,0 +1,93 @@
+/* Bandwidth totals (Live panel + Network page) */
+.bw-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.bw-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.bw-table th,
+.bw-table td {
+  padding: 2px 6px;
+  text-align: right;
+  white-space: nowrap;
+}
+.bw-table thead th {
+  color: var(--muted);
+  font-weight: 500;
+  font-family: var(--sans);
+  font-size: 11px;
+  border-bottom: 1px solid var(--line);
+}
+.bw-table th.bw-dir {
+  text-align: left;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.bw-table tbody tr + tr td,
+.bw-table tbody tr + tr th {
+  border-top: 1px solid var(--bg-3);
+}
+.bw-classes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.bw-chip {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--bg-1);
+}
+.bw-cls {
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.bw-fleet {
+  border-color: var(--accent-2);
+  background: var(--bg-1);
+}
+.bw-ifaces .bw-machine {
+  vertical-align: top;
+}
+.bw-radio-row td:not(.bw-machine) {
+  background: var(--info-bg);
+}
+.bw-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+  cursor: help;
+}
+.bw-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 10px;
+}
+.bw-compare {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg);
+  min-width: 0;
+}
+.bw-compare .table-wrap,
+.bw-compare .bw-table {
+  overflow-x: auto;
+}
+.bw-ifaces td.num,
+.bw-ifaces th.num {
+  white-space: nowrap;
+}

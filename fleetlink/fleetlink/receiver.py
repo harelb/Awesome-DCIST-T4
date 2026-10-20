@@ -119,6 +119,16 @@ class _Robot:
         self.kf_req_t: dict[str, float] = {}
         self.bytes = dict.fromkeys(CLASSES, 0)
         self.rates = dict.fromkeys(CLASSES, 0.0)
+        # base -> robot bytes (C0 ctl/req + camera query payloads) and its rate
+        self.tx_bytes = 0
+        self.tx_rate = 0.0
+        self.tx_win = 0
+        # the current link session: since the first message after a silence of
+        # ``connected_timeout`` (or an epoch change), bytes counted from there
+        self.connected_since: float | None = None
+        self.sessions = 0
+        self.session_rx0 = 0
+        self.session_tx0 = 0
         self.win = dict.fromkeys(CLASSES, 0)
         self.win_t: float | None = None
         self.gaps = 0
@@ -197,6 +207,7 @@ class Receiver:
         self._pending: dict[str, dict] = {}  # req id -> {robot, req, t, tries}
         self._ids = itertools.count()
         self._session = secrets.token_hex(3)
+        self.started = clock()  # byte totals count from here
         self._req_seq = itertools.count()
         self._lock = threading.RLock()
         self._sub = None
@@ -306,12 +317,11 @@ class Receiver:
                 r.win["C4"] += len(data)
             callback(rep)
 
-        self.transport.query(
-            f"adt4/{robot}/media/camera/{name}",
-            {"w": int(width), "q": int(quality)},
-            done,
-            timeout,
-        )
+        key = f"adt4/{robot}/media/camera/{name}"
+        params = {"w": int(width), "q": int(quality)}
+        with self._lock:  # ~ what goes on the wire: key + params
+            self._count_tx(self._robot(robot), len(key) + len(msgpack.packb(params)))
+        self.transport.query(key, params, done, timeout)
 
     def camera(self, robot, name, width=640, quality=70, timeout=5.0) -> dict | None:
         """Blocking :meth:`query_camera` (needs a transport that answers on its own
@@ -351,6 +361,7 @@ class Receiver:
             "budgets": stats.get("budgets", {}),
             "rates": {c: r.rates[c] for c in REPORTED_CLASSES},
             "bytes": dict(r.bytes),
+            **self._totals(r, now),
             "drops": r.drops,
             "gaps": r.gaps,
             "loss": {c: round(r.loss[c], 4) for c in CLASSES},
@@ -364,6 +375,35 @@ class Receiver:
             "robot_queue": stats.get("queue", {}),
             "store": self.store.stats(r.name) if self.store is not None else None,
         }
+
+    def _totals(self, r: _Robot, now: float) -> dict:
+        """Byte totals per direction: robot -> base (``rx``: every class, envelope
+        bytes as received, i.e. after compression) and base -> robot (``tx``),
+        since this receiver started and since the current link session began."""
+        rx = sum(r.bytes.values())
+        return {
+            "rx_total_B": rx,
+            "tx_total_B": r.tx_bytes,
+            "rx_rate_Bps": sum(r.rates.values()),
+            "tx_rate_Bps": r.tx_rate,
+            "since_s": now - self.started,
+            "connected_since": r.connected_since,
+            "sessions": r.sessions,
+            "rx_session_B": rx - r.session_rx0,
+            "tx_session_B": r.tx_bytes - r.session_tx0,
+        }
+
+    @staticmethod
+    def _count_tx(r: _Robot, n: int) -> None:
+        r.tx_bytes += n
+        r.tx_win += n
+
+    @staticmethod
+    def _new_session(r: _Robot, now: float) -> None:
+        r.connected_since = now
+        r.sessions += 1
+        r.session_rx0 = sum(r.bytes.values())
+        r.session_tx0 = r.tx_bytes
 
     def _robot(self, name: str) -> _Robot:
         r = self._robots.get(name)
@@ -402,7 +442,10 @@ class Receiver:
     def _put_req(self, robot: str, req: dict) -> None:
         env = codec.envelope("base", "ctl/req", next(self._req_seq), self._session, req)
         env["t"] = self.clock()
-        self.transport.put(f"adt4/{robot}/ctl/req", codec.pack(env), "C0")
+        data = codec.pack(env)
+        with self._lock:
+            self._count_tx(self._robot(robot), len(data))
+        self.transport.put(f"adt4/{robot}/ctl/req", data, "C0")
 
     def set_budget(self, robot: str, cls: str, bps: float) -> str:
         if cls not in REPORTED_CLASSES:
@@ -498,6 +541,12 @@ class Receiver:
 
     def _receive(self, r: _Robot, env: dict, stream: str, cls: str, n, now) -> list:
         """Lock held: account and dispatch one message; returns the events."""
+        if (
+            r.last_seen is None
+            or now - r.last_seen >= self.connected_timeout
+            or (r.epoch is not None and env.get("epoch") not in (r.epoch, *r.retired))
+        ):
+            self._new_session(r, now)  # (re)connected after a silence / agent restart
         r.bytes[cls] += n
         r.win[cls] += n
         r.last_seen = now
@@ -878,6 +927,8 @@ class Receiver:
                     r.win_t = now
                 elif now - r.win_t >= 1.0:
                     dt = now - r.win_t
+                    r.tx_rate = 0.6 * r.tx_rate + 0.4 * (r.tx_win / dt)
+                    r.tx_win = 0
                     for c in CLASSES:
                         r.rates[c] = 0.6 * r.rates[c] + 0.4 * (r.win[c] / dt)
                         r.win[c] = 0

@@ -5,6 +5,8 @@ import {errorText, getJSON, postJSON} from "../lib/api";
 import {fmtRate} from "../lib/fuzzy";
 import type {Cls, LinkInfo, LiveResponse} from "../types";
 import {Badge, Dot, Empty, ErrorBox, Sparkline, Toggle, type Tone} from "../components/ui";
+import {FleetTotalsRow, LinkTotalsTable} from "../components/Bandwidth";
+import type {Link} from "../lib/netstats";
 
 const CLASSES: {cls: Cls; name: string; color: string}[] = [
   {cls: "C1", name: "state", color: "#35d07f"},
@@ -122,6 +124,7 @@ export function LivePanel() {
   if (loaded && !robots.length) return <Empty title="No live robots">fleetlink has not heard from any robot. Is the console running with fleetlink enabled?</Empty>;
   return (
     <div className="live-panel">
+      {robots.length > 0 && <FleetTotalsRow links={link as Record<string, Link>} />}
       {robots.map(([r, l]) => {
         const srcId = `live:${r}`;
         const src = sources[srcId];
@@ -161,6 +164,7 @@ export function LivePanel() {
               drops {l.drops ?? 0} · gaps {l.gaps ?? 0} · resyncs {l.resyncs ?? 0}
               {l.epoch ? ` · epoch ${String(l.epoch).slice(0, 8)}` : ""}
             </div>
+            <LinkTotalsTable link={l as Link} />
             {linkClasses(l).map(c => (
               <BudgetRow key={c.cls} robot={r} cls={c.cls} name={c.name} color={c.color} link={l} history={history[r]?.[c.cls] ?? []} />
             ))}
