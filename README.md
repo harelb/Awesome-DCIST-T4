@@ -126,6 +126,7 @@ You should periodically rerun the python setup script to make sure everything is
 | ADT4\_ROBOT\_NAME                 | Robot name (e.g. "spot")                                          |
 | ADT4\_DLS\_PKG                    | Path to dicst\_launch\_system package                             |
 | ADT4\_SIM\_TIME                   | Use sim time? true/false                                          |
+| ADT4\_NAMESPACE\_TF              | Publish TF on /<robot>/tf instead of /tf? (default: true)         |
 | ADT4\_OPENAI\_API\_KEY            | OpenAI API Key                                                    |
 | ADT4\_DEEPGRAM\_API\_KEY          | Deepgram API Key                                                  |
 | ADT4\_HERACLES\_AGENTS\_PATH      | Path to heracles\_agents package                                  |
@@ -144,6 +145,27 @@ You should periodically rerun the python setup script to make sure everything is
 Note that while some of these environment variables can be set to dummy values
 (e.g., API Keys for functionality you aren't using), all of them need to be set
 to *something* in order to launch the system properly.
+
+### Heracles plan-repair configuration
+
+The Heracles publisher can **seed Neo4j**: load the prior scene graph into the
+database before publishing it. `seed_dsg_path` is set to
+`$ADT4_PRIOR_MAP/hydra/backend/dsg.json`, using the prior map selected by
+`run-adt4 -p`. This is database initialization, not a random-number seed.
+
+`ADT4_NEO4J_SEED=true` enables seeding. It **replaces the database contents**,
+including robot poses and holding relationships, and restarts the map version at
+1. Use it at the start of a fresh run. Set `ADT4_NEO4J_SEED=false` when restarting
+the publisher during a mission to preserve the current database and recorded
+changes. The publisher defaults to `false`; the `heracles_prior_dsg_repair`
+launch component defaults to `true` unless the variable is explicitly set.
+If the seed file is missing, the publisher logs an error and retains the existing
+database.
+
+The state updater tracks the robots listed under `robots:` in the config's
+`omniplanner_plugins.yaml`, the same robots the planner plans for. For each one
+it updates the pose and exposes `/<robot>/update_holding_state`. Robots without
+an available transform are skipped for pose updates.
 
 ### Silvus Network Computer IPs
 

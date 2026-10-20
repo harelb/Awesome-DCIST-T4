@@ -34,9 +34,6 @@
 [submodule "nlu_interface"]
 	path = nlu_interface
 	url = git@github.com:robustrobotics/nlu_interface.git
-[submodule "hydra_multi"]
-	path = hydra_multi
-	url = git@github.com:MIT-SPARK/Hydra-Multi.git
 [submodule "config_utilities"]
 	path = config_utilities
 	url = git@github.com:MIT-SPARK/config_utilities.git
@@ -48,7 +45,7 @@
 	url = git@github.com:MultyXu/dsg_analyzer.git
 [submodule "heracles"]
 	path = heracles
-	url = git@github.com:GoldenZephyr/heracles.git
+	url = git@github.com:robustrobotics/heracles.git
 [submodule "heracles_agents"]
 	path = heracles_agents
 	url = git@github.com:robustrobotics/heracles_agents.git
@@ -64,3 +61,6 @@
 [submodule "agentic_navigation"]
 	path = agentic_navigation
 	url = git@github.com:harelb/agentic_navigation.git
+[submodule "depth_processing_ros"]
+	path = depth_processing_ros
+	url = git@github.com:mbpeterson70/depth_processing_ros.git

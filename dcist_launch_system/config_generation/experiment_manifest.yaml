@@ -3,28 +3,36 @@
 launch_configs:
   # core groupings
   main: [core, status]
-  map: [main, hydra, roman, fleetlink]
+  # robots also send reduced-rate TF to the base station
+  robot_main: [main, tf_network]
+  map: [robot_main, hydra, roman, fleetlink]
   # like `map`, but hydra consumes ROMAN intra-session loop closures (drift reduction)
-  map_lc: [main, hydra_lc, roman, fleetlink]
-  relocalize: [main, hydra_multi, roman, fleetlink]
+  map_lc: [robot_main, hydra_lc, roman, fleetlink]
+  relocalize: [robot_main, hydra_multi, roman, fleetlink]
   # development groupings
-  map_old: [main, hydra_old, roman]
-  no_relocalize: [main, transform_publishers]
+  map_old: [robot_main, hydra_old, roman]
+  no_relocalize: [robot_main, transform_publishers]
   bag_map: [map, rviz]
   bag_map_lc: [map_lc, rviz]
   bag_relocalize: [relocalize, rviz, relocalize_viz]
   # planning and base station
   plan_prior: [main, prior_dsg, planning, fleetlink_base]
   plan_prior_heracles: [main, heracles_prior_dsg, planning, fleetlink_base]
+  plan_prior_repair: [main, prior_dsg, planning_repair, fleetlink_base]
+  plan_prior_heracles_repair: [main, heracles_prior_dsg_repair, planning_repair, fleetlink_base]
   # web console instead of rviz (rviz-free base station)
   plan_prior_web: [main, prior_dsg, planning_web, console, fleetlink_base]
 # Configs build the set of rosparams that will be loaded
 configs:
   default: []
   classic: []
+  indoor: []
   prior_dsg: []
+  regions: []
   relocalize: []
+  relocalize_awcd: [relocalize]
   apollo_relocalize: [relocalize]
+  indoor_regions: [indoor, regions]
 # Variant names shown first in run-adt4 session selection
 important_variants:
   - base_station-default
@@ -39,34 +47,46 @@ important_variants:
 experiments:
   # base station — these run on the base station only (no robot hardware needed)
   base_station:
-    launch_config: [plan_prior, multi_status]
+    launch_config: [plan_prior, multi_status, tf_relay]
     config: [default]
   base_station_heracles:
-    launch_config: [plan_prior_heracles, multi_status]
+    launch_config: [plan_prior_heracles, multi_status, tf_relay]
+    config: [default]
+  base_station_repair:
+    launch_config: [plan_prior_repair, multi_status, tf_relay]
+    config: [default]
+  base_station_heracles_repair:
+    launch_config: [plan_prior_heracles_repair, multi_status, tf_relay]
     config: [default]
   base_station_web:
-    launch_config: [plan_prior_web, multi_status]
+    launch_config: [plan_prior_web, multi_status, tf_relay]
     config: [default]
 
   # spot configs — require Spot hardware or bag playback
   spot:
     launch_config: [map, spot_real, sensors]
-    config: [default]
+    config: [default, indoor]
   spot_relocalize:
     launch_config: [relocalize, spot_real, sensors]
-    config: [relocalize, apollo_relocalize]
+    config: [relocalize, apollo_relocalize, relocalize_awcd]
+  spot_regions:
+    launch_config: [robot_main, roman, hydra_regions, spot_real, sensors]
+    config: [regions, indoor_regions]
   spot_data_collection:
-    launch_config: [main, spot_real, sensors]
+    launch_config: [robot_main, spot_real, sensors]
     config: [default]
   spot_bag:
     launch_config: [bag_map, spot_bag]
-    config: [default]
+    config: [default, indoor]
   spot_bag_lc:
     launch_config: [bag_map_lc, spot_bag]
     config: [default]
   spot_bag_relocalize:
     launch_config: [bag_relocalize, spot_bag]
-    config: [relocalize]
+    config: [relocalize, relocalize_awcd]
+  spot_bag_regions:
+    launch_config: [robot_main, roman, hydra_regions, rviz, spot_bag]
+    config: [regions, indoor_regions]
   spot_no_relocalize:
     launch_config: [no_relocalize, spot_real, sensors]
     config: [relocalize]
@@ -77,16 +97,16 @@ experiments:
     config: [default]
   phoenix_relocalize:
     launch_config: [relocalize, phoenix_real, sensors]
-    config: [relocalize]
+    config: [relocalize, relocalize_awcd]
   phoenix_data_collection:
-    launch_config: [main, phoenix_real, sensors]
+    launch_config: [robot_main, phoenix_real, sensors]
     config: [default]
   phoenix_bag:
     launch_config: bag_map
     config: [default]
   phoenix_bag_relocalize:
     launch_config: bag_relocalize
-    config: [relocalize]
+    config: [relocalize, relocalize_awcd]
   phoenix_no_relocalize:
     launch_config: [no_relocalize, sensors]
     config: [relocalize]
@@ -105,4 +125,10 @@ experiments:
     config: [prior_dsg]
   spot_prior_dsg_heracles:
     launch_config: [plan_prior_heracles, spot_sim]
+    config: [prior_dsg]
+  spot_prior_dsg_repair:
+    launch_config: [plan_prior_repair, spot_sim]
+    config: [prior_dsg]
+  spot_prior_dsg_heracles_repair:
+    launch_config: [plan_prior_heracles_repair, spot_sim]
     config: [prior_dsg]

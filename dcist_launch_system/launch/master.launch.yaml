@@ -11,17 +11,31 @@ launch:
   - let: {name: output_dir, value: $(env ADT4_OUTPUT_DIR)}
   - let: {name: semantic_inference_model_name, value: ade20k-efficientvit_seg_l2}
 
+  # Namespace TF by robot (default, set ADT4_NAMESPACE_TF=false to disable): every node in this
+  # file uses /<robot_name>/tf and /<robot_name>/tf_static instead of /tf and /tf_static. NOTE: the remaps are added per node
+  # (and per group) on purpose: a top-level set_remap makes every later group's set_remaps leak
+  # out of the group (launch_ros appends to a list that scoped groups share)
+  - arg: {name: namespace_tf, default: $(eval '"$(env ADT4_NAMESPACE_TF true)" != "false"')}
+  - let: {name: tf_topic, value: $(if $(var namespace_tf) /$(var robot_name)/tf /tf)}
+  - let: {name: tf_static_topic, value: $(if $(var namespace_tf) /$(var robot_name)/tf_static /tf_static)}
+
   # Zed camera driver (has to be above push_ros_namespace)
   - arg: {name: launch_zed, default: 'false'}
-  - include:
-      if: $(var launch_zed)
-      file: $(find-pkg-share zed_wrapper)/launch/zed_camera.launch.py
-      arg:
-        - {name: namespace, value: $(var robot_name)}
-        - {name: camera_model, value: zed2i}
-        - {name: camera_name, value: $(var camera)}
-        - {name: publish_tf, value: 'false'}
-        - {name: ros_params_override_path, value: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/zed_overrides.yaml}
+  - group:
+    - set_remap: {from: /tf, to: $(var tf_topic)}
+    - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
+    # zed_wrapper 5.x renamed rgb/image_rect_color -> rgb/color/rect/image; remap back to the old
+    # name. Camera info (rgb/camera_info) and image_transport topics are derived from this name.
+    - set_remap: {from: /$(var robot_name)/$(var camera)/rgb/color/rect/image, to: /$(var robot_name)/$(var camera)/rgb/image_rect_color}
+    - include:
+        if: $(var launch_zed)
+        file: $(find-pkg-share zed_wrapper)/launch/zed_camera.launch.py
+        arg:
+          - {name: namespace, value: $(var robot_name)}
+          - {name: camera_model, value: zed2i}
+          - {name: camera_name, value: $(var camera)}
+          - {name: publish_tf, value: 'false'}
+          - {name: ros_params_override_path, value: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/zed_overrides.yaml}
 
   # Force robot name prefix for everything!
   - push_ros_namespace: {namespace: $(var robot_name)}
@@ -37,6 +51,9 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/livox.yaml}
         - {name: frame_id, value: $(var robot_name)/livox}
         - {name: user_config_path, value: $(find-pkg-share dcist_launch_system)/platforms/$(var platform_id)/livox.yaml}
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Efficient-ViT
   - arg: {name: launch_semantic_inference, default: 'false'}
@@ -52,6 +69,8 @@ launch:
         - {from: ~/status, to: /$(var robot_name)/ros_system_monitor/semantic_inference/status}
         # hard-coded top level name to avoid extra $(var robot_name)_zed topic
         - {from: semantic_overlay/image_raw, to: /$(var robot_name)/semantic_overlay/image_raw}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >
         --config-utilities-file $(find-pkg-share semantic_inference_ros)/config/models/$(var semantic_inference_model_name).yaml
         --config-utilities-file $(find-pkg-share semantic_inference_ros)/config/label_groupings/$(var labelspace_name).yaml@output/recolor
@@ -80,6 +99,26 @@ launch:
         # hard-coded top level name to avoid extra $(var robot_name)_zed topic
         - {from: semantic_overlay/image_raw, to: /$(var robot_name)/semantic_overlay/image_raw}
         - {from: labelspace, to: /$(var robot_name)/labelspace}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
+
+  # CLIP Features
+  - arg: {name: launch_clip_features, default: 'false'}
+  - pyenv_node:
+      if: $(var launch_clip_features)
+      pkg: semantic_inference_ros
+      exec: image_embedding_node
+      name: image_embedding_node
+      namespace: $(var camera)
+      pyenv: $(env HOME)/.semantic_inference/env
+      param:
+        - name: config
+          value: '{model: {model_name: ViT-L/14}}'
+          type: str
+      remap:
+        - {from: color/image_raw, to: rgb/image_rect_color}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Hydra
   - arg: {name: launch_hydra, default: 'false'}
@@ -95,13 +134,18 @@ launch:
       param:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
-        - {from: ~/input/camera/depth_registered/image_rect, to: $(var camera)/depth/depth_registered}
+        # ZED depth scale-corrected by depth_scale_correction (launched with ROMAN, see below)
+        - {from: ~/input/camera/depth_registered/image_rect, to: $(var camera)/depth_corrected/depth_registered}
         - {from: ~/input/camera/rgb/image_raw, to: $(var camera)/rgb/image_rect_color}
         - {from: ~/input/camera/rgb/camera_info, to: $(var camera)/rgb/camera_info}
         - {from: ~/input/camera/semantic/image_raw, to: $(var camera)/semantic/image_raw}
         - {from: ~/external_loop_closures, to: $(var hydra_external_lc_topic)}
+        - {from: ~/input/camera/semantic/feature, to: $(var camera)/semantic/feature}
+        - {from: ~/regions/embed, to: $(var camera)/semantic/embed}
         - {from: ~/status, to: ros_system_monitor/hydra/status}
         - {from: ~/labelspace, to: labelspace}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >-
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra.yaml
@@ -119,6 +163,8 @@ launch:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
         - {from: ~/dsg, to: hydra/backend/dsg}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra_visualizer.yaml
@@ -136,6 +182,8 @@ launch:
       remap:
         - {from: ~/external_loop_closures, to: roman/roman_lc/pose_graph_update}
         - {from: ~/status, to: ros_system_monitor/hydra_multi/status}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra_multi.yaml
@@ -153,6 +201,8 @@ launch:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
         - {from: ~/dsg, to: hydra_multi/backend/dsg}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/hydra_multi_visualizer.yaml
@@ -162,13 +212,29 @@ launch:
   - arg: {name: launch_fastsam, default: 'false'}
   - arg: {name: launch_roman_map, default: 'false'}
   - arg: {name: launch_roman_lc, default: 'false'}
+  # ROMAN and Hydra read ZED depth corrected online from the ground (depth_processing_ros; needs
+  # <robot_name>/gpe in TF), published as <camera>/depth_corrected/*.
+  - arg: {name: launch_depth_correction, default: 'false'}
+  - node:
+      if: $(var launch_depth_correction)
+      pkg: depth_processing_ros
+      exec: depth_scale_correction_node
+      namespace: $(var camera)
+      name: depth_scale_correction
+      param:
+        - {name: use_sim_time, value: $(var sim_time)}
+        - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/depth_scale_correction.yaml, allow_substs: true}
+      remap:
+        - {from: ~/node_status, to: /$(var robot_name)/ros_system_monitor/node_diagnostic_collector}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
   - group:
+      - set_remap: {from: /tf, to: $(var tf_topic)}
+      - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
       - set_remap: {from: color/camera_info, to: $(var camera)/rgb/camera_info}
       - set_remap: {from: color/image_raw, to: $(var camera)/rgb/image_rect_color}
-      - set_remap: {from: depth/camera_info, to: $(var camera)/depth/camera_info}
-      - set_remap: {from: depth/image_raw, to: $(var camera)/depth/depth_registered}
-      - set_remap: {from: tf, to: /tf}
-      - set_remap: {from: tf_static, to: /tf_static}
+      - set_remap: {from: depth/camera_info, to: $(var camera)/depth_corrected/camera_info}
+      - set_remap: {from: depth/image_raw, to: $(var camera)/depth_corrected/depth_registered}
       - set_remap: {from: roman/fastsam/status, to: ros_system_monitor/node_diagnostic_collector}
       - set_remap: {from: roman/roman_map/status, to: ros_system_monitor/node_diagnostic_collector}
       - set_remap: {from: roman/roman_lc/status, to: ros_system_monitor/node_diagnostic_collector}
@@ -210,12 +276,15 @@ launch:
       pyenv: $(var spark_env)
       param:
         - {name: use_sim_time, value: $(var sim_time)}
+        - {name: output_dir, value: $(var output_dir)}
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/spot_executor_node.yaml, allow_substs: true}
       remap:
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
         - {from: ~/action_sequence_subscriber, to: omniplanner_node/compiled_plan_out}
         - {from: ~/joint_states, to: joint_states}
         - {from: ~/occupancy_grid, to: hydra/tsdf/occupancy}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Spot twist receiver
   - arg: {name: launch_spot_twist_node, default: 'false'}
@@ -228,7 +297,9 @@ launch:
       param:
         - {name: use_sim_time, value: $(var sim_time)}
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/spot_twist_node.yaml, allow_substs: true}
-
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Spot state publisher
   - arg: {name: launch_spot_state_publisher, default: 'false'}
@@ -249,6 +320,8 @@ launch:
         - {name: robot_description, value: $(command $(var spot_urdf_command))}
       remap:
         - {from: /joint_states, to: joint_states}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Misc calibrations
   - arg: {name: launch_calibration_publisher, default: 'false'}
@@ -259,6 +332,9 @@ launch:
       exec: transform_file_broadcaster
       param:
         - {name: filepath, value: $(subs-file $(var platform_file))}
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Spot camera driver
   - arg: {name: launch_spot_camera_driver, default: 'false'}
@@ -271,10 +347,15 @@ launch:
       param:
         - {name: use_sim_time, value: $(var sim_time)}
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/spot_sensor_node.yaml, allow_substs: true}
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Decompression for spot camera topics
   - arg: {name: launch_spot_camera_decompression, default: 'false'}
   - group:
+      - set_remap: {from: /tf, to: $(var tf_topic)}
+      - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
       - include:
           if: $(var launch_spot_camera_decompression)
           file: $(find-pkg-share dcist_launch_system)/launch/utils/decompress_camera.launch.yaml
@@ -289,6 +370,8 @@ launch:
   # Decompression for zed
   - arg: {name: launch_zed_camera_decompression, default: 'false'}
   - group:
+      - set_remap: {from: /tf, to: $(var tf_topic)}
+      - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
       - node:
           if: $(var launch_zed_camera_decompression)
           namespace: $(var robot_name)_zed
@@ -303,7 +386,7 @@ launch:
 
   # Rviz
   - arg: {name: launch_rviz, default: 'false'}
-  - arg: {name: rviz_config, default: '$(find-pkg-share dcist_launch_system)/rviz/dcist.rviz'}
+  - arg: {name: rviz_config, default: $(find-pkg-share dcist_launch_system)/rviz/dcist.rviz}
   - node:
       if: $(var launch_rviz)
       pkg: rviz2
@@ -312,12 +395,17 @@ launch:
       args: -d $(var rviz_config)
       remap:
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       param:
         - {name: use_sim_time, value: $(var sim_time)}
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/rviz_node.yaml, allow_substs: true}
 
   # Omniplanner
+  # Set launch_omniplanner:=true for original, launch_omniplanner_repair:=true for plan repair + constraints
   - arg: {name: launch_omniplanner, default: 'false'}
+  - arg: {name: launch_omniplanner_repair, default: 'false'}
+  # Original omniplanner (no plan repair / constraints)
   - pyenv_node:
       if: $(var launch_omniplanner)
       pkg: omniplanner_ros
@@ -331,6 +419,47 @@ launch:
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
         - {from: ~/dsg_in, to: hydra/backend/dsg}
         - {from: ~/llm_response, to: rviz2_node/llm_response}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
+
+  # Omniplanner with plan repair + runtime constraints (Jaeyoun)
+  - pyenv_node:
+      if: $(var launch_omniplanner_repair)
+      pkg: omniplanner_ros
+      exec: omniplanner_repair_node
+      name: omniplanner_node
+      pyenv: $(var spark_env)
+      param:
+        - {name: use_sim_time, value: $(var sim_time)}
+        - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/omniplanner_node.yaml, allow_substs: true}
+      remap:
+        - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
+        - {from: ~/dsg_in, to: hydra/backend/dsg}
+        - {from: ~/llm_response, to: rviz2_node/llm_response}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
+
+  # Goal manager (plan repair): only with repair mode
+  - pyenv_node:
+      if: $(var launch_omniplanner_repair)
+      pkg: omniplanner_ros
+      exec: goal_manager_node
+      name: goal_manager
+      pyenv: $(var spark_env)
+      remap:
+        - {from: ~/commanded_goal,    to: /$(var robot_name)/commanded_goal}
+        - {from: ~/planner_goal,      to: /$(var robot_name)/omniplanner_node/multi_robot_pddl_constrained/pddl_goal}
+        # What the running plan covers, and which robots' executors (addressed by
+        # name, /<robot>/spot_executor_node/...) to pause for the next goal.
+        - {from: ~/plan_visited_pois, to: /$(var robot_name)/omniplanner_node/plan_visited_pois_all}
+        - {from: ~/plan_robots,       to: /$(var robot_name)/omniplanner_node/plan_robots}
+        # A goal the planner rejects: resume the executor it paused.
+        - {from: ~/planner_failed,    to: /$(var robot_name)/omniplanner_node/plan_failed}
+        # Messages for the operator: the rviz instruction panel, and a topic for other UIs.
+        - {from: ~/operator_display,  to: rviz2_node/llm_response}
+        - {from: ~/operator_alert,    to: /$(var robot_name)/plan_repair/alert}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Scene Graph Publisher
   - arg: {name: launch_scene_graph_publisher, default: 'false'}
@@ -345,6 +474,24 @@ launch:
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/prior_dsg_publisher.yaml, allow_substs: true}
       remap:
         - {from: ~/dsg_out, to: hydra/backend/dsg}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
+
+  # AWCD Visualizer (base station: draws changed-object bboxes from all robots into rviz)
+  - arg: {name: launch_awcd_visualizer, default: 'false'}
+  - pyenv_node:
+      if: $(var launch_awcd_visualizer)
+      pkg: dcist_launch_system
+      exec: awcd_visualizer_node
+      name: awcd_visualizer
+      pyenv: $(var spark_env)
+      param:
+        - {name: use_sim_time, value: $(var sim_time)}
+        - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/awcd_visualizer.yaml, allow_substs: true}
+      remap:
+        - {from: ~/dsg_in, to: hydra/backend/dsg}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Prior Mesh Publisher
   - arg: {name: launch_mesh_publisher, default: 'false'}
@@ -357,6 +504,8 @@ launch:
         - {name: use_sim_time, value: $(var sim_time)}
       remap:
         - {from: mesh, to: hydra/backend/dsg_mesh}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
       args: >
         --config-utilities-var robot_name=$(var robot_name)
         --config-utilities-file $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/mesh_publisher.yaml
@@ -376,6 +525,8 @@ launch:
       remap:
         - {from: ~/dsg_in, to: hydra/backend/dsg}
         - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # dsg_analyzer
   - arg: {name: launch_dsg_analyzer, default: 'false'}
@@ -388,6 +539,8 @@ launch:
       remap:
         - {from: ~/dsg_in, to: hydra/backend/dsg}
         - {from: ~/dsg_stats_out, to: dsg_analyzer/dsg_stats}
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Static TF to replace Hydra multi map->robot/map TF.
   # Non-identity transform for verification.
@@ -397,6 +550,9 @@ launch:
       pkg: tf2_ros
       exec: static_transform_publisher
       args: --frame-id $(var robot_name)/body --child-frame-id $(var robot_name)/base_link
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Static TF to replace Hydra multi map->robot/map TF.
   # Non-identity transform for verification.
@@ -406,6 +562,9 @@ launch:
       pkg: tf2_ros
       exec: static_transform_publisher
       args: --frame-id map --child-frame-id $(var robot_name)/map --x 10 --y 20 --yaw 1.57
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Static TF to replace Hydra backend TF with non-identity transform for verification
   # This node is used to replace the backend TF from hydra, when we are running planning offline.
@@ -415,6 +574,9 @@ launch:
       pkg: tf2_ros
       exec: static_transform_publisher
       args: --frame-id $(var robot_name)/map --child-frame-id $(var robot_name)/odom --x 5 --y 10 --yaw 1.57
+      remap:
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # Heracles scene graph publisher
   - arg: {name: launch_heracles_publisher, default: 'false'}
@@ -430,6 +592,8 @@ launch:
       remap:
         - from: ~/dsg_out
           to: hydra/backend/dsg
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # State updater for heracles
   - arg: {name: launch_heracles_state_updater, default: 'false'}
@@ -443,8 +607,38 @@ launch:
         - {name: use_sim_time, value: $(var sim_time)}
         - {from: $(find-pkg-share dcist_launch_system)/config/$(var conf_name)/heracles_state_updater_node.yaml, allow_substs: true}
       remap:
-        - from: ~/update_holding_state
-          to: /$(var robot_name)/update_holding_state
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
+
+  # TF network publisher (robots: republishes /<robot_name>/tf at a reduced rate on
+  # /<robot_name>/network/tf, which is all the base station subscribes to)
+  - arg: {name: launch_tf_network, default: 'false'}
+  - arg: {name: tf_network_rate_hz, default: '10.0'}
+  - node:
+      if: $(var launch_tf_network)
+      pkg: dcist_launch_system
+      exec: tf_network_node
+      name: tf_network
+      param:
+        - {name: use_sim_time, value: $(var sim_time)}
+        - {name: rate_hz, value: $(var tf_network_rate_hz)}
+      remap:  # follow the robot's TF wherever namespace_tf put it
+        - {from: tf, to: $(var tf_topic)}
+        - {from: tf_static, to: $(var tf_static_topic)}
+        - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
+
+  # TF relay (base station: merges /<robot>/network/tf from every robot onto /<robot_name>/tf)
+  # Deliberately no /tf remaps: its inputs and outputs are explicit namespaced topics
+  - arg: {name: launch_tf_relay, default: 'false'}
+  - node:
+      if: $(var launch_tf_relay)
+      pkg: dcist_launch_system
+      exec: tf_relay_node
+      name: tf_relay
+      param:
+        - {name: use_sim_time, value: $(var sim_time)}
+      remap:
+        - {from: ~/node_status, to: ros_system_monitor/node_diagnostic_collector}
 
   # gps
   - arg: {name: launch_gps, default: 'false'}
@@ -461,10 +655,14 @@ launch:
           to: fix
         - from: /rtcm
           to: rtcm
+        - {from: /tf, to: $(var tf_topic)}
+        - {from: /tf_static, to: $(var tf_static_topic)}
 
   # ntrip
   - arg: {name: launch_ntrip, default: 'false'}
   - group:
+      - set_remap: {from: /tf, to: $(var tf_topic)}
+      - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
       - set_remap: {from: ublox_gps_node/fix, to: fix}
       - set_remap: {from: /rtcm, to: rtcm}
       - node:
@@ -478,6 +676,8 @@ launch:
   # tx_rx
   - arg: {name: launch_tx_rx, default: 'false'}
   - group:
+      - set_remap: {from: /tf, to: $(var tf_topic)}
+      - set_remap: {from: /tf_static, to: $(var tf_static_topic)}
       - set_remap: {from: tx_rx/status, to: ros_system_monitor/node_diagnostic_collector}
       - node:
           if: $(var launch_tx_rx)

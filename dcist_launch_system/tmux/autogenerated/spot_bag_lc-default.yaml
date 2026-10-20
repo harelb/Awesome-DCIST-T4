@@ -1,9 +1,11 @@
 nodes_to_monitor:
+  tf_network: {}
   dsg_saver: {}
   hydra:
     external_monitor: {type: JsonMonitor}
   semantic_inference:
     external_monitor: {type: JsonMonitor}
+  depth_correction: {}
   fastsam: {}
   roman_map: {}
   roman_lc: {}
@@ -22,9 +24,10 @@ environment:
   HERACLES_OPENAI_API_KEY: $ADT4_OPENAI_API_KEY
   HERACLES_EVALUATION_PATH: $ADT4_HERACLES_AGENTS_PATH
   ADT4_ORIGIN_UTM: $ADT4_ORIGIN_UTM
+  ADT4_NAMESPACE_TF: $ADT4_NAMESPACE_TF
   ADT4_FLEET_LINK: $ADT4_FLEET_LINK
   ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
-  ADT4_MONITOR_CONFIG: "{nodes_to_track: {dsg_saver: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, semantic_inference: {external_monitor: {type: JsonMonitor}}}}"
+  ADT4_MONITOR_CONFIG: "{nodes_to_track: {depth_correction: {}, dsg_saver: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, semantic_inference: {external_monitor: {type: JsonMonitor}}, tf_network: {}}}"
   ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
   config: default
   logging_key: spot_bag_lc-default
@@ -35,15 +38,18 @@ windows:
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
     panes:
-      - ros2 run rmw_zenoh_cpp rmw_zenohd
       - python3 $ADT4_WS/src/awesome_dcist_t4/dcist_launch_system/scripts/show_environment.py
-      - "ros2 service call /${ADT4_ROBOT_NAME}/shutdown std_srvs/Empty && tmux send-keys -t roman.1 C-c \\"
+      - "ros2 service call /${ADT4_ROBOT_NAME}/hydra/shutdown std_srvs/Empty && ros2 service call /${ADT4_ROBOT_NAME}/roman/shutdown std_srvs/Empty \\"
   - window_name: status
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
     panes:
       - ros2 run ros_system_monitor ros_system_monitor --params $ADT4_MONITOR_CONFIG --name $ADT4_ROBOT_NAME --ros-args -r __ns:=/$ADT4_ROBOT_NAME -r '~/table_out:=/global/ros_system_monitor/table_in'
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_analyzer:=true
+  - window_name: tf_network
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes: [ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_tf_network:=true]
   - window_name: hydra
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
@@ -57,6 +63,7 @@ windows:
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
     panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_depth_correction:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_fastsam:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_roman_map:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_roman_lc:=true
@@ -64,7 +71,7 @@ windows:
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled
     panes:
-      - "$ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/$ADT4_ROBOT_NAME -p robot_name:=$ADT4_ROBOT_NAME -p use_sim_time:=$sim_time -p zenoh_connect:=${ADT4_FLEETLINK_CONNECT:-tcp/127.0.0.1:7447} $([ \"$ADT4_FLEET_LINK\" = fleetlink ] && echo -p relay_config:=default -p topology:=${ADT4_TOPOLOGY:-$ADT4_WS/src/awesome_dcist_t4/network_diagnostics/config/topology.yaml})"
+      - "$ADT4_WS/src/awesome_dcist_t4/fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/$ADT4_ROBOT_NAME -r /tf:=$([[ $ADT4_NAMESPACE_TF == false ]] && echo /tf || echo /$ADT4_ROBOT_NAME/tf) -r /tf_static:=$([[ $ADT4_NAMESPACE_TF == false ]] && echo /tf_static || echo /$ADT4_ROBOT_NAME/tf_static) -p robot_name:=$ADT4_ROBOT_NAME -p use_sim_time:=$sim_time -p zenoh_connect:=${ADT4_FLEETLINK_CONNECT:-tcp/127.0.0.1:7447} $([ \"$ADT4_FLEET_LINK\" = fleetlink ] && echo -p relay_config:=default -p topology:=${ADT4_TOPOLOGY:-$ADT4_WS/src/awesome_dcist_t4/network_diagnostics/config/topology.yaml})"
   - window_name: rviz
     shell_command_before: source ${ADT4_WS}/install/setup.zsh
     layout: tiled

@@ -59,9 +59,8 @@ topics:
     replay_on_resync: false
     qos: {reliability: reliable, durability: volatile, depth: 1}
     platform: [phoenix, husky]
-  # NOTE: the console's Pause/Resume publish these, but NOTHING subscribes to them on the
-  # robot at this checkout (spot_tools_ros has no pause/resume subscriber; see inventory).
-  # Kept so the commands arrive once a consumer exists; the ack's `subs: 0` shows it.
+  # pause / resume / stop: published by the console and the plan repair goal manager,
+  # served by spot_executor_node
   - topic: /{robot}/spot_executor_node/pause
     type: std_msgs/msg/Bool
     dir: down
@@ -82,12 +81,34 @@ topics:
     replay_on_resync: false
     qos: {reliability: reliable, durability: volatile, depth: 10}
     platform: [spot]
+  - topic: /{robot}/spot_executor_node/stop
+    type: std_msgs/msg/Bool
+    dir: down
+    mode: reliable
+    cls: C0
+    rate_hz: null
+    ttl_s: 10
+    replay_on_resync: false
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    platform: [spot]
 
   # ---------------------------------------------------------------- results / telemetry (up)
   - topic: /{robot}/spot_executor_node/action_result
     type: robot_executor_msgs/msg/ActionResultMsg
     dir: up
     mode: reliable            # per-action results must not be lost (planner obligation tracking)
+    cls: C0
+    rate_hz: null
+    ttl_s: null
+    replay_on_resync: true
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    platform: [spot]
+  # finished actions for the plan repair node (omniplanner_repair_node); one topic for the
+  # whole fleet, the message carries robot_name
+  - topic: /action_done
+    type: robot_executor_msgs/msg/ActionDoneMsg
+    dir: up
+    mode: reliable
     cls: C0
     rate_hz: null
     ttl_s: null
