@@ -115,7 +115,7 @@ function MachineRow({
                       ⌨
                     </button>
                   )}
-                  <button className="chip-btn" title={`Ctrl-C every pane of ${name}`} disabled={!m.online} onClick={() => onSession({m, session: name, action: "stop"})}>
+                  <button className="chip-btn" title={`stop ${name}: Ctrl-C every pane, then kill the session`} disabled={!m.online} onClick={() => onSession({m, session: name, action: "stop"})}>
                     ■
                   </button>
                   <button className="chip-btn chip-btn-danger" title={`kill tmux session ${name}`} disabled={!m.online} onClick={() => onSession({m, session: name, action: "kill"})}>
@@ -249,9 +249,12 @@ export function FleetPage() {
     setSessionTarget(null);
     setActionErr(null);
     try {
-      await postJSON(`api/fleet/${encodeURIComponent(m.name)}/tmux/${encodeURIComponent(session)}/${action}`);
+      const r = await postJSON(`api/fleet/${encodeURIComponent(m.name)}/tmux/${encodeURIComponent(session)}/${action}`);
+      // stop is a job: Ctrl-C every pane, wait for the nodes to exit, then kill
+      const id = jobIdOf(r);
+      if (id) trackJob(id, `Stop ${session} on ${m.name}`);
       // the session list refreshes with the next status poll; ask for one now
-      setTimeout(() => void load(), action === "kill" ? 1500 : 4000);
+      setTimeout(() => void load(), action === "kill" ? 1500 : 20000);
     } catch (e) {
       setActionErr(errorText(e));
     }
@@ -339,7 +342,7 @@ export function FleetPage() {
                 Cancel
               </button>
               <button className="btn btn-danger" onClick={() => sessionAction(sessionTarget)}>
-                {sessionTarget.action === "kill" ? "Kill session" : "Send Ctrl-C"}
+                {sessionTarget.action === "kill" ? "Kill session" : "Stop session"}
               </button>
             </>
           }
@@ -352,7 +355,7 @@ export function FleetPage() {
           ) : (
             <p>
               Sends Ctrl-C to every pane of <span className="mono">{sessionTarget.session}</span>, so each node shuts down the way it would in the
-              terminal. The panes stay open (shells); kill the session afterwards to close them.
+              terminal, waits up to 15 s for them to exit, then kills the session (anything still running is killed then).
             </p>
           )}
           {sessionTarget.session === "adt4_system" && sessionTarget.m.role === "robot" && (

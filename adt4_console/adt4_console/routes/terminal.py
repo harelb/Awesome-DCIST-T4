@@ -25,9 +25,15 @@ router = APIRouter(prefix="/api")
 CLOSE_DISABLED = 4403
 CLOSE_BAD_TARGET = 4404
 
+# Stop: after Ctrl-C, how long the panes get to exit before the session is killed
+STOP_WAIT_S = 15.0
+STOP_POLL_S = 1.0
+
 
 @router.post("/fleet/{name}/tmux/{session}/{action}")
 def tmux_session_action(name: str, session: str, action: str, request: Request):
+    """``kill``: kill the session now.  ``stop``: a job that sends Ctrl-C to every
+    pane, waits up to STOP_WAIT_S for the nodes to exit, then kills the session."""
     svc = services(request)
     m = require_machine(svc, name)
     if action not in ("stop", "kill"):
@@ -36,6 +42,19 @@ def tmux_session_action(name: str, session: str, action: str, request: Request):
         cmd = term.session_command(action, session)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if action == "stop":
+
+        def run(job):
+            ok = term.stop_session(
+                svc.helpers.ssh_cmd, m["user"], m["ip"], session, job.log,
+                wait_s=STOP_WAIT_S, poll_s=STOP_POLL_S,
+            )  # fmt: skip
+            if svc.settings.fleet_poll:
+                svc.fleet.request_status_refresh()
+            return {"machine": name, "session": session} if ok else False
+
+        job = svc.jobs.start("tmux_stop", f"Stop {session} on {name}", run)
+        return {"ok": True, "machine": name, "session": session, "action": action, "job_id": job.id}
     rc, out, err = svc.helpers.ssh_cmd(m["user"], m["ip"], cmd, timeout=8)
     if rc != 0:
         raise HTTPException(502, f"{action} {session} on {name} failed: {err or out or rc}")

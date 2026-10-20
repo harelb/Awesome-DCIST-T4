@@ -205,7 +205,6 @@ HYDRA_EXIT_WAIT_S = 600.0
 HYDRA_EXIT_POLL_S = 2.0
 # teardown: after Ctrl-C, how long nodes get to exit before the session is killed
 TEARDOWN_WAIT_S = 30.0
-SHELLS = {"zsh", "bash", "sh", "fish", "dash"}
 
 
 def _wait_hydra_exit(svc, job, robot: str) -> bool | None:
@@ -255,32 +254,18 @@ def _teardown_stack(svc, job, robot: str, m) -> bool:
     exit, then kill the session."""
     from dcist_launch_system.fleet.launch_workflow import TMUX_SESSION_NAME
 
-    from ..terminal import session_command
+    from ..terminal import stop_session
 
     session = TMUX_SESSION_NAME
-    user, ip = m["user"], m["ip"]
     job.log("info", f"Stopping the rest of the stack on {robot} (Ctrl-C every pane of {session}) ...")
-    rc, out, err = svc.helpers.ssh_cmd(user, ip, session_command("stop", session), timeout=10)
-    if rc != 0:
-        job.log("dim", f"{robot}: no {session} session to stop ({err or out or rc})")
-        return True
-    t0 = time.monotonic()
-    while time.monotonic() - t0 < TEARDOWN_WAIT_S:
-        time.sleep(HYDRA_EXIT_POLL_S)
-        rc, out, _ = svc.helpers.ssh_cmd(
-            user, ip, f"tmux list-panes -s -t {session} -F '#{{pane_current_command}}'"
-        )
-        busy = [c for c in out.split() if c not in SHELLS] if rc == 0 else []
-        if not busy:
-            break
-    else:
-        job.log("dim", f"{robot}: still running after {TEARDOWN_WAIT_S:.0f} s: {', '.join(sorted(set(busy)))}; killing")
-    rc, out, err = svc.helpers.ssh_cmd(user, ip, session_command("kill", session), timeout=10)
-    if rc != 0 and "can't find session" not in (err or out):
-        job.log("error", f"{robot}: kill {session} failed: {err or out or rc}")
-        return False
-    job.log("ok", f"{robot}: {session} stopped and closed")
-    return True
+    ok = stop_session(
+        svc.helpers.ssh_cmd, m["user"], m["ip"], session,
+        lambda lvl, text: job.log(lvl, f"{robot}: {text}"),
+        wait_s=TEARDOWN_WAIT_S, poll_s=HYDRA_EXIT_POLL_S,
+    )  # fmt: skip
+    if ok:
+        job.log("ok", f"{robot}: {session} stopped and closed")
+    return ok
 
 
 class StopSaveBody(BaseModel):

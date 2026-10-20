@@ -82,7 +82,9 @@ The header shows the server, WebSocket ("live"), ROS and fleetlink status, plus 
 
 * **Fleet.** Machines from the topology with ping/ssh/online state, remote status (tmux
   sessions, load) and per-robot node health from `ros_system_monitor`, with a readiness light.
-  *Stop & save* calls the robot's `/shutdown` service, falling back to tmux keys.
+  *Stop & save* calls the robot's `/shutdown` service, falling back to tmux keys. Each tmux
+  session has *stop* (a job: Ctrl-C every pane, wait up to 15 s for the nodes to exit, then
+  kill the session) and *kill* (kill the session at once).
 * **Launch.** Choose robots, session, experiment name, mapping or relocalize mode, a prior map,
   recording, and an optional base-station session. *Dry run* lists the exact commands.
   *Launch* runs the same workflow as the `fleet-adt4` TUI as a job.
