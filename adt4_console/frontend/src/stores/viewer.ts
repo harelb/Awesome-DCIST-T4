@@ -5,6 +5,7 @@ import {decodeDelta, decodeGraph} from "../codec";
 import {GraphModel} from "../lib/graphModel";
 import {errorText, getJSON, getMsgpack} from "../lib/api";
 import type {GraphSource, TileManifest} from "../types";
+import type {VizStyle} from "../viewer/layout";
 import {ws} from "../ws";
 
 export interface SourceView {
@@ -46,6 +47,15 @@ interface ViewerStore {
   topDown: boolean;
   follow: string | null; // robot name
   meshOpacity: number;
+  /** "hydra" mimics the ADT4 hydra_visualizer config; "classic" is the old look */
+  vizStyle: VizStyle;
+  /** node / object text labels (hydra text adapters) */
+  showText: boolean;
+  /** cull mesh back faces like RViz MeshDisplay (hides ceilings seen from above) */
+  meshCull: boolean;
+  /** clip the mesh above `meshClipHeight` metres over the floor */
+  meshClipOn: boolean;
+  meshClipHeight: number;
   planRobot: string | null;
   pddlDraft: string;
   // interaction
@@ -97,12 +107,17 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   hiddenLayers: {"2/115": true},
   edgeKinds: {},
   flat: false,
-  stackHeight: 3,
+  stackHeight: 2, // hydra_visualizer layer_z_step
   showBBoxes: true,
   showTrajectory: true,
   topDown: false,
   follow: null,
   meshOpacity: 1,
+  vizStyle: "hydra",
+  showText: true,
+  meshCull: true,
+  meshClipOn: false,
+  meshClipHeight: 2.0,
   planRobot: null,
   pddlDraft: "",
   selected: null,

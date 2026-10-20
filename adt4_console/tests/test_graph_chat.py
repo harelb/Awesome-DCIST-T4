@@ -140,6 +140,8 @@ def test_chat_fallback_uses_robot_pose_and_handles_misses(gclient):
     out = _chat(gclient, "find chair", robot="euclid", src="file:syn")
     assert out[2]["body"]["points"] == ["O(1)"]  # nearest to the robot
     out = _chat(gclient, "find a giraffe", src="file:syn")
-    assert [o["type"] for o in out] == ["tool", "text", "done"]
+    # nothing in the map → the SAM3 image search is tried (no server in tests)
+    assert [o["type"] for o in out] == ["tool", "text", "tool", "error", "done"]
+    assert "unreachable" in out[3]["text"]
     out = _chat(gclient, "hello there")
     assert [o["type"] for o in out] == ["text", "done"]

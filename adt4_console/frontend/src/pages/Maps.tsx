@@ -252,6 +252,10 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
   const [bags, setBags] = useState(false);
   const [limit, setLimit] = useState(false);
   const [kbps, setKbps] = useState(2000);
+  const hasStore = (map.subdirs ?? []).includes("image_store");
+  // default for a store: keyframes only, fast codec (JPEG q75, half-res depth + zstd)
+  const [images, setImages] = useState<"keyframes" | "all" | "none">(hasStore ? "keyframes" : "all");
+  const [compression, setCompression] = useState<"none" | "lossless" | "fast">(hasStore ? "fast" : "none");
   return (
     <Modal
       title={`Transfer ${map.name}`}
@@ -264,7 +268,15 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
           <button
             className="btn btn-primary"
             onClick={() =>
-              onStart({src: machine, experiment: map.name, as_name: asName && asName !== map.name ? asName : undefined, include_bags: bags, bwlimit_kbps: limit ? kbps : undefined})
+              onStart({
+                src: machine,
+                experiment: map.name,
+                as_name: asName && asName !== map.name ? asName : undefined,
+                include_bags: bags,
+                bwlimit_kbps: limit ? kbps : undefined,
+                images,
+                compression: images === "none" ? "none" : compression,
+              })
             }
           >
             Start transfer
@@ -278,6 +290,33 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
       <Field label="Name on base station">
         <input className="input mono" value={asName} onChange={e => setAsName(e.target.value)} />
       </Field>
+      {hasStore ? (
+        <div className="row gap wrap">
+          <Field label="Image store frames">
+            <select className="input" value={images} onChange={e => setImages(e.target.value as typeof images)} aria-label="Image store frames">
+              <option value="keyframes">Keyframes only (what SAM3 searches)</option>
+              <option value="all">All frames</option>
+              <option value="none">None (skip the image store)</option>
+            </select>
+          </Field>
+          <Field label="Compression">
+            <select
+              className="input"
+              value={images === "none" ? "none" : compression}
+              disabled={images === "none"}
+              onChange={e => setCompression(e.target.value as typeof compression)}
+              aria-label="Image store compression"
+            >
+              <option value="fast">Fast (RGB q75, half-res depth + zstd)</option>
+              <option value="lossless">Lossless (stored RGB, depth delta + zstd)</option>
+              <option value="none">None (copy as stored)</option>
+            </select>
+          </Field>
+        </div>
+      ) : (
+        <p className="muted small">This run has no image store; the run directory is copied as is.</p>
+      )}
+      {hasStore && images === "all" && compression === "none" && <p className="muted small">Plain rsync of the whole run directory.</p>}
       <Toggle checked={bags} onChange={setBags} label="Include rosbags (large)" />
       <Toggle checked={limit} onChange={setLimit} label="Limit bandwidth (shared radio)" />
       {limit && (

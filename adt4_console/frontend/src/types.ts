@@ -29,6 +29,8 @@ export interface Machine {
   user: string;
   desc?: string;
   platform_id?: string;
+  /** topology platform_type: spot / phoenix / ... */
+  platform_type?: string;
   online?: boolean;
   ping?: boolean | number | null;
   ssh?: boolean | null;
@@ -182,7 +184,9 @@ export interface PlanRobot {
   plugins: {name: string; kind: "language" | "goto" | "tsp" | "pddl" | string; topic: string}[];
 }
 
-export type Cls = "C1" | "C2" | "C3" | "C4" | "C5";
+/** fleetlink budget classes; C6 is the image-store mirror. Unknown future classes
+ *  still render (LivePanel lists whatever the link reports). */
+export type Cls = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | (string & {});
 
 export interface LinkInfo {
   connected: boolean;

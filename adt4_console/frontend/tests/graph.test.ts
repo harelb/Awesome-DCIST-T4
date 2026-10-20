@@ -73,6 +73,19 @@ describe("graph store delta application", () => {
   });
 });
 
+describe("hydra style text", () => {
+  it("labels objects/places/rooms per node but agents once per layer", () => {
+    const m = model();
+    const l = layoutGraph(m, {hiddenLayers: {}, edgeKinds: {}, flat: false, stackHeight: 2, style: "hydra", text: true});
+    const agentTexts = l.texts.filter(t => t.kind === "agents");
+    const agentNodes = [...m.nodes.values()].filter(n => n.layer === 2 && n.part === 97).length;
+    expect(agentTexts.length).toBe(agentNodes ? 1 : 0);
+    expect(l.texts.filter(t => t.kind === "places").length).toBe([...m.nodes.values()].filter(n => n.layer === 3).length);
+    // places stack at z_offset_scale 2 * layer_z_step
+    expect(l.layers.find(x => x.key === "3/0")!.positions[2]).toBe(1 + 4);
+  });
+});
+
 describe("nearest place resolution", () => {
   it("snaps a mesh click to the closest place node", () => {
     const m = model();

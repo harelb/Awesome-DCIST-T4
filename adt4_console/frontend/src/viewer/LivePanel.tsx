@@ -12,7 +12,20 @@ const CLASSES: {cls: Cls; name: string; color: string}[] = [
   {cls: "C3", name: "mesh", color: "#ffb020"},
   {cls: "C4", name: "camera stills", color: "#b388ff"},
   {cls: "C5", name: "video", color: "#ff6f91"},
+  {cls: "C6", name: "image store", color: "#9ccc65"},
 ];
+
+/** Known classes plus any other class the link reports a budget or rate for. */
+export function linkClasses(l: LinkInfo): {cls: Cls; name: string; color: string}[] {
+  const known = new Set(CLASSES.map(c => c.cls));
+  const reported = new Set([...Object.keys(l.budgets ?? {}), ...Object.keys(l.rates ?? {})]);
+  const extra = [...reported].filter(c => !known.has(c)).sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+  return [
+    // C6 only when this robot's agent has it (older agents report C1-C5)
+    ...CLASSES.filter(c => c.cls !== "C6" || reported.has("C6")),
+    ...extra.map(cls => ({cls, name: cls, color: "#b0bec5"})),
+  ];
+}
 
 // log-scale slider: 0..100 <-> 500 B/s .. 2 MB/s
 const MIN = Math.log(500);
@@ -148,7 +161,7 @@ export function LivePanel() {
               drops {l.drops ?? 0} · gaps {l.gaps ?? 0} · resyncs {l.resyncs ?? 0}
               {l.epoch ? ` · epoch ${String(l.epoch).slice(0, 8)}` : ""}
             </div>
-            {CLASSES.map(c => (
+            {linkClasses(l).map(c => (
               <BudgetRow key={c.cls} robot={r} cls={c.cls} name={c.name} color={c.color} link={l} history={history[r]?.[c.cls] ?? []} />
             ))}
             <div className="row gap between">

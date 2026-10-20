@@ -144,6 +144,7 @@ class FleetService:
                     "user": m.get("user"),
                     "desc": m.get("desc", ""),
                     "platform_id": m.get("platform_id", ""),
+                    "platform_type": m.get("platform_type", ""),
                     "online": m.get("online"),
                     "ping": m.get("ping"),
                     "ssh": m.get("ssh"),

@@ -1,11 +1,13 @@
 // Camera tab: on-demand frames from a robot's fleetlink agent (C4 request/reply).
 // One request at a time; auto-refresh waits for the previous frame to land.
 // "Video" mode switches to the live C5 stream (VideoView, API.md §12).
+// "All" mode tiles every advertised camera (Spot: frontleft ... hand) at ~1 Hz.
 import {useEffect, useRef, useState} from "react";
 import {getJSON, errorText} from "../lib/api";
 import {getToken} from "../lib/auth";
 import {Empty, Toggle} from "../components/ui";
 import {useLiveRobots} from "../stores/robots";
+import {useFleet} from "../stores/fleet";
 import {VideoView} from "./VideoView";
 
 export interface CameraFrame {
@@ -66,12 +68,78 @@ async function fetchFrame(robot: string, cam: string, w: number, signal: AbortSi
   };
 }
 
+/** Offer the all-cameras grid: Spot robots, or anything with more than two cameras. */
+export function showGrid(platform: string | undefined, cams: string[]): boolean {
+  return platform === "spot" ? cams.length > 1 : cams.length > 2;
+}
+
+/** One grid tile: its own fetch loop, one request in flight, ~1 Hz. */
+function GridTile({robot, cam, width, hz, onOpen, onVideo}: {robot: string; cam: string; width: number; hz: number; onOpen: () => void; onVideo: () => void}) {
+  const [frame, setFrame] = useState<CameraFrame | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const ref = useRef<CameraFrame | null>(null);
+  useEffect(() => {
+    const ctl = new AbortController();
+    let timer: number | undefined;
+    const run = async () => {
+      const started = Date.now();
+      try {
+        const f = await fetchFrame(robot, cam, width, ctl.signal);
+        if (ctl.signal.aborted) {
+          URL.revokeObjectURL(f.url);
+          return;
+        }
+        if (ref.current) URL.revokeObjectURL(ref.current.url);
+        ref.current = f;
+        setFrame(f);
+        setErr(null);
+      } catch (e) {
+        if (!ctl.signal.aborted) setErr(e instanceof Error ? e.message : String(e));
+      }
+      if (!ctl.signal.aborted) timer = window.setTimeout(run, Math.max(0, 1000 / hz - (Date.now() - started)));
+    };
+    void run();
+    return () => {
+      ctl.abort();
+      window.clearTimeout(timer);
+    };
+  }, [robot, cam, width, hz]);
+  useEffect(
+    () => () => {
+      if (ref.current) URL.revokeObjectURL(ref.current.url);
+    },
+    [],
+  );
+  return (
+    <div className="camera-tile">
+      <button className="camera-tile-img" onClick={onOpen} title={`Open ${cam}`}>
+        {frame ? <img src={frame.url} alt={`${robot} ${cam}`} /> : <span className="muted small">{err ? "" : "..."}</span>}
+      </button>
+      <div className="camera-tile-bar row between">
+        <span className="mono small">{cam}</span>
+        <span className="row gap-sm">
+          {err ? (
+            <span className="small tone-err" title={err}>
+              no frame
+            </span>
+          ) : frame ? (
+            <span className="small muted">{(frame.bytes / 1024).toFixed(0)} KB</span>
+          ) : null}
+          <button className="btn btn-xs" onClick={onVideo} title={`Live video of ${cam}`}>
+            video
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function CameraPanel() {
   const robots = useLiveRobots();
   const [robot, setRobot] = useState<string>("");
   const [cams, setCams] = useState<string[]>([]);
   const [cam, setCam] = useState<string>("");
-  const [mode, setMode] = useState<"still" | "video">("still");
+  const [mode, setMode] = useState<"still" | "video" | "grid">("still");
   const [auto, setAuto] = useState(true);
   const [hz, setHz] = useState(1);
   const [width, setWidth] = useState(640);
@@ -83,6 +151,9 @@ export function CameraPanel() {
   const frameRef = useRef<CameraFrame | null>(null);
 
   const r = robot && robots.includes(robot) ? robot : (robots[0] ?? "");
+  const platform = useFleet(s => s.machines?.machines.find(m => m.name === r)?.platform_type);
+  const grid = showGrid(platform, cams);
+  const effMode = mode === "grid" && !grid ? "still" : mode;
 
   // camera list per robot
   useEffect(() => {
@@ -103,7 +174,7 @@ export function CameraPanel() {
 
   // fetch loop: one request in flight; next one `1/hz` after the previous started
   useEffect(() => {
-    if (!r || !cam || mode !== "still") return;
+    if (!r || !cam || effMode !== "still") return;
     const ctl = new AbortController();
     let timer: number | undefined;
     const run = async () => {
@@ -134,7 +205,7 @@ export function CameraPanel() {
       ctl.abort();
       window.clearTimeout(timer);
     };
-  }, [r, cam, auto, hz, width, nonce, mode]);
+  }, [r, cam, auto, hz, width, nonce, effMode]);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 250);
@@ -153,12 +224,17 @@ export function CameraPanel() {
     <div className="camera-panel">
       <div className="row gap-sm wrap">
         <div className="segmented" role="group" aria-label="Camera mode">
-          <button className={mode === "still" ? "on" : ""} onClick={() => setMode("still")} title="On-demand still frames">
+          <button className={effMode === "still" ? "on" : ""} onClick={() => setMode("still")} title="On-demand still frames">
             Still
           </button>
-          <button className={mode === "video" ? "on" : ""} onClick={() => setMode("video")} title="Live video stream">
+          <button className={effMode === "video" ? "on" : ""} onClick={() => setMode("video")} title="Live video stream">
             Video
           </button>
+          {grid && (
+            <button className={effMode === "grid" ? "on" : ""} onClick={() => setMode("grid")} title="All cameras, about 1 Hz each">
+              All cameras
+            </button>
+          )}
         </div>
         <select className="input input-sm" value={r} onChange={e => setRobot(e.target.value)} aria-label="Robot">
           {robots.map(x => (
@@ -167,6 +243,7 @@ export function CameraPanel() {
             </option>
           ))}
         </select>
+        {effMode !== "grid" && (
         <select className="input input-sm" value={cam} onChange={e => setCam(e.target.value)} aria-label="Camera stream" disabled={!cams.length}>
           {!cams.length && <option value="">no cameras</option>}
           {cams.map(c => (
@@ -175,7 +252,8 @@ export function CameraPanel() {
             </option>
           ))}
         </select>
-        {mode === "still" && (
+        )}
+        {effMode === "still" && (
           <>
             <select className="input input-sm" value={width} onChange={e => setWidth(Number(e.target.value))} aria-label="Frame width">
               {[320, 640, 960, 1280].map(w => (
@@ -190,7 +268,31 @@ export function CameraPanel() {
           </>
         )}
       </div>
-      {mode === "video" ? r && cam ? <VideoView key={`${r}/${cam}`} robot={r} cam={cam} /> : <div className="muted small">No camera</div> : stillView()}
+      {effMode === "grid" ? (
+        <div className="camera-grid">
+          {cams.map(c => (
+            <GridTile
+              key={`${r}/${c}`}
+              robot={r}
+              cam={c}
+              width={320}
+              hz={1}
+              onOpen={() => {
+                setCam(c);
+                setMode("still");
+              }}
+              onVideo={() => {
+                setCam(c);
+                setMode("video");
+              }}
+            />
+          ))}
+        </div>
+      ) : effMode === "video" ? (
+        r && cam ? <VideoView key={`${r}/${cam}`} robot={r} cam={cam} /> : <div className="muted small">No camera</div>
+      ) : (
+        stillView()
+      )}
     </div>
   );
 

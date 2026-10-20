@@ -4,12 +4,15 @@
 ``text`` / ``tool`` / ``goal`` (a proposal the UI can send) / ``error`` / ``done``.
 
 With LLM credentials (and ``settings.llm``) the model answers using tools over
-the selected graph source — OpenAI (``ADT4_OPENAI_API_KEY``/``OPENAI_API_KEY``,
-default ``gpt-4.1-mini``) or Anthropic.  Spend is metered from each response's
+the selected graph source — OpenAI (``ADT4_OPENAI_API_KEY``/``OPENAI_API_KEY``/
+``HERACLES_OPENAI_API_KEY``, default ``gpt-4.1-mini``) or Anthropic.  When an
+object is not in the map, ``search_robot_images`` runs SAM3 (dry run) over the
+robot's stored keyframes and streams ``object_candidate`` events; the operator
+adds one to Neo4j from the UI (``POST /api/sam3/commit``).  Spend is metered from each response's
 token usage against ``settings.llm_budget_usd`` (persisted in
 ``settings.llm_usage_path``); past the cap, or without credentials, a
 deterministic fallback handles "find / go to <label>" by matching object labels
-and proposing a goto goal.
+and proposing a goto goal (or, when nothing matches, the same SAM3 search).
 """
 
 from __future__ import annotations
@@ -22,6 +25,8 @@ import pathlib
 import re
 import threading
 import time
+
+from . import sam3_client
 
 log = logging.getLogger(__name__)
 
@@ -288,7 +293,22 @@ class ChatService:
             "result": hits,
         }
         if not hits:
-            yield {"type": "text", "text": f"I found no “{query}” in {src}."}
+            yield {
+                "type": "text",
+                "text": f"I found no “{query}” in {src}; searching the robot's "
+                "stored images with SAM3 ...",
+            }
+            events, out = self._search_images(query, src)
+            yield from events
+            n = out.get("num_candidates", 0)
+            if n:
+                yield {
+                    "type": "text",
+                    "text": f"SAM3 found {n} candidate(s) for “{query}”. "
+                    "Add the right one to Neo4j, then ask me to go there.",
+                }
+            elif "error" not in out:
+                yield {"type": "text", "text": "SAM3 found nothing either."}
             return
         best = hits[0]
         where = ", ".join(f"{v:.1f}" for v in best["pos"])
@@ -313,6 +333,21 @@ class ChatService:
             "name matches a short noun phrase (e.g. 'chair', 'trash can'). Returns "
             "total_matches (the true count) and up to 10 objects (nearest the robot first) "
             "with symbols like 'O(12)' and positions in metres.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "search_robot_images",
+            "description": "Run the SAM3 open-vocabulary detector over the robot's stored "
+            "camera keyframes to find an object that is NOT in the scene graph. Use it when "
+            "find_objects returns no matches, or when the operator asks to look in the "
+            "robot's images. Takes a short noun phrase. Returns candidates (label, score, "
+            "3D centroid); they are NOT added to the map: the operator sees each candidate's "
+            "masked image and decides whether to add it, so ask them.",
             "input_schema": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -346,22 +381,23 @@ class ChatService:
     ]
 
     def _llm(self, client, message, robot, src):
+        """Anthropic tool loop; tools run through ``_run_tool`` (shared with OpenAI)."""
         import anthropic
 
-        system = (
-            "You are the operator assistant of a multi-robot mapping console. Answer briefly. "
-            "Use find_objects to look things up in the scene graph; when the operator wants a "
-            "robot to go somewhere, call propose_goal (the operator approves it in the UI — "
-            "never claim the robot is already moving). "
-            f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}."
-        )
+        model = self.model()
         messages = [{"role": "user", "content": message}]
         origin = self._robot_pos(robot)
         for _ in range(6):
+            if self.ledger.remaining() <= 0:
+                yield {
+                    "type": "error",
+                    "text": "LLM budget exhausted mid-conversation.",
+                }
+                return
             kwargs = dict(
-                model=self.model(),
+                model=model,
                 max_tokens=4000,
-                system=system,
+                system=self._system(src, robot),
                 tools=self._TOOLS,
                 messages=messages,
                 # server-side refusal fallback; the installed SDK predates the
@@ -384,6 +420,13 @@ class ChatService:
                 }
                 yield from self._fallback(message, robot, src)
                 return
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                self.ledger.record(
+                    getattr(resp, "model", None) or model,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
             if resp.stop_reason == "refusal":
                 yield {"type": "error", "text": "The model declined this request."}
                 return
@@ -392,33 +435,10 @@ class ChatService:
                 if block.type == "text" and block.text.strip():
                     yield {"type": "text", "text": block.text}
                 elif block.type == "tool_use":
-                    args = dict(block.input or {})
-                    if block.name == "find_objects":
-                        hits, out = search_for_model(
-                            self.graph, src, str(args.get("query", "")), origin
-                        )
-                        yield {
-                            "type": "tool",
-                            "name": block.name,
-                            "args": args,
-                            "result": hits,
-                        }
-                    elif block.name == "propose_goal":
-                        kind = args.get("kind", "goto")
-                        body = (
-                            {"command": args.get("command", message)}
-                            if kind == "language"
-                            else {"points": list(args.get("points") or [])}
-                        )
-                        yield {
-                            "type": "goal",
-                            "kind": kind,
-                            "body": body,
-                            "robot": robot,
-                        }
-                        out = {"proposed": True}
-                    else:
-                        out = {"error": f"unknown tool {block.name}"}
+                    events, out = self._run_tool(
+                        block.name, dict(block.input or {}), message, robot, src, origin
+                    )
+                    yield from events
                     results.append(
                         {
                             "type": "tool_result",
@@ -435,9 +455,12 @@ class ChatService:
     def _system(self, src, robot) -> str:
         return (
             "You are the operator assistant of a multi-robot mapping console. Answer "
-            "briefly. Use find_objects to look things up in the scene graph; when the "
-            "operator wants a robot to go somewhere, call propose_goal (the operator "
-            "approves it in the UI — never claim the robot is already moving). "
+            "briefly. Use find_objects to look things up in the scene graph. If it finds "
+            "nothing (or the operator asks to look in the robot's images), call "
+            "search_robot_images; its candidates are not in the map until the operator "
+            "clicks 'Add to Neo4j', so ask whether to add them. When the operator wants a "
+            "robot to go somewhere, call propose_goal (the operator approves it in the UI "
+            "— never claim the robot is already moving). "
             f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}."
         )
 
@@ -463,7 +486,51 @@ class ChatService:
                 body = {"points": list(args.get("points") or [])}
             goal = {"type": "goal", "kind": kind, "body": body, "robot": robot}
             return [goal], {"proposed": True}
+        if name == "search_robot_images":
+            return self._search_images(str(args.get("query", "")), src)
         return [], {"error": f"unknown tool {name}"}
+
+    def _search_images(self, query, src):
+        """SAM3 dry run → (``tool`` + ``object_candidate`` events, model summary)."""
+        url = getattr(self.settings, "sam3_url", "http://127.0.0.1:8077")
+        args = {"query": query}
+        query = query.strip()
+        if not query:
+            return [], {"error": "empty query"}
+        try:
+            result = sam3_client.query(
+                query, url, timeout_s=getattr(self.settings, "sam3_timeout_s", 180.0)
+            )
+        except (sam3_client.Sam3Unavailable, sam3_client.Sam3Error) as e:
+            return [
+                {
+                    "type": "tool",
+                    "name": "search_robot_images",
+                    "args": args,
+                    "result": {"error": str(e)},
+                },
+                {"type": "error", "text": f"Image search failed: {e}"},
+            ], {"error": str(e)}
+        for_model = sam3_client.candidates_for_model(result)
+        events = [
+            {
+                "type": "tool",
+                "name": "search_robot_images",
+                "args": args,
+                "result": for_model,
+            }
+        ]
+        events += sam3_client.candidate_events(result, self._neo4j_src(src))
+        return events, for_model
+
+    def _neo4j_src(self, src):
+        """The Neo4j source a commit lands in (for the viewer refresh)."""
+        if src and src.startswith("neo4j:"):
+            return src
+        for s in self.graph.list() if self.graph is not None else []:
+            if s["kind"] == "neo4j":
+                return s["id"]
+        return src
 
     # ------------------------------------------------------------------ OpenAI
     def _openai_tools(self):
@@ -569,4 +636,8 @@ class ChatService:
 
 
 def _openai_key() -> str | None:
-    return os.environ.get("ADT4_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    return (
+        os.environ.get("ADT4_OPENAI_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("HERACLES_OPENAI_API_KEY")
+    )

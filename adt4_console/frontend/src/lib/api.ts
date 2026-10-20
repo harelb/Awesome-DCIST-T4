@@ -11,9 +11,11 @@ export class ApiError extends Error {
     this.status = status;
     this.detail = detail;
   }
-  get kind(): "down" | "ros" | "auth" | "notfound" | "other" {
+  get kind(): "down" | "ros" | "unavailable" | "auth" | "notfound" | "other" {
     if (this.status === 0 || this.status === 502 || this.status === 504) return "down";
-    if (this.status === 503) return "ros";
+    // 503 is "ROS unavailable: ..." from the bridge, but also neo4j / fleetlink /
+    // SAM3 being down: only blame ROS when the server says so
+    if (this.status === 503) return !this.detail || /\bros\b/i.test(this.detail) ? "ros" : "unavailable";
     if (this.status === 401 || this.status === 403) return "auth";
     if (this.status === 404) return "notfound";
     return "other";
@@ -99,6 +101,7 @@ export function errorText(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.kind === "down") return "Backend unreachable";
     if (e.kind === "ros") return "ROS not connected" + (e.detail && !/ros/i.test(e.detail) ? `: ${e.detail}` : "");
+    if (e.kind === "unavailable") return `Unavailable: ${e.detail}`;
     if (e.kind === "auth") return "Not authorised: open the console with ?token=...";
     return e.detail || `HTTP ${e.status}`;
   }

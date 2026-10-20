@@ -1,5 +1,11 @@
 // Progressive mesh-tile streaming: one BufferGeometry per tile, fetched nearest
 // the camera first with a concurrency limit; tiles whose hash changed are refetched.
+//
+// Ceilings: RViz (kimera_pgmo_rviz MeshDisplay, `Cull Backfaces: true`) hides them
+// because ceiling triangles face down into the room, so from above only their
+// back faces show. Same here: FrontSide material (three.js and kimera_pgmo both
+// wind front faces counter-clockwise). An optional clipping plane cuts the mesh
+// above a height over the floor for views from inside or at grazing angles.
 import {useEffect, useRef, useState} from "react";
 import * as THREE from "three";
 import {useThree} from "@react-three/fiber";
@@ -23,6 +29,10 @@ class TileLoader {
   private inflight = new Set<string>();
   private disposed = false;
   material: THREE.MeshLambertMaterial;
+  /** keeps z <= floor + height when clipping is on */
+  clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+  clipHeight: number | null = null;
+  private tileMinZ = new Map<string, number>();
   triangles = 0;
   total = 0;
 
@@ -31,7 +41,7 @@ class TileLoader {
     private camTarget: () => THREE.Vector3,
     private onChange: () => void,
   ) {
-    this.material = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.DoubleSide});
+    this.material = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.FrontSide});
     // tile colours are sRGB bytes; three treats vertex colours as linear, so decode here
     this.material.onBeforeCompile = shader => {
       shader.vertexShader = shader.vertexShader.replace(
@@ -64,7 +74,42 @@ class TileLoader {
     this.pump();
   }
 
+  /** Floor height: low percentile of the tiles' lowest vertices (robust to pits). */
+  floorZ(): number {
+    const zs = [...this.tileMinZ.values()].sort((a, b) => a - b);
+    return zs.length ? zs[Math.floor(zs.length * 0.1)] : 0;
+  }
+
+  setCull(on: boolean) {
+    const side = on ? THREE.FrontSide : THREE.DoubleSide;
+    if (this.material.side !== side) {
+      this.material.side = side;
+      this.material.needsUpdate = true;
+    }
+  }
+
+  setClip(height: number | null) {
+    this.clipHeight = height;
+    this.updateClip();
+  }
+
+  private updateClip() {
+    if (this.clipHeight === null) {
+      if (this.material.clippingPlanes?.length) {
+        this.material.clippingPlanes = [];
+        this.material.needsUpdate = true;
+      }
+      return;
+    }
+    this.clipPlane.constant = this.floorZ() + this.clipHeight;
+    if (!this.material.clippingPlanes?.length) {
+      this.material.clippingPlanes = [this.clipPlane];
+      this.material.needsUpdate = true;
+    }
+  }
+
   private drop(k: string, mesh: THREE.Mesh) {
+    this.tileMinZ.delete(k);
     this.group.remove(mesh);
     this.triangles -= mesh.geometry.index ? mesh.geometry.index.count / 3 : 0;
     mesh.geometry.dispose();
@@ -103,6 +148,7 @@ class TileLoader {
       g.setIndex(new THREE.BufferAttribute(t.indices, 1));
       g.computeVertexNormals();
       g.computeBoundingSphere();
+      g.computeBoundingBox();
       const mesh = new THREE.Mesh(g, this.material);
       mesh.name = `tile:${key}`;
       mesh.userData.tileKey = key;
@@ -111,6 +157,8 @@ class TileLoader {
       if (old) this.drop(key, old.mesh);
       this.group.add(mesh);
       this.have.set(key, {hash: t.hash || hash, mesh});
+      if (g.boundingBox && Number.isFinite(g.boundingBox.min.z)) this.tileMinZ.set(key, g.boundingBox.min.z);
+      if (this.clipHeight !== null) this.updateClip();
       this.triangles += t.indices.length / 3;
       this.onChange();
     } catch {
@@ -132,11 +180,15 @@ class TileLoader {
   }
 }
 
-export function MeshTiles({src, manifest, manifestRev, opacity, onStats}: {
+export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = true, clipHeight = null, onStats}: {
   src: string;
   manifest: TileManifest | null;
   manifestRev: number;
   opacity: number;
+  /** RViz MeshDisplay `Cull Backfaces` */
+  cullBackfaces?: boolean;
+  /** metres above the floor; null = no clipping */
+  clipHeight?: number | null;
   onStats?: (s: TileStats) => void;
 }) {
   const {controls, invalidate, camera} = useThree() as unknown as {
@@ -181,6 +233,12 @@ export function MeshTiles({src, manifest, manifestRev, opacity, onStats}: {
     loader.material.needsUpdate = true;
     invalidate();
   }, [loader, opacity, invalidate]);
+  useEffect(() => {
+    if (!loader) return;
+    loader.setCull(cullBackfaces);
+    loader.setClip(clipHeight);
+    invalidate();
+  }, [loader, cullBackfaces, clipHeight, invalidate]);
   if (!loader) return null;
   // picking is done by viewer/Scene.tsx Picker (on click only), so no R3F handlers here:
   // per-pointermove raycasts against ~1.6M triangles would stall the frame.

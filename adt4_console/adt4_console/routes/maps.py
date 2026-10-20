@@ -5,8 +5,12 @@ from __future__ import annotations
 import getpass
 import os
 import pathlib
+import shlex
 import subprocess
+import sys
+import threading
 import time
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -17,6 +21,50 @@ from . import services
 router = APIRouter(prefix="/api/maps")
 
 BAG_EXCLUDES = ["recorded_data/"]
+
+
+def _notify_fn():
+    """heracles' combined helper (both counters) when this heracles has it."""
+    try:
+        from heracles.graph_interface import notify_map_change
+    except ImportError:
+        return None
+    return notify_map_change
+
+
+def bump_map_counters(db, dirty_layers=None, affected_ids=None) -> int:
+    """Bump BOTH Neo4j version counters after a write; returns ``_State.version``.
+
+    ``_State{key:'global'}.version`` is what the console (and viz agents) poll;
+    ``_MapState.version`` is what the heracles DSG publisher polls to republish
+    within 0.5 s (``heracles_ros.map_state.bump_map_version``).  A writer that
+    bumps only one leaves the other consumer stale.
+    """
+    notify = _notify_fn()
+    if notify is not None:
+        out = notify(db, list(dirty_layers or []), list(affected_ids or []))
+        if isinstance(out, (tuple, list)) and out:  # (state_version, map_version)
+            return int(out[0])
+        if isinstance(out, int):
+            return out
+        from heracles.graph_interface import read_version
+
+        return int(read_version(db))
+    # same cypher as heracles graph_interface.record_change + map_state.bump_map_version
+    records, _, _ = db.execute(
+        "MERGE (s:_State {key: 'global'}) "
+        "ON CREATE SET s.version = 1 "
+        "ON MATCH SET s.version = s.version + 1 "
+        "SET s.dirty_layers = $dl, s.affected_ids = $ai "
+        "RETURN s.version AS v",
+        parameters={"dl": list(dirty_layers or []), "ai": list(affected_ids or [])},
+    )
+    version = records[0]["v"] if records else 0
+    db.execute(
+        "MERGE (m:_MapState) SET m.version = coalesce(m.version, 0) + 1 "
+        "RETURN m.version AS v"
+    )
+    return int(version)
 
 
 def _local_name(svc) -> str:
@@ -110,6 +158,156 @@ class TransferBody(BaseModel):
     as_name: str | None = None
     include_bags: bool = False
     bwlimit_kbps: int | None = None
+    # image store: which frames to send and how (hydra_image_store pack/unpack).
+    # images="all" + compression="none" keeps the plain rsync of the run dir.
+    images: Literal["keyframes", "all", "none"] = "all"
+    compression: Literal["none", "lossless", "fast"] = "none"
+
+
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+STORE_DIR = "image_store"
+# On a remote machine: spark_env python, with the workspace's hydra_image_store
+# source on PYTHONPATH in case it is not pip-installed there.
+REMOTE_PY = (
+    'PY="${ADT4_ENV:-$HOME/environments/dcist}/spark_env/bin/python3"; '
+    '[ -x "$PY" ] || PY=python3; '
+    'export PYTHONPATH="${ADT4_WS:-$HOME/dcist_ws}/src/awesome_dcist_t4/hydra/'
+    'hydra_image_store/src${PYTHONPATH:+:$PYTHONPATH}"; '
+)
+
+
+def _is_local(svc, m: dict) -> bool:
+    if m.get("local"):
+        return True
+    try:
+        return m["ip"] in svc.helpers.get_local_ips()
+    except Exception:  # noqa: BLE001
+        return m.get("ip") in ("127.0.0.1", "localhost")
+
+
+def _local_store_env() -> dict:
+    """Env for running ``python -m hydra_image_store`` locally."""
+    env = dict(os.environ)
+    try:
+        import hydra_image_store  # noqa: F401
+
+        return env
+    except ImportError:
+        pass
+    repo = pathlib.Path(__file__).resolve().parents[3]
+    for cand in (
+        repo / "hydra" / "hydra_image_store" / "src",
+        pathlib.Path(os.path.expanduser("~/dcist_ws/src/awesome_dcist_t4/hydra/hydra_image_store/src")),
+    ):
+        if cand.is_dir():
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(cand)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+            )
+            break
+    return env
+
+
+def pack_args(run_dir: str, images: str, compression: str) -> list[str]:
+    """``hydra-image-store pack`` → archive on stdout (zstd-wrapped: the sqlite
+    index and any raw bytes compress; JPEGs pass through cheaply)."""
+    return [
+        "pack", run_dir, "-", "--frames", images, "--compression", compression,
+        "--zstd-level", "3", "--quiet",
+    ]
+
+
+def unpack_args(dest_run_dir: str) -> list[str]:
+    """``hydra-image-store unpack`` ← archive on stdin; rebuilds
+    ``<dest>/image_store`` (via ``image_store.partial``) and runs ``check_store``."""
+    return ["unpack", "-", dest_run_dir, "--overwrite", "--quiet"]
+
+
+def _unpack_summary(text: str) -> str:
+    """Short summary of unpack's JSON stats (else the output tail)."""
+    import json
+
+    text = text.strip()
+    try:
+        stats = json.loads(text[text.index("{"):])
+    except ValueError:
+        return text[-400:]
+    if not isinstance(stats, dict):
+        return text[-400:]
+    parts = [f"{k}={v}" for k, v in stats.items() if isinstance(v, (int, float, str, bool))]
+    check = stats.get("check")
+    if isinstance(check, dict) and "ok" in check:
+        parts.append(f"check ok={check['ok']}")
+    return ", ".join(parts[:8])
+
+
+def store_command(svc, m: dict, args: list[str]) -> tuple[list[str], dict | None]:
+    """argv (+ env) running ``python -m hydra_image_store <args>`` on machine ``m``."""
+    if _is_local(svc, m):
+        expanded = [os.path.expanduser(a) if a.startswith("~") else a for a in args]
+        return [sys.executable, "-m", "hydra_image_store", *expanded], _local_store_env()
+    remote_args = " ".join(
+        a.replace("~", "$HOME", 1) if a.startswith("~") else shlex.quote(a) for a in args
+    )
+    script = REMOTE_PY + f'exec "$PY" -m hydra_image_store {remote_args}'
+    return [*SSH, f"{m['user']}@{m['ip']}", f"sh -c {shlex.quote(script)}"], None
+
+
+def pipe_store(job, svc, src: dict, dst: dict, src_run: str, dst_run: str, images, compression):
+    """Stream ``pack`` on ``src`` into ``unpack`` on ``dst`` through this host.
+
+    Returns (ok, message).  Bytes on the wire are counted and logged.
+    """
+    pack_cmd, pack_env = store_command(svc, src, pack_args(src_run, images, compression))
+    unpack_cmd, unpack_env = store_command(svc, dst, unpack_args(dst_run))
+    job.log("dim", "pack: " + " ".join(pack_cmd[-1:] if pack_env is None else pack_cmd))
+    p_src = subprocess.Popen(pack_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pack_env)
+    p_dst = subprocess.Popen(
+        unpack_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=unpack_env
+    )
+    errs: dict[str, bytes] = {}
+
+    def drain(name, stream):
+        errs[name] = stream.read()
+
+    t_err = threading.Thread(target=drain, args=("pack", p_src.stderr), daemon=True)
+    t_out = threading.Thread(target=drain, args=("unpack", p_dst.stdout), daemon=True)
+    t_err.start()
+    t_out.start()
+    sent, next_log, t0 = 0, 8 << 20, time.time()
+    try:
+        while True:
+            job.check_cancelled()
+            chunk = p_src.stdout.read(1 << 16)
+            if not chunk:
+                break
+            p_dst.stdin.write(chunk)
+            sent += len(chunk)
+            if sent >= next_log:
+                rate = sent / max(time.time() - t0, 1e-3) / 1e6
+                job.log("dim", f"image store: {sent / 1e6:.1f} MB sent ({rate:.1f} MB/s)")
+                next_log += 8 << 20
+    except BrokenPipeError:
+        pass
+    except BaseException:
+        p_src.kill()
+        p_dst.kill()
+        raise
+    finally:
+        try:
+            p_dst.stdin.close()
+        except BrokenPipeError:
+            pass
+    rc_src, rc_dst = p_src.wait(), p_dst.wait()
+    t_err.join(5)
+    t_out.join(5)
+    secs = time.time() - t0
+    tail = lambda b: (b or b"").decode("utf-8", "replace").strip()[-400:]  # noqa: E731
+    if rc_src != 0:
+        return False, f"pack failed (rc {rc_src}): {tail(errs.get('pack'))}"
+    if rc_dst != 0:
+        return False, f"unpack failed (rc {rc_dst}): {tail(errs.get('unpack'))}"
+    summary = _unpack_summary((errs.get("unpack") or b"").decode("utf-8", "replace"))
+    return True, f"{sent / 1e6:.1f} MB in {secs:.1f}s" + (f"; {summary}" if summary else "")
 
 
 @router.post("/transfer")
@@ -121,13 +319,26 @@ def transfer(body: TransferBody, request: Request):
     root = svc.settings.output_root
     dest_name = body.as_name or body.experiment
 
+    plain = body.images == "all" and body.compression == "none"
+    if body.images == "none" and body.compression != "none":
+        raise HTTPException(400, "compression needs images=keyframes|all")
+
     def run(job):
         if body.bwlimit_kbps:
             job.log("warn", "bwlimit_kbps is not supported by rsync_transfer; ignoring")
+        exclude = [] if body.include_bags else list(BAG_EXCLUDES)
+        if not plain:
+            exclude.append(f"/{STORE_DIR}/")
         job.log(
             "info",
             f"{src['name']}:{root}/{body.experiment} -> {dst['name']}:{root}/{dest_name}"
-            + ("" if body.include_bags else " (excluding rosbags)"),
+            + ("" if body.include_bags else " (excluding rosbags)")
+            + (
+                ""
+                if plain
+                else f"; image store: {body.images}"
+                + (f", {body.compression}" if body.images != "none" else "")
+            ),
         )
         ok, method, msg = svc.helpers.rsync_transfer(
             src["user"],
@@ -136,13 +347,33 @@ def transfer(body: TransferBody, request: Request):
             dst["user"],
             dst["ip"],
             f"{root}/{dest_name}",
-            exclude=None if body.include_bags else BAG_EXCLUDES,
-            progress_callback=lambda pct: job.set_progress(dst["name"], pct),
+            exclude=exclude or None,
+            progress_callback=lambda pct: job.set_progress(
+                dst["name"], pct if plain or body.images == "none" else pct * 0.5
+            ),
         )
         job.log("ok" if ok else "error", f"{method}: {msg[-500:] if msg else ''}")
-        if ok:
-            job.set_progress(dst["name"], 100)
-        return {"method": method, "dest": f"{root}/{dest_name}"} if ok else False
+        if not ok:
+            return False
+        result = {"method": method, "dest": f"{root}/{dest_name}"}
+        if not plain and body.images != "none":
+            job.log("info", f"Packing image store ({body.images}, {body.compression}) ...")
+            ok, msg = pipe_store(
+                job,
+                svc,
+                src,
+                dst,
+                f"{root}/{body.experiment}",
+                f"{root}/{dest_name}",
+                body.images,
+                body.compression,
+            )
+            job.log("ok" if ok else "error", f"image store: {msg}")
+            if not ok:
+                return False
+            result["image_store"] = msg
+        job.set_progress(dst["name"], 100)
+        return result
 
     job = svc.jobs.start(
         "transfer", f"Transfer {body.experiment} {src['name']}→{dst['name']}", run
@@ -219,7 +450,7 @@ def ingest(body: IngestBody, request: Request):
 
     def run(job):
         import spark_dsg as dsg
-        from heracles.graph_interface import bump_version, store_mesh_path
+        from heracles.graph_interface import store_mesh_path
         from heracles.utils import load_dsg_to_db
 
         t0 = time.time()
@@ -257,7 +488,7 @@ def ingest(body: IngestBody, request: Request):
         if mesh.is_file():
             store_mesh_path(db, str(mesh))
             job.log("dim", f"mesh: {mesh}")
-        version = bump_version(db)
+        version = bump_map_counters(db)
         target.invalidate()
         svc.graph.notify_version(target.id, "ingest")
         nodes = target.count_nodes()

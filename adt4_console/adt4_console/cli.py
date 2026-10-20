@@ -40,6 +40,13 @@ def parse_args(argv=None):
     p.add_argument("--no-ros", action="store_true")
     p.add_argument("--no-fleetlink", action="store_true")
     p.add_argument(
+        "--live-store-root",
+        default=None,
+        help="where live image-store mirrors (fleetlink C6) are written: "
+        "<root>/<robot>/<store_id>/image_store (default <output-root>/live; "
+        "'' disables mirroring)",
+    )
+    p.add_argument(
         "--zenoh-connect",
         help="zenoh router for the fleetlink receiver (default: the local fleetlink "
         "router tcp/127.0.0.1:<zenoh.fleetlink_port> when $ADT4_FLEET_LINK is "
@@ -64,6 +71,11 @@ def parse_args(argv=None):
         type=float,
         default=10.0,
         help="hard cap on cumulative chat LLM spend; afterwards chat goes offline",
+    )
+    p.add_argument(
+        "--sam3-url",
+        default=os.environ.get("SAM3_QUERY_SERVER_URL", "http://127.0.0.1:8077"),
+        help="SAM3 query server used by chat's robot-image search",
     )
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
@@ -98,6 +110,7 @@ def settings_from_args(args):
         topology=args.topology,
         network=args.network,
         output_root=args.output_root,
+        live_store_root=args.live_store_root,
         neo4j=neo4j,
         prior_neo4j=args.prior_neo4j,
         maps=_pairs(args.map, "--map"),
@@ -112,6 +125,7 @@ def settings_from_args(args):
         llm_model=args.llm_model,
         llm_budget_usd=args.llm_budget_usd,
         planner_ns=args.planner_ns,
+        sam3_url=args.sam3_url,
     )
 
 

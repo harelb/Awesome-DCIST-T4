@@ -29,6 +29,8 @@ class Settings:
     ros: bool = True
     fleetlink: bool = True
     zenoh_connect: str | None = None
+    # live image-store mirror (fleetlink C6): None -> <output_root>/live, "" = off
+    live_store_root: str | None = None
     robots: list[str] | None = None
     planner_ns: str | None = None  # omniplanner namespace (base station name)
     static_dir: pathlib.Path = STATIC_DIR
@@ -49,6 +51,15 @@ class Settings:
     )
     llm_budget_usd: float = 10.0  # hard cap on cumulative chat spend (persisted)
     llm_usage_path: str = "~/.adt4_console/llm_usage.json"
+
+    # SAM3 query server (agentic_navigation sam3_frontend/query_server.py):
+    # chat's search_robot_images tool + the /api/sam3 commit/discard routes
+    sam3_url: str = field(
+        default_factory=lambda: os.environ.get(
+            "SAM3_QUERY_SERVER_URL", "http://127.0.0.1:8077"
+        )
+    )
+    sam3_timeout_s: float = 180.0
 
     @property
     def output_root_path(self) -> pathlib.Path:

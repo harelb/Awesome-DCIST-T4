@@ -46,7 +46,7 @@ export function Empty({title, children}: {title: string; children?: ReactNode}) 
 export function ErrorBox({error, onRetry, compact}: {error: unknown; onRetry?: () => void; compact?: boolean}) {
   const kind = error instanceof ApiError ? error.kind : "other";
   const title =
-    kind === "ros" ? "ROS not connected" : kind === "down" ? "Backend unreachable" : kind === "auth" ? "Not authorised" : "Request failed";
+    kind === "ros" ? "ROS not connected" : kind === "unavailable" ? "Service unavailable" : kind === "down" ? "Backend unreachable" : kind === "auth" ? "Not authorised" : "Request failed";
   const detail =
     kind === "ros"
       ? "This view needs the console's ROS bridge. Start the console without --no-ros on a sourced workspace."
@@ -54,7 +54,7 @@ export function ErrorBox({error, onRetry, compact}: {error: unknown; onRetry?: (
         ? "The console server is not responding. Retrying automatically."
         : errorText(error);
   return (
-    <div className={`error-box ${kind === "ros" ? "tone-warn" : "tone-err"} ${compact ? "compact" : ""}`} role="alert">
+    <div className={`error-box ${kind === "ros" || kind === "unavailable" ? "tone-warn" : "tone-err"} ${compact ? "compact" : ""}`} role="alert">
       <div>
         <strong>{title}</strong>
         {!compact && <div className="error-detail">{detail}</div>}

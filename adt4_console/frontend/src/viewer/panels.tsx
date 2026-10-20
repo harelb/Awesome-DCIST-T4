@@ -6,7 +6,7 @@ import {errorText, getJSON} from "../lib/api";
 import {withToken} from "../lib/auth";
 import {Badge, Dot, Empty, Modal, Spinner, Toggle} from "../components/ui";
 import type {NodeDetail} from "../types";
-import {displayPos, DEFAULT_EDGE_ON, EDGE_COLORS} from "./layout";
+import {displayPos, defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
@@ -79,8 +79,12 @@ export function SourcesPanel({stats}: {stats: Record<string, TileStats>}) {
   );
 }
 
+/** Layer swatches in hydra style (places black, rooms/agents colorbrewer). */
+const HYDRA_SWATCH: Record<string, string> = {places: "#000000", rooms: "#a6cee3", agents: "#1f78b4", subkeyframes: "#ff7f00"};
+
 export function LayersPanel() {
-  const {sources, order, hiddenLayers, edgeKinds, set} = useViewer();
+  const {sources, order, hiddenLayers, edgeKinds, set, vizStyle} = useViewer();
+  const hydra = vizStyle === "hydra";
   const revs = order.map(id => sources[id]?.rev).join(",");
   const {layers, edgeCounts} = useMemo(() => {
     const layers = new Map<string, {name: string; kind: string; count: number; order: number}>();
@@ -115,7 +119,13 @@ export function LayersPanel() {
           <li key={k}>
             <label className="layer-row">
               <input type="checkbox" checked={!hiddenLayers[k]} onChange={e => set({hiddenLayers: {...hiddenLayers, [k]: !e.target.checked}})} />
-              <span className="swatch" style={{background: rgbCss((LAYER_COLORS as Record<string, [number, number, number]>)[l.kind] ?? [230, 25, 75])}} />
+              <span
+                className="swatch"
+                style={{
+                  background:
+                    hydra && HYDRA_SWATCH[l.kind] ? HYDRA_SWATCH[l.kind] : rgbCss((LAYER_COLORS as Record<string, [number, number, number]>)[l.kind] ?? [230, 25, 75]),
+                }}
+              />
               <span className="layer-name">{l.name}</span>
               <span className="mono small muted count-r">{l.count.toLocaleString()}</span>
             </label>
@@ -131,8 +141,8 @@ export function LayersPanel() {
           .map(([k, n]) => (
             <li key={k}>
               <label className="layer-row">
-                <input type="checkbox" checked={edgeKinds[k] ?? DEFAULT_EDGE_ON(k)} onChange={e => set({edgeKinds: {...edgeKinds, [k]: e.target.checked}})} />
-                <span className="swatch line" style={{background: EDGE_COLORS[k] ?? "#7f8b96"}} />
+                <input type="checkbox" checked={edgeKinds[k] ?? defaultEdgeOn(k, vizStyle)} onChange={e => set({edgeKinds: {...edgeKinds, [k]: e.target.checked}})} />
+                <span className="swatch line" style={{background: (hydra ? HYDRA_EDGES[k]?.color : EDGE_COLORS[k]) ?? "#7f8b96"}} />
                 <span className="layer-name">{k === "agents-agents" ? "trajectory" : k.replace("-", " / ")}</span>
                 <span className="mono small muted count-r">{n.toLocaleString()}</span>
               </label>
@@ -144,12 +154,25 @@ export function LayersPanel() {
 }
 
 export function DisplayPanel() {
-  const {flat, stackHeight, showBBoxes, showTrajectory, meshOpacity, set} = useViewer();
+  const {flat, stackHeight, showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, set} = useViewer();
   return (
     <section className="vsec">
       <header className="vsec-head">
         <h4>Display</h4>
       </header>
+      <label className="slider-row">
+        <span>Style</span>
+        <select
+          className="input input-sm"
+          value={vizStyle}
+          onChange={e => set({vizStyle: e.target.value as typeof vizStyle})}
+          aria-label="Graph style"
+          title="hydra_visualizer: the ADT4 RViz look (base_params/hydra_visualizer.yaml)"
+        >
+          <option value="hydra">hydra_visualizer</option>
+          <option value="classic">Classic console</option>
+        </select>
+      </label>
       <Toggle checked={flat} onChange={v => set({flat: v})} label="Flat (no layer stacking)" />
       {!flat && (
         <label className="slider-row">
@@ -163,14 +186,24 @@ export function DisplayPanel() {
         <input type="range" min={0} max={1} step={0.05} value={meshOpacity} onChange={e => set({meshOpacity: Number(e.target.value)})} />
         <span className="mono small">{Math.round(meshOpacity * 100)}%</span>
       </label>
+      <Toggle checked={meshCull} onChange={v => set({meshCull: v})} label="Cull mesh back faces (hide ceilings, like RViz)" />
+      <Toggle checked={meshClipOn} onChange={v => set({meshClipOn: v})} label="Clip mesh above a height" />
+      {meshClipOn && (
+        <label className="slider-row">
+          <span>Max height</span>
+          <input type="range" min={0.2} max={6} step={0.1} value={meshClipHeight} onChange={e => set({meshClipHeight: Number(e.target.value)})} aria-label="Mesh max height above floor" />
+          <span className="mono small">{meshClipHeight.toFixed(1)} m</span>
+        </label>
+      )}
       <Toggle checked={showBBoxes} onChange={v => set({showBBoxes: v})} label="Object bounding boxes" />
+      <Toggle checked={showText} onChange={v => set({showText: v})} label="Text labels" />
       <Toggle checked={showTrajectory} onChange={v => set({showTrajectory: v})} label="Agent trajectory" />
     </section>
   );
 }
 
 export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?: () => void} = {}) {
-  const {query, set, select, fly, sources, flat, stackHeight} = useViewer();
+  const {query, set, select, fly, sources, flat, stackHeight, vizStyle} = useViewer();
   const [open, setOpen] = useState(false);
   const revs = Object.values(sources).map(s => s.rev).join(",");
   const results = useMemo(() => {
@@ -190,7 +223,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
     const n = sources[r.src]?.model?.nodes.get(r.sym);
     if (!n) return;
     select({src: r.src, sym: r.sym});
-    fly(displayPos(n, flat, stackHeight));
+    fly(displayPos(n, flat, stackHeight, vizStyle));
     setOpen(false);
     onPicked?.();
   };
@@ -234,7 +267,7 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
 }
 
 export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string) => void; onGoto: (src: string, sym: string) => void}) {
-  const {selected, sources, fly, flat, stackHeight, select} = useViewer();
+  const {selected, sources, fly, flat, stackHeight, select, vizStyle} = useViewer();
   const [detail, setDetail] = useState<NodeDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -278,7 +311,7 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
         </button>
       </div>
       <div className="row gap-sm wrap">
-        <button className="btn btn-sm" onClick={() => fly(displayPos(node, flat, stackHeight))}>
+        <button className="btn btn-sm" onClick={() => fly(displayPos(node, flat, stackHeight, vizStyle))}>
           Fly to
         </button>
         <button className="btn btn-sm" onClick={() => onGoto(selected.src, selected.sym)}>

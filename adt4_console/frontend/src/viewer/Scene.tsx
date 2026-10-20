@@ -23,11 +23,11 @@ export interface SceneCallbacks {
 }
 
 function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
-  const {hiddenLayers, edgeKinds, flat, stackHeight, showBBoxes, showTrajectory, meshOpacity} = useViewer();
+  const {hiddenLayers, edgeKinds, flat, stackHeight, showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight} = useViewer();
   const layout = useMemo(
-    () => (src.model ? layoutGraph(src.model, {hiddenLayers, edgeKinds, flat, stackHeight}) : null),
+    () => (src.model ? layoutGraph(src.model, {hiddenLayers, edgeKinds, flat, stackHeight, style: vizStyle, text: showText}) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [src.model, src.rev, hiddenLayers, edgeKinds, flat, stackHeight],
+    [src.model, src.rev, hiddenLayers, edgeKinds, flat, stackHeight, vizStyle, showText],
   );
   const onLayout = cb.onLayout;
   useEffect(() => {
@@ -36,10 +36,27 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
   return (
     <group>
       {src.showMesh && src.manifest && (
-        <MeshTiles src={src.id} manifest={src.manifest} manifestRev={src.manifestRev} opacity={meshOpacity} onStats={s => cb.onStats(src.id, s)} />
+        <MeshTiles
+          src={src.id}
+          manifest={src.manifest}
+          manifestRev={src.manifestRev}
+          opacity={meshOpacity}
+          cullBackfaces={meshCull}
+          clipHeight={meshClipOn ? meshClipHeight : null}
+          onStats={s => cb.onStats(src.id, s)}
+        />
       )}
       {src.showGraph && layout && (
-        <GraphLayers src={src.id} layout={layout} showBBoxes={showBBoxes} showTrajectory={showTrajectory} trajectory={src.trajectory} edgeKinds={edgeKinds} />
+        <GraphLayers
+          src={src.id}
+          layout={layout}
+          showBBoxes={showBBoxes}
+          showTrajectory={showTrajectory}
+          trajectory={src.trajectory}
+          edgeKinds={edgeKinds}
+          style={vizStyle}
+          showText={showText}
+        />
       )}
     </group>
   );
@@ -202,10 +219,10 @@ function PlanOverlay() {
 }
 
 function Markers() {
-  const {selected, highlight, sources, flat, stackHeight, gotoDraft} = useViewer();
+  const {selected, highlight, sources, flat, stackHeight, gotoDraft, vizStyle} = useViewer();
   const findPos = (src: string, sym: string): [number, number, number] | null => {
     const n = sources[src]?.model?.nodes.get(sym);
-    return n ? displayPos(n, flat, stackHeight) : null;
+    return n ? displayPos(n, flat, stackHeight, vizStyle) : null;
   };
   const sel = selected ? findPos(selected.src, selected.sym) : null;
   const selNode = selected ? sources[selected.src]?.model?.nodes.get(selected.sym) : null;
@@ -313,17 +330,32 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
   return <CameraControls ref={ref} makeDefault maxPolarAngle={Math.PI * 0.49} dollyToCursor minDistance={1} maxDistance={2000} />;
 }
 
+/** RViz look for the hydra style: grey background, light grid. */
+export const BACKGROUND = {hydra: "#303030", classic: "#0b0f14"} as const;
+const GRID = {hydra: ["#7a7a80", "#55555a"], classic: ["#2a3440", "#1a222b"]} as const;
+
+function Background() {
+  const style = useViewer(s => s.vizStyle);
+  const {gl, invalidate} = useThree();
+  useEffect(() => {
+    gl.setClearColor(BACKGROUND[style]);
+    invalidate();
+  }, [gl, style, invalidate]);
+  return null;
+}
+
 function Ground({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
+  const style = useViewer(s => s.vizStyle);
   const size = bounds ? Math.ceil(Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], 20) / 10) * 10 + 40 : 100;
   const cx = bounds ? Math.round((bounds.min[0] + bounds.max[0]) / 2) : 0;
   const cy = bounds ? Math.round((bounds.min[1] + bounds.max[1]) / 2) : 0;
   const grid = useMemo(() => {
-    const g = new THREE.GridHelper(size, size / 2, "#2a3440", "#1a222b");
+    const g = new THREE.GridHelper(size, size / 2, GRID[style][0], GRID[style][1]);
     g.rotation.x = Math.PI / 2;
     (g.material as THREE.Material).transparent = true;
-    (g.material as THREE.Material).opacity = 0.6;
+    (g.material as THREE.Material).opacity = style === "hydra" ? 0.5 : 0.6;
     return g;
-  }, [size]);
+  }, [size, style]);
   return <primitive object={grid} position={[cx, cy, -0.05]} />;
 }
 
@@ -342,12 +374,16 @@ export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {mi
       dpr={DPR}
       gl={GL}
       camera={{fov: 50, near: 0.1, far: 5000, position: [-10, -30, 30], up: [0, 0, 1]}}
-      onCreated={({gl}) => gl.setClearColor("#0b0f14")}
+      onCreated={({gl}) => {
+        gl.setClearColor(BACKGROUND[useViewer.getState().vizStyle]);
+        gl.localClippingEnabled = true; // mesh "max height" clip
+      }}
       data-testid="viewer-canvas"
     >
       <ambientLight intensity={0.85} />
       <directionalLight position={[30, -20, 60]} intensity={1.0} />
       <directionalLight position={[-40, 30, 20]} intensity={0.35} />
+      <Background />
       <Ground bounds={bounds} />
       {sources.map(s => (
         <SourceContent key={s.id} src={s} cb={cb} />

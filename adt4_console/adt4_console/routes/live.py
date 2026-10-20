@@ -56,13 +56,17 @@ def grid(robot: str, request: Request):
 
 
 class BudgetBody(BaseModel):
-    cls: Literal["C1", "C2", "C3", "C4", "C5"]
+    # C6 = image-store mirror (lowest priority); fleetlink set_budget must know it too
+    cls: Literal["C1", "C2", "C3", "C4", "C5", "C6"]
     bps: float
 
 
 @router.post("/{robot}/budget")
 def budget(robot: str, body: BudgetBody, request: Request):
-    req = _rx(request).set_budget(robot, body.cls, body.bps)
+    try:
+        req = _rx(request).set_budget(robot, body.cls, body.bps)
+    except ValueError as e:  # e.g. a receiver that predates class C6
+        raise HTTPException(400, str(e)) from None
     return {"ok": True, "request": req}
 
 

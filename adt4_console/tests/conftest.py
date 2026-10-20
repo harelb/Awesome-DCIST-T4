@@ -67,6 +67,7 @@ def settings(tmp_path, topology_copy):
         llm=False,
         static_dir=tmp_path / "static",
         confirm_timeout_s=5.0,
+        sam3_url="http://127.0.0.1:9",  # nothing listens: tests never hit a real server
     )
 
 

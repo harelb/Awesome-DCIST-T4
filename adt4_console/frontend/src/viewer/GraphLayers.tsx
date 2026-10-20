@@ -1,9 +1,9 @@
 import {useLayoutEffect, useMemo, useRef} from "react";
 import * as THREE from "three";
 import {useThree} from "@react-three/fiber";
-import {Line} from "@react-three/drei";
-import type {GraphLayout, LayerBuffers} from "./layout";
-import {DEFAULT_EDGE_ON, EDGE_COLORS} from "./layout";
+import {Html, Line} from "@react-three/drei";
+import type {GraphLayout, LayerBuffers, TextLabel, VizStyle} from "./layout";
+import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 
 /** Displayed node positions per source, used by the click picker. */
 export const pickRegistry = new Map<string, Map<string, LayerBuffers>>();
@@ -17,8 +17,12 @@ function NodeLayer({layer}: {layer: LayerBuffers}) {
   const capacity = nextPow2(layer.syms.length);
   const ref = useRef<THREE.InstancedMesh>(null);
   const invalidate = useThree(s => s.invalidate);
-  const geom = layer.info.kind === "objects" ? box : sphere;
-  const material = useMemo(() => new THREE.MeshLambertMaterial({color: "#ffffff"}), []);
+  const geom = layer.shape === "box" ? box : sphere;
+  const material = useMemo(
+    () => new THREE.MeshLambertMaterial({color: "#ffffff", transparent: layer.opacity < 1, opacity: layer.opacity}),
+    [layer.opacity],
+  );
+  useLayoutEffect(() => () => material.dispose(), [material]);
   useLayoutEffect(() => {
     const m = ref.current;
     if (!m) return;
@@ -38,7 +42,35 @@ function NodeLayer({layer}: {layer: LayerBuffers}) {
     m.computeBoundingSphere();
     invalidate();
   }, [layer, invalidate]);
-  return <instancedMesh key={capacity} ref={ref} args={[geom, material, capacity]} frustumCulled={false} />;
+  return <instancedMesh key={`${capacity}/${layer.shape}/${layer.opacity}`} ref={ref} args={[geom, material, capacity]} frustumCulled={false} />;
+}
+
+/** Translucent place-region fill (hydra RegionGrowingBoundaryPlugin, fill_alpha 0.3). */
+function PlaceFill({positions, colors}: {positions: Float32Array; colors: Float32Array}) {
+  const geom = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    return g;
+  }, [positions, colors]);
+  useLayoutEffect(() => () => geom.dispose(), [geom]);
+  return (
+    <mesh geometry={geom} frustumCulled={false} renderOrder={-1}>
+      <meshBasicMaterial vertexColors transparent opacity={0.3} side={THREE.DoubleSide} depthWrite={false} />
+    </mesh>
+  );
+}
+
+function TextLabels({texts}: {texts: TextLabel[]}) {
+  return (
+    <>
+      {texts.map((t, i) => (
+        <Html key={i} position={t.pos} center zIndexRange={[5, 0]} className="viz-text-wrap" style={{pointerEvents: "none"}}>
+          <div className={`viz-text viz-text-${t.kind}`}>{t.text}</div>
+        </Html>
+      ))}
+    </>
+  );
 }
 
 function Segments({positions, colors, color, opacity = 1}: {positions: Float32Array; colors?: Float32Array; color?: string; opacity?: number}) {
@@ -56,14 +88,17 @@ function Segments({positions, colors, color, opacity = 1}: {positions: Float32Ar
   );
 }
 
-export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, edgeKinds}: {
+export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, edgeKinds, style = "classic", showText = false}: {
   src: string;
   layout: GraphLayout;
   showBBoxes: boolean;
   showTrajectory: boolean;
   trajectory: [number, number, number][] | null;
   edgeKinds: Record<string, boolean>;
+  style?: VizStyle;
+  showText?: boolean;
 }) {
+  const hydra = style === "hydra";
   useLayoutEffect(() => {
     pickRegistry.set(src, new Map(layout.layers.map(l => [l.key, l])));
     return () => void pickRegistry.delete(src);
@@ -81,12 +116,26 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
         <NodeLayer key={l.key} layer={l} />
       ))}
       {showBBoxes && layout.bboxes.positions.length > 0 && <Segments positions={layout.bboxes.positions} colors={layout.bboxes.colors} opacity={0.9} />}
+      {hydra && layout.placeFill && <PlaceFill positions={layout.placeFill.positions} colors={layout.placeFill.colors} />}
       {Object.entries(layout.edges).map(([kind, pos]) =>
-        (edgeKinds[kind] ?? DEFAULT_EDGE_ON(kind)) && kind !== "agents-agents" ? (
-          <Segments key={kind} positions={pos} color={EDGE_COLORS[kind] ?? "#7f8b96"} opacity={kind === "places-places" ? 0.55 : 0.35} />
+        (edgeKinds[kind] ?? defaultEdgeOn(kind, style)) && kind !== "agents-agents" ? (
+          hydra ? (
+            <Segments
+              key={kind}
+              positions={pos}
+              colors={layout.edgeColors[kind]}
+              color={HYDRA_EDGES[kind]?.color ?? "#000000"}
+              opacity={HYDRA_EDGES[kind]?.alpha ?? 0.5}
+            />
+          ) : (
+            <Segments key={kind} positions={pos} color={EDGE_COLORS[kind] ?? "#7f8b96"} opacity={kind === "places-places" ? 0.55 : 0.35} />
+          )
         ) : null,
       )}
-      {showTrajectory && trajPoints && trajPoints.length > 1 && <Line points={trajPoints} color={EDGE_COLORS["agents-agents"]} lineWidth={2.5} />}
+      {showTrajectory && trajPoints && trajPoints.length > 1 && (
+        <Line points={trajPoints} color={hydra ? HYDRA_EDGES["agents-agents"].color : EDGE_COLORS["agents-agents"]} lineWidth={hydra ? 2 : 2.5} />
+      )}
+      {showText && layout.texts.length > 0 && <TextLabels texts={layout.texts} />}
     </group>
   );
 }

@@ -25,10 +25,11 @@ export const useRobots = create<RobotsStore>(set => ({
   rateHistory: {},
   setLink: (r, l) =>
     set(s => {
-      const prev = s.rateHistory[r] ?? {C1: [], C2: [], C3: []};
+      const prev = s.rateHistory[r] ?? {};
       const next = {} as Record<Cls, number[]>;
-      for (const c of ["C1", "C2", "C3"] as Cls[]) {
-        next[c] = [...prev[c], Number(l.rates?.[c] ?? 0)].slice(-HISTORY);
+      const classes = new Set<Cls>(["C1", "C2", "C3", ...Object.keys(l.rates ?? {}), ...Object.keys(l.budgets ?? {})]);
+      for (const c of classes) {
+        next[c] = [...(prev[c] ?? []), Number(l.rates?.[c] ?? 0)].slice(-HISTORY);
       }
       return {link: {...s.link, [r]: l}, rateHistory: {...s.rateHistory, [r]: next}};
     }),
