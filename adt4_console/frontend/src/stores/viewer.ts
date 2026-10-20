@@ -275,3 +275,10 @@ export function readyModels(): {id: string; model: GraphModel}[] {
     .filter(v => v?.enabled && v.model)
     .map(v => ({id: v.id, model: v.model!}));
 }
+
+/** The source the planner resolves goal symbols in: omniplanner reads the
+ *  heracles Neo4j map, so the first Neo4j source (null: none in the catalog). */
+export function plannerSourceId(): string | null {
+  const s = useViewer.getState();
+  return s.order.find(id => s.sources[id]?.kind === "neo4j") ?? null;
+}

@@ -1504,6 +1504,11 @@ input[type="checkbox"] {
   border-radius: var(--radius);
   z-index: 6;
 }
+.toast-err {
+  border-color: var(--err);
+  background: color-mix(in srgb, var(--err-bg), var(--bg-3) 70%);
+  max-width: min(640px, calc(100% - 20px));
+}
 .searchbox {
   position: relative;
   width: min(420px, 100%);

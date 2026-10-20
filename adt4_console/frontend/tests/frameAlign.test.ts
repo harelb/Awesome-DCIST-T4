@@ -11,6 +11,7 @@ import {
   nearestGotoPlace,
   poseInGlobal,
   robotOfSource,
+  snapToPlannerMap,
   type Vec3,
 } from "../src/lib/frameAlign";
 import {GraphModel} from "../src/lib/graphModel";
@@ -134,6 +135,42 @@ describe("goto picking across frames", () => {
     expect(nearestGotoPlace(models, [0.9, 0, 0], () => null)!.sym).toBe("P(7)");
     // aligned: P(7) is ~11 m away, P(1) wins
     expect(nearestGotoPlace(models, [0.9, 0, 0], aligned)!.sym).toBe("P(1)");
+  });
+});
+
+describe("goto picks snap to the planner's map", () => {
+  // planner (Neo4j) map: places + one object, global frame
+  const planner = {id: "neo4j:live", model: model([rec("P(1)", 3, [0, 0, 0]), rec("P(2)", 3, [20, 20, 0]), rec("O(3)", 2, [4, 0, 0]), rec("a(4)", 2, [1, 1, 0])])};
+  planner.model.nodes.get("a(4)")!.part = 97; // agent keyframe partition
+  const none = () => null;
+
+  it("a point near the live robot's place maps to the planner place nearby", () => {
+    // live P(7) is drawn at map (10, 6, 0.7); the planner only has P(1) / P(2) / O(3)
+    const best = snapToPlannerMap(planner, [10, 6, 0.7], none)!;
+    expect(best.src).toBe("neo4j:live");
+    expect(best.sym).toBe("P(1)"); // 11.7 m away (P(2) is 17 m)
+  });
+  it("never returns agent poses or objects for a plain pick", () => {
+    expect(snapToPlannerMap(planner, [1, 1, 0], none)!.sym).toBe("P(1)");
+    expect(snapToPlannerMap(planner, [4, 0, 0], none)!.sym).toBe("P(1)");
+  });
+  it("an object pick keeps a planner object within 1 m, else falls back to a place", () => {
+    expect(snapToPlannerMap(planner, [4.5, 0, 0], none, {object: true})!.sym).toBe("O(3)");
+    expect(snapToPlannerMap(planner, [6, 0, 0], none, {object: true})!.sym).toBe("P(1)");
+  });
+  it("agent poses in a robot-prefix partition are not objects", () => {
+    const m = model([rec("P(1)", 3, [0, 0, 0]), rec("h(9)", 2, [4, 0, 0])]);
+    m.nodes.get("h(9)")!.part = 104; // 'h'
+    expect(snapToPlannerMap({id: "neo4j:live", model: m}, [4, 0, 0], none, {object: true})!.sym).toBe("P(1)");
+  });
+  it("nothing within range is null", () => {
+    expect(snapToPlannerMap(planner, [100, 100, 0], none)).toBeNull();
+  });
+  it("searches in the planner source's own frame", () => {
+    // planner drawn through the 90 deg alignment: P(1) at local (0,0,0) shows at map (10, 5, 0.7)
+    const best = snapToPlannerMap(planner, [10.2, 5.1, 0.7], () => alignMatrix(FA))!;
+    expect(best.sym).toBe("P(1)");
+    close(best.pos, [10, 5, 0.7]);
   });
 });
 

@@ -296,6 +296,8 @@ export interface PlanStatus {
   error: string;
   t: number;
   refusals?: Record<string, string>;
+  /** console-wide arrival counter (new refusals are toasted) */
+  seq?: number;
 }
 
 /** Spot lease from the executor's runtime guards (``t``: console seconds). */

@@ -150,3 +150,23 @@ export function nearestGotoPlace(
   }
   return best;
 }
+
+/** Snap a goto pick (global frame) to a node of the planner's own map.
+ *  The planner refuses a symbol its map lacks ("not in scene graph"), and a
+ *  symbol picked on another source (a live mirror's agent pose, a prior file)
+ *  can be missing there. `object` (the pick was an object) first tries a
+ *  planner object within `objectDist`, else the nearest planner place. */
+export function snapToPlannerMap(
+  planner: {id: string; model: GraphModel},
+  p: Vec3,
+  matrixOf: (id: string) => THREE.Matrix4 | null,
+  opts: {object?: boolean; objectDist?: number; maxDist?: number} = {},
+): {src: string; sym: string; d: number; pos: Vec3} | null {
+  const m = matrixOf(planner.id);
+  const local = invertPoint(m, p);
+  const n =
+    (opts.object ? nearestPlace(planner.model, local, {kinds: ["objects"], maxDist: opts.objectDist ?? 1}) : null) ??
+    nearestPlace(planner.model, local, {maxDist: opts.maxDist ?? 15});
+  if (!n) return null;
+  return {src: planner.id, sym: n.sym, d: Math.hypot(n.pos[0] - local[0], n.pos[1] - local[1]), pos: applyPoint(m, n.pos)};
+}

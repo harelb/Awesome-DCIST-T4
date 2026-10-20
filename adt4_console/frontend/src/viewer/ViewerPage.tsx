@@ -5,8 +5,8 @@ import {getJSON} from "../lib/api";
 import {pickDefaultSources} from "../lib/runCopies";
 import type {ActiveLaunch} from "../types";
 import {sourceMatrix, useRobots} from "../stores/robots";
-import {applyPoint, nearestGotoPlace} from "../lib/frameAlign";
-import {layerInfo, nearestPlace} from "../lib/graphModel";
+import {applyPoint, nearestGotoPlace, snapToPlannerMap, type Vec3} from "../lib/frameAlign";
+import {layerInfo} from "../lib/graphModel";
 import {Scene, type SceneCallbacks} from "./Scene";
 import type {GraphLayout} from "./layout";
 import type {TileStats} from "./MeshTiles";
@@ -21,7 +21,7 @@ import {CameraPanel} from "./CameraPanel";
 import {TeleopPanel} from "./TeleopPanel";
 import {SearchImagesPanel} from "./SearchImagesPanel";
 import {Segmented} from "../components/ui";
-import {readyModels} from "../stores/viewer";
+import {plannerSourceId, readyModels} from "../stores/viewer";
 import {useWsStatus} from "../ws";
 import {useIsPhone, useMedia} from "../lib/media";
 import {Icon} from "../components/Shell";
@@ -94,8 +94,10 @@ export default function ViewerPage() {
   );
   const [stats, setStats] = useState<Record<string, TileStats>>({});
   const [bounds, setBounds] = useState<{min: number[]; max: number[]} | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToastState] = useState<{text: string; err: boolean} | null>(null);
+  const setToast = useCallback((text: string | null, err = false) => setToastState(text ? {text, err} : null), []);
   const robotStates = useRobots(s => s.state);
+  const plans = useRobots(s => s.plan);
   const wsUp = useWsStatus(s => s.connected);
   const initDone = useRef(false);
 
@@ -133,9 +135,31 @@ export default function ViewerPage() {
 
   useEffect(() => {
     if (!toast) return;
-    const id = window.setTimeout(() => setToast(null), 3500);
+    const id = window.setTimeout(() => setToast(null), toast.err ? 8000 : 3500);
     return () => window.clearTimeout(id);
-  }, [toast]);
+  }, [toast, setToast]);
+
+  // a goal the planner refused (e.g. "Requested symbol ... not in scene graph")
+  // shows as an error toast; entries already there when a robot's plan is first
+  // seen are history, not news
+  const seenStatus = useRef<Record<string, number>>({});
+  useEffect(() => {
+    for (const [robot, p] of Object.entries(plans)) {
+      const list = p?.status ?? [];
+      const seen = seenStatus.current[robot];
+      seenStatus.current[robot] = list.reduce((m, st) => Math.max(m, st.seq ?? 0), seen ?? 0);
+      if (seen === undefined) continue;
+      const failed = list.filter(st => (st.seq ?? 0) > seen && !st.ok);
+      if (failed.length) setToast(`${robot}: planner rejected the goal: ${failed[failed.length - 1].error || "no reason given"}`, true);
+    }
+  }, [plans, setToast]);
+
+  // goto picking snaps to the planner's map: load it as soon as picking starts
+  useEffect(() => {
+    if (v.pickMode !== "goto") return;
+    const pid = plannerSourceId();
+    if (pid && !useViewer.getState().sources[pid]?.enabled) useViewer.getState().enableSource(pid, true);
+  }, [v.pickMode]);
 
   // [ / ] cycle the robot focus (all -> each robot -> all)
   useEffect(() => {
@@ -163,6 +187,44 @@ export default function ViewerPage() {
     setTab("plan");
   }, [setTab]);
 
+  // a goto pick (global frame) -> a node of the planner's map, the only symbols
+  // omniplanner can look up; without a Neo4j source, the nearest shown place
+  const pickGoto = useCallback(
+    (p: Vec3, object: boolean) => {
+      const st = useViewer.getState();
+      const pid = plannerSourceId();
+      if (!pid) {
+        const best = nearestGotoPlace(readyModels(), p, sourceMatrix);
+        if (best) addGoto(best.src, best.sym);
+        else setToast("No place within 15 m of that point");
+        return;
+      }
+      const ps = st.sources[pid];
+      if (!ps.enabled) st.enableSource(pid, true);
+      if (!ps.model || ps.status !== "ready") {
+        setToast(ps.status === "error" ? `Planner map ${ps.label} failed to load: ${ps.error}` : `Loading the planner map (${ps.label}); pick again in a moment`, ps.status === "error");
+        return;
+      }
+      const best = snapToPlannerMap({id: pid, model: ps.model}, p, sourceMatrix, {object});
+      if (best) addGoto(best.src, best.sym);
+      else setToast(`No place in the planner map (${ps.label}) within 15 m of that point`);
+    },
+    [addGoto, setToast],
+  );
+
+  // a picked node: the planner's own places / objects go as is; anything else
+  // (agent poses, live-mirror or prior-file nodes, mesh) snaps to its map
+  const gotoNode = useCallback(
+    (src: string, sym: string) => {
+      const n = useViewer.getState().sources[src]?.model?.nodes.get(sym);
+      if (!n) return;
+      const kind = layerInfo(n.layer, n.part).kind;
+      if (src === plannerSourceId() && (kind === "places" || kind === "objects")) addGoto(src, sym);
+      else pickGoto(applyPoint(sourceMatrix(src), n.pos), kind === "objects");
+    },
+    [addGoto, pickGoto],
+  );
+
   // a picked search result: the Inspect tab (object images) comes to the front
   const showInspect = useCallback(() => {
     setTab("inspect");
@@ -174,13 +236,7 @@ export default function ViewerPage() {
       onNode: (src, sym) => {
         const st = useViewer.getState();
         if (st.pickMode === "goto") {
-          const n = st.sources[src]?.model?.nodes.get(sym);
-          const kind = n ? layerInfo(n.layer, n.part).kind : null;
-          if (kind === "places" || kind === "objects") addGoto(src, sym);
-          else if (n) {
-            const near = nearestPlace(st.sources[src]?.model, n.pos);
-            if (near) addGoto(src, near.sym);
-          }
+          gotoNode(src, sym);
           return;
         }
         st.select({src, sym});
@@ -189,11 +245,9 @@ export default function ViewerPage() {
       onPoint: p => {
         const st = useViewer.getState();
         if (st.pickMode !== "goto") return;
-        // the click is in the global frame; a live source's places are in its
-        // robot's frame (goals go to the planner as node symbols, not points)
-        const best = nearestGotoPlace(readyModels(), p, sourceMatrix);
-        if (best) addGoto(best.src, best.sym);
-        else setToast("No place within 15 m of that point");
+        // the click is in the global frame (goals go to the planner as node
+        // symbols of its map, not points)
+        pickGoto(p, false);
       },
       onMiss: () => {
         if (useViewer.getState().pickMode === "inspect") useViewer.getState().select(null);
@@ -203,7 +257,7 @@ export default function ViewerPage() {
         if (l.bounds) setBounds(b => b ?? l.bounds);
       },
     }),
-    [addGoto, showTab],
+    [gotoNode, pickGoto, showTab],
   );
 
   const onVisit = (src: string, sym: string) => {
@@ -280,7 +334,7 @@ export default function ViewerPage() {
   const tabContent = (t: Tab) => {
     switch (t) {
       case "inspect":
-        return <Inspector onVisit={onVisit} onGoto={addGoto} />;
+        return <Inspector onVisit={onVisit} onGoto={gotoNode} />;
       case "plan":
         return <PlanPanel />;
       case "teleop":
@@ -489,7 +543,7 @@ export default function ViewerPage() {
             </button>
           </div>
         )}
-        {toast && <div className="toast">{toast}</div>}
+        {toast && <div className={`toast${toast.err ? " toast-err" : ""}`} role={toast.err ? "alert" : "status"}>{toast.text}</div>}
         <TopViewHint active={v.topDown} />
         <RobotLegend />
         <div className="vstatus mono">

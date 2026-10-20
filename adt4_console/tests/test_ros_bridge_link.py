@@ -94,3 +94,17 @@ def test_bad_link_status_ignored(monkeypatch):
     rb._on_link_status(types.SimpleNamespace(data="not json"))
     rb._on_link_status(types.SimpleNamespace(data=json.dumps({"no": "robot"})))
     assert rb._link_status == {}
+
+
+def test_plan_status_entries_get_increasing_seq():
+    """The UI toasts refusals newer than the last seq it saw for a robot."""
+    rb = RosBridge(types.SimpleNamespace(ros=False, planner_ns="willow"))
+    refuse = '{"plugin": "goto", "robot": "hamilton", "ok": false, "error": "Requested symbol a(4) not in scene graph"}'
+    rb._on_plan_status("hamilton", types.SimpleNamespace(data=refuse))
+    rb._on_plan_status("hamilton", types.SimpleNamespace(data=refuse.replace("hamilton", "spot2")))
+    rb._on_plan_status("hamilton", types.SimpleNamespace(data="not json"))
+    rb._on_plan_status("hamilton", types.SimpleNamespace(data=refuse))
+    seqs = [s["seq"] for s in rb.plan("hamilton")["status"]]
+    assert seqs == [1, 3]
+    assert rb.plan("spot2")["status"][0]["seq"] == 2
+    assert rb.plan("hamilton")["status"][0]["error"].startswith("Requested symbol")

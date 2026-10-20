@@ -88,6 +88,15 @@ export class GraphModel {
 }
 
 /** Nearest node of a place layer to `p` (xy distance weighted, z de-emphasised). */
+/** An agent (trajectory keyframe) node: layer 2 in partition 'a', or in its
+ *  robot-prefix partition (sym starts with that character); mirrors the
+ *  backend's ``is_agent_record``. */
+export function isAgentNode(n: Pick<NodeRecord, "layer" | "part" | "sym">): boolean {
+  if (n.layer !== 2) return false;
+  if (n.part === 97) return true;
+  return n.part !== 0 && n.part !== 115 && !!n.sym && n.sym[0] === String.fromCharCode(n.part);
+}
+
 export function nearestPlace(
   model: GraphModel | null | undefined,
   p: [number, number, number],
@@ -99,7 +108,7 @@ export function nearestPlace(
   let best: NodeRecord | null = null;
   let bestD = Infinity;
   for (const n of model.nodes.values()) {
-    if (!kinds.includes(layerInfo(n.layer, n.part).kind)) continue;
+    if (!kinds.includes(layerInfo(n.layer, n.part).kind) || isAgentNode(n)) continue;
     const dx = n.pos[0] - p[0];
     const dy = n.pos[1] - p[1];
     const dz = (n.pos[2] - p[2]) * 0.25;

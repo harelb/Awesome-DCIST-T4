@@ -11,6 +11,7 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import importlib
+import itertools
 import json
 import logging
 import pathlib
@@ -208,6 +209,8 @@ class RosBridge:
         self.plugins = load_plugins()
         self.planner_ns = settings.planner_ns or default_planner_ns(fleet)
         self._last_goal_robot: str | None = None
+        # plan_status entries get a console-wide ``seq`` (the UI toasts new refusals)
+        self._status_seq = itertools.count(1)
         self._planner_llm_sub = None
         self._plan: dict[str, RobotPlanState] = collections.defaultdict(RobotPlanState)
         self._subscribed: set[str] = set()
@@ -555,6 +558,7 @@ class RosBridge:
         except ValueError:
             return
         robot = st.get("robot") or self._last_goal_robot or default_robot
+        st["seq"] = next(self._status_seq)
         self._plan[robot].status.append(st)
         self._publish_plan(robot)
 

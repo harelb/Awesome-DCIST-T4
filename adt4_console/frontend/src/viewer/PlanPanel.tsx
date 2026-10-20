@@ -143,7 +143,7 @@ export function PlanPanel() {
               </button>
             )}
           </div>
-          <p className="muted small">Click a place or object; clicking the mesh snaps to the nearest place.</p>
+          <p className="muted small">Click a place, object or the mesh; each pick snaps to the nearest place (or object) in the planner's map.</p>
           {gotoDraft.length === 0 ? (
             <div className="muted small pad">No points yet.</div>
           ) : (
