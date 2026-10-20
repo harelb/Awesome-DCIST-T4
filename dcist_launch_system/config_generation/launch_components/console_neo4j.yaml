@@ -6,4 +6,6 @@ windows:
     panes:
       # web console (fleet + map viewer + planning) on http://<base station>:8090,
       # also showing the live Neo4j map that heracles seeds from the prior and updates
-      - $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map prior=$ADT4_PRIOR_MAP} --neo4j live=${ADT4_NEO4J_URI:-bolt://localhost:7687}
+      # one console per machine: a standalone one (e.g. the adt4_console tmux session that
+      # launched this run) keeps serving :8090 and this pane only says so
+      - if ss -ltn 2>/dev/null | grep -q ':8090 '; then echo 'a console already serves :8090; not starting another'; else $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map=prior=$ADT4_PRIOR_MAP} --neo4j live=${ADT4_NEO4J_URI:-bolt://localhost:7687}; fi

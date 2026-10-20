@@ -257,7 +257,7 @@ def _plan(**kw):
 def _deps(ssh, rsync, listings):
     deps = make_deps(ssh, rsync)
 
-    def scan(machine, root, only=None):
+    def scan(machine, root, only=None, manifest=False):
         runs = listings.get(machine["name"])
         if runs is None:
             return None
@@ -337,3 +337,76 @@ def test_launch_prior_phase_falls_back_to_names_without_scan():
         deps=_deps(ssh, lambda *a, **k: pytest.fail("no rsync expected"), {}),
     )
     assert ok and "prior map already present (prior_map_x__hamilton)" in rec.text()
+
+
+def _legacy(name, digest=None, dsg=None, rid="legacy-1"):
+    """A dir with only a fallback identity (no run_info, no origin)."""
+    e = _ident(name, rid)
+    e["identity"]["source"] = "fallback"
+    e["manifest"] = {"digest": digest}
+    e["dsg_sig"] = dsg
+    return e
+
+
+def _source(digest="D", dsg="100:5"):
+    src = _legacy("map_x__hamilton", digest, dsg, rid="legacy-SRC")
+    return src
+
+
+def _launch(listings, rsyncs, ssh=None):
+    rec = Recorder()
+    ssh = ssh or FakeSsh()
+    ok = run_launch(
+        _plan(robots=["topaz"]),
+        topo=TOPO,
+        active_network="silvus",
+        runtime_config=RUNTIME,
+        output_root=OUT,
+        callbacks=rec,
+        deps=_deps(ssh, lambda *a, **k: rsyncs.append(a) or (True, "direct", "ok"), listings),
+    )
+    return ok, rec, ssh
+
+
+def test_unlabelled_copy_with_the_same_files_is_labelled_not_copied():
+    # copied before copies recorded their origin: same files, own fallback id
+    listings = {"willow": [_source()], "topaz": [_legacy("prior_map_x__hamilton", "D", "100:5", "legacy-T")]}
+    rsyncs = []
+    ok, rec, ssh = _launch(listings, rsyncs)
+    assert ok, rec.text()
+    assert rsyncs == [] and "labelled it, no transfer" in rec.text()
+    marks = [c for ip, c in ssh.calls if ip == "10.0.0.2" and ri.ORIGIN in c]
+    assert marks and "prior_map_x__hamilton/" in marks[0].replace("'", "")
+    launch = [c for ip, c in ssh.calls if ip == "10.0.0.2" and "run-adt4" in c][0]
+    assert "prior_map_x__hamilton " in launch.replace("'", "") + " "
+
+
+def test_older_unlabelled_copy_is_updated_in_place():
+    # same saved scene graph, other files differ (e.g. the source gained files since)
+    listings = {"willow": [_source()], "topaz": [_legacy("prior_map_x__hamilton", "OLD", "100:5", "legacy-T")]}
+    rsyncs = []
+    ok, rec, ssh = _launch(listings, rsyncs)
+    assert ok, rec.text()
+    assert len(rsyncs) == 1 and rsyncs[0][5] == f"{OUT}/prior_map_x__hamilton"
+    assert "updating it in place" in rec.text() and "__2" not in rec.text()
+    assert [c for ip, c in ssh.calls if ip == "10.0.0.2" and ri.ORIGIN in c]
+
+
+def test_unlabelled_dir_of_another_run_still_gets_a_new_name():
+    listings = {"willow": [_source()], "topaz": [_legacy("prior_map_x__hamilton", "OTHER", "7:7", "legacy-T")]}
+    rsyncs = []
+    ok, rec, _ = _launch(listings, rsyncs)
+    assert ok and len(rsyncs) == 1 and rsyncs[0][5] == f"{OUT}/prior_map_x__hamilton__2"
+    assert "holds a different run" in rec.text()
+
+
+def test_copies_record_the_source_manifest():
+    listings = {"willow": [_source()], "topaz": []}
+    rsyncs = []
+    ok, rec, ssh = _launch(listings, rsyncs)
+    mark = [c for ip, c in ssh.calls if ip == "10.0.0.2" and ri.ORIGIN in c][0]
+    import base64, re as _re
+
+    blob = _re.search(r"echo (\S+) \| base64 -d", mark).group(1)
+    origin = json.loads(base64.b64decode(blob))
+    assert origin["manifest_digest"] == "D" and origin["run_id"] == "legacy-SRC"

@@ -46,7 +46,7 @@ windows:
 - window_name: console
   layout: tiled
   panes:
-  - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map prior=$ADT4_PRIOR_MAP}; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'$ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map prior=$ADT4_PRIOR_MAP}'"'"' exec zsh'
+  - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && if ss -ltn 2>/dev/null | grep -q '"'"':8090 '"'"'; then echo '"'"'a console already serves :8090; not starting another'"'"'; else $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map=prior=$ADT4_PRIOR_MAP}; fi; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'if ss -ltn 2>/dev/null | grep -q '"'"'"'"'"'"'"'"':8090 '"'"'"'"'"'"'"'"'; then echo '"'"'"'"'"'"'"'"'a console already serves :8090; not starting another'"'"'"'"'"'"'"'"'; else $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map=prior=$ADT4_PRIOR_MAP}; fi'"'"' exec zsh'
 - window_name: fleetlink_base
   layout: tiled
   panes:

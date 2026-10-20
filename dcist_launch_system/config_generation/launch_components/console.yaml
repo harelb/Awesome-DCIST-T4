@@ -5,4 +5,6 @@ windows:
     layout: tiled
     panes:
       # web console (fleet + map viewer + planning) on http://<base station>:8090
-      - $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map prior=$ADT4_PRIOR_MAP}
+      # one console per machine: a standalone one (e.g. the adt4_console tmux session that
+      # launched this run) keeps serving :8090 and this pane only says so
+      - if ss -ltn 2>/dev/null | grep -q ':8090 '; then echo 'a console already serves :8090; not starting another'; else $ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map=prior=$ADT4_PRIOR_MAP}; fi

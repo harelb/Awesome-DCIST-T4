@@ -277,9 +277,14 @@ class LaunchDeps:
     scan: Callable | None = None
 
 
-def scan_identities(deps, machine: dict, root: str, only=None):
-    """Light ``run_scan`` (identity only) of ``root`` on ``machine``; None on failure."""
+def scan_identities(deps, machine: dict, root: str, only=None, manifest=False):
+    """Light ``run_scan`` (identity only) of ``root`` on ``machine``; None on failure.
+
+    ``manifest``: entries also carry the file manifest digest and ``dsg_sig``.
+    """
     if deps.scan is not None:
+        if manifest:
+            return deps.scan(machine, root, only, manifest=True)
         return deps.scan(machine, root, only)
     from dcist_launch_system.fleet.maps import parse_scan_output, remote_scan_command
 
@@ -287,7 +292,7 @@ def scan_identities(deps, machine: dict, root: str, only=None):
         rc, out, _ = deps.ssh(
             machine["user"],
             machine["ip"],
-            remote_scan_command(root, None, 0, only, light=True),
+            remote_scan_command(root, None, 0, only, light=True, manifest=manifest),
             timeout=30,
         )
     except Exception:  # noqa: BLE001
@@ -306,7 +311,8 @@ def prior_identity(prior_path, prior_source, runtime_config, deps) -> dict | Non
     if not src or not prior_path:
         return None
     p = pathlib.PurePosixPath(prior_path)
-    runs = scan_identities(deps, src, str(p.parent), [p.name])
+    # with the manifest: a copy records it, and old unlabelled copies are matched by it
+    runs = scan_identities(deps, src, str(p.parent), [p.name], manifest=True)
     if not runs:
         return None
     from dcist_launch_system.fleet.run_identity import canonical_id
@@ -352,6 +358,27 @@ def ensure_prior_on(
                 )
                 cb.progress(target["name"], 100)
                 return path
+        same, how = _unlabelled_copy(deps, target, output_root, runs, dest_name, prior_entry)
+        if same is not None:
+            path = f"{output_root}/{same}"
+            if how == "same_files":
+                cb.log(
+                    "dim",
+                    f"{target['name']}: {same} has the prior's files (copied before "
+                    "copies were labelled); labelled it, no transfer",
+                )
+                _mark_origin(deps, target, path, prior_entry, prior_source)
+                cb.progress(target["name"], 100)
+                return path
+            cb.log(
+                "info",
+                f"{target['name']}: {same} is an older copy of the prior (same scene "
+                "graph); updating it in place",
+            )
+            return _transfer_prior(
+                prior_path, prior_source, target, path, runtime_config, cb, deps,
+                prior_entry,
+            )  # fmt: skip
         existing = {r["name"]: ri.entry_ids(r) for r in runs if r.get("name")}
         dest_name, status = ri.choose_dest_name(dest_name, existing, prior_id)
         if status.startswith("collision"):
@@ -374,6 +401,59 @@ def ensure_prior_on(
             cb.progress(target["name"], 100)
             return dest_path
 
+    return _transfer_prior(
+        prior_path, prior_source, target, dest_path, runtime_config, cb, deps, prior_entry
+    )
+
+
+def _unlabelled_copy(deps, target, output_root, runs, dest_name, prior_entry):
+    """A ``prior_<name>[__N]`` dir on ``target`` with no origin record that holds the
+    prior anyway (made before copies were labelled): ``(name, "same_files")`` when its
+    file manifest equals the source's, ``(name, "same_dsg")`` when only the saved scene
+    graph matches (an older copy: update it in place), else ``(None, None)``."""
+    src_digest = ((prior_entry or {}).get("manifest") or {}).get("digest")
+    src_dsg = (prior_entry or {}).get("dsg_sig")
+    if not (src_digest or src_dsg):
+        return None, None
+    names = [
+        r["name"]
+        for r in runs
+        if (r.get("name") == dest_name or str(r.get("name", "")).startswith(dest_name + "__"))
+        and not r.get("origin")
+        and (r.get("identity") or {}).get("source") == "fallback"
+    ]
+    if not names:
+        return None, None
+    found = scan_identities(deps, target, output_root, names, manifest=True) or []
+    for r in found:
+        if src_digest and (r.get("manifest") or {}).get("digest") == src_digest:
+            return r["name"], "same_files"
+    for r in found:
+        if src_dsg and r.get("dsg_sig") == src_dsg:
+            return r["name"], "same_dsg"
+    return None, None
+
+
+def _mark_origin(deps, target, dest_path, prior_entry, prior_source):
+    """Write ``.adt4_origin.json`` so the next launch finds the copy by run_id."""
+    from dcist_launch_system.fleet import run_identity as ri
+
+    origin = ri.make_origin(dict(prior_entry), prior_source, "all", "none")
+    deps.ssh(
+        target["user"],
+        target["ip"],
+        ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin),
+        timeout=10,
+    )
+
+
+def _transfer_prior(
+    prior_path, prior_source, target, dest_path, runtime_config, cb, deps, prior_entry
+):
+    from dcist_launch_system.fleet import run_identity as ri
+
+    dest_name = pathlib.Path(dest_path).name
+    prior_id = ri.canonical_id(prior_entry) if prior_entry else None
     cb.log("info", f"Transferring prior map to {target['name']}...")
     src = runtime_config.get(prior_source)
     if not src:
@@ -395,13 +475,7 @@ def ensure_prior_on(
         cb.log("error", f"{target['name']}: prior map transfer FAILED: {msg}")
         return None
     if prior_id:  # mark the copy so the next launch finds it by run_id
-        origin = ri.make_origin(dict(prior_entry), prior_source, "all", "none")
-        deps.ssh(
-            target["user"],
-            target["ip"],
-            ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin),
-            timeout=10,
-        )
+        _mark_origin(deps, target, dest_path, prior_entry, prior_source)
     cb.progress(target["name"], 100)
     cb.log("ok", f"{target['name']}: prior map transferred to {dest_name} ({method})")
     return dest_path

@@ -294,15 +294,33 @@ def store_fingerprint(store):
     )
 
 
-def scan_identity(run):
-    """Light listing entry: name, path, subdirs, identity, origin (no sizes/stores)."""
+def dsg_signature(run):
+    """``"<size>:<mtime>"`` of the saved scene graph: two dirs with the same one hold
+    the same run's map (rsync -a keeps both), even if other files differ."""
+    try:
+        st = os.stat(os.path.join(run, DSG_FILES["has_dsg"]))
+    except OSError:
+        return None
+    return "%d:%d" % (st.st_size, int(st.st_mtime))
+
+
+def scan_identity(run, with_manifest=False):
+    """Light listing entry: name, path, subdirs, identity, origin (no sizes/stores).
+
+    ``with_manifest``: also the file ``manifest`` and ``dsg_sig``, to recognise copies
+    made before copies recorded their origin.
+    """
     name = os.path.basename(run.rstrip("/"))
     try:
         subdirs = sorted(e.name for e in os.scandir(run) if e.is_dir(follow_symlinks=False))
     except OSError:
         subdirs = []
     ident, origin = run_identity(run)
-    return {"name": name, "path": run, "subdirs": subdirs, "identity": ident, "origin": origin}
+    entry = {"name": name, "path": run, "subdirs": subdirs, "identity": ident, "origin": origin}
+    if with_manifest:
+        entry["manifest"] = manifest(run)
+        entry["dsg_sig"] = dsg_signature(run)
+    return entry
 
 
 def scan_run(run, known=None, measure=True, timeout=None):
@@ -361,7 +379,7 @@ def scan_run(run, known=None, measure=True, timeout=None):
     return entry
 
 
-def scan_root(root, known=None, budget=None, only=None, extra=(), light=False):
+def scan_root(root, known=None, budget=None, only=None, extra=(), light=False, with_manifest=False):
     """Every run directory under ``root`` (plus ``extra`` absolute run dirs).
 
     ``light``: identity only (``scan_identity``), for launch-time prior lookups.
@@ -386,7 +404,7 @@ def scan_root(root, known=None, budget=None, only=None, extra=(), light=False):
     for run in runs:
         if light:
             try:
-                out.append(scan_identity(run))
+                out.append(scan_identity(run, with_manifest))
             except Exception as e:  # noqa: BLE001
                 out.append({"name": os.path.basename(run), "path": run, "subdirs": [], "error": str(e)})
             continue
@@ -409,6 +427,7 @@ def main(argv):
         only=args.get("only"),
         extra=args.get("extra") or (),
         light=bool(args.get("light")),
+        with_manifest=bool(args.get("manifest")),
     )
     sys.stdout.write(
         json.dumps(

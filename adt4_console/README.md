@@ -24,7 +24,7 @@ run-adt4 base_station_web-default
 The window runs:
 
 ```bash
-$ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map prior=$ADT4_PRIOR_MAP}
+$ADT4_WS/src/awesome_dcist_t4/adt4_console/bin/adt4-console --port 8090 ${ADT4_PRIOR_MAP:+--map=prior=$ADT4_PRIOR_MAP}
 ```
 
 Open `http://<base station>:8090/`. The session is generated from

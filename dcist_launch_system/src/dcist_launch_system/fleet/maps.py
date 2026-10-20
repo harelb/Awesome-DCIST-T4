@@ -62,6 +62,7 @@ def remote_scan_command(
     budget: float | None = None,
     only: list[str] | None = None,
     light: bool = False,
+    manifest: bool = False,
 ) -> str:
     """Shell command that runs ``fleet.run_scan`` on a remote machine and prints JSON.
 
@@ -76,7 +77,14 @@ def remote_scan_command(
     code = base64.b64encode(src).decode()
     args = base64.b64encode(
         json.dumps(
-            {"root": root, "known": known or {}, "budget": budget, "only": only, "light": light}
+            {
+                "root": root,
+                "known": known or {},
+                "budget": budget,
+                "only": only,
+                "light": light,
+                "manifest": manifest,
+            }
         ).encode()
     ).decode()
     return _REMOTE_PY + f'"$PY" -c "$(echo {code} | base64 -d)" {args}'
