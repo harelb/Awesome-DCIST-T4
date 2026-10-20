@@ -743,13 +743,19 @@ def build():
             "no subscriber found in spot_tools_ros at this checkout (grep pause/resume): robot-side consumer unverified",
         ("topic", "/{robot}/spot_executor_node/resume"):
             "no subscriber found in spot_tools_ros at this checkout: robot-side consumer unverified",
-        ("service", "/{robot}/shutdown"):
-            "server is in hydra (C++; Empty); console stop_save + core pane call it",
+        ("service", "/{robot}/hydra/shutdown"):
+            "hydra_ros_node ~/shutdown (ianvs spinAndWait, Empty): answers at once, hydra "
+            "then saves and exits; console stop_save + core pane call it",
+        ("service", "/{robot}/roman/shutdown"):
+            "roman_map_node (Empty): pickles the ROMAN map before answering; console "
+            "stop_save + core pane call it",
+        ("service", "/{robot}/spot_executor_node/take_lease"):
+            "spot_executor_ros ~/take_lease (Trigger): forcibly takes the Spot lease; console",
     }
     for k, text in ann.items():
         if k in rows:
             rows[k]["notes"].append(text)
-            if "llm_response" in k[1] or "shutdown" in k[1]:
+            if "llm_response" in k[1]:
                 rows[k]["uncertain"] = True
     for r in rows.values():
         r.pop("_roles", None)

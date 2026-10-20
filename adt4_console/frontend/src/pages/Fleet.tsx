@@ -275,8 +275,9 @@ export function FleetPage() {
           }
         >
           <p>
-            Calls <span className="mono">/{stopTarget.name}/shutdown</span>: the robot stack saves its scene graph and stops. Falls back to
-            sending tmux keys over ssh if the service does not answer within 10 s.
+            Calls <span className="mono">/{stopTarget.name}/hydra/shutdown</span> then <span className="mono">/{stopTarget.name}/roman/shutdown</span>:
+            hydra saves its scene graph and mesh and exits, ROMAN saves its map. If hydra's service does not answer, runs the same calls in the
+            robot's core shutdown pane over ssh. Progress is in the job log.
           </p>
         </Modal>
       )}

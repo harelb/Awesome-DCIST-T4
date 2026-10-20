@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -100,23 +102,104 @@ def launch(body: LaunchPlanBody, request: Request):
     return {"job_id": job.id}
 
 
+# Stop & save calls the robot stack's two map savers, in this order (the core
+# window's shutdown pane runs the same pair, core.yaml).  hydra_ros_node's
+# ~/shutdown (ianvs spinAndWait) only flags the node to exit and answers at
+# once; hydra then saves the DSG + mesh (minutes with a big mesh) and exits.
+# roman/shutdown pickles the ROMAN map before it answers.
+HYDRA_SHUTDOWN_TIMEOUT_S = 15.0
+ROMAN_SHUTDOWN_TIMEOUT_S = 180.0  # > fleetlink relay timeout_s (170) + 2
+HYDRA_EXIT_WAIT_S = 600.0
+HYDRA_EXIT_POLL_S = 2.0
+
+
+def _wait_hydra_exit(svc, job, robot: str) -> bool | None:
+    """Router mode: hydra's shutdown service disappears once hydra saved and
+    exited.  True = gone, False = still up after HYDRA_EXIT_WAIT_S, None = cannot
+    tell (no graph query)."""
+    name = f"/{robot}/hydra/shutdown"
+    has = getattr(svc.ros, "has_service", None)
+    if has is None:
+        return None
+    t0 = time.monotonic()
+    last_note = t0
+    while time.monotonic() - t0 < HYDRA_EXIT_WAIT_S:
+        try:
+            if not has(name):
+                return True
+        except Exception:  # noqa: BLE001
+            return None
+        if time.monotonic() - last_note >= 30:
+            last_note = time.monotonic()
+            job.log("dim", f"hydra still saving ({time.monotonic() - t0:.0f} s) ...")
+        time.sleep(HYDRA_EXIT_POLL_S)
+    return False
+
+
 @router.post("/robots/{robot}/stop_save")
 def stop_save(robot: str, request: Request):
     svc = services(request)
 
     def run(job):
         if svc.ros.available:
-            job.log("info", f"Calling /{robot}/shutdown ...")
+            fleetlink = svc.ros.link_status(robot) is not None
+            hydra = f"/{robot}/hydra/shutdown"
+            roman = f"/{robot}/roman/shutdown"
+            job.log("info", f"Calling {hydra} ...")
             try:
                 svc.ros.call_service(
-                    f"/{robot}/shutdown", "std_srvs/srv/Empty", {}, timeout=10
+                    hydra, "std_srvs/srv/Empty", {}, timeout=HYDRA_SHUTDOWN_TIMEOUT_S
                 )
-                job.log(
-                    "ok", f"{robot}: shutdown service called (maps are being saved)"
-                )
-                return {"method": "service"}
             except Exception as e:  # noqa: BLE001
-                job.log("warn", f"shutdown service failed: {e}")
+                job.log("warn", f"{hydra} failed: {e}")
+            else:
+                job.log(
+                    "ok",
+                    f"{robot}: hydra is shutting down; it saves the scene graph and "
+                    "mesh before it exits (can take minutes with a big mesh)",
+                )
+                if fleetlink:
+                    job.log(
+                        "dim",
+                        "fleetlink mode: the relay answers an Empty call even when the "
+                        "robot did not; confirm on the robot's node status",
+                    )
+                job.log(
+                    "info", f"Calling {roman} (saves the ROMAN map, then answers) ..."
+                )
+                roman_ok = True
+                try:
+                    svc.ros.call_service(
+                        roman,
+                        "std_srvs/srv/Empty",
+                        {},
+                        timeout=ROMAN_SHUTDOWN_TIMEOUT_S,
+                    )
+                    job.log("ok", f"{robot}: ROMAN map saved")
+                except Exception as e:  # noqa: BLE001
+                    roman_ok = False
+                    job.log(
+                        "warn",
+                        f"{roman} failed: {e} (ROMAN may not run in this experiment)",
+                    )
+                hydra_saved = None
+                if not fleetlink:  # the bridge serves relayed services forever
+                    job.log("info", "Waiting for hydra to finish saving and exit ...")
+                    hydra_saved = _wait_hydra_exit(svc, job, robot)
+                    if hydra_saved:
+                        job.log("ok", f"{robot}: hydra saved and exited")
+                    elif hydra_saved is False:
+                        job.log(
+                            "warn",
+                            f"{robot}: hydra still running after "
+                            f"{HYDRA_EXIT_WAIT_S:.0f} s; check its pane",
+                        )
+                return {
+                    "method": "service",
+                    "hydra": True,
+                    "roman": roman_ok,
+                    "hydra_exited": hydra_saved,
+                }
         else:
             job.log("dim", "ROS unavailable; using tmux fallback")
         m = svc.fleet.machine(robot)
@@ -125,9 +208,10 @@ def stop_save(robot: str, request: Request):
                 "error", f"{robot} is not in the topology; cannot fall back to tmux"
             )
             return False
-        ok, msg = svc.helpers.send_tmux_keys(m["user"], m["ip"])
-        job.log("ok" if ok else "error", f"{robot}: tmux Enter on core pane: {msg}")
-        return {"method": "tmux"} if ok else False
+        job.log("info", f"tmux fallback: running the core shutdown pane on {robot} ...")
+        ok, msg = svc.helpers.stop_save_via_tmux(m["user"], m["ip"], robot=robot)
+        job.log("ok" if ok else "error", f"{robot}: {msg}")
+        return {"method": "tmux", "detail": msg} if ok else False
 
     job = svc.jobs.start("stop_save", f"Stop & save {robot}", run)
     return {"job_id": job.id}
