@@ -49,7 +49,7 @@ def test_launch_kill_session_confirm_then_launch(settings):
         job_id = client.post("/api/launch", json=PLAN).json()["job_id"]
         job = _wait_confirm(client, job_id)
         assert job["confirm"]["kind"] == "kill_sessions"
-        assert job["confirm"]["detail"] == {"machines": ["euclid"]}
+        assert job["confirm"]["detail"]["machines"] == ["euclid"]
         r = client.post(f"/api/jobs/{job_id}/confirm", json={"answer": True})
         assert r.status_code == 200
         job = svc.jobs.wait(job_id).to_dict()

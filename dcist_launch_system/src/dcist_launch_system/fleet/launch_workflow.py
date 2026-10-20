@@ -227,10 +227,12 @@ def build_base_station_command(
     platform = bs_machine.get("platform_id")
     config_flag = f" -c {shlex.quote(platform)}" if platform else ""
     rviz_flag = f" --rviz-config {shlex.quote(rviz_path)}" if rviz_path else ""
-    # the base station publishes the prior (prior_dsg) and seeds Neo4j from it (heracles)
+    # the base station publishes the prior (prior_dsg) and seeds Neo4j from it
+    # (heracles); a launch is a fresh run, so seeding replaces what Neo4j held
     prior_flag = f" -p {_quote_path(prior_path)}" if prior_path else ""
+    seed_env = "ADT4_NEO4J_SEED=true " if prior_path else ""
     return (
-        f"{_WS_PREFIX}{fleet_env_prefix(bs_machine['name'], topo)}nohup {RUN_ADT4} "
+        f"{_WS_PREFIX}{fleet_env_prefix(bs_machine['name'], topo)}{seed_env}nohup {RUN_ADT4} "
         f"{shlex.quote(bs_session)} -n {shlex.quote(bs_machine['name'])}"
         f"{config_flag} -o {out_dir} -y{prior_flag}{rviz_flag} "
         f'--tmuxp-args "-d" '
@@ -405,36 +407,47 @@ def ensure_prior_on(
     return dest_path
 
 
+def _running_experiment(out: str) -> str:
+    """The experiment a session runs, from ``tmux show-environment ADT4_OUTPUT_DIR``."""
+    for line in out.splitlines():
+        if line.startswith("ADT4_OUTPUT_DIR="):
+            return pathlib.PurePosixPath(line.split("=", 1)[1].strip()).name
+    return ""
+
+
 def _resolve_session_conflicts(targets, cb, deps) -> bool:
     def check(m):
-        rc, _, _ = deps.ssh(
+        rc, out, _ = deps.ssh(
             m["user"],
             m["ip"],
-            f"tmux has-session -t {TMUX_SESSION_NAME} 2>/dev/null",
+            f"tmux has-session -t {TMUX_SESSION_NAME} 2>/dev/null && "
+            f"(tmux show-environment -t {TMUX_SESSION_NAME} ADT4_OUTPUT_DIR 2>/dev/null; true)",
             timeout=5,
         )
-        return m["name"] if rc == 0 else None
+        return (m["name"], _running_experiment(out)) if rc == 0 else None
 
     cb.log("dim", f"Checking for existing '{TMUX_SESSION_NAME}' sessions...")
-    conflicts = [r for _, r in deps.parallel(check, targets) if isinstance(r, str)]
+    running = dict(r for _, r in deps.parallel(check, targets) if isinstance(r, tuple))
+    conflicts = list(running)
     if not conflicts:
         return True
 
+    what = [f"{n} (running {e})" if e else n for n, e in running.items()]
     cb.log(
         "warn",
-        f"Session '{TMUX_SESSION_NAME}' already running on: {', '.join(conflicts)}",
+        f"Session '{TMUX_SESSION_NAME}' already running on: {', '.join(what)}",
     )
     answer = cb.confirm(
         Confirmation(
             kind="kill_sessions",
             message=(
                 f"Session '{TMUX_SESSION_NAME}' is already running on "
-                f"{len(conflicts)} machine(s):\n{', '.join(conflicts)}\n\n"
+                f"{len(conflicts)} machine(s):\n{', '.join(what)}\n\n"
                 "Terminate existing sessions and proceed?"
             ),
             yes_label="Yes, Terminate",
             no_label="No, Abort",
-            detail={"machines": conflicts},
+            detail={"machines": conflicts, "experiments": running},
         )
     )
     if not answer:

@@ -233,8 +233,9 @@ def test_base_station_command_passes_the_prior():
     cmd = build_base_station_command(
         RUNTIME["willow"], "base_station-default", OUT, "e1", prior_path="~/adt4_output/p"
     )
-    assert " -p ~/adt4_output/p" in cmd
-    assert " -p " not in build_base_station_command(RUNTIME["willow"], "b", OUT, "e1")
+    assert " -p ~/adt4_output/p" in cmd and "ADT4_NEO4J_SEED=true " in cmd
+    plain = build_base_station_command(RUNTIME["willow"], "b", OUT, "e1")
+    assert " -p " not in plain and "ADT4_NEO4J_SEED" not in plain
 
 
 def _reloc_plan(source):
@@ -270,11 +271,14 @@ def test_relocalize_base_station_gets_the_prior():
 
 def test_running_base_station_session_is_replaced():
     # a session left from the mapping run must not keep running with no prior
-    ssh = FakeSsh({"2>/dev/null": (0, "OK", "", "10.0.0.9")})
+    ssh = FakeSsh({"2>/dev/null": (0, "ADT4_OUTPUT_DIR=/home/rrg/adt4_output/map_1715\nOK", "", "10.0.0.9")})
     rec = Recorder(answers=[True])
     assert run(_reloc_plan("willow"), ssh, rec) is True
     [req] = rec.requests
     assert req.detail["machines"] == ["willow"]
+    # the prompt says what would be killed
+    assert "willow (running map_1715)" in req.message
+    assert req.detail["experiments"] == {"willow": "map_1715"}
     cmds = ssh.cmds_for("10.0.0.9")
     kill = next(i for i, c in enumerate(cmds) if "kill-session" in c)
     launch = next(i for i, c in enumerate(cmds) if "nohup" in c)
