@@ -1,6 +1,9 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useSearchParams} from "react-router";
 import {useViewer} from "../stores/viewer";
+import {getJSON} from "../lib/api";
+import {pickDefaultSources} from "../lib/runCopies";
+import type {ActiveLaunch} from "../types";
 import {useRobots} from "../stores/robots";
 import {layerInfo, nearestPlace} from "../lib/graphModel";
 import {Scene, type SceneCallbacks} from "./Scene";
@@ -99,6 +102,14 @@ export default function ViewerPage() {
         return;
       }
       if (st.order.some(id => st.sources[id].enabled)) return;
+      // an active launch with a prior map: prior + live:<robots> by default
+      const active = await getJSON<ActiveLaunch>("api/launch/active").catch(() => null);
+      if (active?.default_sources?.length) {
+        const {enable, pending} = pickDefaultSources(useViewer.getState().order, active.default_sources);
+        useViewer.getState().set({pendingEnable: pending});
+        for (const id of enable) useViewer.getState().enableSource(id, true);
+        if (enable.length) return;
+      }
       const first = st.order.find(id => st.sources[id].kind === "neo4j") ?? st.order.find(id => st.sources[id].kind === "file") ?? st.order[0];
       if (first) st.enableSource(first, true);
     })();

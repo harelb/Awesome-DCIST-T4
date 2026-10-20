@@ -190,6 +190,27 @@ def _resolve_output_dir(output_dir, force):
     return output_dir
 
 
+def _write_run_info(output_dir, robot_name, platform_id, session_path):
+    """``<output>/run_info.json``: this run's id (kept if the file already exists).
+
+    Map transfers and the console's Maps page tell runs apart by this id, since every
+    robot of a multi-robot launch uses the same experiment name.
+    """
+    try:
+        from dcist_launch_system.fleet.run_identity import write_run_info
+
+        info = write_run_info(
+            output_dir,
+            robot=robot_name,
+            platform=platform_id,
+            session=pathlib.Path(str(session_path)).stem,
+            workspace=_ws_path(),
+        )
+        click.secho(f"Run id: {info['run_id']}", fg="green")
+    except Exception as e:  # never block a launch on bookkeeping
+        click.secho(f"Could not write run_info.json: {e}", fg="yellow")
+
+
 def _robot_colors(robot_name):
     """Return (all robots as "name:#hex,...", this robot's #hex) from topology.yaml.
 
@@ -616,6 +637,9 @@ def main(
         info.trajectory_args = trajectory_args.split(" ")
     if bag_args:
         info.bag_args = shlex.split(bag_args)
+
+    if not dry_run:
+        _write_run_info(output_dir, robot_name, platform_id, session_path)
 
     with tempfile.NamedTemporaryFile("w+", suffix=".yaml") as fout:
         _write_session_to_file(session_path, info, fout, verbose=dry_run or show_tmux)

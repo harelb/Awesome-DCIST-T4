@@ -1077,8 +1077,10 @@ class GraphService:
             except FileNotFoundError as e:
                 log.warning("map %s: %s", name, e)
 
-    def add_file(self, name: str, path) -> FileSource:
+    def add_file(self, name: str, path, label: str | None = None) -> FileSource:
         src = FileSource(name, path)
+        if label:
+            src.label = label
         with self._lock:
             self.sources[src.id] = src
         return src

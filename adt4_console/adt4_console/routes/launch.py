@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -87,7 +88,7 @@ def launch(body: LaunchPlanBody, request: Request):
             topo = fleet.topo
             network = fleet.network
             runtime_config = {k: dict(v) for k, v in fleet.runtime_config.items()}
-        return run_launch(
+        ok = run_launch(
             plan,
             topo=topo,
             active_network=network,
@@ -96,10 +97,101 @@ def launch(body: LaunchPlanBody, request: Request):
             callbacks=cb,
             deps=svc.launch_deps,
         )
+        if ok:
+            try:
+                attach_prior(svc, plan, job)
+            except Exception as e:  # noqa: BLE001 - the launch itself succeeded
+                job.log("warn", f"could not register the prior map in the viewer: {e}")
+        return ok
 
     title = f"Launch {plan.experiment} on {', '.join(plan.robots)}"
     job = svc.jobs.start("launch", title, run)
     return {"job_id": job.id}
+
+
+def attach_prior(svc, plan, job) -> dict | None:
+    """After a launch: remember it, and show its prior map in the viewer.
+
+    The prior is registered from this machine's copy (the prior itself when it lives
+    here, else the local run with the same run_id).  Without a local copy the launch
+    record keeps ``pending``; transferring the prior later registers it.
+    """
+    from dcist_launch_system.fleet import run_identity as ri
+
+    from ..launch_state import new_state, register_prior
+    from .maps import _endpoint, _is_local, _local_name, _scan_one, find_local_copy
+
+    if svc.launch_state is None:
+        return None
+    if not plan.prior_path:
+        svc.launch_state.set(new_state(plan, None))
+        return None
+    src_name = plan.prior_source or _local_name(svc)
+    src = _endpoint(svc, src_name)
+    p = pathlib.PurePosixPath(plan.prior_path)
+    entry = _scan_one(svc, src, p.name, str(p.parent))
+    if entry is None:
+        job.log("warn", f"prior {src_name}:{plan.prior_path} not found; viewer not updated")
+        svc.launch_state.set(new_state(plan, None))
+        return None
+    ident = entry.get("identity") or {}
+    origin = entry.get("origin") or {}
+    run_id = ri.canonical_id(entry)
+    robot = ident.get("robot") or origin.get("robot") or origin.get("source_machine") or src_name
+    experiment = ident.get("experiment") or origin.get("experiment") or p.name
+    prior = {
+        "run_id": run_id,
+        "source_machine": src_name,
+        "path": plan.prior_path,
+        "experiment": experiment,
+        "robot": robot,
+        "label": f"prior: {experiment} ({robot})",
+        "local_path": None,
+        "source_id": None,
+        "pending": True,
+    }
+    if _is_local(svc, src):
+        prior["local_path"] = entry["abs_path"]
+    else:
+        local = find_local_copy(svc, run_id) if run_id else None
+        if local is not None:
+            prior["local_path"] = local["path"]
+    if prior["local_path"]:
+        prior["source_id"] = register_prior(svc.graph, prior)
+        prior["pending"] = prior["source_id"] is None
+    svc.launch_state.set(new_state(plan, prior))
+    if prior["source_id"]:
+        svc.graph.notify_version(prior["source_id"], "registered")
+        job.log(
+            "ok",
+            f"viewer: {prior['label']} from {prior['local_path']} + live "
+            + ", ".join(plan.robots),
+        )
+    else:
+        job.log(
+            "warn",
+            f"prior not on this machine yet: copy {src_name}:{plan.prior_path} here "
+            "(Maps → Transfer to base) and the viewer will show it",
+        )
+    return prior
+
+
+@router.get("/launch/active")
+def launch_active(request: Request):
+    """The last successful launch + the viewer's default sources for it."""
+    from ..launch_state import default_sources
+
+    svc = services(request)
+    state = svc.launch_state.get() if svc.launch_state is not None else None
+    return {"active": state, "default_sources": default_sources(state)}
+
+
+@router.delete("/launch/active")
+def launch_active_clear(request: Request):
+    svc = services(request)
+    if svc.launch_state is not None:
+        svc.launch_state.clear()
+    return {"active": None, "default_sources": []}
 
 
 # Stop & save calls the robot stack's two map savers, in this order (the core

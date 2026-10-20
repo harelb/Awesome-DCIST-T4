@@ -480,7 +480,8 @@ def list_remote_experiments(user, ip, output_root=_DEFAULT_OUTPUT_ROOT):
 def hash_remote_experiment(user, ip, output_root, experiment):
     """Compute md5sums of map files in a remote experiment directory.
 
-    Returns dict of {relative_path: md5hash} or empty dict on failure.
+    ``.adt4_origin.json`` (present only on a transferred copy) is left out, so a
+    copy compares equal to its source.  Returns dict of {relative_path: md5hash} or empty dict on failure.
     """
     exp_path = f"{output_root}/{experiment}"
     q_path = _quote_path(exp_path)
@@ -489,6 +490,7 @@ def hash_remote_experiment(user, ip, output_root, experiment):
         f"  cd {q_path} && "
         f"  find . -type f \\( -name '*.json' -o -name '*.pkl' -o -name '*.sparkdsg' "
         f"    -o -name '*.ply' -o -name '*.csv' -o -name '*.bson' \\) "
+        f"    ! -name .adt4_origin.json "
         f"    -exec md5sum {{}} + 2>/dev/null | sort; "
         f"fi"
     )

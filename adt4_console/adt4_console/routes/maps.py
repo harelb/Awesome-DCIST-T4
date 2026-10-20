@@ -280,7 +280,10 @@ def list_maps(request: Request):
             out[_local_name(svc)] = {"error": str(e)}
         for m, r in remote_future.result():
             out[m["name"]] = r if isinstance(r, list) else {"error": str(r)}
-    return {"machines": out, "pending": sorted(pending)}
+    from dcist_launch_system.fleet.run_identity import pair_copies
+
+    pair_copies(out, _local_name(svc))
+    return {"machines": out, "pending": sorted(pending), "base": _local_name(svc)}
 
 
 class TransferBody(BaseModel):
@@ -294,6 +297,8 @@ class TransferBody(BaseModel):
     # images="all" + compression="none" keeps the plain rsync of the run dir.
     images: Literal["keyframes", "all", "none"] = "all"
     compression: Literal["none", "lossless", "fast"] = "none"
+    # transfer even when the copy on the destination is already up to date
+    force: bool = False
 
 
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
@@ -442,6 +447,188 @@ def pipe_store(job, svc, src: dict, dst: dict, src_run: str, dst_run: str, image
     return True, f"{sent / 1e6:.1f} MB in {secs:.1f}s" + (f"; {summary}" if summary else "")
 
 
+# ---------------------------------------------------------------------------
+# Transfer planning: run identity decides where a copy goes and whether it is needed
+# (dcist_launch_system.fleet.run_identity).  A robot's run lands on the base as
+# <experiment>__<robot>; a second transfer of an unchanged run is a no-op; a name
+# taken by another run gets a __N suffix.
+# ---------------------------------------------------------------------------
+
+
+def _scan_one(svc, m: dict, name: str, root: str | None = None) -> dict | None:
+    """Full run_scan entry (no du) of ``<root>/<name>`` on ``m``; None if absent."""
+    from dcist_launch_system.fleet.maps import parse_scan_output, remote_scan_command
+    from dcist_launch_system.fleet.run_scan import scan_run
+
+    root = root or svc.settings.output_root
+    if _is_local(svc, m):
+        path = pathlib.Path(os.path.expanduser(root)) / name
+        if not path.is_dir():
+            return None
+        cache = _cache_get(m["name"])
+        known = {name: cache[str(path)]} if str(path) in cache else None
+        e = scan_run(str(path), known, measure=False)
+        e["abs_path"] = str(path)
+        return e
+    rc, out, err = svc.helpers.ssh_cmd(
+        m["user"], m["ip"],
+        remote_scan_command(root, _cache_get(m["name"]), 0, [name]),
+        timeout=REMOTE_TIMEOUT_S,
+    )
+    if rc != 0:
+        raise HTTPException(502, f"{m['name']}: scan failed: {(err or out)[-300:]}")
+    runs = parse_scan_output(out)
+    if not runs:
+        return None
+    e = runs[0]
+    e["abs_path"] = e.get("path")
+    return e
+
+
+def _dest_entries(svc, m: dict) -> list[dict]:
+    """Identity listing (light scan) of the output root on ``m``."""
+    from dcist_launch_system.fleet.maps import parse_scan_output, remote_scan_command
+    from dcist_launch_system.fleet.run_scan import scan_root
+
+    root = svc.settings.output_root
+    if _is_local(svc, m):
+        return scan_root(root, light=True)
+    rc, out, err = svc.helpers.ssh_cmd(
+        m["user"], m["ip"], remote_scan_command(root, None, 0, None, light=True),
+        timeout=REMOTE_TIMEOUT_S,
+    )
+    if rc != 0:
+        raise HTTPException(502, f"{m['name']}: listing failed: {(err or out)[-300:]}")
+    return parse_scan_output(out)
+
+
+def plan_transfer(svc, src: dict, dst: dict, experiment: str, as_name: str | None,
+                  images: str, compression: str) -> dict:
+    """Where the copy goes and what has to move.
+
+    ``status``: ``new`` (no copy yet), ``update`` (copy exists, source changed or the
+    image settings differ), ``up_to_date`` (nothing to do) or ``collision`` (the
+    natural name holds a different run; a ``__N`` name was picked).
+    """
+    from dcist_launch_system.fleet import run_identity as ri
+    from dcist_launch_system.fleet.run_scan import manifest
+
+    source = _scan_one(svc, src, experiment)
+    if source is None:
+        raise HTTPException(404, f"{src['name']}: no run {experiment}")
+    run_id = ri.canonical_id(source)
+    dests = _dest_entries(svc, dst)
+    if _is_local(svc, dst):  # legacy copies (no ids) are matched by their files
+        same = next((d for d in dests if d.get("name") == experiment and not d.get("origin")), None)
+        if same is not None:
+            same["manifest"] = manifest(same["path"])
+            same["dsg_mtime"] = _mtime_of(pathlib.Path(same["path"]) / "hydra/backend/dsg.json")
+    copy, how = ri.find_copy(source, src["name"], dests)
+    robot = (source.get("identity") or {}).get("robot") or src["name"]
+    plain = images == "all" and compression == "none"
+    out = {
+        "run_id": run_id,
+        "identity_source": (source.get("identity") or {}).get("source"),
+        "robot": robot,
+        "source_path": source.get("abs_path"),
+        "source": source,
+        "copy": None,
+        "matched_by": how,
+    }
+    if copy is not None:
+        origin = copy.get("origin") if how != "contents" else None
+        state = ri.copy_state(source, origin, copy)
+        same_mode = bool(origin) and origin.get("images") == images and (
+            origin.get("compression") == compression
+        )
+        send_store = (not plain) and ri.store_needs_send(source, origin, images, compression)
+        status = "up_to_date" if state == ri.IN_SYNC and same_mode else "update"
+        note = (
+            f"{dst['name']}:{copy['name']} is already an up-to-date copy"
+            if status == "up_to_date"
+            else f"updating {dst['name']}:{copy['name']}"
+            + (" (robot changed since the copy)" if state == ri.OUTDATED else "")
+            + ("" if same_mode or not origin else " (image settings changed)")
+            + (" (adopting a copy made before run ids)" if how == "contents" else "")
+        )
+        out.update(
+            copy={"name": copy["name"], "state": state, "origin": copy.get("origin")},
+            dest_name=copy["name"],
+            status=status,
+            state=state,
+            send_store=send_store,
+            note=note,
+        )
+    else:
+        wanted = as_name or ri.copy_name(experiment, robot)
+        existing = {d["name"]: ri.entry_ids(d) for d in dests if d.get("name")}
+        name, st = ri.choose_dest_name(wanted, existing, run_id)
+        out.update(
+            dest_name=name,
+            status="collision" if st.startswith("collision") else "new",
+            state=ri.NOT_COPIED,
+            send_store=(not plain) and images != "none" and bool(source.get("has_image_store")),
+            note=(
+                f"{dst['name']}:{wanted} holds a different run; copying to {name} instead"
+                if st.startswith("collision")
+                else f"new copy {dst['name']}:{name}"
+            ),
+        )
+    out["dest_path"] = f"{svc.settings.output_root}/{out['dest_name']}"
+    return out
+
+
+def _mtime_of(path: pathlib.Path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def write_origin(svc, m: dict, dest_path: str, origin: dict) -> None:
+    from dcist_launch_system.fleet import run_identity as ri
+
+    if _is_local(svc, m):
+        ri.write_json_atomic(os.path.join(os.path.expanduser(dest_path), ri.ORIGIN), origin)
+        return
+    rc, out, err = svc.helpers.ssh_cmd(
+        m["user"], m["ip"], ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin), timeout=15
+    )
+    if rc != 0:
+        raise RuntimeError(f"could not write {ri.ORIGIN} on {m['name']}: {(err or out)[-200:]}")
+
+
+def find_local_copy(svc, run_id: str) -> dict | None:
+    """This host's run (original or copy) holding ``run_id`` with a saved DSG."""
+    from dcist_launch_system.fleet import run_identity as ri
+    from dcist_launch_system.fleet.run_scan import scan_root
+
+    for e in scan_root(svc.settings.output_root, light=True):
+        if run_id in ri.entry_ids(e) and "hydra" in e.get("subdirs", []):
+            return e
+    return None
+
+
+@router.get("/transfer/plan")
+def transfer_plan(
+    request: Request,
+    src: str,
+    experiment: str,
+    dst: str | None = None,
+    as_name: str | None = None,
+    images: Literal["keyframes", "all", "none"] = "all",
+    compression: Literal["none", "lossless", "fast"] = "none",
+):
+    """What POST /transfer would do (destination name, new/update/up_to_date)."""
+    svc = services(request)
+    s, d = _endpoint(svc, src), _endpoint(svc, dst)
+    if s["ip"] == d["ip"]:
+        raise HTTPException(400, "source and destination are the same machine")
+    plan = plan_transfer(svc, s, d, experiment, as_name, images, compression)
+    plan.pop("source", None)
+    return plan
+
+
 @router.post("/transfer")
 def transfer(body: TransferBody, request: Request):
     svc = services(request)
@@ -449,18 +636,39 @@ def transfer(body: TransferBody, request: Request):
     if src["ip"] == dst["ip"]:
         raise HTTPException(400, "source and destination are the same machine")
     root = svc.settings.output_root
-    dest_name = body.as_name or body.experiment
 
     plain = body.images == "all" and body.compression == "none"
     if body.images == "none" and body.compression != "none":
         raise HTTPException(400, "compression needs images=keyframes|all")
 
     def run(job):
+        from dcist_launch_system.fleet import run_identity as ri
+
+        plan = plan_transfer(
+            svc, src, dst, body.experiment, body.as_name, body.images, body.compression
+        )
+        dest_name = plan["dest_name"]
+        job.log(
+            "warn" if plan["status"] == "collision" else "dim",
+            f"run {plan['run_id']} ({plan['identity_source']}): {plan['note']}",
+        )
+        if plan["status"] == "up_to_date" and not body.force:
+            job.log("ok", f"Already up to date: {dst['name']}:{root}/{dest_name}")
+            job.set_progress(dst["name"], 100)
+            _attach_pending_prior(svc, job, dst, plan)
+            return {
+                "up_to_date": True,
+                "status": "up_to_date",
+                "dest": f"{root}/{dest_name}",
+                "dest_name": dest_name,
+                "run_id": plan["run_id"],
+            }
         if body.bwlimit_kbps:
             job.log("warn", "bwlimit_kbps is not supported by rsync_transfer; ignoring")
         exclude = [] if body.include_bags else list(BAG_EXCLUDES)
         if not plain:
             exclude.append(f"/{STORE_DIR}/")
+        send_store = not plain and body.images != "none" and (plan["send_store"] or body.force)
         job.log(
             "info",
             f"{src['name']}:{root}/{body.experiment} -> {dst['name']}:{root}/{dest_name}"
@@ -487,8 +695,17 @@ def transfer(body: TransferBody, request: Request):
         job.log("ok" if ok else "error", f"{method}: {msg[-500:] if msg else ''}")
         if not ok:
             return False
-        result = {"method": method, "dest": f"{root}/{dest_name}"}
-        if not plain and body.images != "none":
+        result = {
+            "method": method,
+            "dest": f"{root}/{dest_name}",
+            "dest_name": dest_name,
+            "status": plan["status"],
+            "run_id": plan["run_id"],
+        }
+        if not plain and body.images != "none" and not send_store:
+            job.log("dim", "image store unchanged since the last copy; not re-packed")
+            result["image_store"] = "unchanged"
+        if send_store:
             job.log("info", f"Packing image store ({body.images}, {body.compression}) ...")
             ok, msg = pipe_store(
                 job,
@@ -504,7 +721,19 @@ def transfer(body: TransferBody, request: Request):
             if not ok:
                 return False
             result["image_store"] = msg
+        previous = (plan.get("copy") or {}).get("origin")
+        origin = ri.make_origin(
+            plan["source"], src["name"], body.images, body.compression, previous
+        )
+        if body.include_bags:
+            origin["include_bags"] = True
+        try:
+            write_origin(svc, dst, f"{root}/{dest_name}", origin)
+            job.log("dim", f"wrote {ri.ORIGIN} (copy of {src['name']}:{origin['source_path']})")
+        except Exception as e:  # noqa: BLE001
+            job.log("warn", str(e))
         job.set_progress(dst["name"], 100)
+        _attach_pending_prior(svc, job, dst, plan)
         return result
 
     job = svc.jobs.start(
@@ -513,9 +742,32 @@ def transfer(body: TransferBody, request: Request):
     return {"job_id": job.id}
 
 
+def _attach_pending_prior(svc, job, dst: dict, plan: dict) -> None:
+    """The active launch's prior was missing here: register it now that it is copied."""
+    from ..launch_state import register_prior
+
+    if svc.launch_state is None or not _is_local(svc, dst):
+        return
+    state = svc.launch_state.get()
+    prior = (state or {}).get("prior")
+    if not prior or prior.get("source_id") or prior.get("run_id") != plan["run_id"]:
+        return
+    prior["local_path"] = os.path.expanduser(plan["dest_path"])
+    sid = register_prior(svc.graph, prior)
+    if sid:
+        prior.update(source_id=sid, pending=False)
+        state["prior"] = prior
+        svc.launch_state.set(state)
+        svc.graph.notify_version(sid, "registered")
+        job.log("ok", f"prior map of the active launch is now in the viewer ({prior['label']})")
+
+
 class VerifyBody(BaseModel):
     experiment: str
     machines: list[str] | None = None
+    # machine -> run name there, when copies are named differently
+    # (hamilton: map_x, willow: map_x__hamilton); others use ``experiment``
+    names: dict[str, str] | None = None
 
 
 @router.post("/verify")
@@ -524,17 +776,29 @@ def verify(body: VerifyBody, request: Request):
 
     svc = services(request)
     with svc.fleet.lock:
-        names = body.machines or [
-            n for n, m in svc.fleet.runtime_config.items() if m.get("online")
-        ]
+        names = body.machines or (
+            list(body.names)
+            if body.names
+            else [n for n, m in svc.fleet.runtime_config.items() if m.get("online")]
+        )
     targets = [_endpoint(svc, n) for n in names]
+    run_names = dict(body.names or {})
     if not targets:
         raise HTTPException(400, "no machines to verify")
 
     def run(job):
         def fetch(m):
             return svc.helpers.hash_remote_experiment(
-                m["user"], m["ip"], svc.settings.output_root, body.experiment
+                m["user"], m["ip"], svc.settings.output_root,
+                run_names.get(m["name"], body.experiment),
+            )
+
+        if run_names:
+            job.log(
+                "dim",
+                "comparing " + " ↔ ".join(
+                    f"{m['name']}:{run_names.get(m['name'], body.experiment)}" for m in targets
+                ),
             )
 
         hashes = {}

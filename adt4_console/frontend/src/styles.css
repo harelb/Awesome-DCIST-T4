@@ -2702,9 +2702,37 @@ input[type="checkbox"] {
     flex: 1 1 140px;
   }
 }
-.img-badge .badge {
+.img-badge .badge,
+.copy-badge .badge,
+.copy-of .badge,
+.transfer-plan .badge,
+.prior-hint .badge {
   text-transform: none;
   letter-spacing: 0;
+}
+/* run identity: copy of a robot run on the base station (Maps / Launch) */
+.copy-of {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+.transfer-plan {
+  color: var(--text);
+  padding: 8px 10px;
+  margin: 0 0 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: 6px;
+}
+.transfer-plan.tone-ok {
+  border-left-color: var(--ok);
+}
+.transfer-plan.tone-warn {
+  border-left-color: var(--warn);
+}
+.prior-hint {
+  margin-top: 6px;
+  align-items: center;
 }
 
 /* Spot lease: refusal notice with a Take lease button (LeaseControl.tsx) */

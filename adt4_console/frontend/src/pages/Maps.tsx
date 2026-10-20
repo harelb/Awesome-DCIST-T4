@@ -3,17 +3,18 @@ import {useNavigate} from "react-router";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {trackJob, useJobs} from "../stores/jobs";
 import {useFleet} from "../stores/fleet";
-import type {ConsoleConfig, GraphSource, MapEntry, MapsResponse} from "../types";
+import type {ConsoleConfig, GraphSource, MapEntry, MapsResponse, TransferPlan} from "../types";
 import {Badge, Card, Empty, ErrorBox, Field, Loading, Modal, PageHeader, Spinner, Toggle} from "../components/ui";
 import {ChecksumMatrix, JobStateBadge} from "../components/Jobs";
 import {jobIdOf} from "./Fleet";
 import {launchHref} from "../lib/launchLink";
 import {fmtBytes, matchRanges} from "../lib/fuzzy";
 import {loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, SORT_LABELS, type MapRow, type MapsPrefs, type SearchHit, type SortKey} from "../lib/mapList";
+import {COPY_STATE_TEXT, copyBadge, copyEntry, copyOfText, verifyNames} from "../lib/runCopies";
 
 type Dialog =
   | {kind: "transfer"; machine: string; map: MapEntry}
-  | {kind: "verify"; map: MapEntry}
+  | {kind: "verify"; machine: string; map: MapEntry}
   | {kind: "ingest"; machine: string; map: MapEntry};
 
 const fmtDate = (epochS: number | null | undefined, withTime = true): string => {
@@ -145,7 +146,7 @@ export function MapsPage() {
   }, [pending.length, maps.loading, maps.reload]);
 
   // the backend lists this host as "local" when the topology does not name it
-  const local = config.data?.local_machine || fleet?.machines.find(m => m.local)?.name || "local";
+  const local = maps.data?.base || config.data?.local_machine || fleet?.machines.find(m => m.local)?.name || "local";
   const entries = Object.entries(maps.data?.machines ?? {}).sort(([a], [b]) => (a === local ? -1 : b === local ? 1 : a.localeCompare(b)));
   const machineNames = entries.map(([m]) => m);
 
@@ -194,7 +195,11 @@ export function MapsPage() {
     opening,
     showMachine: machine === null,
     onTransfer: (r: SearchHit) => setDialog({kind: "transfer", machine: r.machine, map: r.map}),
-    onVerify: (r: SearchHit) => setDialog({kind: "verify", map: r.map}),
+    onVerify: (r: SearchHit) => setDialog({kind: "verify", machine: r.machine, map: r.map}),
+    onOpenCopy: (r: SearchHit) => {
+      const c = copyEntry(maps.data, r.map, local);
+      if (c) void openInViewer(local, c);
+    },
     onIngest: (r: SearchHit) => setDialog({kind: "ingest", machine: r.machine, map: r.map}),
     onOpen: (r: SearchHit) => openInViewer(r.machine, r.map),
     onLaunch: (r: SearchHit) => r.map.path && navigate(launchHref(r.machine, r.map.path)),
@@ -315,6 +320,7 @@ export function MapsPage() {
       {dialog?.kind === "verify" && (
         <VerifyDialog
           map={dialog.map}
+          pairing={verifyNames(dialog.machine, dialog.map, local)}
           machines={machineNames}
           onClose={() => setDialog(null)}
           onStart={async body => {
@@ -361,7 +367,29 @@ function SubdirChips({subdirs}: {subdirs: string[]}) {
   );
 }
 
-function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onVerify, onIngest, onOpen, onLaunch}: {
+function CopyLine({map, local, isLocal}: {map: MapEntry; local: string; isLocal: boolean}) {
+  if (isLocal) {
+    const text = copyOfText(map);
+    if (!text || !map.copy_of) return null;
+    const st = map.copy_of.state;
+    return (
+      <div className="muted small mono copy-of" title={`${text}\n${COPY_STATE_TEXT[st]}${map.origin?.transferred_at ? `\ncopied ${map.origin.transferred_at}` : ""}`}>
+        {text} <Badge tone={st === "in_sync" ? "ok" : st === "outdated" ? "warn" : "off"}>{st === "in_sync" ? "in sync" : st === "outdated" ? "outdated" : "source offline"}</Badge>
+      </div>
+    );
+  }
+  const b = copyBadge(map, local);
+  if (!b) return null;
+  return (
+    <span className="copy-badge">
+      <Badge tone={b.tone} title={b.title}>
+        {b.text}
+      </Badge>
+    </span>
+  );
+}
+
+function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onVerify, onOpenCopy, onIngest, onOpen, onLaunch}: {
   rows: SearchHit[];
   local: string;
   opening: string | null;
@@ -369,6 +397,7 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
   emptyText: string;
   onTransfer: (r: SearchHit) => void;
   onVerify: (r: SearchHit) => void;
+  onOpenCopy: (r: SearchHit) => void;
   onIngest: (r: SearchHit) => void;
   onOpen: (r: SearchHit) => void;
   onLaunch: (r: SearchHit) => void;
@@ -390,6 +419,7 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
           {rows.map(r => {
             const m = r.map;
             const isLocal = r.machine === local;
+            const hasCopy = !!m.copy?.name && m.copy.state !== "not_copied";
             const t = mapTime(m);
             return (
               <tr key={`${r.machine}:${m.path ?? m.name}`}>
@@ -399,6 +429,7 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
                       <Highlight text={m.name} indices={r.hits.name} />
                     </span>
                     {m.is_prior && <Badge tone="info">prior</Badge>}
+                    {!isLocal && <CopyLine map={m} local={local} isLocal={false} />}
                     {showMachine && (
                       <span className="chip mono">
                         <Highlight text={r.machine} indices={r.hits.machine} />
@@ -415,6 +446,7 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
                       machine: <Highlight text={r.machine} indices={r.hits.machine} />
                     </div>
                   )}
+                  {isLocal && <CopyLine map={m} local={local} isLocal />}
                   {m.error && <div className="inline-err mono small">{m.error}</div>}
                 </td>
                 <td className="mono small nowrap" data-label="date" title={m.mtime ? `modified ${fmtDate(m.mtime)}` : m.name_date ? "date parsed from the run name" : "unknown"}>
@@ -438,7 +470,17 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
                 </td>
                 <td className="actions-col cell-actions">
                   <div className="row gap-sm end wrap">
-                    {!isLocal && (
+                    {!isLocal && hasCopy && (
+                      <>
+                        <button className="btn btn-sm" onClick={() => onOpenCopy(r)} disabled={opening === m.copy?.name} title={`Open ${local}:${m.copy?.name} in the viewer`}>
+                          {opening === m.copy?.name && <Spinner />} Open copy
+                        </button>
+                        <button className={`btn btn-sm ${m.copy?.state === "outdated" ? "btn-primary" : ""}`} onClick={() => onTransfer(r)} title="Incremental rsync into the existing copy; the image store is re-packed only if it changed">
+                          Update copy
+                        </button>
+                      </>
+                    )}
+                    {!isLocal && !hasCopy && (
                       <button className="btn btn-sm" onClick={() => onTransfer(r)}>
                         Transfer to base
                       </button>
@@ -473,38 +515,58 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
 }
 
 function TransferDialog({machine, map, local, onClose, onStart}: {machine: string; map: MapEntry; local: string; onClose: () => void; onStart: (b: unknown) => void}) {
-  const [asName, setAsName] = useState(map.name);
+  const [asName, setAsName] = useState<string | null>(null); // null = the planned name
   const [bags, setBags] = useState(false);
   const [limit, setLimit] = useState(false);
   const [kbps, setKbps] = useState(2000);
   const hasStore = map.has_image_store ?? (map.subdirs ?? []).includes("image_store");
-  // default for a store: keyframes only, fast codec (JPEG q75, half-res depth + zstd)
+  // an existing copy keeps its image settings; else keyframes only, fast codec
+  const prev = map.copy?.state !== "not_copied" ? map.copy : null;
   const [images, setImages] = useState<"keyframes" | "all" | "none">(hasStore ? "keyframes" : "all");
   const [compression, setCompression] = useState<"none" | "lossless" | "fast">(hasStore ? "fast" : "none");
+  const [plan, setPlan] = useState<TransferPlan | null>(null);
+  const [planErr, setPlanErr] = useState<string | null>(null);
+  const comp = images === "none" ? "none" : compression;
+  useEffect(() => {
+    let live = true;
+    const q = new URLSearchParams({src: machine, experiment: map.name, images, compression: comp});
+    getJSON<TransferPlan>(`api/maps/transfer/plan?${q}`)
+      .then(p => live && (setPlan(p), setPlanErr(null)))
+      .catch(e => live && setPlanErr(errorText(e)));
+    return () => {
+      live = false;
+    };
+  }, [machine, map.name, images, comp]);
+  const upToDate = plan?.status === "up_to_date";
+  const updating = plan?.status === "update" || upToDate;
+  const name = asName ?? plan?.dest_name ?? "";
+  const start = (force: boolean) =>
+    onStart({
+      src: machine,
+      experiment: map.name,
+      as_name: asName && asName !== plan?.dest_name ? asName : undefined,
+      include_bags: bags,
+      bwlimit_kbps: limit ? kbps : undefined,
+      images,
+      compression: comp,
+      force,
+    });
   return (
     <Modal
-      title={`Transfer ${map.name}`}
+      title={`${updating || prev ? "Update copy of" : "Transfer"} ${map.name}`}
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button
-            className="btn btn-primary"
-            onClick={() =>
-              onStart({
-                src: machine,
-                experiment: map.name,
-                as_name: asName && asName !== map.name ? asName : undefined,
-                include_bags: bags,
-                bwlimit_kbps: limit ? kbps : undefined,
-                images,
-                compression: images === "none" ? "none" : compression,
-              })
-            }
-          >
-            Start transfer
+          {upToDate && (
+            <button className="btn" onClick={() => start(true)} title="Copy again even though nothing changed">
+              Transfer anyway
+            </button>
+          )}
+          <button className="btn btn-primary" disabled={upToDate || (!plan && !planErr)} onClick={() => start(false)}>
+            {upToDate ? "Already up to date" : updating ? "Update copy" : "Start transfer"}
           </button>
         </>
       }
@@ -512,8 +574,18 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
       <p>
         rsync <span className="mono">{machine}</span> to <span className="mono">{local || "this base station"}</span>.
       </p>
-      <Field label="Name on base station">
-        <input className="input mono" value={asName} onChange={e => setAsName(e.target.value)} />
+      {plan ? (
+        <div className={`transfer-plan tone-${plan.status === "collision" ? "warn" : upToDate ? "ok" : "info"}`}>
+          <Badge tone={upToDate ? "ok" : plan.status === "collision" ? "warn" : "info"}>{plan.status === "up_to_date" ? "up to date" : plan.status}</Badge> {plan.note}
+          <div className="muted small mono">run {plan.run_id}</div>
+        </div>
+      ) : planErr ? (
+        <ErrorBox error={planErr} compact />
+      ) : (
+        <Spinner label="Checking the base station for an existing copy" />
+      )}
+      <Field label="Name on base station" hint={updating ? "The existing copy is updated in place." : "Robot runs land as <experiment>__<robot>; a name holding another run gets __2."}>
+        <input className="input mono" value={name} disabled={updating} onChange={e => setAsName(e.target.value)} aria-label="Name on base station" />
       </Field>
       {hasStore ? (
         <div className="row gap wrap">
@@ -525,13 +597,7 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
             </select>
           </Field>
           <Field label="Compression">
-            <select
-              className="input"
-              value={images === "none" ? "none" : compression}
-              disabled={images === "none"}
-              onChange={e => setCompression(e.target.value as typeof compression)}
-              aria-label="Image store compression"
-            >
+            <select className="input" value={comp} disabled={images === "none"} onChange={e => setCompression(e.target.value as typeof compression)} aria-label="Image store compression">
               <option value="fast">Fast (RGB q75, half-res depth + zstd)</option>
               <option value="lossless">Lossless (stored RGB, depth delta + zstd)</option>
               <option value="none">None (copy as stored)</option>
@@ -540,6 +606,9 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
         </div>
       ) : (
         <p className="muted small">This run has no image store; the run directory is copied as is.</p>
+      )}
+      {hasStore && plan && updating && !plan.send_store && images !== "none" && !(images === "all" && comp === "none") && (
+        <p className="muted small">Image store unchanged since the last copy: it will not be re-packed.</p>
       )}
       {hasStore && images === "all" && compression === "none" && <p className="muted small">Plain rsync of the whole run directory.</p>}
       <Toggle checked={bags} onChange={setBags} label="Include rosbags (large)" />
@@ -553,8 +622,9 @@ function TransferDialog({machine, map, local, onClose, onStart}: {machine: strin
   );
 }
 
-function VerifyDialog({map, machines, onClose, onStart}: {map: MapEntry; machines: string[]; onClose: () => void; onStart: (b: unknown) => void}) {
-  const [sel, setSel] = useState<string[]>(machines);
+function VerifyDialog({map, machines, pairing, onClose, onStart}: {map: MapEntry; machines: string[]; pairing: Record<string, string> | null; onClose: () => void; onStart: (b: unknown) => void}) {
+  const [sel, setSel] = useState<string[]>(pairing ? Object.keys(pairing) : machines);
+  const nameOn = (m: string) => pairing?.[m] ?? map.name;
   return (
     <Modal
       title={`Verify ${map.name}`}
@@ -564,18 +634,23 @@ function VerifyDialog({map, machines, onClose, onStart}: {map: MapEntry; machine
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn btn-primary" disabled={!sel.length} onClick={() => onStart({experiment: map.name, machines: sel})}>
+          <button
+            className="btn btn-primary"
+            disabled={!sel.length}
+            onClick={() => onStart({experiment: map.name, machines: sel, names: pairing ? Object.fromEntries(sel.map(m => [m, nameOn(m)])) : undefined})}
+          >
             Compare checksums
           </button>
         </>
       }
     >
-      <p>Hashes every file of the experiment on each selected machine and compares them.</p>
+      <p>{pairing ? "Compares this run with its copy (paired by run id), file by file." : "Hashes every file of the experiment on each selected machine and compares them."}</p>
       <div className="robot-pick">
         {machines.map(m => (
           <label key={m} className={`pick ${sel.includes(m) ? "on" : ""}`}>
             <input type="checkbox" checked={sel.includes(m)} onChange={() => setSel(s => (s.includes(m) ? s.filter(x => x !== m) : [...s, m]))} />
             <span className="pick-name">{m}</span>
+            {pairing && sel.includes(m) && <span className="muted small mono">{nameOn(m)}</span>}
           </label>
         ))}
       </div>

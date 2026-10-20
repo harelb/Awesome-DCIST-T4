@@ -65,6 +65,8 @@ interface ViewerStore {
   flyTo: {target: [number, number, number]; nonce: number} | null;
   pickMode: PickMode;
   gotoDraft: {sym: string; src: string; pos: [number, number, number]; label: string}[];
+  /** default sources (active launch) to enable as soon as they appear in the catalog */
+  pendingEnable: string[];
   // actions
   loadCatalog: () => Promise<void>;
   enableSource: (id: string, on: boolean) => void;
@@ -126,6 +128,7 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   flyTo: null,
   pickMode: "inspect",
   gotoDraft: [],
+  pendingEnable: [],
 
   loadCatalog: async () => {
     try {
@@ -141,6 +144,12 @@ export const useViewer = create<ViewerStore>((set, get) => ({
         const order = [...new Set([...s.order.filter(id => sources[id]), ...list.map(g => g.id)])];
         return {catalog: list, catalogError: null, sources, order};
       });
+      // a default source that just appeared (e.g. live:<robot> after its first update)
+      const waiting = get().pendingEnable.filter(id => get().sources[id]);
+      if (waiting.length) {
+        set(s => ({pendingEnable: s.pendingEnable.filter(id => !waiting.includes(id))}));
+        for (const id of waiting) get().enableSource(id, true);
+      }
     } catch (e) {
       set({catalogError: errorText(e)});
     }

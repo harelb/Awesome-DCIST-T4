@@ -12,11 +12,21 @@ the sizes it already knows (``known``: name -> [signature, size, store_size]) an
 subdirectories, ``hydra/backend`` and the store index) still matches keeps its cached
 size; others are measured until the budget runs out and the rest come back with
 ``size_pending: true`` for the caller to fill later (``budget=None`` = no limit).
+
+Run identity (see ``fleet.run_identity``): each entry carries ``identity`` -- the
+``run_id`` from ``<run>/run_info.json`` (written by run-adt4 at launch), else from
+``.adt4_origin.json`` (a transferred copy), else a stable fallback derived from host +
+realpath + creation time (older runs; nothing is written) -- plus ``origin`` (the copy
+metadata, if any) and ``manifest`` (a digest of the run's files outside the image store
+and rosbags, which a copy made with ``rsync -a`` reproduces exactly) used to tell an
+in-sync copy from an outdated one.
 """
 
 import base64
+import hashlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -31,6 +41,14 @@ STORE_DIR = "image_store"
 STORE_DB = "store.sqlite"
 KIND_NAMES = {0: "keyframe", 1: "subkeyframe", 2: "object"}
 CHECK_SAMPLES = 4  # referenced files checked from each end of the frames table
+RUN_INFO = "run_info.json"
+ORIGIN = ".adt4_origin.json"
+# never part of the manifest digest: the image store is repacked on transfer (its
+# index is fingerprinted separately), bags are not copied by default, and the
+# origin file exists only on a copy
+MANIFEST_SKIP_DIRS = {STORE_DIR, "recorded_data", "image_store.partial"}
+MANIFEST_SKIP_FILES = {ORIGIN}
+MANIFEST_MAX_FILES = 50000
 
 
 def _mtime(path):
@@ -164,6 +182,129 @@ def store_info(store_dir):
     return info
 
 
+def _read_json(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _birth_time(path):
+    """Creation time of ``path`` (statx via ``stat -c %W``), else None."""
+    bt = getattr(os.stat(path), "st_birthtime", None) if os.path.exists(path) else None
+    if bt:
+        return float(bt)
+    try:
+        out = subprocess.run(
+            ["stat", "-c", "%W", path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            universal_newlines=True,
+        ).stdout.strip()
+        v = float(out)
+        return v if v > 0 else None
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def fallback_identity(run, host=None):
+    """Stable id of a run without run_info.json: host + realpath + creation time.
+
+    The creation time is that of ``hydra/`` (created once at launch; the run dir
+    itself is sometimes recreated by copies), falling back to the run dir, then to
+    the mtime of ``hydra/hydra_config.yaml``.  Nothing is written.
+    """
+    host = host or socket.gethostname()
+    real = os.path.realpath(run)
+    born = None
+    for p in (os.path.join(run, "hydra"), run):
+        if os.path.isdir(p):
+            born = _birth_time(p)
+            if born:
+                break
+    if not born:
+        born = _mtime(os.path.join(run, "hydra", "hydra_config.yaml")) or _mtime(run) or 0
+    key = "%s|%s|%d" % (host, real, int(born))
+    return {
+        "run_id": "legacy-" + hashlib.sha1(key.encode()).hexdigest()[:20],
+        "source": "fallback",
+        "host": host,
+        "created": born,
+    }
+
+
+def run_identity(run):
+    """``(identity, origin)`` of a run dir (see module doc)."""
+    info = _read_json(os.path.join(run, RUN_INFO))
+    origin = _read_json(os.path.join(run, ORIGIN))
+    if origin is not None and not origin.get("run_id"):
+        origin = None
+    if info and info.get("run_id"):
+        ident = dict(info)
+        ident["source"] = "run_info"
+    elif origin is not None:
+        ident = {"run_id": origin["run_id"], "source": "origin"}
+    else:
+        ident = fallback_identity(run)
+    return ident, origin
+
+
+def manifest(run):
+    """Digest of (path, size, mtime) of every file outside the image store / bags.
+
+    ``rsync -a`` preserves sizes and mtimes, so a complete copy has the same digest
+    as its source; any file the robot adds or rewrites afterwards changes it.
+    Returns {"digest", "files", "newest"} (digest None when over the file cap).
+    """
+    rows = []
+    newest = 0.0
+    run = run.rstrip("/")
+    for root, dirs, files in os.walk(run):
+        dirs[:] = sorted(d for d in dirs if d not in MANIFEST_SKIP_DIRS)
+        rel_root = os.path.relpath(root, run)
+        for f in files:
+            if rel_root == "." and f in MANIFEST_SKIP_FILES:
+                continue
+            try:
+                st = os.lstat(os.path.join(root, f))
+            except OSError:
+                continue
+            rel = f if rel_root == "." else rel_root + "/" + f
+            rows.append("%s\t%d\t%d" % (rel, st.st_size, int(st.st_mtime)))
+            newest = max(newest, st.st_mtime)
+        if len(rows) > MANIFEST_MAX_FILES:
+            return {"digest": None, "files": len(rows), "newest": round(newest, 3)}
+    rows.sort()
+    digest = hashlib.sha1("\n".join(rows).encode()).hexdigest()
+    return {"digest": digest, "files": len(rows), "newest": round(newest, 3)}
+
+
+def store_fingerprint(store):
+    """What changes when the robot adds frames: counts from ``store_info``."""
+    if not store:
+        return None
+    frames = store.get("frames") or {}
+    return "%s:%s:%s" % (
+        store.get("frames_total"),
+        store.get("observations"),
+        ",".join("%s=%s" % kv for kv in sorted(frames.items())),
+    )
+
+
+def scan_identity(run):
+    """Light listing entry: name, path, subdirs, identity, origin (no sizes/stores)."""
+    name = os.path.basename(run.rstrip("/"))
+    try:
+        subdirs = sorted(e.name for e in os.scandir(run) if e.is_dir(follow_symlinks=False))
+    except OSError:
+        subdirs = []
+    ident, origin = run_identity(run)
+    return {"name": name, "path": run, "subdirs": subdirs, "identity": ident, "origin": origin}
+
+
 def scan_run(run, known=None, measure=True, timeout=None):
     """One run directory -> listing entry (see module doc)."""
     name = os.path.basename(run.rstrip("/"))
@@ -190,6 +331,9 @@ def scan_run(run, known=None, measure=True, timeout=None):
     store = store_info(os.path.join(run, STORE_DIR))
     entry["has_image_store"] = store is not None
     entry["image_store"] = store
+    entry["identity"], entry["origin"] = run_identity(run)
+    entry["manifest"] = manifest(run)
+    entry["store_fingerprint"] = store_fingerprint(store)
     sessions = os.path.join(run, "sessions")
     if os.path.isdir(sessions):
         try:
@@ -217,8 +361,11 @@ def scan_run(run, known=None, measure=True, timeout=None):
     return entry
 
 
-def scan_root(root, known=None, budget=None, only=None, extra=()):
-    """Every run directory under ``root`` (plus ``extra`` absolute run dirs)."""
+def scan_root(root, known=None, budget=None, only=None, extra=(), light=False):
+    """Every run directory under ``root`` (plus ``extra`` absolute run dirs).
+
+    ``light``: identity only (``scan_identity``), for launch-time prior lookups.
+    """
     root = os.path.expanduser(root)
     runs = []
     try:
@@ -237,6 +384,12 @@ def scan_root(root, known=None, budget=None, only=None, extra=()):
     deadline = None if budget is None else time.monotonic() + budget
     out = []
     for run in runs:
+        if light:
+            try:
+                out.append(scan_identity(run))
+            except Exception as e:  # noqa: BLE001
+                out.append({"name": os.path.basename(run), "path": run, "subdirs": [], "error": str(e)})
+            continue
         left = None if deadline is None else deadline - time.monotonic()
         measure = left is None or left > 0.05
         try:
@@ -247,7 +400,7 @@ def scan_root(root, known=None, budget=None, only=None, extra=()):
 
 
 def main(argv):
-    """``python run_scan.py <base64 json {root, known, budget, only, extra}>`` -> JSON."""
+    """``python run_scan.py <base64 json {root, known, budget, only, extra, light}>`` -> JSON."""
     args = json.loads(base64.b64decode(argv[1]).decode()) if len(argv) > 1 else {}
     runs = scan_root(
         args.get("root", "~/adt4_output"),
@@ -255,8 +408,17 @@ def main(argv):
         budget=args.get("budget"),
         only=args.get("only"),
         extra=args.get("extra") or (),
+        light=bool(args.get("light")),
     )
-    sys.stdout.write(json.dumps({"root": os.path.expanduser(args.get("root", "~")), "runs": runs}))
+    sys.stdout.write(
+        json.dumps(
+            {
+                "root": os.path.expanduser(args.get("root", "~")),
+                "host": socket.gethostname(),
+                "runs": runs,
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

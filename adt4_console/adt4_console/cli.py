@@ -126,6 +126,7 @@ def settings_from_args(args):
         llm_budget_usd=args.llm_budget_usd,
         planner_ns=args.planner_ns,
         sam3_url=args.sam3_url,
+        launch_state_path="~/.adt4_console/active_launch.json",
     )
 
 

@@ -95,7 +95,15 @@ job = {id, kind, title, state: "running"|"waiting"|"succeeded"|"failed"|"cancell
 
 * `GET /api/launch/defaults?mode=mapping|relocalize` → `default_selection(...)` + `{sessions:[...]}`
 * `POST /api/launch/dry_run` body = LaunchPlan JSON (`robots, session, experiment, mode, prior_path, prior_source, record, base_station, bs_session`) → `{lines:[...]}` or 400 with LaunchError text
-* `POST /api/launch` body = LaunchPlan → `{job_id}` (runs `run_launch` with a job-backed `LaunchCallbacks`)
+* `POST /api/launch` body = LaunchPlan → `{job_id}` (runs `run_launch` with a job-backed `LaunchCallbacks`).
+  Phase 1 matches the prior by run_id (`fleet.run_identity`): a robot already holding that run under any name
+  launches with it, nothing is sent. After a successful launch with a prior, the prior is registered as graph
+  source `file:prior:<dir>` (label `prior: <experiment> (<robot>)`) from this machine's copy (the prior itself,
+  or the local run with the same run_id); with no local copy the record says `pending` and a later transfer of
+  that run registers it. The record persists in `settings.launch_state_path` (cli: `~/.adt4_console/active_launch.json`).
+* `GET /api/launch/active` → `{active: {experiment, robots, mode, started_at, prior: {run_id, source_machine, path, label, local_path, source_id, pending} | null} | null, default_sources: [prior source id?, "live:<robot>"...]}`;
+  the Map viewer (no `?src=`) enables `default_sources`, and the ones not in the catalog yet when they appear.
+  `DELETE /api/launch/active` forgets it.
 * `POST /api/robots/{r}/stop_save` → job: call `/{r}/shutdown` (std_srvs/Empty) via rclpy with 10 s timeout; fallback `send_tmux_keys(user, ip)` if the machine is in topology
 * `POST /api/robots/{r}/save_dsg` `{path?: str, include_mesh: bool=true}` → job: `/{r}/dsg_saver/save_dsg` (dcist_launch_system_msgs/srv/SaveDsg)
 
@@ -140,8 +148,20 @@ Maps:
     (3 s local, 4 s per remote machine). The rest come back `size_pending: true, size_bytes: null`, their machine is
     listed in `pending`, and a background thread measures them (local in-process, remote with one more ssh using
     `only=[names]`). The page re-lists every 4 s while `pending` is non-empty.
-* `POST /api/maps/transfer` `{src, experiment, dst?: local, as_name?, include_bags=false, bwlimit_kbps?}` → job (`rsync_transfer` + progress)
-* `POST /api/maps/verify` `{experiment, machines?}` → job; result `{machines:[...], rows:[{path, consistent, cells:{m: str}}]}` (`compare_hashes`)
+* Run identity (`dcist_launch_system.fleet.run_identity`): every listed run has `identity` (`run_id` from
+  `run_info.json` written by run-adt4, else `.adt4_origin.json` of a copy, else a stable `legacy-…` fallback from
+  host+realpath+creation time), `origin` (copies) and `manifest` (digest of files outside the image store / bags).
+  `GET /api/maps` adds `base` and pairs copies with originals: robot runs get `copy: {state: in_sync|outdated|not_copied,
+  machine, name, path, matched_by: run_id|origin|contents}`, base copies get `copy_of: {machine, name, path, state}`.
+* `GET /api/maps/transfer/plan?src&experiment[&dst&as_name&images&compression]` → `{run_id, robot, dest_name, dest_path,
+  status: new|update|up_to_date|collision, state, send_store, note}`. A robot run lands as `<experiment>__<robot>`
+  (unchanged when the name already contains the robot); a name holding another run gets `__2`, `__3`…
+* `POST /api/maps/transfer` `{src, experiment, dst?: local, as_name?, include_bags=false, bwlimit_kbps?, images, compression, force=false}`
+  → job: plan as above; `up_to_date` (source unchanged and same image settings) does nothing unless `force`;
+  otherwise incremental rsync into the existing copy, image store re-packed only when its fingerprint or the
+  settings changed; writes `<copy>/.adt4_origin.json`. Result `{dest, dest_name, status, run_id, up_to_date?}`.
+* `POST /api/maps/verify` `{experiment, machines?, names?: {machine: run name}}` → job (`names` pairs a run with its
+  differently named copy; `.adt4_origin.json` is not hashed); result `{machines:[...], rows:[{path, consistent, cells:{m: str}}]}` (`compare_hashes`)
 * `POST /api/maps/ingest` `{path: RUN_DIR, target: neo4j_name, image_root?}` (`image_root` = image store dir, default `<run>/image_store`) → job. Steps: load
   `hydra/backend/dsg.json` (fall back to `dsg_with_mesh.json`); typed confirm `required_text="wipe"`
   showing current node count of the target; `heracles.utils.load_dsg_to_db`; `store_mesh_path(<run>/hydra/backend/mesh.ply)`;

@@ -1,6 +1,7 @@
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {useSearchParams} from "react-router";
 import {parseLaunchPreset} from "../lib/launchLink";
+import {preferBaseCopy, priorAvailability} from "../lib/runCopies";
 import {useFleet} from "../stores/fleet";
 import {trackJob} from "../stores/jobs";
 import {errorText, postJSON, useApi} from "../lib/api";
@@ -41,6 +42,24 @@ export function LaunchPage() {
   const [dry, setDry] = useState<{lines: string[]} | null>(null);
   const [busy, setBusy] = useState<"dry" | "launch" | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [presetNote, setPresetNote] = useState<string | null>(null);
+  const [copying, setCopying] = useState(false);
+  const base = maps.data?.base || config.data?.local_machine || "";
+
+  // Launch with map: a robot run with an in-sync copy here launches from that copy
+  const presetApplied = useRef(false);
+  useEffect(() => {
+    // a new "Launch with map" link while this page is open: start from its prior
+    presetApplied.current = false;
+    if (preset) setPrior(`${preset.source}\u0000${preset.prior}`);
+  }, [preset]);
+  useEffect(() => {
+    if (!preset || presetApplied.current || !maps.data) return;
+    presetApplied.current = true;
+    const {preset: p, note} = preferBaseCopy(preset, maps.data, base);
+    if (p.source !== preset.source || p.prior !== preset.prior) setPrior(`${p.source}\u0000${p.prior}`);
+    setPresetNote(note);
+  }, [preset, maps.data, base]);
 
   // apply presets whenever the mode's defaults arrive
   useEffect(() => {
@@ -191,6 +210,21 @@ export function LaunchPage() {
                 ))}
               </select>
             )}
+            {prior && <PriorHint maps={maps.data} prior={prior} base={base} note={presetNote} copying={copying} onCopy={async (machine, entry) => {
+              setCopying(true);
+              setErr(null);
+              try {
+                const store = entry.has_image_store;
+                const r = await postJSON("api/maps/transfer", {src: machine, experiment: entry.name, images: store ? "keyframes" : "all", compression: store ? "fast" : "none"});
+                const id = jobIdOf(r);
+                if (id) trackJob(id, `Copy ${entry.name} to ${base}`);
+                maps.reload();
+              } catch (e) {
+                setErr(errorText(e));
+              } finally {
+                setCopying(false);
+              }
+            }} />}
           </Field>
         </Card>
       </div>
@@ -228,3 +262,26 @@ export function LaunchPage() {
   );
 }
 
+
+function PriorHint({maps, prior, base, note, copying, onCopy}: {maps: MapsResponse | null | undefined; prior: string; base: string; note: string | null; copying: boolean; onCopy: (machine: string, entry: MapEntry) => void}) {
+  const [machine, path] = prior.split("\u0000");
+  const a = priorAvailability(maps, machine, path, base);
+  return (
+    <div className="prior-hint muted small">
+      {note && <div>{note}</div>}
+      {a.copy ? (
+        <div>
+          The viewer will show {base}'s copy <span className="mono">{a.copy}</span>{" "}
+          <Badge tone={a.state === "in_sync" ? "ok" : "warn"}>{a.state === "in_sync" ? "in sync" : "outdated"}</Badge>
+        </div>
+      ) : !a.local && a.entry ? (
+        <div className="row gap wrap prior-hint">
+          <span className="tone-warn">Prior not on this machine yet: copy it so the viewer can show it.</span>
+          <button className="btn btn-sm" disabled={copying} onClick={() => onCopy(machine, a.entry!)}>
+            {copying && <Spinner />} Copy to {base || "base"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
