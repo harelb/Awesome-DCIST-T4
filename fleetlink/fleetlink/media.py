@@ -128,6 +128,8 @@ def image_to_array(
     98th percentile of the valid (nonzero, finite) pixels."""
     enc = (encoding or "").lower()
     buf = np.frombuffer(bytes(data), np.uint8)
+    if enc in ("jpeg", "png"):  # sensor_msgs/CompressedImage payload
+        return decode_compressed(buf)
     h, w = int(height), int(width)
     step = int(step) or 0
     chans = {"rgb8": 3, "bgr8": 3, "rgba8": 4, "bgra8": 4, "mono8": 1, "8uc1": 1,
@@ -157,6 +159,28 @@ def image_to_array(
             out[valid] = np.clip((img[valid] - lo) / (hi - lo) * 254 + 1, 1, 255)
         return out
     raise ValueError(f"unsupported image encoding {encoding!r}")
+
+
+def compressed_encoding(fmt: str) -> str:
+    """sensor_msgs/CompressedImage ``format`` (e.g. "rgb8; jpeg compressed bgr8") → jpeg | png."""
+    return "png" if "png" in (fmt or "").lower() else "jpeg"
+
+
+def decode_compressed(buf: np.ndarray) -> np.ndarray:
+    """JPEG/PNG bytes → uint8 RGB (H, W, 3) or grey (H, W)."""
+    if _cv2 is not None:
+        img = _cv2.imdecode(buf, _cv2.IMREAD_UNCHANGED)
+        if img is None:
+            raise ValueError("undecodable compressed image")
+        if img.ndim == 3:
+            img = _cv2.cvtColor(img, _cv2.COLOR_BGRA2RGB if img.shape[2] == 4 else _cv2.COLOR_BGR2RGB)
+        return np.ascontiguousarray(img)
+    import io
+
+    from PIL import Image as _PIL
+
+    pil = _PIL.open(io.BytesIO(buf.tobytes()))
+    return np.asarray(pil.convert("L" if pil.mode in ("L", "I;16") else "RGB"))
 
 
 def resize_max_width(img: np.ndarray, max_w: int) -> np.ndarray:
@@ -209,6 +233,7 @@ def camera_reply(
     img = image_to_array(
         frame["encoding"], frame["width"], frame["height"], frame["step"], frame["data"]
     )
+    src_h, src_w = img.shape[:2]  # compressed frames don't know their size until decoded
     img = resize_max_width(img, max_w)
     data, fmt = encode_image(img, quality, force_png)
     return {
@@ -216,8 +241,8 @@ def camera_reply(
         "data": data,
         "width": int(img.shape[1]),
         "height": int(img.shape[0]),
-        "src_width": int(frame["width"]),
-        "src_height": int(frame["height"]),
+        "src_width": int(src_w),
+        "src_height": int(src_h),
         "encoding": frame["encoding"],
         "stamp": frame.get("stamp"),
         "age_s": None if frame.get("rx_t") is None else max(0.0, now - frame["rx_t"]),

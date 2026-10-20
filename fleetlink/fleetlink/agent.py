@@ -1214,9 +1214,10 @@ class AgentNode:
         self._camera_subs: dict = {}
         self._sensor_qos = sensor_qos
         try:
-            from sensor_msgs.msg import Image
+            from sensor_msgs.msg import CompressedImage, Image
 
             self._image_type = Image
+            self._compressed_type = CompressedImage
         except ImportError:
             self._image_type = None
             self.log.warn("sensor_msgs unavailable: no cameras")
@@ -1322,10 +1323,13 @@ class AgentNode:
         for name, topic in self._camera_topics.items():
             sub = self._camera_subs.get(name)
             if name in want and sub is None:
+                compressed = topic.rstrip("/").endswith("/compressed")
                 self._camera_subs[name] = self.node.create_subscription(
-                    self._image_type,
+                    self._compressed_type if compressed else self._image_type,
                     topic,
-                    lambda m, name=name: self._on_image(name, m),
+                    (lambda m, name=name: self._on_compressed(name, m))
+                    if compressed
+                    else (lambda m, name=name: self._on_image(name, m)),
                     self._sensor_qos,
                 )
             elif name not in want and sub is not None:
@@ -1440,6 +1444,20 @@ class AgentNode:
             msg.height,
             msg.step,
             msg.data,  # converted lazily, only when a frame is requested
+            stamp_s(msg.header),
+        )
+
+    def _on_compressed(self, name: str, msg) -> None:
+        from fleetlink.media import compressed_encoding
+
+        # stored as JPEG/PNG bytes, decoded only when a frame is requested
+        self.core.on_camera_frame(
+            name,
+            compressed_encoding(msg.format),
+            0,
+            0,
+            0,
+            msg.data,
             stamp_s(msg.header),
         )
 
