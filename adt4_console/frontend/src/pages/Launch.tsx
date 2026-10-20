@@ -1,4 +1,6 @@
 import {useEffect, useMemo, useState} from "react";
+import {useSearchParams} from "react-router";
+import {parseLaunchPreset} from "../lib/launchLink";
 import {useFleet} from "../stores/fleet";
 import {trackJob} from "../stores/jobs";
 import {errorText, postJSON, useApi} from "../lib/api";
@@ -20,7 +22,10 @@ interface PriorOption {
 }
 
 export function LaunchPage() {
-  const [mode, setMode] = useState<Mode>("mapping");
+  // Maps → "Launch with map" preselects the prior map (and relocalize) through the URL
+  const [search] = useSearchParams();
+  const preset = useMemo(() => parseLaunchPreset(search), [search]);
+  const [mode, setMode] = useState<Mode>(preset?.mode ?? "mapping");
   const defaults = useApi<LaunchDefaults>(`api/launch/defaults?mode=${mode}`);
   const config = useApi<ConsoleConfig>("api/config");
   const maps = useApi<MapsResponse>("api/maps");
@@ -32,7 +37,7 @@ export function LaunchPage() {
   const [bsSession, setBsSession] = useState("");
   const [experiment, setExperiment] = useState(defaultExperiment("mapping"));
   const [record, setRecord] = useState(false);
-  const [prior, setPrior] = useState<string>(""); // "machine\u0000path"
+  const [prior, setPrior] = useState<string>(preset ? `${preset.source}\u0000${preset.prior}` : ""); // "machine\u0000path"
   const [dry, setDry] = useState<{lines: string[]} | null>(null);
   const [busy, setBusy] = useState<"dry" | "launch" | null>(null);
   const [err, setErr] = useState<string | null>(null);

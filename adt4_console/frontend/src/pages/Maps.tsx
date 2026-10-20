@@ -7,6 +7,7 @@ import type {ConsoleConfig, GraphSource, MapEntry, MapsResponse} from "../types"
 import {Badge, Card, Empty, ErrorBox, Field, Loading, Modal, PageHeader, Spinner, Toggle} from "../components/ui";
 import {ChecksumMatrix, JobStateBadge} from "../components/Jobs";
 import {jobIdOf} from "./Fleet";
+import {launchHref} from "../lib/launchLink";
 import {fmtBytes, matchRanges} from "../lib/fuzzy";
 import {loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, SORT_LABELS, type MapRow, type MapsPrefs, type SearchHit, type SortKey} from "../lib/mapList";
 
@@ -196,6 +197,7 @@ export function MapsPage() {
     onVerify: (r: SearchHit) => setDialog({kind: "verify", map: r.map}),
     onIngest: (r: SearchHit) => setDialog({kind: "ingest", machine: r.machine, map: r.map}),
     onOpen: (r: SearchHit) => openInViewer(r.machine, r.map),
+    onLaunch: (r: SearchHit) => r.map.path && navigate(launchHref(r.machine, r.map.path)),
   });
 
   return (
@@ -359,7 +361,7 @@ function SubdirChips({subdirs}: {subdirs: string[]}) {
   );
 }
 
-function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onVerify, onIngest, onOpen}: {
+function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onVerify, onIngest, onOpen, onLaunch}: {
   rows: SearchHit[];
   local: string;
   opening: string | null;
@@ -369,6 +371,7 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
   onVerify: (r: SearchHit) => void;
   onIngest: (r: SearchHit) => void;
   onOpen: (r: SearchHit) => void;
+  onLaunch: (r: SearchHit) => void;
 }) {
   if (!rows.length) return <div className="muted pad">{emptyText}</div>;
   return (
@@ -443,6 +446,11 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
                     <button className="btn btn-sm" onClick={() => onVerify(r)}>
                       Verify
                     </button>
+                    {m.path && (
+                      <button className="btn btn-sm" onClick={() => onLaunch(r)} title="Open Launch with this run as the prior map">
+                        Launch with map
+                      </button>
+                    )}
                     {isLocal && (
                       <>
                         <button className="btn btn-sm" onClick={() => onIngest(r)}>
