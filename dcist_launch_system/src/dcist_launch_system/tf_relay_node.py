@@ -25,6 +25,13 @@ STATIC_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
 )
+# Static TF arrives latched from several publishers (driver, calibration, robot state
+# publisher, ...); like tf2's static listener, subscribe deep enough to replay all of them
+STATIC_SUB_QOS = QoSProfile(
+    depth=100,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 
 NOMINAL = "nominal"
@@ -146,7 +153,7 @@ class TfRelay(Node):
             self.get_logger().info(f"Relaying '{topic}'")
             if topic.endswith("tf_static"):
                 self.subs[topic] = self.create_subscription(
-                    TFMessage, topic, self.static_callback, STATIC_QOS
+                    TFMessage, topic, self.static_callback, STATIC_SUB_QOS
                 )
             else:
                 self.msg_counts[robot] = 0
