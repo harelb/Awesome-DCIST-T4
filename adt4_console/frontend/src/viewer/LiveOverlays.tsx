@@ -9,6 +9,7 @@ import {gridOpacityOf, gridShown, useOverlays, watchGrid} from "../stores/overla
 import {Toggle} from "../components/ui";
 import {lift, type DecodedGrid} from "../lib/overlays";
 import {shade, useRobotColorOf} from "../lib/palette";
+import {AlignedGroup} from "./AlignedGroup";
 
 /** Executor overlay colours derived from a robot's colour. */
 export function pathColors(robotHex: string) {
@@ -45,7 +46,11 @@ function GridLayer({robot}: {robot: string}) {
   const grid = useOverlays(s => s.grids[robot]);
   const opacity = useOverlays(s => gridOpacityOf(s, robot));
   useEffect(() => watchGrid(robot), [robot]);
-  return grid ? <GridPlane grid={grid} opacity={opacity} /> : null;
+  return grid ? (
+    <AlignedGroup robot={robot} frame={grid.frame}>
+      <GridPlane grid={grid} opacity={opacity} />
+    </AlignedGroup>
+  ) : null;
 }
 
 function PathLayer({robot}: {robot: string}) {
@@ -57,7 +62,7 @@ function PathLayer({robot}: {robot: string}) {
   const mlp = lift(paths.mlp, 0.2);
   const t = paths.target;
   return (
-    <group>
+    <AlignedGroup robot={robot} frame={paths.frame}>
       {showSmooth && smooth.length > 1 && <Line points={smooth} color={c.smooth} lineWidth={2.5} dashed dashSize={0.35} gapSize={0.2} />}
       {showMlp && mlp.length > 1 && <Line points={mlp} color={c.mlp} lineWidth={3} />}
       {showTarget && t && (
@@ -72,7 +77,7 @@ function PathLayer({robot}: {robot: string}) {
           </mesh>
         </group>
       )}
-    </group>
+    </AlignedGroup>
   );
 }
 

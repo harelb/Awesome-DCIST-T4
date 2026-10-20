@@ -42,6 +42,11 @@ plus its *Deviations → fleetlink* section.
   built at send time, so dropping or replacing queued items never creates sequence gaps.
   `AgentNode` is the rclpy wrapper: it decodes DSGs on a worker thread (newest only), ticks on
   its own thread, looks up the pose in the DSG frame, and transforms paths into that frame.
+  At `frame_align_hz` it also looks up `global_frame` (default `map`) <- the DSG frame (e.g.
+  `map -> hamilton/odom`, published by hydra_multi / ROMAN relocalization) and sends it in the
+  C1 state as `frame_align {parent, child, T: [x, y, z, qw, qx, qy, qz], stamp, ok, reason, age_s}`
+  (`ok: false`, `T: null` and a `reason` when the lookup fails, i.e. not relocalized; `stamp` 0 =
+  static TF). Everything else stays in its native frame; the console applies the transform.
 * **`scheduler.py`.** A token bucket per class, drained in strict priority C0 > C1 > C2 > C3.
   Each bucket allows a `burst_s` burst and goes into debt by at most one message, so long-run
   throughput equals the budget. An optional `total_bps` caps all classes together. *Auto* mode
@@ -114,7 +119,7 @@ plus its *Deviations → fleetlink* section.
 | class | key(s) under `adt4/<robot>/` | zenoh priority, reliability | congestion control | default budget | contents | delivery guarantee |
 |---|---|---|---|---|---|---|
 | C0 control | `ctl/req` (base→robot), `ctl/ack` | INTERACTIVE_HIGH, express, reliable | DROP | unlimited | `resync`, `budget {cls: bps}`, `auto`, `ping`, `fb`, `tiles {keys}`, `resend {streams}` / `resend {stream: "dsg", from_seq, to_seq}`, `video`, `video_keyframe` | retried every 1 s until acked (`fb`, `ping` fire-and-forget) |
-| C1 state | `state`, `paths` | INTERACTIVE_LOW | DROP | 5 kB/s | pose, guards, health, results, stats, `cameras`, `hashes`, `seqs` at 4 Hz; executor paths on change | latest value; paths re-sent on hash mismatch |
+| C1 state | `state`, `paths` | INTERACTIVE_LOW | DROP | 5 kB/s | pose, guards, health, results, stats, `cameras`, `hashes`, `seqs`, `frame_align` at 4 Hz; executor paths on change | latest value; paths re-sent on hash mismatch |
 | C2 graph | `dsg/delta` | DATA_HIGH, reliable | DROP | 50 kB/s | snapshot begin/chunk/end, deltas (1 Hz tick) | in order; gap → `resend` from ring → resync |
 | C3 mesh | `mesh/tile/<key>`, `mesh/manifest`, `grid/occupancy` | DATA_LOW, best effort | DROP | 100 kB/s | mesh tiles, manifest every 5 s, occupancy grid (checked every 5 s, sent on change) | manifest → `tiles`; grid hash → `resend` |
 | C4 media | queryable `media/camera/<name>` | DATA (request/reply) | DROP | 200 kB/s | camera frames on request (`?w=640;q=70`) | none (the caller retries) |
@@ -183,6 +188,8 @@ for 20 ms instead of waiting for the next AUD) and about 10 ms for vp8.
 | `burst_s` | 1.0 | token-bucket depth, in seconds of budget |
 | `grid_period_s` | 5.0 | occupancy grid check period |
 | `paths_hz` | 2.0 | executor path check rate |
+| `global_frame` (ROS param) | `map` | parent of `frame_align`; "" disables the lookup |
+| `frame_align_hz` (ROS param) | 1.0 | `frame_align` lookup rate |
 | `budgets.C5` | 400000 | live video, all streams together |
 | `video_keepalive_s` | 6.0 | a stream stops without a `video` request this long |
 | `ffmpeg` | null | ffmpeg binary (null: `$FLEETLINK_FFMPEG`, `ffmpeg` on `PATH`, `/usr/bin/ffmpeg`) |

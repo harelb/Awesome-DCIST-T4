@@ -1448,6 +1448,24 @@ input[type="checkbox"] {
   color: #fff;
   white-space: nowrap;
 }
+.robot-chip .align-status {
+  font: 500 11px var(--sans);
+  pointer-events: auto; /* the title explains the transform / the reason */
+  cursor: help;
+}
+.robot-chip .align-status::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-2);
+}
+.robot-chip .align-status.tone-ok {
+  color: #9be7b5;
+}
+.live-align {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
 .canvas-empty {
   position: absolute;
   inset: 0;

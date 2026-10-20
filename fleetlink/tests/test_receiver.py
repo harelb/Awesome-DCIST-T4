@@ -257,3 +257,25 @@ def test_byte_totals_per_direction_and_session():
     restarted = rx.link("r")
     assert restarted["sessions"] == 3
     assert restarted["rx_session_B"] == restarted["rx_total_B"] - after["rx_total_B"]
+
+
+def test_frame_align_passes_through_state_and_link():
+    tr, clock, rx, events = _rx()
+    fa = {
+        "parent": "map",
+        "child": "r/odom",
+        "T": [1.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "stamp": 99.0,
+        "ok": True,
+        "reason": "",
+        "age_s": 0.4,
+    }
+    rx._on_msg("adt4/r/state", env_bytes("r", "state", 0, "E1", {"pose": None}))
+    assert rx.link("r")["frame_align"] is None  # old agent: no field
+    rx._on_msg(
+        "adt4/r/state",
+        env_bytes("r", "state", 1, "E1", {"pose": None, "frame_align": fa}),
+    )
+    assert rx.state("r")["frame_align"] == fa
+    assert rx.link("r")["frame_align"] == fa
+    assert events[-1][1] == "state" and events[-1][2]["frame_align"]["ok"]

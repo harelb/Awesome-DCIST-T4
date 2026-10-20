@@ -185,7 +185,7 @@ Key space (zenoh): `adt4/<robot>/<stream>`.
 | class | key | payload | zenoh QoS | default budget |
 |---|---|---|---|---|
 | C0 control | `adt4/<r>/ctl/req` (base→robot), `adt4/<r>/ctl/ack` (robot→base) | `{id, op, args}` / `{id, ok, result}`; ops: `resync`, `budget {cls: bps}`, `auto {enabled}`, `ping {t}` | INTERACTIVE_HIGH, DROP, express, reliable | — |
-| C1 state | `adt4/<r>/state` | `{pose: {x,y,z,qw,qx,qy,qz,frame,t}, guards: {...RuntimeGuardsMsg fields}, health: {nominal, warning, error, nodes}, results: [..ActionResultMsg dicts, last 10], stats: {per-class sent bytes, queue}}` | INTERACTIVE_LOW, DROP | 5 kB/s, 2 Hz |
+| C1 state | `adt4/<r>/state` | `{pose: {x,y,z,qw,qx,qy,qz,frame,t}, guards: {...RuntimeGuardsMsg fields}, health: {nominal, warning, error, nodes}, results: [..ActionResultMsg dicts, last 10], stats: {per-class sent bytes, queue}, frame_align?: {parent, child, T: [x,y,z,qw,qx,qy,qz] \| null, stamp, ok, reason, age_s}}` (`frame_align`: global frame <- the robot's scene-graph frame, see §8.1) | INTERACTIVE_LOW, DROP | 5 kB/s, 2 Hz |
 | C2 graph | `adt4/<r>/dsg/delta` | `{kind: "delta"|"snapshot_begin"|"snapshot_chunk"|"snapshot_end", ...GraphDelta.encode()}` | DATA_HIGH, DROP, reliable | 50 kB/s, 1 Hz tick |
 | C3 mesh | `adt4/<r>/mesh/tile/<key>` and `adt4/<r>/mesh/manifest` | tile dict / `{tiles: {key: hash}}` | DATA_LOW, DROP | 100 kB/s |
 | C5 video | `adt4/<r>/video/<camera>` | one encoded frame, see §12 | DATA_LOW, DROP, best effort | 400 kB/s |
@@ -205,6 +205,29 @@ Console endpoints:
 * `GET /api/live` → `{robots: {r: {connected, epoch, last_seen, staleness_s, latency_ms, nodes, tiles, budgets: {C1,C2,C3}, rates: {C1,C2,C3: bytes_per_s}, drops, gaps, resyncs, auto}}}`
 * `POST /api/live/{r}/budget` `{cls: "C1"…"C6", bps}`; `POST /api/live/{r}/resync`; `POST /api/live/{r}/auto` `{enabled}`
 * `GET /api/live/{r}/state` → latest C1 state (same payload as the `robot/<r>/state` topic); 404 before the robot has reported
+* Each `GET /api/live` robot entry also carries `frame_align` (from the latest C1 state; null from older agents).
+
+#### 8.1 Global-frame alignment (`frame_align`)
+
+A robot streams its live layers in its own scene-graph frame (the DSG header frame, e.g.
+`hamilton/odom`): the live graph and mesh tiles, executor paths / target (transformed into that
+frame by the agent), and, when TF allows, the pose and occupancy grid (each says its `frame`).
+Prior maps (file / Neo4j sources) and omniplanner (in relocalize / fleet configs) are in the
+global `map` frame. Once the robot is relocalized (hydra_multi / ROMAN publish `map -> <robot>/odom`)
+the agent sends `frame_align {parent: "map", child: "<robot>/odom", T, stamp, ok: true}` at
+1 Hz (in every 4 Hz C1 state); `T` maps child points into parent. Without the transform it
+sends `ok: false, T: null, reason`.
+
+The viewer draws each of that robot's layers whose frame is `child` (or unset) through `T`
+whenever `ok` is true, independent of which sources are shown (the view's fixed frame is
+always `map`, as in RViz with `Fixed Frame: map`); a layer already in `parent` is drawn as is.
+`ok: false` draws the layers in the robot's frame as before. Changes glide over 0.6 s. The
+legend and the Live link panel show "aligned to map (relocalized) · <transform age>" or, in
+amber, "<robot>/odom frame — not relocalized". Fly-to, follow-robot, selection markers and
+click picking use the aligned positions; goto picking snaps a clicked point to the nearest
+place in each source's own frame. Goals are sent as node symbols (omniplanner resolves them in
+its own graph), so no coordinates are converted for the planner. Plans are drawn as received
+(in the planner's frame).
 
 ## 9. Planning (rclpy, publishes on the base station)
 

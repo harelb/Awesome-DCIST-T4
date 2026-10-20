@@ -164,6 +164,17 @@ def test_agent_node_grid_paths_cameras(zenoh_router, monkeypatch):
     im = Image()
     im.encoding, im.width, im.height, im.step = "mono8", 8, 6, 8
     im.data = bytes(range(48))
+    # relocalization: map -> the scene-graph frame (no DSG yet: the fallback
+    # smoke2/map) goes out as ``frame_align``
+    import tf2_ros
+    from geometry_msgs.msg import TransformStamped
+
+    tfb = tf2_ros.StaticTransformBroadcaster(pub_node)
+    tf = TransformStamped()
+    tf.header.frame_id, tf.child_frame_id = "map", "smoke2/map"
+    tf.transform.translation.x = 2.0
+    tf.transform.rotation.w = 1.0
+    tfb.sendTransform(tf)
     ex = MultiThreadedExecutor()
     ex.add_node(pub_node)
     ex.add_node(agent_node)
@@ -186,6 +197,7 @@ def test_agent_node_grid_paths_cameras(zenoh_router, monkeypatch):
                 and core._paths["smooth"] is not None
                 and core._paths["target"] is not None
                 and "rgb" in core._frames
+                and (core.frame_align or {}).get("ok")
             ):
                 break
         assert core._grid and core._grid["width"] == 4
@@ -199,6 +211,9 @@ def test_agent_node_grid_paths_cameras(zenoh_router, monkeypatch):
             0.0,
         ]
         assert core.camera_names == ["rgb", "overlay"]
+        fa = core._state_payload()["frame_align"]
+        assert (fa["parent"], fa["child"], fa["ok"]) == ("map", "smoke2/map", True)
+        assert fa["T"] == [2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
         rep = media.camera_reply(core._frames["rgb"], 640, 70, time.time())
         assert rep["width"] == 8 and rep["height"] == 6
     finally:

@@ -374,6 +374,9 @@ class Receiver:
             "auto": stats.get("auto", False),
             "robot_queue": stats.get("queue", {}),
             "store": self.store.stats(r.name) if self.store is not None else None,
+            # global frame <- scene-graph frame from the C1 state (None from
+            # agents that predate it); ``state_age_s`` above ages the whole state
+            "frame_align": (r.state or {}).get("frame_align"),
         }
 
     def _totals(self, r: _Robot, now: float) -> dict:

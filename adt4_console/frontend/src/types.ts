@@ -184,8 +184,24 @@ export interface ActionResult {
   t?: number;
 }
 
+/** fleetlink C1 ``frame_align``: ``T`` (x, y, z, qw, qx, qy, qz) maps points in
+ *  ``child`` (the robot's scene-graph frame, e.g. ``hamilton/odom``) into
+ *  ``parent`` (the global ``map``). ``ok`` false = not relocalized (``T`` null). */
+export interface FrameAlign {
+  parent: string;
+  child: string;
+  T: number[] | null;
+  /** TF stamp (robot clock); 0 = static transform */
+  stamp?: number | null;
+  ok: boolean;
+  reason?: string;
+  /** robot clock at send minus ``stamp`` */
+  age_s?: number | null;
+}
+
 export interface RobotState {
   pose?: Pose;
+  frame_align?: FrameAlign;
   guards?: Record<string, unknown>;
   health?: {nominal?: number; warning?: number; error?: number; nodes?: unknown};
   results?: ActionResult[];
@@ -239,6 +255,7 @@ export type Cls = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | (string & {});
 
 export interface LinkInfo {
   connected: boolean;
+  frame_align?: FrameAlign | null;
   epoch?: string;
   last_seen?: number | null;
   staleness_s?: number | null;
