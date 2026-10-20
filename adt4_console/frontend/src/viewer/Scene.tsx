@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef} from "react";
+import {useEffect, useMemo, useRef, type CSSProperties} from "react";
 import * as THREE from "three";
 import {Canvas, useThree} from "@react-three/fiber";
 import {CameraControls, Html, Line} from "@react-three/drei";
@@ -11,6 +11,9 @@ import {pickBox, type BoxSet} from "../lib/bboxPick";
 import {MeshTiles, type TileStats} from "./MeshTiles";
 import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
+import {useViewStyle} from "../stores/viewStyle";
+import {contrastFor, STYLE_BACKGROUND, type ColorOpts} from "./style";
+import {captureBridge} from "./screenshot";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -23,12 +26,32 @@ export interface SceneCallbacks {
   onLayout: (src: string, l: GraphLayout) => void;
 }
 
+/** Effective background colour (user choice or the style default). */
+export function useBackground(): string {
+  const style = useViewer(s => s.vizStyle);
+  const bg = useViewStyle(s => s.background);
+  return bg ?? STYLE_BACKGROUND[style];
+}
+
+export function useColorOpts(): ColorOpts {
+  const rules = useViewStyle(s => s.colors);
+  const labelColors = useViewStyle(s => s.labelColors);
+  const placesByRegion = useViewStyle(s => s.regionColorPlaces);
+  return useMemo(() => ({rules, labelColors, placesByRegion}), [rules, labelColors, placesByRegion]);
+}
+
 function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
   const {hiddenLayers, edgeKinds, flat, stackHeight, showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight} = useViewer();
+  const heights = useViewStyle(s => s.heights);
+  const regionHulls = useViewStyle(s => s.regionHulls);
+  const meshColor = useViewStyle(s => s.meshColor);
+  const colors = useColorOpts();
+  const bg = useBackground();
+  const edgeInk = contrastFor(bg, vizStyle).edge;
   const layout = useMemo(
-    () => (src.model ? layoutGraph(src.model, {hiddenLayers, edgeKinds, flat, stackHeight, style: vizStyle, text: showText}) : null),
+    () => (src.model ? layoutGraph(src.model, {hiddenLayers, edgeKinds, flat, stackHeight, style: vizStyle, text: showText, heights, colors, regionHulls}) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [src.model, src.rev, hiddenLayers, edgeKinds, flat, stackHeight, vizStyle, showText],
+    [src.model, src.rev, hiddenLayers, edgeKinds, flat, stackHeight, vizStyle, showText, heights, colors, regionHulls],
   );
   const onLayout = cb.onLayout;
   useEffect(() => {
@@ -44,6 +67,8 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
           opacity={meshOpacity}
           cullBackfaces={meshCull}
           clipHeight={meshClipOn ? meshClipHeight : null}
+          colorMode={meshColor.mode}
+          uniformColor={meshColor.color}
           onStats={s => cb.onStats(src.id, s)}
         />
       )}
@@ -57,6 +82,8 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
           edgeKinds={edgeKinds}
           style={vizStyle}
           showText={showText}
+          colors={colors}
+          edgeInk={edgeInk}
         />
       )}
     </group>
@@ -238,9 +265,10 @@ function PlanOverlay() {
 
 function Markers() {
   const {selected, highlight, sources, flat, stackHeight, gotoDraft, vizStyle} = useViewer();
+  const heights = useViewStyle(s => s.heights);
   const findPos = (src: string, sym: string): [number, number, number] | null => {
     const n = sources[src]?.model?.nodes.get(sym);
-    return n ? displayPos(n, flat, stackHeight, vizStyle) : null;
+    return n ? displayPos(n, flat, stackHeight, vizStyle, heights) : null;
   };
   const sel = selected ? findPos(selected.src, selected.sym) : null;
   const selNode = selected ? sources[selected.src]?.model?.nodes.get(selected.sym) : null;
@@ -370,31 +398,44 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
 }
 
 /** RViz look for the hydra style: grey background, light grid. */
-export const BACKGROUND = {hydra: "#303030", classic: "#0b0f14"} as const;
-const GRID = {hydra: ["#7a7a80", "#55555a"], classic: ["#2a3440", "#1a222b"]} as const;
+export const BACKGROUND = STYLE_BACKGROUND;
 
 function Background() {
-  const style = useViewer(s => s.vizStyle);
+  const bg = useBackground();
   const {gl, invalidate} = useThree();
   useEffect(() => {
-    gl.setClearColor(BACKGROUND[style]);
+    gl.setClearColor(bg, 1);
     invalidate();
-  }, [gl, style, invalidate]);
+  }, [gl, bg, invalidate]);
+  return null;
+}
+
+/** Hands the renderer to the screenshot code (outside the R3F tree). */
+function CaptureBridge() {
+  const {gl, scene, camera, invalidate, controls} = useThree();
+  useEffect(() => {
+    captureBridge.current = {gl, scene, camera, invalidate, controls: controls as unknown as CameraControlsImpl | null};
+    return () => {
+      if (captureBridge.current?.gl === gl) captureBridge.current = null;
+    };
+  }, [gl, scene, camera, invalidate, controls]);
   return null;
 }
 
 function Ground({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
   const style = useViewer(s => s.vizStyle);
+  const bg = useBackground();
+  const ct = contrastFor(bg, style);
   const size = bounds ? Math.ceil(Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], 20) / 10) * 10 + 40 : 100;
   const cx = bounds ? Math.round((bounds.min[0] + bounds.max[0]) / 2) : 0;
   const cy = bounds ? Math.round((bounds.min[1] + bounds.max[1]) / 2) : 0;
   const grid = useMemo(() => {
-    const g = new THREE.GridHelper(size, size / 2, GRID[style][0], GRID[style][1]);
+    const g = new THREE.GridHelper(size, size / 2, ct.grid[0], ct.grid[1]);
     g.rotation.x = Math.PI / 2;
     (g.material as THREE.Material).transparent = true;
-    (g.material as THREE.Material).opacity = style === "hydra" ? 0.5 : 0.6;
+    (g.material as THREE.Material).opacity = ct.gridOpacity;
     return g;
-  }, [size, style]);
+  }, [size, ct.grid[0], ct.grid[1], ct.gridOpacity]);
   return <primitive object={grid} position={[cx, cy, -0.05]} />;
 }
 
@@ -406,15 +447,19 @@ const DPR: [number, number] = COARSE ? [1, 1.5] : [1, 2];
 const GL = {antialias: !COARSE, powerPreference: "high-performance" as const, preserveDrawingBuffer: !COARSE};
 
 export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {min: number[]; max: number[]} | null; cb: SceneCallbacks}) {
+  const bg = useBackground();
+  const style = useViewer(s => s.vizStyle);
+  const ct = contrastFor(bg, style);
   return (
     <Canvas
       className="scene-canvas"
+      style={{"--viz-text": ct.text, "--viz-halo": ct.halo} as CSSProperties}
       frameloop="demand"
       dpr={DPR}
       gl={GL}
       camera={{fov: 50, near: 0.1, far: 5000, position: [-10, -30, 30], up: [0, 0, 1]}}
       onCreated={({gl}) => {
-        gl.setClearColor(BACKGROUND[useViewer.getState().vizStyle]);
+        gl.setClearColor(useViewStyle.getState().background ?? BACKGROUND[useViewer.getState().vizStyle]);
         gl.localClippingEnabled = true; // mesh "max height" clip
       }}
       data-testid="viewer-canvas"
@@ -423,6 +468,7 @@ export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {mi
       <directionalLight position={[30, -20, 60]} intensity={1.0} />
       <directionalLight position={[-40, 30, 20]} intensity={0.35} />
       <Background />
+      <CaptureBridge />
       <Ground bounds={bounds} />
       {sources.map(s => (
         <SourceContent key={s.id} src={s} cb={cb} />
