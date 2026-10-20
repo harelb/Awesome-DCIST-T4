@@ -26,6 +26,7 @@ to_seq}``), answers C4 camera queries on
 from __future__ import annotations
 
 import importlib.metadata
+import os
 import secrets
 import threading
 import time
@@ -43,7 +44,7 @@ from fleetlink.transport import Transport, split_endpoints
 ZENOH_EXPECTED = "1.8"
 
 # budget classes reported in the state message (and adjustable from the console)
-CLASSES_REPORTED = ("C1", "C2", "C3", "C4", "C5")
+CLASSES_REPORTED = ("C1", "C2", "C3", "C4", "C5", "C6")
 
 DEFAULT_CONFIG = {
     "budgets": {  # bytes/s
@@ -52,6 +53,7 @@ DEFAULT_CONFIG = {
         "C3": 100_000,
         "C4": 200_000,
         "C5": 400_000,  # live video (all streams together)
+        "C6": 150_000,  # live image-store mirror (lowest priority)
     },
     "budget_min": {"C2": 5_000, "C3": 5_000},
     "budget_max": {"C2": 500_000, "C3": 1_000_000},
@@ -68,9 +70,20 @@ DEFAULT_CONFIG = {
     "grid_period_s": 5.0,
     "paths_hz": 2.0,  # how often paths are checked for a change
     "cameras": ["rgb", "overlay"],
+    # cameras subscribed all the time; the others only while wanted (a C4 query
+    # or a C5 video request within ``camera_idle_s``), so e.g. six Spot cameras
+    # behind lazy image_transport republishers cost nothing until viewed
+    "eager_cameras": ["rgb", "overlay"],
+    "camera_idle_s": 15.0,
     "video_keepalive_s": video.KEEPALIVE_S,  # a stream stops without a request this long
     "ffmpeg": None,  # None -> $FLEETLINK_FFMPEG / ffmpeg on PATH / /usr/bin/ffmpeg
     "c2_ring": 256,  # last C2 messages kept for ``resend`` (gap repair)
+    # C6 live image-store mirror (fleetlink.store_mirror); None/"" disables
+    "store_path": None,
+    "store_frames": "keyframes",  # keyframes | all
+    "store_compression": "fast",  # none | lossless | fast
+    "store_poll_s": 1.0,  # how often new store frames are looked for
+    "store_queue_s": 2.0,  # C6 frames queued at most (seconds of C6 budget)
 }
 
 
@@ -126,6 +139,55 @@ def _merge(cfg: dict | None) -> dict:
     return out
 
 
+def spark_dsg_location() -> str:
+    """Where ``import spark_dsg`` resolves (logged + reported: a stale pip copy
+    in spark_env shadowing the workspace build silently changes decoding)."""
+    try:
+        import spark_dsg
+
+        ver = getattr(spark_dsg, "__version__", None)
+        return f"{spark_dsg.__file__}" + (f" ({ver})" if ver else "")
+    except Exception as exc:  # noqa: BLE001
+        return f"unavailable: {exc}"
+
+
+def decode_dsg(dsg, data: bytes) -> tuple[tuple, dict]:
+    """DsgUpdate ``layer_contents`` → (graph_inputs, diagnostics).
+
+    The diagnostics compare what spark_dsg decoded with the payload's own
+    header (:func:`codec.dsg_binary_info`): a payload that has nodes but decodes
+    to none means the imported spark_dsg cannot read the writer's attribute
+    types (it skips such nodes silently), and ``warning`` says so."""
+    G = dsg.DynamicSceneGraph.from_binary(data)
+    inputs = graph_inputs(G)
+    records, _edges, _ls, mesh = inputs
+    try:
+        raw = int(G.num_nodes())
+    except Exception:  # noqa: BLE001
+        raw = None
+    info = {
+        "bytes": len(data),
+        "nodes": len(records),
+        "raw_nodes": raw,
+        "mesh_faces": 0 if mesh is None else int(len(mesh[2])),
+        "warning": None,
+    }
+    try:
+        hdr = codec.dsg_binary_info(data)
+        info["has_nodes"] = hdr["has_nodes"]
+        info["layer_keys"] = [list(k) for k in hdr["layer_keys"]]
+        if hdr["has_nodes"] and not records:
+            info["warning"] = (
+                f"DSG payload has nodes but spark_dsg ({spark_dsg_location()}) "
+                f"decoded none: it cannot read the writer's attribute types "
+                f"{hdr['node_types']} (stale spark_dsg on the python path?)"
+            )
+    except ValueError as exc:
+        info["has_nodes"] = None
+        info["header_error"] = str(exc)
+    return inputs, info
+
+
 def graph_inputs(G) -> tuple:
     """spark_dsg graph → (records, edges, labelspaces, mesh_arrays | None)."""
     records = codec.graph_records(G)
@@ -149,6 +211,7 @@ class AgentCore:
         "mesh/manifest": "C3",
         "grid/occupancy": "C3",
         "paths": "C1",
+        "store/frame": "C6",
     }
 
     def __init__(
@@ -220,6 +283,8 @@ class AgentCore:
         self._t_paths = -1e9
         # cameras (C4 request/reply)
         self.camera_names: list[str] = list(self.cfg["cameras"])
+        self.eager_cameras: set[str] = set(self.cfg.get("eager_cameras") or [])
+        self.camera_wanted_t: dict[str, float] = {}
         self._frames: dict[str, dict] = {}
         self._media_lock = threading.Lock()
         self._c4_tokens = self._c4_cap()
@@ -239,6 +304,25 @@ class AgentCore:
             keepalive_s=float(self.cfg["video_keepalive_s"]),
             ffmpeg=self.cfg["ffmpeg"],
         )
+
+        # C6 live image-store mirror
+        self.store = None
+        self.store_error: str | None = None
+        self._t_store = -1e9
+        if self.cfg.get("store_path"):
+            try:
+                from fleetlink.store_mirror import StoreTail
+
+                self.store = StoreTail(
+                    self.cfg["store_path"],
+                    self.cfg["store_frames"],
+                    self.cfg["store_compression"],
+                    clock=clock,
+                )
+            except Exception as exc:  # noqa: BLE001  (bad params / no hydra_image_store)
+                self.store_error = f"{type(exc).__name__}: {exc}"
+        # DsgUpdate decoding diagnostics (filled by AgentNode, reported in stats)
+        self.dsg_diag: dict = {}
 
         self._sub = transport.subscribe(f"{self.prefix}/ctl/req", self._on_req)
         try:
@@ -323,6 +407,30 @@ class AgentCore:
         }
         with self._media_lock:
             self._frames[name] = frame
+
+    def want_camera(self, name: str, now: float | None = None) -> None:
+        """Note that someone wants ``name`` (keeps a lazy subscription alive)."""
+        with self._media_lock:
+            self.camera_wanted_t[name] = self.clock() if now is None else now
+
+    def wanted_cameras(self, now: float | None = None) -> set[str]:
+        """Cameras that should be subscribed now: eager ones, ones queried or
+        requested as video within ``camera_idle_s``, and live video streams."""
+        now = self.clock() if now is None else now
+        idle = float(self.cfg["camera_idle_s"])
+        try:
+            streaming = set(self.video.state())
+        except Exception:  # noqa: BLE001
+            streaming = set()
+        with self._media_lock:
+            names = set(self.camera_names)
+            recent = {n for n, t in self.camera_wanted_t.items() if now - t < idle}
+        return names & (self.eager_cameras | recent | streaming)
+
+    def drop_frame(self, name: str) -> None:
+        """Forget a camera's cached frame (its subscription went idle)."""
+        with self._media_lock:
+            self._frames.pop(name, None)
 
     def _latest_frame(self, name: str) -> dict | None:
         with self._media_lock:
@@ -459,7 +567,16 @@ class AgentCore:
             self._tiles_dirty = True
             return {"requeued": len(keys)}
         if op == "video":
+            if args.get("enable", True) and args.get("camera"):
+                self.want_camera(str(args["camera"]), now)
             return self.video.request(args, now)
+        if op == "store":
+            if self.store is None:
+                raise ValueError(self.store_error or "store mirror disabled")
+            res = self.store.set_cursor(args.get("id"), args.get("after"))
+            self.sched.clear("C6")
+            self._t_store = -1e9
+            return res
         if op == "video_keyframe":
             cam = str(args.get("camera") or "")
             return {"camera": cam, "forced": self.video.force_keyframe(cam, now)}
@@ -667,8 +784,11 @@ class AgentCore:
             frame = self._frames.get(name)
         if name not in names:
             return media.pack_reply({"error": "unknown camera", "cameras": names})
-        if frame is None:
-            return media.pack_reply({"error": "no frame yet", "cameras": names})
+        self.want_camera(name, now)
+        if frame is None:  # lazy camera: subscribed within ~1 s, ask again
+            return media.pack_reply(
+                {"error": "no frame yet", "subscribing": True, "cameras": names}
+            )
 
         def num(k, default, lo, hi):
             try:
@@ -710,6 +830,7 @@ class AgentCore:
                 # lost *last* message, which no later seq gap would reveal
                 "seqs": {"dsg": self.seq["dsg/delta"] - 1},
                 "video": self.video.state(),
+                "store": self._store_state(),
             }
 
     def stats(self) -> dict:
@@ -726,7 +847,53 @@ class AgentCore:
             "nodes": len(self._target[0]) if self._target else 0,
             "tiles": len(self.tiles),
             "c2_resent": self.c2_resent,
+            "dsg": {k: v for k, v in dict(self.dsg_diag).items() if k[0] != "_"},
         }
+
+    # ------------------------------------------------------------------- C6
+
+    def _store_state(self):
+        if self.store is None:
+            return {"id": None, "enabled": False, "error": self.store_error}
+        try:
+            return {**self.store.state(), "enabled": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": None, "enabled": True, "error": str(exc)}
+
+    def _store_tick(self) -> None:
+        """Queue the next store frames within ``store_queue_s`` of C6 budget.
+        In auto mode the mirror only fills the link when C2/C3 have nothing
+        queued, so it never delays the graph or the mesh."""
+        st = self.store
+        st.refresh()
+        if not st.active:
+            return
+        if self.sched.auto and (self.sched.queues["C2"] or self.sched.queues["C3"]):
+            return
+        budget = self.sched.budget("C6")
+        if budget is not None and budget <= 0:
+            return
+        cap = float("inf") if budget is None else budget * self.cfg["store_queue_s"]
+        queued = self.sched.queued_bytes("C6")
+        room = max(0, int((cap - queued) // max(1.0, st.avg_bytes)))
+        if not self.sched.queues["C6"]:
+            room = max(room, 1)  # always one in flight (a frame larger than cap)
+        room = min(room, 16)
+        for fid, prev in st.take(room):
+
+            def payload(fid=fid, prev=prev):
+                return st.encode(fid, prev)
+
+            def sent(n, fid=fid):
+                st.mark_sent(fid, n)
+
+            self._queue(
+                "store/frame",
+                f"{self.prefix}/store/frame",
+                payload,
+                int(st.avg_bytes),
+                on_sent=sent,
+            )
 
     # ------------------------------------------------------------------ tick
 
@@ -765,6 +932,12 @@ class AgentCore:
             if self._paths_dirty and now - self._t_paths >= 1.0 / self.cfg["paths_hz"]:
                 self._t_paths = now
                 self._paths_tick()
+            if self.store is not None and now - self._t_store >= self.cfg["store_poll_s"]:
+                self._t_store = now
+                try:
+                    self._store_tick()
+                except Exception as exc:  # noqa: BLE001  (never stop the tick)
+                    self.store_error = f"{type(exc).__name__}: {exc}"
             sent = self.sched.drain(now)
         self.video.tick(now)  # outside the core lock: encoders call back from threads
         return sent
@@ -780,6 +953,8 @@ class AgentCore:
 
     def close(self) -> None:
         self.video.close()
+        if self.store is not None:
+            self.store.close()
         unsub = getattr(self.transport, "unsubscribe", None)
         if unsub is not None:
             unsub(self._sub)
@@ -959,6 +1134,20 @@ class AgentNode:
             )
         )
         cfg["cameras"] = list(cameras)
+        cfg["eager_cameras"] = list(
+            p("eager_cameras", list(cfg["eager_cameras"])) or []
+        )
+        cfg["camera_idle_s"] = p("camera_idle_s", float(cfg["camera_idle_s"]))
+        # C6 live image-store mirror: "" disables
+        default_store = ""
+        if os.environ.get("ADT4_OUTPUT_DIR"):
+            default_store = os.path.join(os.environ["ADT4_OUTPUT_DIR"], "image_store")
+        cfg["store_path"] = p("store_path", default_store) or None
+        cfg["store_frames"] = p("store_frames", str(cfg["store_frames"]))
+        cfg["store_compression"] = p(
+            "store_compression", str(cfg["store_compression"])
+        )
+        cfg["budgets"]["C6"] = p("budget_C6", int(cfg["budgets"]["C6"]))
 
         self.log = nd.get_logger()
         warning = zenoh_version_warning()
@@ -968,6 +1157,19 @@ class AgentNode:
             transport = self._open_zenoh(connect)
         self.transport = transport
         self.core = AgentCore(robot, transport, cfg)
+        if self.core.store_error:
+            self.log.warn(f"store mirror disabled: {self.core.store_error}")
+        elif self.core.store is not None:
+            self.log.info(
+                f"store mirror: {cfg['store_path']} frames={cfg['store_frames']} "
+                f"compression={cfg['store_compression']} C6={cfg['budgets']['C6']} B/s"
+            )
+        self.spark_dsg_path = spark_dsg_location()
+        self.log.info(f"spark_dsg: {self.spark_dsg_path}")
+        self.core.dsg_diag.update(
+            {"spark_dsg": self.spark_dsg_path, "received": 0, "processed": 0,
+             "dropped": 0, "failed": 0}
+        )  # fmt: skip
 
         self._pending = None
         self._pending_cv = threading.Condition()
@@ -1003,18 +1205,19 @@ class AgentNode:
             )
         except ImportError:
             self.log.warn("visualization_msgs unavailable: no MLP target")
+        # cameras: subscribed lazily (eager_cameras always), see _update_cameras
+        self._camera_topics = dict(cameras)
+        self._camera_subs: dict = {}
+        self._sensor_qos = sensor_qos
         try:
             from sensor_msgs.msg import Image
 
-            for name, topic in cameras.items():
-                nd.create_subscription(
-                    Image,
-                    topic,
-                    lambda m, name=name: self._on_image(name, m),
-                    sensor_qos,
-                )
+            self._image_type = Image
         except ImportError:
+            self._image_type = None
             self.log.warn("sensor_msgs unavailable: no cameras")
+        self._update_cameras()
+        nd.create_timer(1.0, self._update_cameras)
         try:
             from robot_executor_msgs.msg import ActionResultMsg, RuntimeGuardsMsg
 
@@ -1107,6 +1310,25 @@ class AgentNode:
             )
         return transport
 
+    def _update_cameras(self) -> None:
+        """Subscribe wanted cameras, unsubscribe idle ones (1 Hz timer)."""
+        if self._image_type is None:
+            return
+        want = self.core.wanted_cameras(time.time())
+        for name, topic in self._camera_topics.items():
+            sub = self._camera_subs.get(name)
+            if name in want and sub is None:
+                self._camera_subs[name] = self.node.create_subscription(
+                    self._image_type,
+                    topic,
+                    lambda m, name=name: self._on_image(name, m),
+                    self._sensor_qos,
+                )
+            elif name not in want and sub is not None:
+                self.node.destroy_subscription(sub)
+                del self._camera_subs[name]
+                self.core.drop_frame(name)
+
     def _on_dsg(self, msg) -> None:
         self._dsg_frame = msg.header.frame_id or self._dsg_frame
         with self._pending_cv:
@@ -1126,12 +1348,27 @@ class AgentNode:
                 data, self._pending = self._pending, None
             if data is None:
                 continue
+            diag = self.core.dsg_diag
+            diag.update(received=self.graphs_received, dropped=self.graphs_dropped)
             try:
-                G = dsg.DynamicSceneGraph.from_binary(data)
-                self.core.on_records(*graph_inputs(G))
-                self.graphs_processed += 1
+                inputs, info = decode_dsg(dsg, data)
             except Exception as exc:
-                self.log.error(f"failed to decode DSG: {exc}")
+                diag["failed"] = diag.get("failed", 0) + 1
+                diag["last_error"] = f"{type(exc).__name__}: {exc}"
+                self.log.error(f"failed to decode DSG ({len(data)} B): {exc}")
+                continue
+            prev = diag.get("nodes")
+            self.core.on_records(*inputs)
+            self.graphs_processed += 1
+            diag.update(info, processed=self.graphs_processed)
+            if info.get("warning") and info["warning"] != diag.get("_warned"):
+                diag["_warned"] = info["warning"]
+                self.log.error(info["warning"])
+            if prev != info["nodes"] and (not prev or not info["nodes"]):
+                self.log.info(
+                    f"DSG: {info['nodes']} nodes, {info['raw_nodes']} in the graph, "
+                    f"{info['bytes']} B, mesh faces {info['mesh_faces']}"
+                )
 
     def _on_grid(self, msg) -> None:
         from fleetlink.media import yaw_from_quat

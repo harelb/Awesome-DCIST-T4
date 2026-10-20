@@ -55,8 +55,11 @@ STREAM_CLASS = {
     "mesh/manifest": "C3",
     "grid/occupancy": "C3",
     "paths": "C1",
+    "store/frame": "C6",
 }
 RESEND_STREAMS = ("grid", "paths")
+# classes whose budget / rate the base reports and may set (C0 is unmetered)
+REPORTED_CLASSES = ("C1", "C2", "C3", "C4", "C5", "C6")
 VIDEO_PREFIX = "video/"
 
 
@@ -170,6 +173,8 @@ class Receiver:
         resend_timeout_s: float = 2.0,
         hold_max: int = 1024,
         fb_period: float = 1.0,
+        store_root: str | None = None,
+        store_mirror=None,
     ):
         self.transport = transport
         self.on_update = on_update or (lambda r, k, d: None)
@@ -198,6 +203,12 @@ class Receiver:
         self._thread: threading.Thread | None = None
         self._running = False
         self.failed_requests: list[dict] = []
+        # C6 live image-store mirror (fleetlink.store_mirror.StoreMirror)
+        self.store = store_mirror
+        if self.store is None and store_root:
+            from fleetlink.store_mirror import StoreMirror
+
+            self.store = StoreMirror(store_root, clock=clock)
 
     # ----------------------------------------------------------- lifecycle
 
@@ -212,6 +223,11 @@ class Receiver:
 
     def stop(self) -> None:
         self._running = False
+        if self.store is not None:
+            try:
+                self.store.close()
+            except Exception:  # noqa: BLE001
+                pass
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
@@ -333,7 +349,7 @@ class Receiver:
             "nodes": len(r.graph.records),
             "tiles": len(r.tiles),
             "budgets": stats.get("budgets", {}),
-            "rates": {c: r.rates[c] for c in ("C1", "C2", "C3", "C4", "C5")},
+            "rates": {c: r.rates[c] for c in REPORTED_CLASSES},
             "bytes": dict(r.bytes),
             "drops": r.drops,
             "gaps": r.gaps,
@@ -346,6 +362,7 @@ class Receiver:
             "resync_requests": r.resync_requests,
             "auto": stats.get("auto", False),
             "robot_queue": stats.get("queue", {}),
+            "store": self.store.stats(r.name) if self.store is not None else None,
         }
 
     def _robot(self, name: str) -> _Robot:
@@ -388,7 +405,7 @@ class Receiver:
         self.transport.put(f"adt4/{robot}/ctl/req", codec.pack(env), "C0")
 
     def set_budget(self, robot: str, cls: str, bps: float) -> str:
-        if cls not in ("C1", "C2", "C3", "C4", "C5"):
+        if cls not in REPORTED_CLASSES:
             raise ValueError(f"unknown class {cls!r}")
         return self._send(robot, "budget", {cls: float(bps)})
 
@@ -514,6 +531,8 @@ class Receiver:
             events.append(("state", p))
             self._check_hashes(r, p, now)
             self._c2_check_tail(r, p, now)
+            if self.store is not None:
+                self._store_requests(self.store.on_state(r.name, p.get("store"), now))
         elif stream == "grid/occupancy":
             r.grid = p
             keys = ("hash", "frame", "width", "height", "resolution", "t")
@@ -529,7 +548,27 @@ class Receiver:
             events.extend(self._on_manifest(r, p, now))
         elif stream == "ctl/ack":
             events.extend(self._on_ack(r, p, now))
+        elif stream == "store/frame" and self.store is not None:
+            self._store_requests(self.store.on_frame(r.name, p, now))
         return events
+
+    def _store_requests(self, reqs) -> None:
+        """Lock held: send C6 ``store`` requests; a newer one replaces any still
+        pending for that robot (a stale retry must not rewind the agent)."""
+        for robot, op, args in reqs or ():
+            for rid in [
+                k
+                for k, v in self._pending.items()
+                if v["robot"] == robot and v["req"]["op"] == op
+            ]:
+                del self._pending[rid]
+            self._pending_send(robot, op, args)
+
+    def store_stats(self, robot: str | None = None) -> dict:
+        """Live store mirror stats (all robots, or one); {} when disabled."""
+        if self.store is None:
+            return {}
+        return self.store.stats(robot)
 
     # ------------------------------------------------- C2 in-order + resend
 
@@ -811,7 +850,7 @@ class Receiver:
                 r.clock_offset = min(r.offset_samples)[1]
         if "budgets" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["budgets"] = {
-                c: res["budgets"].get(c) for c in ("C1", "C2", "C3", "C4", "C5")
+                c: res["budgets"].get(c) for c in REPORTED_CLASSES
             }
         if "auto" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["auto"] = res["auto"]

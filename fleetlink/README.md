@@ -119,9 +119,29 @@ plus its *Deviations → fleetlink* section.
 | C3 mesh | `mesh/tile/<key>`, `mesh/manifest`, `grid/occupancy` | DATA_LOW, best effort | DROP | 100 kB/s | mesh tiles, manifest every 5 s, occupancy grid (checked every 5 s, sent on change) | manifest → `tiles`; grid hash → `resend` |
 | C4 media | queryable `media/camera/<name>` | DATA (request/reply) | DROP | 200 kB/s | camera frames on request (`?w=640;q=70`) | none (the caller retries) |
 | C5 video | `video/<name>` | DATA_LOW, best effort | DROP | 400 kB/s | live h264 / vp8 / jpeg frames while a `video` request is kept alive | none; a gap requests a key frame |
+| C6 store | `store/frame` | BACKGROUND, reliable | DROP | 150 kB/s | image-store frames (`{id, frame_id, prev, blob}`) of the live store mirror | `prev` chain; gap or lost tail → C0 `store {id, after: watermark}` rewinds the agent |
 
 Budgets are **bytes per second**. On the emulated link the transmit order is
-C0 > C1 > C2 > C4 > C3 > C5: an operator waiting for a frame outranks bulk mesh, but not the graph.
+C0 > C1 > C2 > C4 > C3 > C5 > C6: an operator waiting for a frame outranks bulk mesh, but not the
+graph; the image-store mirror only uses what is left.
+
+### Live image-store mirror (C6)
+
+`store_mirror.py`. The agent tails the robot's hydra image store read-only (`store_path`, default
+`$ADT4_OUTPUT_DIR/image_store`) and sends each new frame (`store_frames`: `keyframes` | `all`)
+encoded with `hydra_image_store.transfer.encode_frame` (`store_compression`: `none` | `lossless` |
+`fast`) within the C6 budget. The console's receiver writes them into
+`<live_store_root>/<robot>/<store_id>/image_store` (default `~/adt4_output/live/...`), a valid store
+SAM3 can search. The base tells the agent its watermark (C0 `store {id, after}`) on first contact,
+after an agent restart and after a gap, so nothing is lost or duplicated across restarts; a new
+Hydra session (store rotation) starts a new mirror directory. Protocol details: console API.md §13.
+On a Penn-bag run (`fast`): 64 kB per keyframe, 115 keyframes mirrored at ~61 kB/s.
+
+### Lazy cameras
+
+Only `eager_cameras` (default `[rgb, overlay]`) are subscribed all the time. Other `cameras` entries
+(e.g. the six Spot cameras, behind lazy image_transport republishers) are subscribed while a C4
+query or C5 video request wanted them within `camera_idle_s` (15 s), then released.
 
 ### Live video (C5)
 
@@ -167,6 +187,10 @@ for 20 ms instead of waiting for the next AUD) and about 10 ms for vp8.
 | `video_keepalive_s` | 6.0 | a stream stops without a `video` request this long |
 | `ffmpeg` | null | ffmpeg binary (null: `$FLEETLINK_FFMPEG`, `ffmpeg` on `PATH`, `/usr/bin/ffmpeg`) |
 | `c2_ring` | 256 | last C2 messages kept to serve `resend` (0: every C2 gap ends in a resync) |
+| `budgets.C6` | 150000 | live image-store mirror |
+| `store_frames`, `store_compression` | keyframes, fast | C6 frame selection and codec |
+| `store_poll_s`, `store_queue_s` | 1.0, 2.0 | store check period; C6 queue depth in seconds of budget |
+| `eager_cameras`, `camera_idle_s` | [rgb, overlay], 15.0 | always-subscribed cameras; idle time before a lazy one is released |
 
 Receiver kwargs (base side, `Receiver(...)`): `resend_attempts` (3), `resend_timeout_s` (2.0,
 at least 3 RTT), `hold_max` (1024 held C2 messages before giving up on a gap), `fb_period` (1.0 s),
@@ -176,7 +200,8 @@ ROS params of `fleetlink-agent` (topics are relative to the robot namespace unle
 `robot_name` (default: the namespace), `config`, `zenoh_connect` (`tcp/127.0.0.1:7447`; one
 endpoint or a comma-separated list, retried forever, so the agent starts fine before the router),
 `c2_ring`,
-`tick_hz` (20), `budget_C1`…`budget_C5`, `ffmpeg`, `auto`, `mesh_period_s`, `tile_size`, `grid_period_s`,
+`tick_hz` (20), `budget_C1`…`budget_C6`, `store_path` (`$ADT4_OUTPUT_DIR/image_store`, `""` off),
+`store_frames`, `store_compression`, `eager_cameras`, `camera_idle_s`, `ffmpeg`, `auto`, `mesh_period_s`, `tile_size`, `grid_period_s`,
 `dsg_topic` (`hydra/backend/dsg`), `guards_topic`, `result_topic`, `health_topic`,
 `health_monitor_name`, `map_frame` (default: the DSG header frame), `body_frame` (`<robot>/body`),
 `fallback_map_frame` (`<robot>/map`), `grid_topic` (`hydra/tsdf/occupancy`),
@@ -193,7 +218,9 @@ fleetlink/bin/fleetlink-agent --ros-args -r __ns:=/euclid -p robot_name:=euclid 
 `bin/fleetlink-agent` re-executes itself in `$ADT4_ENV/spark_env`, which has `eclipse-zenoh`
 pinned to rmw_zenoh's zenoh version: `eclipse-zenoh==1.8.0` in `install/spark_requirements.txt`
 (rmw_zenoh 0.2.11 / zenoh-c 1.8). The agent logs a warning at startup when the installed
-version is not 1.8.x. Budgets can also be changed live from the console's
+version is not 1.8.x. It also logs which `spark_dsg` it imported and reports DSG decoding
+in `state.stats.dsg` (received / processed / failed, node counts, and a `warning` when a payload
+that has nodes decodes to none, e.g. a stale spark_dsg shadowing the workspace build). Budgets can also be changed live from the console's
 Live link tab (`POST /api/live/{r}/budget`).
 
 ## Generic ROS relay (fleetlink mode)

@@ -151,6 +151,7 @@ Key space (zenoh): `adt4/<robot>/<stream>`.
 | C2 graph | `adt4/<r>/dsg/delta` | `{kind: "delta"|"snapshot_begin"|"snapshot_chunk"|"snapshot_end", ...GraphDelta.encode()}` | DATA_HIGH, DROP, reliable | 50 kB/s, 1 Hz tick |
 | C3 mesh | `adt4/<r>/mesh/tile/<key>` and `adt4/<r>/mesh/manifest` | tile dict / `{tiles: {key: hash}}` | DATA_LOW, DROP | 100 kB/s |
 | C5 video | `adt4/<r>/video/<camera>` | one encoded frame, see §12 | DATA_LOW, DROP, best effort | 400 kB/s |
+| C6 store | `adt4/<r>/store/frame` | one image-store frame `{id, frame_id, prev, blob}`, see §13 | BACKGROUND, DROP, reliable | 150 kB/s |
 
 Every message is `codec.pack(codec.envelope(robot, stream, seq, epoch, payload))`; `seq`
 is per stream; `epoch` changes when the agent restarts or the graph is reset.
@@ -164,7 +165,7 @@ methods `start()`, `stop()`, `robots()`, `graph(robot) -> GraphState`, `tiles(ro
 
 Console endpoints:
 * `GET /api/live` → `{robots: {r: {connected, epoch, last_seen, staleness_s, latency_ms, nodes, tiles, budgets: {C1,C2,C3}, rates: {C1,C2,C3: bytes_per_s}, drops, gaps, resyncs, auto}}}`
-* `POST /api/live/{r}/budget` `{cls: "C2"|"C3"|"C1", bps}`; `POST /api/live/{r}/resync`; `POST /api/live/{r}/auto` `{enabled}`
+* `POST /api/live/{r}/budget` `{cls: "C1"…"C6", bps}`; `POST /api/live/{r}/resync`; `POST /api/live/{r}/auto` `{enabled}`
 * `GET /api/live/{r}/state` → latest C1 state (same payload as the `robot/<r>/state` topic); 404 before the robot has reported
 
 ## 9. Planning (rclpy, publishes on the base station)
@@ -403,6 +404,67 @@ stay bytes per second.
     queue). When either is full, a delta frame is dropped and that topic skips to the next key frame.
     A key frame replaces the topic's stale queued chain. The generic "drop the oldest frame" rule never
     evicts a video frame, so a client never receives a delta whose predecessor it missed.
+
+## 13. Live image-store mirror (C6)
+
+During a run the robot's hydra image store (`$ADT4_OUTPUT_DIR/image_store`) is mirrored to the
+base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirror.py`
+(`StoreTail` robot side, `StoreMirror` base side), codec `hydra_image_store.transfer`.
+
+### 13.1 Robot (agent)
+* **Params.** `store_path` (default `$ADT4_OUTPUT_DIR/image_store`; `""` disables),
+  `store_frames` (`keyframes` = kind 0, default, or `all`), `store_compression` (`none` |
+  `lossless` | `fast`, default `fast`: RGB re-encoded JPEG q75, depth half resolution + row-delta
+  zstd), `budget_C6` (default 150 000 B/s); yaml also `store_poll_s` (1 s), `store_queue_s` (2 s
+  of budget queued at most).
+* The store is opened **read-only** (sqlite WAL, `mode=ro`); Hydra keeps writing. Frames are read
+  in `frame_id` order with a watermark (`select_frames(after=…)`), encoded at send time.
+  Every frame carries its frame row and the sensor calibration, so any frame rebuilds a valid store.
+* **Store id.** `id` names one Hydra store session (inode of `store.sqlite` + first frame
+  timestamp). Hydra rotates the store when it restarts (frame ids restart), giving a new id and a
+  new mirror directory.
+* **State.** C1 `state.store = {id, enabled, active, after, sent, last, backlog, frames_sent,
+  bytes_sent, avg_frame_bytes, frames, compression, rewinds, error}`.
+* **Auto mode.** C6 is never AIMD-adjusted; with `auto` on, store frames are only queued while
+  C2 and C3 have nothing queued. C6 is last in priority (zenoh `BACKGROUND`, after C5).
+* A frame that cannot be encoded is sent as a skip (`blob: null, error`) so the chain stays intact.
+
+### 13.2 Protocol (no loss, no duplicates across agent / console / Hydra restarts)
+* C0 op **`store {id, after}`**: the base's highest `frame_id` in its mirror (`null` = empty).
+  The agent restarts its cursor there and clears queued C6 frames; the ack is `{id, after, backlog}`
+  (`ok: false` when `id` is not the current store).
+* The base sends it when a state shows a store it does not mirror yet, `active: false` (agent
+  restarted), or on its own first contact (console restarted, watermark read from disk).
+* Each C6 message `{id, frame_id, prev, blob}`: `prev` is the frame sent before it. The base applies
+  a frame only if `prev` equals its watermark; frames at or below the watermark are duplicates
+  (ignored). A mismatch (a frame was lost) re-sends `store {id, after: watermark}`
+  (at most every 2 s); a lost last frame shows as `state.store.sent > watermark` with nothing
+  arriving for 5 s.
+
+### 13.3 Base (console)
+* `fleetlink.receiver.Receiver(..., store_root=DIR)` (or `store_mirror=StoreMirror(...)`) writes
+  frames with `hydra_image_store.transfer.write_frame` on a worker thread into
+  **`<live_store_root>/<robot>/<store_id>/image_store`**; source frame and sensor ids are kept.
+  Console setting `live_store_root` / `--live-store-root` (default `<output_root>/live`,
+  i.e. `~/adt4_output/live`; `""` disables). The result passes `hydra-image-store check` and
+  loads with `agentic_navigation…keyframe_store.load_keyframes_from_store`.
+* **`GET /api/live`** gains `store: {root, robots: {r: {store_id, path, watermark, frames, bytes,
+  avg_frame_bytes, backlog, robot_last, duplicates, skipped, gaps, write_errors, last_error,
+  frames_selection, compression, queued_writes}}}`, and each `robots[r]` link gains the same dict
+  as `store` plus `C6` in `budgets`, `rates`, `bytes`, `loss`. `Receiver.store_stats(robot=None)`.
+* Budget: `POST /api/live/{r}/budget {cls: "C6", bps}` (the Live link panel's "image store"
+  slider). Measured on a Penn-bag run: 115 keyframes, 64 kB/frame (`fast`), ~61 kB/s.
+
+### 13.4 Other agent additions (same change)
+* **Lazy cameras.** Only `eager_cameras` (default `[rgb, overlay]`) are subscribed all the time;
+  any other `cameras` entry is subscribed while a C4 query or a C5 `video` request wanted it within
+  `camera_idle_s` (15 s), or while its video stream runs, then unsubscribed and its cached frame
+  dropped (checked at 1 Hz). A query before the first frame answers
+  `{error: "no frame yet", subscribing: true}`: ask again after ~1 s.
+* **DSG decode diagnostics.** `state.stats.dsg = {spark_dsg, received, processed, dropped, failed,
+  last_error, bytes, nodes, raw_nodes, has_nodes, mesh_faces, layer_keys, warning}`. `has_nodes`
+  comes from the payload header (`fleetlink.codec.dsg_binary_info`, read without spark_dsg);
+  `warning` is set when the payload has nodes but the imported spark_dsg decoded none.
 
 ## Deviations
 

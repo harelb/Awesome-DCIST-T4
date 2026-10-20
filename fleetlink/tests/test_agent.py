@@ -61,6 +61,7 @@ def test_streams_and_envelopes():
         "C3",
         "C4",
         "C5",
+        "C6",
     }
 
 

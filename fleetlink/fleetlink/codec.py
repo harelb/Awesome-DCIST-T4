@@ -148,14 +148,110 @@ def node_record(node) -> NodeRecord:
 
 
 def graph_records(G) -> dict[str, NodeRecord]:
-    """All nodes of a spark_dsg graph, keyed by symbol string."""
+    """All nodes of a spark_dsg graph, keyed by symbol string.
+
+    Walks the primary layers and the partitions; if that finds fewer nodes than
+    ``G.num_nodes()`` (bindings whose layer views miss some layer keys), it also
+    walks the graph-wide ``G.nodes`` iterator, so no node is silently dropped.
+    """
     out = {}
     for layers in (G.layers, G.layer_partitions):
         for L in layers:
             for node in L.nodes:
                 rec = node_record(node)
                 out[rec.sym] = rec
+    try:
+        total = int(G.num_nodes())
+    except Exception:
+        total = None
+    if total is not None and len(out) < total and hasattr(G, "nodes"):
+        for node in G.nodes:
+            rec = node_record(node)
+            out.setdefault(rec.sym, rec)
     return out
+
+
+# --- spark_dsg binary header (read without spark_dsg) ------------------------
+# The binary format is a subset of msgpack with little-endian fixed-size values
+# (spark_dsg serialization/binary_serialization.h): strings are ARR32/STR32 +
+# u32 length + bytes; 0x00 / 0x01 open / close a dynamic array.
+
+_FIXED = {
+    0xC0: 0, 0xC2: 0, 0xC3: 0, 0xCA: 4, 0xCB: 8, 0xCC: 1, 0xCD: 2, 0xCE: 4,
+    0xCF: 8, 0xD0: 1, 0xD1: 2, 0xD2: 4, 0xD3: 8,
+}  # fmt: skip
+
+
+class _BinReader:
+    def __init__(self, data: bytes):
+        self.d = memoryview(data)
+        self.i = 0
+
+    def _u32(self) -> int:
+        v = int.from_bytes(self.d[self.i : self.i + 4], "little")
+        self.i += 4
+        return v
+
+    def array_len(self) -> int:
+        t = self.d[self.i]
+        if t != 0xDD:
+            raise ValueError(f"expected an array at {self.i}, got 0x{t:02x}")
+        self.i += 1
+        return self._u32()
+
+    def string(self) -> str:
+        t = self.d[self.i]
+        if t not in (0xDB, 0xDD):
+            raise ValueError(f"expected a string at {self.i}, got 0x{t:02x}")
+        self.i += 1
+        n = self._u32()
+        s = bytes(self.d[self.i : self.i + n]).decode("utf-8", "replace")
+        self.i += n
+        return s
+
+    def integer(self) -> int:
+        t = self.d[self.i]
+        if t not in _FIXED or t in (0xC0, 0xC2, 0xC3, 0xCA, 0xCB):
+            raise ValueError(f"expected an integer at {self.i}, got 0x{t:02x}")
+        n = _FIXED[t]
+        raw = bytes(self.d[self.i + 1 : self.i + 1 + n])
+        self.i += 1 + n
+        return int.from_bytes(raw, "little", signed=t >= 0xD0)
+
+    def layer_key(self) -> tuple[int, int]:
+        if self.array_len() != 2:
+            raise ValueError("bad layer key")
+        return (self.integer(), self.integer())
+
+
+def dsg_binary_info(data: bytes) -> dict:
+    """Header of a ``to_binary`` / hydra ``DsgUpdate.layer_contents`` payload,
+    read without spark_dsg: layer keys, node/edge attribute type names, layer
+    names and whether the node array is non-empty.
+
+    Lets the agent tell "the robot's graph is empty" from "the imported
+    spark_dsg dropped every node" (spark_dsg's reader silently skips nodes whose
+    attribute type it cannot create, e.g. a stale pip copy shadowing the
+    workspace build).  Raises ValueError on a payload it cannot parse."""
+    r = _BinReader(data)
+    keys = [r.layer_key() for _ in range(r.array_len())]
+    node_types = [r.string() for _ in range(r.array_len())]
+    edge_types = [r.string() for _ in range(r.array_len())]
+    names = {}
+    for _ in range(r.array_len()):
+        name = r.string()
+        names[name] = r.layer_key()
+    r.string()  # metadata json
+    if r.i + 1 >= len(r.d) or r.d[r.i] != 0x00:
+        raise ValueError("expected the node array")
+    return {
+        "bytes": len(data),
+        "layer_keys": keys,
+        "node_types": node_types,
+        "edge_types": edge_types,
+        "layer_names": names,
+        "has_nodes": r.d[r.i + 1] != 0x01,
+    }
 
 
 def graph_edges(G) -> set[tuple[str, str]]:

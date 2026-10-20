@@ -7,11 +7,17 @@ fleetlink) ``receiver`` stays ``None`` and live endpoints return empty.
 the background (and reconnects after router restarts), so the receiver is
 created at once and :attr:`LiveService.status` reports ``waiting`` until the
 session is open, then ``connected``.
+
+Live image-store mirror (fleetlink class C6, API.md §13): the receiver writes
+the robots' store frames into ``<live_store_root>/<robot>/<store_id>/image_store``
+(default ``<output_root>/live``; an empty ``live_store_root`` disables it), a
+valid hydra image store that SAM3 search can load while the run goes on.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from .video_service import VideoRelay
@@ -46,7 +52,9 @@ class LiveService:
             transport = ZenohTransport(
                 connect=self.settings.zenoh_connect or "tcp/127.0.0.1:7447"
             )
-            receiver = Receiver(transport, self.on_update)
+            receiver = Receiver(
+                transport, self.on_update, store_root=self.store_root
+            )
             receiver.start()
         except Exception as e:  # noqa: BLE001  (e.g. zenoh / fleetlink missing)
             self.error = f"{type(e).__name__}: {e}"
@@ -75,6 +83,27 @@ class LiveService:
             if opened.wait(1.0):
                 log.info("fleetlink receiver connected")
                 return
+
+    @property
+    def store_root(self) -> str | None:
+        """Where live store mirrors go (None = mirroring disabled)."""
+        root = getattr(self.settings, "live_store_root", None)
+        if root is None:
+            out = getattr(self.settings, "output_root", None) or "~/adt4_output"
+            root = os.path.join(out, "live")
+        return os.path.expanduser(root) if root else None
+
+    def store_stats(self) -> dict:
+        """``{root, robots: {robot: mirror stats}}`` (robots empty when off)."""
+        fn = getattr(self.receiver, "store_stats", None)
+        robots = {}
+        if fn is not None:
+            try:
+                robots = fn() or {}
+            except Exception:  # noqa: BLE001
+                robots = {}
+        enabled = getattr(self.receiver, "store", None) is not None
+        return {"root": self.store_root if enabled else None, "robots": robots}
 
     @property
     def status(self) -> dict:
@@ -160,10 +189,15 @@ class LiveService:
 
     def links(self) -> dict:
         if self.receiver is None:
-            return {"robots": {}, "transport": self.status}
+            return {
+                "robots": {},
+                "transport": self.status,
+                "store": {"root": None, "robots": {}},
+            }
         return {
             "robots": {r: self.receiver.link(r) for r in self.receiver.robots()},
             "transport": self.status,
+            "store": self.store_stats(),
         }
 
     def state(self, robot: str) -> dict | None:

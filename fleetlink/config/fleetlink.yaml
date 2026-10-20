@@ -6,6 +6,7 @@ budgets:
   C3: 100000  # mesh tiles + occupancy grid
   C4: 200000  # on-demand camera frames (request/reply)
   C5: 400000  # live camera video, all streams together (API.md §12)
+  C6: 150000  # live image-store mirror, lowest priority (API.md §13)
 budget_min:  # auto (AIMD) mode never goes below / above these
   C2: 5000
   C3: 5000
@@ -26,3 +27,13 @@ paths_hz: 2.0  # executor paths: checked this often, sent only when they changed
 video_keepalive_s: 6.0  # a video stream stops without a `video` request this long
 ffmpeg:  # null = $FLEETLINK_FFMPEG / ffmpeg on PATH / /usr/bin/ffmpeg
 c2_ring: 256  # last C2 messages kept for `resend` gap repair (0 = always resync)
+# lazy cameras: these are always subscribed, the others only while a C4 query or
+# C5 video request wanted them within camera_idle_s
+eager_cameras: [rgb, overlay]
+camera_idle_s: 15.0
+# C6 live image-store mirror (the ROS param store_path defaults to
+# $ADT4_OUTPUT_DIR/image_store; "" disables)
+store_frames: keyframes  # keyframes | all
+store_compression: fast  # none | lossless | fast (hydra_image_store.transfer)
+store_poll_s: 1.0  # how often the store is checked for new frames
+store_queue_s: 2.0  # C6 frames queued at most, in seconds of C6 budget

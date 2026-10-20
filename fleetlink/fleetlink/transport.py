@@ -15,6 +15,8 @@ full resync as the last resort), C3 tiles through the manifest.
 * ``C3`` mesh     - DATA_LOW, DROP, best effort
 * ``C4`` media    - DATA, DROP, request/reply only (on-demand camera frames)
 * ``C5`` video    - DATA_LOW, DROP, best effort (live camera video, API.md §12)
+* ``C6`` store    - BACKGROUND, DROP, reliable (live image-store mirror, API.md §13;
+  lowest priority, gaps repaired by the base's watermark requests)
 
 Request/reply (``declare_queryable`` / ``query``) carries C4: the base asks,
 the robot answers once.  Replies travel above C3 (mesh / grid) in priority,
@@ -33,10 +35,11 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Callable
 
-CLASSES = ("C0", "C1", "C2", "C3", "C4", "C5")
+CLASSES = ("C0", "C1", "C2", "C3", "C4", "C5", "C6")
 # strict transmit order on the link (zenoh priority order): C4 sits between
-# graph (C2) and mesh (C3); video (C5) shares DATA_LOW with C3 and goes last
-PRIORITY_ORDER = ("C0", "C1", "C2", "C4", "C3", "C5")
+# graph (C2) and mesh (C3); video (C5) shares DATA_LOW with C3; the image-store
+# mirror (C6) is BACKGROUND and goes after everything
+PRIORITY_ORDER = ("C0", "C1", "C2", "C4", "C3", "C5", "C6")
 PRIORITY = {c: i for i, c in enumerate(PRIORITY_ORDER)}  # lower = more important
 
 Callback = Callable[[str, bytes], None]
@@ -173,6 +176,7 @@ ZENOH_DEFAULTS = {
     "transport/link/tx/queue/size/data_high": 16,  # C2
     "transport/link/tx/queue/size/data": 16,  # C4 replies
     "transport/link/tx/queue/size/data_low": 16,  # C3, C5
+    "transport/link/tx/queue/size/background": 16,  # C6 store frames (~40-130 kB)
 }
 
 
@@ -262,6 +266,11 @@ class ZenohTransport(Transport):
                 priority=zenoh.Priority.DATA_LOW,
                 congestion_control=drop,
                 reliability=zenoh.Reliability.BEST_EFFORT,
+            ),
+            "C6": dict(
+                priority=zenoh.Priority.BACKGROUND,
+                congestion_control=drop,
+                reliability=zenoh.Reliability.RELIABLE,
             ),
         }
         self.max_publishers = int(max_publishers)
@@ -709,6 +718,7 @@ class LinkEmulator:
             "C3": False,
             "C4": True,
             "C5": False,
+            "C6": True,
         }
         self._lock = threading.RLock()
         rng = random.Random(seed)

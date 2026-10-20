@@ -80,6 +80,7 @@ def test_live_endpoints_and_controls(live):
     assert client.get("/api/live").json() == {
         "robots": {"euclid": {"connected": True, "epoch": "e1", "nodes": 2}},
         "transport": {"state": "connected", "endpoints": [], "error": None},
+        "store": {"root": None, "robots": {}},  # C6 mirror off
     }
     assert client.post(
         "/api/live/euclid/budget", json={"cls": "C2", "bps": 20000}
@@ -130,6 +131,7 @@ def test_live_disabled_returns_empty(client):
     assert client.get("/api/live").json() == {
         "robots": {},
         "transport": {"state": "disabled", "endpoints": [], "error": None},
+        "store": {"root": None, "robots": {}},  # C6 mirror off
     }
     assert client.post("/api/live/euclid/resync").status_code == 503
     assert client.get("/api/graph/live:euclid/snapshot").status_code == 404

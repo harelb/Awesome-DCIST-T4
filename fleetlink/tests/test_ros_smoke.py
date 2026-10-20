@@ -208,3 +208,58 @@ def test_agent_node_grid_paths_cameras(zenoh_router, monkeypatch):
         agent_node.destroy_node()
         rclpy.shutdown()
         spin.join(timeout=2)
+
+
+def test_agent_node_lazy_camera_subscriptions(zenoh_router, monkeypatch):
+    """Non-eager cameras are subscribed only while wanted, then released."""
+    monkeypatch.setenv("ROS_DOMAIN_ID", "90")
+    monkeypatch.setenv(
+        "ZENOH_CONFIG_OVERRIDE",
+        f'connect/endpoints=["{zenoh_router}"];scouting/multicast/enabled=false',
+    )
+    rclpy = pytest.importorskip("rclpy")
+    pytest.importorskip("hydra_msgs")
+    from rclpy.node import Node
+    from rclpy.parameter import Parameter
+    from sensor_msgs.msg import Image
+
+    from fleetlink.agent import AgentNode
+
+    rclpy.init()
+    link = LinkEmulator(clock=time.time, bandwidth=None, latency=0.0)
+    pub_node = Node("lazy_cam_pub", namespace="smoke3")
+    agent_node = Node(
+        "fleetlink_agent",
+        namespace="smoke3",
+        parameter_overrides=[
+            Parameter("cameras", value=["rgb=rgb/image", "left=left/image"]),
+            Parameter("camera_idle_s", value=2.0),
+            Parameter("store_path", value=""),
+        ],
+    )
+    agent = AgentNode(transport=link.robot, node=agent_node)
+    left = pub_node.create_publisher(Image, "left/image", 1)
+    rgb = pub_node.create_publisher(Image, "rgb/image", 1)
+
+    def subs(pub, want, timeout=5.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if pub.get_subscription_count() == want:
+                return True
+            time.sleep(0.05)
+        return False
+
+    try:
+        assert agent.core.store is None
+        assert subs(rgb, 1) and subs(left, 0)
+        agent.core.want_camera("left")
+        agent._update_cameras()
+        assert subs(left, 1)
+        time.sleep(2.2)
+        agent._update_cameras()
+        assert subs(left, 0) and subs(rgb, 1)
+    finally:
+        agent.shutdown()
+        pub_node.destroy_node()
+        agent_node.destroy_node()
+        rclpy.shutdown()
