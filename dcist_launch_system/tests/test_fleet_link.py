@@ -1,7 +1,6 @@
 """fleet_link mode switch: router endpoints, fleetlink endpoints, fleet_env, launch env."""
 
 import copy
-import re
 import shlex
 import subprocess
 import sys
@@ -443,18 +442,6 @@ def test_robot_sessions_pass_fleetlink_connect(name):
     assert not any(w["window_name"] == "fleetlink_base" for w in s["windows"])
 
 
-def _tf_remaps(pane, namespace_tf):
-    """The /tf and /tf_static remaps of a pane, expanded the way the tmux shell would."""
-    remaps = re.findall(r"/tf(?:_static)?:=\$\([^)]*\)", pane)
-    env = {"ADT4_NAMESPACE_TF": namespace_tf, "ADT4_ROBOT_NAME": "alpha"}
-    return [
-        subprocess.run(
-            ["bash", "-c", f"echo {r}"], env=env, capture_output=True, text=True
-        ).stdout.strip()
-        for r in remaps
-    ]
-
-
 @pytest.mark.parametrize(
     "name,window,pane",
     [
@@ -464,13 +451,11 @@ def _tf_remaps(pane, namespace_tf):
         ("base_station_web-default", "fleetlink_base", 1),
     ],
 )
-def test_fleetlink_tf_follows_namespace_tf(name, window, pane):
-    # the agent reads the robot's TF and the bridge writes the base's TF, both of which
-    # are /<robot>/tf unless ADT4_NAMESPACE_TF=false
+def test_fleetlink_tf_is_namespaced(name, window, pane):
+    # the agent reads the robot's TF and the bridge writes the base's TF, both /<robot>/tf
     [win] = [w for w in _session(name)["windows"] if w["window_name"] == window]
     cmd = win["panes"][pane]
-    assert _tf_remaps(cmd, "true") == ["/tf:=/alpha/tf", "/tf_static:=/alpha/tf_static"]
-    assert _tf_remaps(cmd, "false") == ["/tf:=/tf", "/tf_static:=/tf_static"]
+    assert "-r /tf:=/$ADT4_ROBOT_NAME/tf -r /tf_static:=/$ADT4_ROBOT_NAME/tf_static" in cmd
 
 
 @pytest.mark.parametrize(

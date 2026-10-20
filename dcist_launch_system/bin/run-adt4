@@ -49,7 +49,7 @@ ADT4_VARS = [
     "ADT4_ROBOT_COLOR",
     "ADT4_FLEET_LINK",
     "ADT4_FLEETLINK_CONNECT",
-    "ADT4_NAMESPACE_TF",
+    "ADT4_TF_NETWORK_MODE",
 ]
 
 
@@ -78,7 +78,6 @@ class SessionInfo:
     trajectory_args: list[str] = field(default_factory=list)
     record: Optional[str] = None
     zenoh: bool = True
-    namespace_tf: bool = False
     fleet_link: str = "router"
     session_env: dict = field(default_factory=dict)
 
@@ -384,11 +383,33 @@ def _make_record_window(info: SessionInfo):
 
 
 def _tf_remap_args(info: SessionInfo):
-    if not info.namespace_tf:
+    # ADT4 namespaces all TF by robot (see master.launch.yaml)
+    ns = f"/{info.robot_name}"
+    return ["-r", f"/tf:={ns}/tf", "-r", f"/tf_static:={ns}/tf_static"]
+
+
+def _bag_tf_args(info: SessionInfo):
+    """Point ianvs at the bag's TF topics: /<robot>/tf in newer bags, /tf in older ones."""
+    bag_dir = info.bag if info.bag.is_dir() else info.bag.parent
+    try:
+        with (bag_dir / "metadata.yaml").open("r") as fin:
+            metadata = yaml.safe_load(fin)["rosbag2_bagfile_information"]
+        counts = {
+            x["topic_metadata"]["name"]: x["message_count"]
+            for x in metadata["topics_with_message_count"]
+        }
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        click.secho(f"Could not read bag metadata in '{bag_dir}'", fg="yellow")
         return []
 
     ns = f"/{info.robot_name}"
-    return ["-r", f"/tf:={ns}/tf", "-r", f"/tf_static:={ns}/tf_static"]
+    args = []
+    if counts.get(f"{ns}/tf", 0) > 0:
+        args += ["--tf-topic", f"{ns}/tf"]
+    if counts.get(f"{ns}/tf_static", 0) > 0:
+        args += ["--tf-static-topic", f"{ns}/tf_static"]
+
+    return args
 
 
 def _make_bag_window(info: SessionInfo):
@@ -397,6 +418,7 @@ def _make_bag_window(info: SessionInfo):
         to_drop.append(".*odom.*")
 
     bag_args = ["--filter-tf", "-k", f"'.*{info.robot_name}.*'"]
+    bag_args += _bag_tf_args(info)
     bag_args += ["--delay", str(info.bag_delay)]
     bag_args += [f"-f '{x}'" for x in to_drop]
     if info.sim_time:
@@ -410,9 +432,7 @@ def _make_bag_window(info: SessionInfo):
         bag_args += ["--rate", f"{info.bag_rate}"]
 
     # play_rosbag republishes (filtered) TF from its wrapper node, which these remaps move
-    tf_remaps = _tf_remap_args(info)
-    if tf_remaps:
-        bag_args += ["--ros-args"] + tf_remaps
+    bag_args += ["--ros-args"] + _tf_remap_args(info)
 
     # tmuxp types pane commands with send-keys before the (slow, oh-my-zsh) shell
     # is ready, and in windows after the first the keystrokes are lost, so the bag
@@ -552,10 +572,9 @@ def _write_session_to_file(session_path, info: SessionInfo, fout, verbose=False)
 )
 @click.option("--zenoh/--no-zenoh", default=True, help="start zenoh router")
 @click.option(
-    "--namespace-tf/--no-namespace-tf",
-    default=True,
-    envvar="ADT4_NAMESPACE_TF",
-    help="use /<robot_name>/tf instead of /tf (also remaps bag playback)",
+    "--forward-all-tf",
+    is_flag=True,
+    help="send the robot's whole TF tree to the base station (default: only map_T_robot)",
 )
 def main(
     session_path,
@@ -579,7 +598,7 @@ def main(
     record,
     rviz_config,
     zenoh,
-    namespace_tf,
+    forward_all_tf,
 ):
     robot_name = robot_name or input("robot name to use? ")
     platform_id = platform_id or input("robot platform ID? ")
@@ -596,7 +615,7 @@ def main(
     env["ADT4_ROBOT_NAME"] = robot_name
     env["ADT4_PLATFORM_ID"] = platform_id
     env["ADT4_SIM_TIME"] = "true" if sim_time else "false"
-    env["ADT4_NAMESPACE_TF"] = "true" if namespace_tf else "false"
+    env["ADT4_TF_NETWORK_MODE"] = "all" if forward_all_tf else "frames"
     env["ADT4_OUTPUT_DIR"] = str(output_dir)
     if prior_map:
         env["ADT4_PRIOR_MAP"] = str(prior_map)
@@ -629,7 +648,6 @@ def main(
         trajectory=_normalize_optional(trajectory),
         record=record,
         zenoh=zenoh,
-        namespace_tf=namespace_tf,
         fleet_link=env.get("ADT4_FLEET_LINK", "router"),
         session_env=_session_env(env),
     )

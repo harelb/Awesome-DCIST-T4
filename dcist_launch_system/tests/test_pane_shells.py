@@ -186,7 +186,6 @@ def test_fleetlink_bridge_pane_runs_with_session_env(tmp_path):
         "ADT4_WS": str(ws),
         "ADT4_FLEET_LINK": "fleetlink",
         "ADT4_FLEETLINK_CONNECT": "tcp/127.0.0.1:7450",
-        "ADT4_NAMESPACE_TF": "true",
         "ADT4_ROBOT_NAME": "willow",
         "sim_time": "false",
     }
