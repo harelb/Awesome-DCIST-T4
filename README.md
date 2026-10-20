@@ -175,7 +175,6 @@ an available transform are skipped for pose updates.
 | hamilton      | Topaz Jockey          | 192.168.100.2    |
 | samoyed       | ARL Husky             | 192.168.100.62  |
 | apollo        | ARL Spot              | 192.168.100.13  |
-| russell       | Aaron's laptop        | 192.168.100.101  |
 | bonsai        | RRG dev computer      | ???.???.??.???  |
 | willow        | RRG base station      | 192.168.100.100  |
 
@@ -184,7 +183,6 @@ an available transform are skipped for pose updates.
 |---------------|-----------------------|-----------------|
 | euclid        | Jasper Jockey         | 10.29.219.68    |
 | hamilton      | Topaz Jockey          | 10.29.225.80    |
-| russell       | Aaron's laptop        | 10.29.129.166   |
 | bonsai        | RRG dev computer      | ???.???.??.???  |
 | willow        | RRG base station      | 10.29.170.228   |
 | gauss         | ACL husky laptop      | 10.29.242.128   |

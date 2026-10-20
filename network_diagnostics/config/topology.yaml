@@ -60,12 +60,6 @@ machines:
     desc: ARL Husky
     addresses:
       silvus: 192.168.100.62
-  russell:
-    role: base_station
-    desc: Aaron's laptop
-    addresses:
-      mit_wifi: 10.29.129.166
-      silvus: 192.168.100.101
   bonsai:
     role: base_station
     desc: RRG dev computer
