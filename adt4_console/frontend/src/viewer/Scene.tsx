@@ -309,16 +309,37 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
       c.minPolarAngle = 0;
       c.maxPolarAngle = 0;
       c.mouseButtons.left = CameraControlsImpl.ACTION.TRUCK;
+      // with the polar angle pinned straight down, orbiting only spins the map in plane
+      c.mouseButtons.right = CameraControlsImpl.ACTION.ROTATE;
       c.touches.one = CameraControlsImpl.ACTION.TOUCH_TRUCK;
+      c.touches.two = CameraControlsImpl.ACTION.TOUCH_DOLLY_ROTATE;
       void c.rotatePolarTo(0, true);
       void c.rotateAzimuthTo(0, true);
     } else {
       c.minPolarAngle = 0;
       c.maxPolarAngle = Math.PI * 0.49;
       c.mouseButtons.left = CameraControlsImpl.ACTION.ROTATE;
+      c.mouseButtons.right = CameraControlsImpl.ACTION.TRUCK;
       c.touches.one = CameraControlsImpl.ACTION.TOUCH_ROTATE;
+      c.touches.two = CameraControlsImpl.ACTION.TOUCH_DOLLY_TRUCK;
       void c.rotatePolarTo(Math.PI / 4, true);
     }
+  }, [topDown]);
+  // top view: Q / E rotate the map 90° left / right, R puts north back up
+  useEffect(() => {
+    if (!topDown) return;
+    const onKey = (e: KeyboardEvent) => {
+      const c = ref.current;
+      const t = e.target as HTMLElement | null;
+      if (!c || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      const k = e.key.toLowerCase();
+      if (k === "q") void c.rotate(Math.PI / 2, 0, true);
+      else if (k === "e") void c.rotate(-Math.PI / 2, 0, true);
+      else if (k === "r") void c.rotateAzimuthTo(0, true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [topDown]);
   // ignore a fly-to request that predates this mount (store outlives the page)
   const flyNonce = useRef(flyTo?.nonce ?? 0);
