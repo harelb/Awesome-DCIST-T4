@@ -20,10 +20,10 @@ launch_configs:
   plan_prior_heracles: [main, heracles_prior_dsg, planning, fleetlink_base]
   plan_prior_repair: [main, prior_dsg, planning_repair, fleetlink_base]
   plan_prior_heracles_repair: [main, heracles_prior_dsg_repair, planning_repair, fleetlink_base]
-  # web console instead of rviz (rviz-free base station)
-  plan_prior_web: [main, prior_dsg, planning_web, console, fleetlink_base]
+  # web console instead of rviz (rviz-free base station: no rviz or rviz-only visualizer nodes)
+  plan_prior_web: [main, prior_dsg_web, planning_web, console, fleetlink_base]
   # web console + heracles (Neo4j) + plan repair + SAM3 object search on the base station
-  plan_prior_web_heracles_repair: [main, heracles_prior_dsg_repair, planning_repair_web, console_neo4j, fleetlink_base, sam3_query]
+  plan_prior_web_heracles_repair: [main, heracles_prior_dsg_repair_web, planning_repair_web, console_neo4j, fleetlink_base, sam3_query]
 # Configs build the set of rosparams that will be loaded
 configs:
   default: []

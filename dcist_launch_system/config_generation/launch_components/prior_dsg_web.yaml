@@ -1,0 +1,13 @@
+---
+nodes_to_monitor:
+  dsg_saver: {}
+windows:
+  # rviz-free variant of prior_dsg for the web console sessions: no hydra_visualizer,
+  # mesh_publisher or awcd_visualizer (they only draw in rviz; the console renders
+  # the graph and mesh itself)
+  - window_name: prior_dsg
+    shell_command_before: source ${ADT4_WS}/install/setup.zsh
+    layout: tiled
+    panes:
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_scene_graph_publisher:=true
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_saver:=true
