@@ -1,6 +1,7 @@
 // "Search images" tool: types, API calls and pure helpers for the SAM3 query
 // server (via the console's /api/sam3/* routes). The UI is SearchImagesPanel.tsx.
 import {getJSON, postJSON} from "../lib/api";
+import {withToken} from "../lib/auth";
 
 export type Sam3Mode = "frustum" | "batched" | "topk";
 /** "sam3": SigLIP2 ranking + SAM3 detection (dry run); "rank": SigLIP2 only */
@@ -26,9 +27,14 @@ export interface Sam3Health {
   admission_policy?: string | null;
   live_store_root?: string | null;
   sources?: Sam3Source[];
+  /** SAM3 image-feature cache (frames cached / being built) */
+  feature_cache?: {pool?: number; pool_cached?: number; building?: boolean; queued?: number; gpu?: number; disk?: number} | null;
+  compile_warmup_s?: number;
 }
 
 export interface Sam3View {
+  /** rank of the view within its candidate (0 = best); the lazy image's `view` */
+  view?: number;
   frame_key?: string | null;
   source?: string | null;
   frame_id: number | null;
@@ -49,6 +55,10 @@ export interface Sam3Candidate {
   bbox_max: number[];
   num_points: number;
   num_views: number;
+  /** distinct keyframes the object was detected in (same-object clustering) */
+  num_frames?: number;
+  /** every member view's frame key, best first */
+  frame_keys?: string[];
   would_merge_into: {symbol: string; distance_m: number} | null;
   image_uri: string | null;
   views: Sam3View[];
@@ -66,6 +76,22 @@ export interface Sam3QueryResult {
   source?: string;
   conf?: number;
   note?: string;
+  /** raw per-view detections before same-object clustering */
+  detections?: number;
+  association?: string;
+  /** SAM3 image-feature cache use of this query */
+  cache?: Sam3CacheStats;
+}
+
+export interface Sam3CacheStats {
+  frames: number;
+  hits: number;
+  hit_rate: number | null;
+  gpu?: number;
+  cpu?: number;
+  disk?: number;
+  miss?: number;
+  feat_s?: number;
 }
 
 export interface RankedFrame {
@@ -112,15 +138,15 @@ export interface SearchParams {
   minScore: number;
 }
 
-/** Serving defaults (same budgets as the chat tool / query_client). */
+/** Serving defaults (same budgets as the chat tool, sam3_client.py). */
 export const DEFAULT_PARAMS: SearchParams = {
   kind: "sam3",
   prompt: "",
   source: "all",
   mode: "frustum",
   topK: 60,
-  maxFrames: 60,
-  patience: 25,
+  maxFrames: 30,
+  patience: 3,
   conf: null,
   minScore: 0,
 };
@@ -179,12 +205,36 @@ export function sourceOptions(sources: Sam3Source[] | undefined): {value: string
   return out;
 }
 
-/** Timing rows to show, in pipeline order, then any extra keys. */
+/** Timing rows to show (seconds), in pipeline order, then any extra keys. */
 export function timingRows(t: Record<string, number> | undefined): [string, number][] {
   if (!t) return [];
   const order = ["connect", "embed_rank", "detect", "evidence", "render"];
-  const keys = [...order.filter(k => k in t), ...Object.keys(t).filter(k => !order.includes(k))];
+  const notSeconds = ["cache_hit"];
+  const keys = [...order.filter(k => k in t), ...Object.keys(t).filter(k => !order.includes(k) && !notSeconds.includes(k))];
   return keys.map(k => [k, t[k]] as [string, number]);
+}
+
+/** "cache 95% (19/20 frames)" chip text + a tooltip with the tier split; null without stats. */
+export function cacheChip(c: Sam3CacheStats | undefined): {text: string; title: string} | null {
+  if (!c || !c.frames) return null;
+  const pct = Math.round(100 * (c.hit_rate ?? c.hits / c.frames));
+  const tiers = (["gpu", "cpu", "disk", "miss"] as const).filter(k => (c[k] ?? 0) > 0).map(k => `${k} ${c[k]}`);
+  return {
+    text: `cache ${pct}% (${c.hits}/${c.frames})`,
+    title: `SAM3 image features of the ${c.frames} frames searched: ${tiers.join(" · ")}${c.miss ? " (miss = computed now, cached for next time)" : ""}`,
+  };
+}
+
+/** "seen in N frames" of a candidate (falls back to its view count). */
+export function seenIn(c: Pick<Sam3Candidate, "num_frames" | "num_views">): string {
+  const n = c.num_frames ?? c.num_views;
+  return `seen in ${n} frame${n === 1 ? "" : "s"}`;
+}
+
+/** Lazy image of a dry-run candidate view (mask + box drawn by the server), for <img loading="lazy">. */
+export function viewImageUrl(pendingId: string, index: number, view: number, maxDim = 480): string {
+  const q = new URLSearchParams({pending_id: pendingId, index: String(index), view: String(view), max_dim: String(maxDim)});
+  return withToken(`api/sam3/frame.jpg?${q.toString()}`);
 }
 
 export function visibleCandidates(r: Sam3QueryResult | undefined, minScore: number): Sam3Candidate[] {
@@ -225,6 +275,9 @@ export const fmtSecs = (s: number | undefined) => (s === undefined ? "—" : s <
 
 export const fetchHealth = () => getJSON<Sam3Health>("api/sam3/health");
 
+/** views per candidate returned by a search (best first) */
+export const MAX_VIEWS = 3;
+
 export function runQuery(p: SearchParams): Promise<Sam3QueryResult> {
   return postJSON<Sam3QueryResult>("api/sam3/query", {
     prompt: p.prompt.trim(),
@@ -234,7 +287,9 @@ export function runQuery(p: SearchParams): Promise<Sam3QueryResult> {
     patience: p.patience,
     source: p.source,
     conf: p.conf ?? undefined,
-    max_views: 6,
+    max_views: MAX_VIEWS,
+    // images are fetched lazily per shown view (viewImageUrl)
+    render: "none",
   });
 }
 

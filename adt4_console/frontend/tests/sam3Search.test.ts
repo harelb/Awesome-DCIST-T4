@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {DEFAULT_PARAMS, pushHistory, rleDecode, sourceLabel, sourceOptions, timingRows, visibleCandidates, visibleFrames, type HistoryEntry, type Sam3QueryResult} from "../src/viewer/sam3Search";
+import {DEFAULT_PARAMS, cacheChip, pushHistory, seenIn, viewImageUrl, rleDecode, sourceLabel, sourceOptions, timingRows, visibleCandidates, visibleFrames, type HistoryEntry, type Sam3QueryResult} from "../src/viewer/sam3Search";
 
 const entry = (id: number): HistoryEntry => ({id, at: id, params: {...DEFAULT_PARAMS, prompt: `q${id}`}, status: {}});
 
@@ -44,7 +44,22 @@ describe("sam3Search helpers", () => {
 
   it("orders timings by pipeline stage", () => {
     expect(timingRows({render: 0.1, detect: 1, embed_rank: 0.02, extra: 3}).map(r => r[0])).toEqual(["embed_rank", "detect", "render", "extra"]);
+    expect(timingRows({detect: 1, cache_hit: 0.5}).map(r => r[0])).toEqual(["detect"]); // not seconds
     expect(timingRows(undefined)).toEqual([]);
+  });
+
+  it("formats cache hit rate, seen-in and lazy view URLs", () => {
+    expect(cacheChip({frames: 20, hits: 19, hit_rate: 0.95, gpu: 18, disk: 1, miss: 1})).toEqual({
+      text: "cache 95% (19/20)",
+      title: "SAM3 image features of the 20 frames searched: gpu 18 · disk 1 · miss 1 (miss = computed now, cached for next time)",
+    });
+    expect(cacheChip({frames: 0, hits: 0, hit_rate: null})).toBeNull();
+    expect(cacheChip(undefined)).toBeNull();
+    expect(seenIn({num_frames: 1, num_views: 2})).toBe("seen in 1 frame");
+    expect(seenIn({num_views: 3})).toBe("seen in 3 frames");
+    expect(viewImageUrl("p 1", 2, 1, 320)).toBe("api/sam3/frame.jpg?pending_id=p+1&index=2&view=1&max_dim=320");
+    expect(DEFAULT_PARAMS.patience).toBe(3);
+    expect(DEFAULT_PARAMS.maxFrames).toBe(30);
   });
 
   it("filters by min score", () => {

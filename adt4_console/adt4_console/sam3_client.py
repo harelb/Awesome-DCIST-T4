@@ -20,12 +20,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-# Serving budgets, same values as agentic_navigation query_client (a narrower
-# search silently misses objects that are in the archive).
+# Serving budgets of the console (chat + "Search images"). With the server's SAM3
+# feature cache a frame costs ~0.04 s warm, so 30 frames bound a search to ~1-2 s;
+# patience 3 stops once three processed frames add nothing (frames that only see
+# already-found objects are skipped and do not count).
 QUERY_MODE = "frustum"
 QUERY_TOP_K = 60
-QUERY_MAX_FRAMES = 60
-QUERY_PATIENCE = 25
+QUERY_MAX_FRAMES = 30
+QUERY_PATIENCE = 3
+#: views per candidate (best first); the console renders them lazily
+QUERY_MAX_VIEWS = 3
 
 
 class Sam3Unavailable(RuntimeError):
@@ -102,6 +106,8 @@ def _post(base_url: str, path: str, payload: dict | None, timeout_s: float) -> d
 
 
 def query(prompt: str, base_url: str, timeout_s: float = 180.0, dry_run=True) -> dict:
+    """Chat's search: the best view of each candidate comes back rendered (the chat
+    card shows one image), the other views as metadata."""
     return _post(
         base_url,
         "/query",
@@ -111,6 +117,8 @@ def query(prompt: str, base_url: str, timeout_s: float = 180.0, dry_run=True) ->
             "top_k": QUERY_TOP_K,
             "max_frames": QUERY_MAX_FRAMES,
             "patience": QUERY_PATIENCE,
+            "max_views": QUERY_MAX_VIEWS,
+            "render": "best",
             "dry_run": bool(dry_run),
         },
         timeout_s,
@@ -119,7 +127,7 @@ def query(prompt: str, base_url: str, timeout_s: float = 180.0, dry_run=True) ->
 
 #: knobs the "Search images" tool may pass through to ``POST /query``
 QUERY_KNOBS = ("mode", "top_k", "max_frames", "patience", "min_ts", "source", "conf",
-               "max_views")
+               "max_views", "render", "association")
 
 
 def query_with(prompt: str, base_url: str, timeout_s: float = 180.0, **knobs) -> dict:
@@ -151,9 +159,27 @@ def health(base_url: str, timeout_s: float = 3.0) -> dict:
     return _post(base_url, "/health", None, timeout_s)
 
 
-def frame(key: str, base_url: str, max_dim: int = 1280, timeout_s: float = 30.0) -> dict:
-    q = urllib.parse.urlencode({"key": key, "max_dim": int(max_dim)})
-    return _post(base_url, f"/frame?{q}", None, timeout_s)
+def frame(key: str | None, base_url: str, max_dim: int = 1280, timeout_s: float = 30.0,
+          pending_id: str | None = None, index: int | None = None,
+          view: int | None = None) -> dict:
+    """A keyframe as a JPEG data URI: ``key``'s raw frame, or (``pending_id`` +
+    ``index`` [+ ``view``]) a dry-run candidate's view with its mask and box."""
+    params: dict = {"max_dim": int(max_dim)}
+    if key:
+        params["key"] = key
+    if pending_id:
+        params.update(pending_id=pending_id, index=int(index or 0), view=int(view or 0))
+    return _post(base_url, f"/frame?{urllib.parse.urlencode(params)}", None, timeout_s)
+
+
+def data_uri_bytes(uri: str) -> tuple[bytes, str]:
+    """``(bytes, media type)`` of a base64 ``data:`` URI."""
+    import base64
+
+    head, _, data = (uri or "").partition(",")
+    if not head.startswith("data:") or ";base64" not in head:
+        raise Sam3Error("SAM3 server sent no image")
+    return base64.b64decode(data), head[5:].split(";")[0] or "image/jpeg"
 
 
 def commit(pending_id: str, index: int, base_url: str, timeout_s: float = 60.0) -> dict:
@@ -212,7 +238,8 @@ def candidate_events(result: dict, src: str | None) -> list[dict]:
                 "bbox_min": _round(c.get("bbox_min")),
                 "bbox_max": _round(c.get("bbox_max")),
                 "num_points": c.get("num_points"),
-                "num_views": len(c.get("views") or []),
+                "num_views": c.get("num_views") or len(c.get("views") or []),
+                "num_frames": c.get("num_frames"),
                 "src": src,
             }
         )
@@ -231,7 +258,8 @@ def candidates_for_model(result: dict) -> dict:
                 "label": c.get("label"),
                 "score": round(float(c.get("score") or 0.0), 3),
                 "centroid": _round(c.get("centroid")),
-                "views": len(c.get("views") or []),
+                "views": c.get("num_views") or len(c.get("views") or []),
+                "frames": c.get("num_frames"),
             }
             for i, c in enumerate(cands)
         ],

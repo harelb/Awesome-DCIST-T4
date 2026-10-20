@@ -6,5 +6,9 @@ windows:
       # warm SAM3 query server (agentic_navigation) on :8077 for the console chat's
       # "search robot images": ranks the map's keyframes (Neo4j image stores + the
       # live fleetlink mirrors under ~/adt4_output/live) and segments with SAM3.
-      # Weights come from the local HF cache (no download).
-      - cd $ADT4_WS/src/awesome_dcist_t4/agentic_navigation && HF_HUB_OFFLINE=1 HERACLES_NEO4J_URI=${ADT4_NEO4J_URI:-bolt://localhost:7687} $ADT4_ENV/sam3/bin/python -m agentic_navigation.sam3_frontend.query_server --port 8077 --conf 0.25 --live-store-root $HOME/adt4_output/live
+      # Weights come from the local HF cache (no download). --compile: torch.compile
+      # warm-up (~30 s at startup). SAM3 image features are cached per keyframe under
+      # <image_store>/cache/sam3_feats_<version>/ (~10.6 MB/frame) and built in the
+      # background; precompute offline with agentic_navigation.sam3_frontend.precompute
+      # --compile (the cache is per eager/compiled mode).
+      - cd $ADT4_WS/src/awesome_dcist_t4/agentic_navigation && HF_HUB_OFFLINE=1 HERACLES_NEO4J_URI=${ADT4_NEO4J_URI:-bolt://localhost:7687} $ADT4_ENV/sam3/bin/python -m agentic_navigation.sam3_frontend.query_server --port 8077 --conf 0.25 --compile --live-store-root $HOME/adt4_output/live
