@@ -53,8 +53,10 @@ export interface GraphLayout {
   edges: Record<string, Float32Array>;
   /** per-vertex colours for edge kinds drawn in their child's colour (hydra use_child_color) */
   edgeColors: Record<string, Float32Array>;
-  /** hydra RegionGrowingBoundaryPlugin stand-in: place footprints (triangles) */
+  /** hydra RegionGrowingBoundaryPlugin fill: place polygons (triangle list, node colour) */
   placeFill: {positions: Float32Array; colors: Float32Array} | null;
+  /** hydra RegionGrowingBoundaryPlugin boundary: state-coloured line list (segment pairs) */
+  placeBoundary: {positions: Float32Array; colors: Float32Array} | null;
   texts: TextLabel[];
   edgeCounts: Record<string, number>;
   agentPath: Float32Array | null;
@@ -86,6 +88,23 @@ export const HYDRA_LAYERS: Record<LayerInfo["kind"], {z: number; scale: number; 
   other: {z: 3, scale: 0.2, alpha: 0.8, sphere: true},
 };
 export const HYDRA_LAYER_Z_STEP = 2.0;
+
+/** RegionGrowingBoundaryPlugin as configured in hydra_visualizer.yaml
+ *  ({fill_boundaries: true, fill_alpha: 0.3}, defaults otherwise): boundary
+ *  lines 0.07 m wide at the node alpha (3p1: 0.9), coloured per
+ *  TraversabilityState with spark_dsg Color::gray/blue/red/green. */
+export const PLACE_BOUNDARY = {
+  lineWidth: 0.07,
+  lineAlpha: HYDRA_LAYERS.places.alpha,
+  fillAlpha: 0.3,
+  /** indexed by TraversabilityState: UNKNOWN, TRAVERSABLE, INTRAVERSABLE, TRAVERSED (0..255 sRGB) */
+  stateColors: [
+    [128, 128, 128],
+    [0, 0, 255],
+    [255, 0, 0],
+    [0, 255, 0],
+  ] as [number, number, number][],
+};
 
 /** spark_dsg colormaps::colorbrewerPalette (IdColorAdapter / PartitionColorAdapter). */
 export const COLORBREWER: [number, number, number][] = [
@@ -134,6 +153,59 @@ export const edgeKind = (a: NodeRecord, b: NodeRecord) => {
 /** sRGB -> linear (vertex colours are linear in three.js). */
 const lin = (c: number) => Math.pow(c, 2.2);
 
+/** Append one place's RegionGrowingBoundaryPlugin geometry to the merged
+ *  buffers (linear-RGB vertex colours).  Mirrors the C++ plugin: boundary point
+ *  i = pos + radii[i]·(cos θ, sin θ, 0) with θ = i/N·2π, lifted by the layer
+ *  z offset; segment i → (i+1)%N is coloured states[i] → states[(i+1)%N]
+ *  (a gradient on mixed segments); the fill is the boundary polygon in the
+ *  node colour.  The plugin ear-clips that polygon; the rays make it
+ *  star-shaped around pos, so the fan (pos, p_i, p_i+1) covers exactly the
+ *  same area with the same number of triangles and no overlaps.
+ *  Without radii (peers / sources that carry none) the bbox footprint stands
+ *  in, outlined in the UNKNOWN colour. Returns false when nothing was drawn. */
+export function appendPlaceBoundary(
+  n: Pick<NodeRecord, "pos" | "bbox" | "radii" | "states">,
+  z: number,
+  nodeRgb: [number, number, number],
+  linePos: number[],
+  lineCol: number[],
+  fillPos: number[],
+  fillCol: number[],
+): boolean {
+  const fr = lin(nodeRgb[0] / 255);
+  const fg = lin(nodeRgb[1] / 255);
+  const fb = lin(nodeRgb[2] / 255);
+  const pz = n.pos[2] + z;
+  const sc = (s: number | undefined) => {
+    const c = PLACE_BOUNDARY.stateColors[s ?? 0] ?? PLACE_BOUNDARY.stateColors[0];
+    return [lin(c[0] / 255), lin(c[1] / 255), lin(c[2] / 255)];
+  };
+  let pts: number[] = [];
+  let states: (number | undefined)[] = [];
+  const radii = n.radii;
+  if (radii && radii.length > 0) {
+    const N = radii.length;
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * 2 * Math.PI;
+      pts.push(n.pos[0] + radii[i] * Math.cos(a), n.pos[1] + radii[i] * Math.sin(a));
+      states.push(n.states?.[i]);
+    }
+  } else if (n.bbox) {
+    const b = n.bbox;
+    pts = [b[0], b[1], b[3], b[1], b[3], b[4], b[0], b[4]];
+    states = [0, 0, 0, 0];
+  } else return false;
+  const N = pts.length / 2;
+  for (let i = 0; i < N; i++) {
+    const j = (i + 1) % N;
+    linePos.push(pts[i * 2], pts[i * 2 + 1], pz, pts[j * 2], pts[j * 2 + 1], pz);
+    lineCol.push(...sc(states[i]), ...sc(states[j]));
+    fillPos.push(n.pos[0], n.pos[1], pz, pts[i * 2], pts[i * 2 + 1], pz, pts[j * 2], pts[j * 2 + 1], pz);
+    for (let k = 0; k < 3; k++) fillCol.push(fr, fg, fb);
+  }
+  return true;
+}
+
 const BOX_EDGES = [
   [0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7],
 ];
@@ -153,6 +225,8 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
   const bbCol: number[] = [];
   const fillPos: number[] = [];
   const fillCol: number[] = [];
+  const lineBPos: number[] = [];
+  const lineBCol: number[] = [];
   const texts: TextLabel[] = [];
   const style: VizStyle = opts.style ?? "classic";
   for (const [key, nodes] of groups) {
@@ -193,15 +267,8 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
           bbCol.push(r, g, bl, r, g, bl);
         }
       }
-      // hydra fills place regions (RegionGrowingBoundaryPlugin, fill_alpha 0.3);
-      // the wire records carry no boundary polygon, so the bbox footprint stands in
-      if (style === "hydra" && info.kind === "places" && n.bbox) {
-        const b = n.bbox;
-        const fz = n.pos[2] + z;
-        const quad = [b[0], b[1], fz, b[3], b[1], fz, b[3], b[4], fz, b[0], b[1], fz, b[3], b[4], fz, b[0], b[4], fz];
-        fillPos.push(...quad);
-        for (let k = 0; k < 6; k++) fillCol.push(lin(0.25), lin(0.6), lin(0.85));
-      }
+      // hydra 3p1 RegionGrowingBoundaryPlugin: state-coloured ray boundary + filled polygon
+      if (style === "hydra" && info.kind === "places") appendPlaceBoundary(n, z, c, lineBPos, lineBCol, fillPos, fillCol);
     });
     const cap = TEXT_LIMITS[info.kind];
     // hydra_visualizer.yaml sets per-node `text.draw: true` only for 2 (objects),
@@ -281,6 +348,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     edgeColors,
     texts,
     placeFill: fillPos.length ? {positions: new Float32Array(fillPos), colors: new Float32Array(fillCol)} : null,
+    placeBoundary: lineBPos.length ? {positions: new Float32Array(lineBPos), colors: new Float32Array(lineBCol)} : null,
     edgeCounts: counts,
     agentPath,
     bounds: Number.isFinite(min[0]) ? robustBounds(model) : null,

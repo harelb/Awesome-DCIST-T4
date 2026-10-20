@@ -63,3 +63,27 @@ describe("codec", () => {
     expect(parseSym("weird").index).toBe(-1);
   });
 });
+
+describe("codec: TravNode ray boundaries", () => {
+  it("decodes radii/states exactly like fleetlink.codec.decode_records", () => {
+    const g = decodeGraph(unpack(bin("graph_places.msgpack")));
+    const exp = js("graph_places.json") as Record<string, unknown>[];
+    expect(g.nodes.map(n => n.sym)).toEqual(exp.map(e => e.sym));
+    g.nodes.forEach((n, i) => {
+      const e = exp[i] as {radii?: number[]; states?: number[]};
+      if (!e.radii) {
+        expect(n.radii).toBeUndefined();
+        return;
+      }
+      expect(n.radii!.length).toBe(e.radii.length);
+      e.radii.forEach((r, j) => expect(n.radii![j]).toBeCloseTo(r, 5));
+      expect([...n.states!]).toEqual(e.states);
+    });
+  });
+
+  it("ignores boundary keys that are absent (old peers)", () => {
+    const raw = unpack(bin("graph_places.msgpack")) as Record<string, unknown>;
+    const {nrad: _n, radii: _r, states: _s, ...old} = raw;
+    expect(decodeGraph(old).nodes.every(n => n.radii === undefined)).toBe(true);
+  });
+});

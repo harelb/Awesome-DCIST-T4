@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import type {NodeRecord} from "../src/codec";
 import {GraphModel, layerInfo, nearestPlace, searchNodes} from "../src/lib/graphModel";
-import {DEFAULT_EDGE_ON, layoutGraph} from "../src/viewer/layout";
+import {appendPlaceBoundary, DEFAULT_EDGE_ON, layoutGraph, PLACE_BOUNDARY} from "../src/viewer/layout";
 
 const rec = (sym: string, layer: number, part: number, pos: [number, number, number], label = -1, name = ""): NodeRecord => ({
   sym, layer, part, pos, label, bbox: null, color: [0, 0, 0], name, active: false,
@@ -120,5 +120,62 @@ describe("layerInfo partitions", () => {
     expect(layerInfo(3, 2).name).toBe("traversability");
     expect(DEFAULT_EDGE_ON("agents-subkeyframes")).toBe(false);
     expect(DEFAULT_EDGE_ON("objects-places")).toBe(true);
+  });
+});
+
+describe("place boundaries (RegionGrowingBoundaryPlugin)", () => {
+  const lin = (c: number) => Math.pow(c / 255, 2.2);
+  const place = (extra: Partial<NodeRecord>): NodeRecord => ({
+    sym: "t(1)", layer: 3, part: 1, pos: [1, 2, 0.5], label: -1, bbox: null, color: [0, 0, 0], name: "", active: false, ...extra,
+  });
+
+  it("builds state-coloured segments i -> (i+1)%N and a fan fill at the z offset", () => {
+    const lp: number[] = [], lc: number[] = [], fp: number[] = [], fc: number[] = [];
+    const n = place({radii: new Float32Array([1, 2, 1, 2]), states: new Uint8Array([0, 1, 2, 3])});
+    expect(appendPlaceBoundary(n, 4, [0, 0, 0], lp, lc, fp, fc)).toBe(true);
+    expect(lp.length).toBe(4 * 2 * 3); // N segments, 2 endpoints
+    expect(fp.length).toBe(4 * 3 * 3); // N triangles
+    // bin 1 at 90deg, radius 2: (1, 4); every vertex at pos.z + offset
+    expect(lp[3]).toBeCloseTo(1);
+    expect(lp[4]).toBeCloseTo(4);
+    for (let i = 2; i < lp.length; i += 3) expect(lp[i]).toBeCloseTo(4.5);
+    // last segment wraps 3 -> 0 and its colours go TRAVERSED (green) -> UNKNOWN (gray)
+    expect(lp.slice(21, 24).map(v => +v.toFixed(5))).toEqual([2, 2, 4.5]);
+    expect(lc.slice(18, 24)).toEqual([0, 1, 0, lin(128), lin(128), lin(128)]);
+    // segment 0 -> 1: UNKNOWN gray -> TRAVERSABLE blue; segment 1 -> 2: blue -> INTRAVERSABLE red
+    expect(lc.slice(0, 6)).toEqual([lin(128), lin(128), lin(128), 0, 0, 1]);
+    expect(lc.slice(6, 12)).toEqual([0, 0, 1, 1, 0, 0]);
+    // fill: fan from the node centre in the node colour (black)
+    expect(fp.slice(0, 3)).toEqual([1, 2, 4.5]);
+    expect(fc.every(v => v === 0)).toBe(true);
+  });
+
+  it("falls back to the bbox footprint when there are no radii", () => {
+    const lp: number[] = [], lc: number[] = [], fp: number[] = [], fc: number[] = [];
+    expect(appendPlaceBoundary(place({}), 0, [0, 0, 0], lp, lc, fp, fc)).toBe(false);
+    expect(appendPlaceBoundary(place({bbox: [0, 0, 0, 2, 1, 1]}), 0, [0, 0, 0], lp, lc, fp, fc)).toBe(true);
+    expect(lp.length).toBe(4 * 6);
+    expect(fp.length).toBe(4 * 9);
+  });
+
+  it("layoutGraph merges all places into one line buffer and one fill buffer (hydra only)", () => {
+    const m = GraphModel.fromSnapshot({
+      nodes: [
+        place({sym: "t(1)", radii: new Float32Array(20).fill(1), states: new Uint8Array(20).fill(1)}),
+        place({sym: "t(2)", pos: [5, 5, 0], radii: new Float32Array(30).fill(2), states: new Uint8Array(30)}),
+      ],
+      edges: [],
+      labelspaces: {},
+    });
+    const opts = {hiddenLayers: {}, edgeKinds: {}, flat: false, stackHeight: 2};
+    const h = layoutGraph(m, {...opts, style: "hydra"});
+    expect(h.placeBoundary!.positions.length).toBe((20 + 30) * 6);
+    expect(h.placeFill!.positions.length).toBe((20 + 30) * 9);
+    // 3p1 z_offset_scale 2 x layer_z_step 2
+    expect(h.placeBoundary!.positions[2]).toBeCloseTo(0.5 + 4);
+    expect(PLACE_BOUNDARY.lineWidth).toBe(0.07);
+    const c = layoutGraph(m, {...opts, style: "classic"});
+    expect(c.placeBoundary).toBeNull();
+    expect(c.placeFill).toBeNull();
   });
 });

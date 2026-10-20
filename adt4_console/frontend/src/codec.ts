@@ -13,6 +13,12 @@ export interface NodeRecord {
   color: [number, number, number];
   name: string;
   active: boolean;
+  /** spark_dsg TravNodeAttributes ray boundary (traversability places): ray i
+   *  has length radii[i] metres at angle i/N*2pi from pos; states[i] is a
+   *  TraversabilityState (0 unknown, 1 traversable, 2 intraversable, 3 traversed).
+   *  Absent for every other node type and from peers that predate the fields. */
+  radii?: Float32Array | null;
+  states?: Uint8Array | null;
 }
 
 export type Edge = [string, string];
@@ -28,6 +34,10 @@ export interface EncodedRecords {
   color: Uint8Array;
   names: string[];
   active: Uint8Array;
+  /** optional boundary keys: uint16[N] rays per node, uint16[sum] cm, uint8[sum] */
+  nrad?: Uint8Array;
+  radii?: Uint8Array;
+  states?: Uint8Array;
 }
 
 export interface DecodedGraph {
@@ -79,6 +89,9 @@ export function asI16(b: Uint8Array | undefined | null): Int16Array {
 export function asU32(b: Uint8Array | undefined | null): Uint32Array {
   return new Uint32Array(aligned(b));
 }
+export function asU16(b: Uint8Array | undefined | null): Uint16Array {
+  return new Uint16Array(aligned(b));
+}
 export function asU8(b: Uint8Array | undefined | null): Uint8Array {
   return new Uint8Array(aligned(b));
 }
@@ -94,10 +107,24 @@ export function decodeRecords(enc: Partial<EncodedRecords> | null | undefined): 
   const color = asU8(enc.color);
   const active = asU8(enc.active);
   const names = enc.names ?? [];
+  const nrad = enc.nrad ? asU16(enc.nrad) : null;
+  const radCm = nrad ? asU16(enc.radii) : null;
+  const radSt = nrad ? asU8(enc.states) : null;
+  let off = 0;
   const out: NodeRecord[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const b0 = bbox[i * 6];
-    out[i] = {
+    let radii: Float32Array | null = null;
+    let states: Uint8Array | null = null;
+    const k = nrad ? (nrad[i] ?? 0) : 0;
+    if (k > 0 && radCm && radSt) {
+      radii = new Float32Array(k);
+      for (let j = 0; j < k; j++) radii[j] = (radCm[off + j] ?? 0) * 0.01;
+      states = new Uint8Array(k);
+      states.set(radSt.subarray(off, off + k));
+      off += k;
+    }
+    const rec: NodeRecord = {
       sym: enc.ids[i],
       layer: layer[i] ?? 0,
       part: part[i] ?? 0,
@@ -111,6 +138,11 @@ export function decodeRecords(enc: Partial<EncodedRecords> | null | undefined): 
       name: names[i] ?? "",
       active: Boolean(active[i]),
     };
+    if (radii) {
+      rec.radii = radii;
+      rec.states = states;
+    }
+    out[i] = rec;
   }
   return out;
 }

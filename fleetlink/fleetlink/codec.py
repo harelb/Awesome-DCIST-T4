@@ -16,6 +16,11 @@ Graph wire format (``encode_graph`` / ``GraphState.delta``)::
       "color":  bytes uint8[N*3]
       "names":  [str, ...]            # node name or "" (keyed by index)
       "active": bytes uint8[N]
+      # optional, only present when some node has a ray boundary
+      # (spark_dsg TravNodeAttributes: traversability / "mesh" places):
+      "nrad":   bytes uint16[N]       # boundary rays per node (0 = none)
+      "radii":  bytes uint16[sum]     # ray lengths in cm, concatenated
+      "states": bytes uint8[sum]      # TraversabilityState per ray
       "edges":  [[src_sym, dst_sym], ...]
       "labelspaces": {"2/0": {"18": "sign", ...}, ...}
     }
@@ -41,6 +46,8 @@ PROTOCOL_VERSION = 1
 POS_QUANT = 0.01  # metres; positions are compared/hashed at 1 cm
 QUANT = 0.01  # mesh vertex quantisation (metres)
 DEFAULT_TILE_SIZE = 8.0
+RADIUS_QUANT = 0.01  # metres; boundary ray lengths travel as uint16 cm
+_RADIUS_MAX_CM = 65535
 
 # zstandard (de)compressor objects are NOT thread-safe: sharing one across the
 # agent's tick/video/query threads (or the receiver's zenoh callback threads)
@@ -105,12 +112,48 @@ class NodeRecord:
     color: tuple[int, int, int] = (0, 0, 0)
     name: str = ""
     active: bool = False
+    # TravNodeAttributes ray boundary: radii[i] (metres) at angle i/N*2pi from
+    # pos, states[i] a spark_dsg TraversabilityState (0 unknown, 1 traversable,
+    # 2 intraversable, 3 traversed).  None for every other attribute type.
+    radii: tuple[float, ...] | None = None
+    states: tuple[int, ...] | None = None
 
     def key(self) -> tuple:
         """Quantised identity used for change detection."""
         q = tuple(round(v / POS_QUANT) for v in self.pos)
         b = tuple(round(v / POS_QUANT) for v in self.bbox) if self.bbox else None
-        return (self.layer, self.part, q, self.label, b, self.color, self.name)
+        r = _radii_cm(self.radii) if self.radii else None
+        s = tuple(self.states) if self.radii else None
+        return (self.layer, self.part, q, self.label, b, self.color, self.name, r, s)
+
+
+def _radii_cm(radii) -> tuple[int, ...]:
+    return tuple(
+        min(_RADIUS_MAX_CM, max(0, round(float(r) / RADIUS_QUANT)))
+        if math.isfinite(float(r))
+        else 0
+        for r in radii
+    )
+
+
+def _boundary(attrs) -> tuple[tuple | None, tuple | None]:
+    """(radii, states) of a TravNodeAttributes-like ``attrs``, radii rounded to
+    the wire quantisation and states padded/truncated to len(radii)."""
+    radii = getattr(attrs, "radii", None)
+    if radii is None:
+        return None, None
+    try:
+        cm = _radii_cm(list(radii))
+    except (TypeError, ValueError):
+        return None, None
+    if not cm:
+        return None, None
+    states = []
+    for s in list(getattr(attrs, "states", None) or [])[: len(cm)]:
+        v = int(getattr(s, "value", s))
+        states.append(v if 0 <= v <= 255 else 0)
+    states += [0] * (len(cm) - len(states))
+    return tuple(c * RADIUS_QUANT for c in cm), tuple(states)
 
 
 def _finite(seq) -> bool:
@@ -134,6 +177,7 @@ def node_record(node) -> NodeRecord:
             bbox = tuple(float(v) for v in lo + hi)
     color = getattr(attrs, "color", None)
     color = tuple(int(c) for c in color[:3]) if color is not None else (0, 0, 0)
+    radii, states = _boundary(attrs)
     return NodeRecord(
         sym=str(node.id),
         layer=int(layer),
@@ -144,6 +188,8 @@ def node_record(node) -> NodeRecord:
         color=color,
         name=str(getattr(attrs, "name", "") or ""),
         active=bool(getattr(attrs, "is_active", False)),
+        radii=radii,
+        states=states,
     )
 
 
@@ -293,7 +339,7 @@ def encode_records(records: list[NodeRecord]) -> dict:
     for i, r in enumerate(records):
         if r.bbox:
             bbox[i] = r.bbox
-    return {
+    enc = {
         "ids": [r.sym for r in records],
         "layer": np.array([r.layer for r in records], np.uint8).tobytes(),
         "part": np.array([r.part for r in records], np.uint8).tobytes(),
@@ -304,6 +350,19 @@ def encode_records(records: list[NodeRecord]) -> dict:
         "names": [r.name for r in records],
         "active": np.array([r.active for r in records], np.uint8).tobytes(),
     }
+    if any(r.radii for r in records):
+        # optional keys: peers that predate them ignore them
+        nrad, radii, states = [], [], []
+        for r in records:
+            cm = _radii_cm(r.radii) if r.radii else ()
+            nrad.append(len(cm))
+            radii.extend(cm)
+            st = list(r.states or ())[: len(cm)]
+            states.extend(st + [0] * (len(cm) - len(st)))
+        enc["nrad"] = np.array(nrad, np.uint16).tobytes()
+        enc["radii"] = np.array(radii, np.uint16).tobytes()
+        enc["states"] = np.array(states, np.uint8).tobytes()
+    return enc
 
 
 def decode_records(enc: dict) -> list[NodeRecord]:
@@ -315,9 +374,19 @@ def decode_records(enc: dict) -> list[NodeRecord]:
     bbox = np.frombuffer(enc["bbox"], np.float32).reshape(n, 6)
     color = np.frombuffer(enc["color"], np.uint8).reshape(n, 3)
     active = np.frombuffer(enc["active"], np.uint8)
+    nrad = np.frombuffer(enc["nrad"], np.uint16) if enc.get("nrad") else None
+    if nrad is not None:
+        radii = np.frombuffer(enc["radii"], np.uint16)
+        states = np.frombuffer(enc["states"], np.uint8)
+        offs = np.concatenate([[0], np.cumsum(nrad, dtype=np.int64)])
     out = []
     for i in range(n):
         b = None if np.isnan(bbox[i, 0]) else tuple(float(v) for v in bbox[i])
+        r = st = None
+        if nrad is not None and nrad[i]:
+            lo, hi = int(offs[i]), int(offs[i + 1])
+            r = tuple(int(c) * RADIUS_QUANT for c in radii[lo:hi])
+            st = tuple(int(v) for v in states[lo:hi])
         out.append(
             NodeRecord(
                 sym=enc["ids"][i],
@@ -329,6 +398,8 @@ def decode_records(enc: dict) -> list[NodeRecord]:
                 color=tuple(int(c) for c in color[i]),
                 name=enc["names"][i],
                 active=bool(active[i]),
+                radii=r,
+                states=st,
             )
         )
     return out

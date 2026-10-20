@@ -2,8 +2,11 @@ import {useLayoutEffect, useMemo, useRef} from "react";
 import * as THREE from "three";
 import {useThree} from "@react-three/fiber";
 import {Html, Line} from "@react-three/drei";
+import {LineSegments2} from "three/examples/jsm/lines/LineSegments2.js";
+import {LineSegmentsGeometry} from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import {LineMaterial} from "three/examples/jsm/lines/LineMaterial.js";
 import type {GraphLayout, LayerBuffers, TextLabel, VizStyle} from "./layout";
-import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
+import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES, PLACE_BOUNDARY} from "./layout";
 
 /** Displayed node positions per source, used by the click picker. */
 export const pickRegistry = new Map<string, Map<string, LayerBuffers>>();
@@ -45,6 +48,35 @@ function NodeLayer({layer}: {layer: LayerBuffers}) {
   return <instancedMesh key={`${capacity}/${layer.shape}/${layer.opacity}`} ref={ref} args={[geom, material, capacity]} frustumCulled={false} />;
 }
 
+/** hydra RegionGrowingBoundaryPlugin boundary: one merged LINE_LIST with
+ *  per-vertex state colours, 0.07 m wide in world units like the RViz marker. */
+function PlaceBoundary({positions, colors}: {positions: Float32Array; colors: Float32Array}) {
+  const obj = useMemo(() => {
+    const g = new LineSegmentsGeometry();
+    g.setPositions(positions);
+    g.setColors(colors);
+    const m = new LineMaterial({
+      vertexColors: true,
+      worldUnits: true,
+      linewidth: PLACE_BOUNDARY.lineWidth,
+      transparent: PLACE_BOUNDARY.lineAlpha < 1,
+      opacity: PLACE_BOUNDARY.lineAlpha,
+    });
+    const l = new LineSegments2(g, m);
+    l.frustumCulled = false;
+    l.raycast = () => {};
+    return l;
+  }, [positions, colors]);
+  useLayoutEffect(
+    () => () => {
+      obj.geometry.dispose();
+      obj.material.dispose();
+    },
+    [obj],
+  );
+  return <primitive object={obj} />;
+}
+
 /** Translucent place-region fill (hydra RegionGrowingBoundaryPlugin, fill_alpha 0.3). */
 function PlaceFill({positions, colors}: {positions: Float32Array; colors: Float32Array}) {
   const geom = useMemo(() => {
@@ -56,7 +88,7 @@ function PlaceFill({positions, colors}: {positions: Float32Array; colors: Float3
   useLayoutEffect(() => () => geom.dispose(), [geom]);
   return (
     <mesh geometry={geom} frustumCulled={false} renderOrder={-1}>
-      <meshBasicMaterial vertexColors transparent opacity={0.3} side={THREE.DoubleSide} depthWrite={false} />
+      <meshBasicMaterial vertexColors transparent opacity={PLACE_BOUNDARY.fillAlpha} side={THREE.DoubleSide} depthWrite={false} />
     </mesh>
   );
 }
@@ -117,6 +149,7 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
       ))}
       {showBBoxes && layout.bboxes.positions.length > 0 && <Segments positions={layout.bboxes.positions} colors={layout.bboxes.colors} opacity={0.9} />}
       {hydra && layout.placeFill && <PlaceFill positions={layout.placeFill.positions} colors={layout.placeFill.colors} />}
+      {hydra && layout.placeBoundary && <PlaceBoundary positions={layout.placeBoundary.positions} colors={layout.placeBoundary.colors} />}
       {Object.entries(layout.edges).map(([kind, pos]) =>
         (edgeKinds[kind] ?? defaultEdgeOn(kind, style)) && kind !== "agents-agents" ? (
           hydra ? (

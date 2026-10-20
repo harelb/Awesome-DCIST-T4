@@ -10,6 +10,7 @@ Writes:
   tests/fixtures/graph_small.msgpack   + graph_small.json   (expected decoded values)
   tests/fixtures/delta_small.msgpack   + delta_small.json   (delta + expected state after apply)
   tests/fixtures/tile_small.msgpack    + tile_small.json    (expected decoded vertices/faces)
+  tests/fixtures/graph_places.msgpack  + graph_places.json  (TravNode ray boundaries: radii/states)
   tests/fixtures/mock/                 (a synthetic building for scripts/mock-server.mjs)
 """
 
@@ -54,7 +55,34 @@ def rec_json(r: NodeRecord) -> dict:
         "color": list(r.color),
         "name": r.name,
         "active": r.active,
+        **(
+            {"radii": [float(np.float32(v)) for v in r.radii], "states": list(r.states)}
+            if r.radii
+            else {}
+        ),
     }
+
+
+def places_fixture():
+    """Mixed graph: an object (no boundary keys), two traversability places with
+    ray boundaries of different sizes, one place without a boundary."""
+    recs = [
+        NodeRecord("O(1)", 2, 0, (0.0, 0.0, 0.0), 3),
+        NodeRecord(
+            "t(1)", 3, 1, (1.0, 2.0, 0.5),
+            radii=(1.0, 0.5, 2.25, 0.07), states=(0, 1, 2, 3),
+        ),
+        NodeRecord("t(2)", 3, 1, (4.0, 0.0, 0.0)),
+        NodeRecord(
+            "t(3)", 3, 1, (-2.0, 1.0, 0.25),
+            radii=tuple(0.5 + 0.1 * i for i in range(20)), states=(1,) * 10 + (2,) * 10,
+        ),
+    ]  # fmt: skip
+    (FIX / "graph_places.msgpack").write_bytes(packb(codec.encode_records(recs)))
+    dec = codec.decode_records(codec.encode_records(recs))
+    (FIX / "graph_places.json").write_text(
+        json.dumps([rec_json(r) for r in dec], indent=1)
+    )
 
 
 def state_json(st: GraphState) -> dict:
@@ -414,5 +442,6 @@ if __name__ == "__main__":
     FIX.mkdir(parents=True, exist_ok=True)
     if not HEAVY:
         small_fixtures()
+        places_fixture()
     mock_fixtures()
     print("fixtures written to", FIX)

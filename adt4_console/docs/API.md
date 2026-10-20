@@ -134,6 +134,21 @@ Graph sources (all served from the same `fleetlink.codec` formats):
 * `GET /api/graph/{src}/image/{sym}/{i}` → image bytes (rgb jpg of the i-th frame in the node's image folder; Neo4j/file sources resolve `<run>/images/<O_n>/frame_*_rgb.jpg`)
 * `GET /api/graph/{src}/trajectory` → `{points: [[t_s, x, y, z], ...]}` from the agents layer (layer 2 partition 97), time-ordered
 
+Place boundaries: graph records (snapshots, C2 deltas, `/snapshot`) carry the
+spark_dsg `TravNodeAttributes` ray boundary of traversability ("mesh") places as
+three optional keys, present only when at least one record has one, so payloads
+without places are unchanged and older peers ignore them:
+`nrad` (uint16[N], rays per node, 0 = none), `radii` (uint16[sum], ray lengths in
+cm, concatenated in node order) and `states` (uint8[sum], `TraversabilityState`:
+0 unknown, 1 traversable, 2 intraversable, 3 traversed). Ray i of a node points at
+angle i/N·2π from `pos`. A node is resent in a delta only when a radius changes by
+≥ 1 cm or a state flips. Cost: 3 bytes per ray + 2 per node raw (20 rays ≈ 62 B,
+~30 B after zstd). File sources read `attrs.radii` / `attrs.states`; Neo4j sources
+get them back from heracles (`db_to_spark_dsg` restores the stored lists). The
+viewer's hydra style draws them like hydra_visualizer's `RegionGrowingBoundaryPlugin`
+(state-coloured 0.07 m boundary lines at alpha 0.9, black fill at alpha 0.3, at the
+3p1 z offset); nodes without radii fall back to their bbox footprint.
+
 Implementation notes: file sources load with `spark_dsg.DynamicSceneGraph.load`; mesh from
 `mesh.ply` via trimesh (or the graph mesh) → `codec.tile_mesh`, cached per source version.
 Neo4j sources: `heracles.graph_interface.db_to_spark_dsg(db)` → same path; mesh from

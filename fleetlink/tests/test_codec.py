@@ -139,3 +139,73 @@ def test_pack_is_thread_safe():
         t.join()
     assert len({id(c) for c, _ in owners.values()}) == 8  # one per thread
     assert len({id(d) for _, d in owners.values()}) == 8
+
+
+def _place(sym, n=24, seed=0, **kw):
+    rng = np.random.default_rng(seed)
+    radii = tuple(round(float(v), 2) for v in rng.uniform(0.05, 4.0, n))
+    states = tuple(int(v) for v in rng.integers(0, 4, n))
+    return NodeRecord(sym, 3, 1, (1.0, 2.0, 0.5), radii=radii, states=states, **kw)
+
+
+def test_boundary_roundtrip_and_old_peer_compat():
+    plain = NodeRecord("O(1)", 2, 0, (0.0, 0.0, 0.0))
+    places = [_place(f"t({i})", n=20 + i, seed=i) for i in range(3)]
+    enc = codec.encode_records([plain, *places])
+    dec = codec.decode_records(codec.unpack(codec.pack(enc)))
+    assert dec[0].radii is None and dec[0].states is None
+    for d, o in zip(dec[1:], places):
+        assert d.states == o.states
+        assert np.allclose(d.radii, o.radii, atol=0.006)
+        assert d.key() == o.key()
+    # graphs without boundaries keep the old wire keys exactly
+    assert "nrad" not in codec.encode_records([plain])
+    # an old payload (no boundary keys) still decodes
+    old = {k: v for k, v in enc.items() if k not in ("nrad", "radii", "states")}
+    assert all(r.radii is None for r in codec.decode_records(old))
+
+
+def test_boundary_quantised_and_clamped():
+    r = NodeRecord("t(1)", 3, 1, (0, 0, 0), radii=(0.123, -1.0, 1e6, float("nan")))
+    (d,) = codec.decode_records(codec.encode_records([r]))
+    assert d.radii == (0.12, 0.0, 655.35, 0.0)
+    assert d.states == (0, 0, 0, 0)  # missing states pad as UNKNOWN
+
+
+def test_boundary_delta_only_on_change():
+    st = GraphState()
+    recs = {"t(1)": _place("t(1)"), "t(2)": _place("t(2)", seed=2)}
+    st.apply(st.diff(recs, set()))
+    # sub-cm radius jitter: no resend
+    jit = dataclasses.replace(recs["t(1)"], radii=tuple(v + 0.001 for v in recs["t(1)"].radii))
+    assert st.diff({**recs, "t(1)": jit}, set()).empty()
+    # a state flip: resend just that node, and the mirror converges
+    flipped = list(recs["t(2)"].states)
+    flipped[0] = (flipped[0] + 1) % 4
+    new = {**recs, "t(2)": dataclasses.replace(recs["t(2)"], states=tuple(flipped))}
+    delta = st.diff(new, set())
+    assert [r.sym for r in delta.upserts] == ["t(2)"]
+    mirror = GraphState()
+    mirror.load_snapshot(codec.unpack(codec.pack(st.snapshot())))
+    mirror.apply(GraphDelta.decode(codec.unpack(codec.pack(delta.encode()))))
+    assert mirror.records["t(2)"].states == tuple(flipped)
+
+
+def test_node_record_reads_trav_attributes():
+    class State:
+        def __init__(self, v):
+            self.value = v
+
+    class Attrs:
+        position = (1.0, 2.0, 3.0)
+        radii = [0.5, 1.004, 2.0]
+        states = [State(1), State(2)]
+
+    class Node:
+        attributes = Attrs()
+        layer = 3
+        id = "t(7)"
+
+    rec = codec.node_record(Node())
+    assert rec.radii == (0.5, 1.0, 2.0)
+    assert rec.states == (1, 2, 0)
