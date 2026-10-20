@@ -1,7 +1,8 @@
 // Camera tab: on-demand frames from a robot's fleetlink agent (C4 request/reply).
 // One request at a time; auto-refresh waits for the previous frame to land.
 // "Video" mode switches to the live C5 stream (VideoView, API.md §12).
-// "All" mode tiles every advertised camera (Spot: frontleft ... hand) at ~1 Hz.
+// "All" mode tiles every advertised camera (Spot: frontleft ... hand): stills
+// at ~1 Hz, or live video (GridVideo: one mosaic stream by default).
 import {useEffect, useRef, useState} from "react";
 import {getJSON, errorText} from "../lib/api";
 import {getToken} from "../lib/auth";
@@ -9,6 +10,16 @@ import {Empty, Toggle} from "../components/ui";
 import {useLiveRobots} from "../stores/robots";
 import {useFleet} from "../stores/fleet";
 import {VideoView} from "./VideoView";
+import {GridVideo} from "./GridVideo";
+
+const GRID_KIND_KEY = "adt4.cameraGrid.kind";
+const loadGridKind = (): "stills" | "video" => {
+  try {
+    return localStorage.getItem(GRID_KIND_KEY) === "video" ? "video" : "stills";
+  } catch {
+    return "stills";
+  }
+};
 
 export interface CameraFrame {
   url: string;
@@ -140,6 +151,15 @@ export function CameraPanel() {
   const [cams, setCams] = useState<string[]>([]);
   const [cam, setCam] = useState<string>("");
   const [mode, setMode] = useState<"still" | "video" | "grid">("still");
+  const [gridKind, setGridKindRaw] = useState<"stills" | "video">(loadGridKind);
+  const setGridKind = (k: "stills" | "video") => {
+    setGridKindRaw(k);
+    try {
+      localStorage.setItem(GRID_KIND_KEY, k);
+    } catch {
+      /* private window */
+    }
+  };
   const [auto, setAuto] = useState(true);
   const [hz, setHz] = useState(1);
   const [width, setWidth] = useState(640);
@@ -231,7 +251,7 @@ export function CameraPanel() {
             Video
           </button>
           {grid && (
-            <button className={effMode === "grid" ? "on" : ""} onClick={() => setMode("grid")} title="All cameras, about 1 Hz each">
+            <button className={effMode === "grid" ? "on" : ""} onClick={() => setMode("grid")} title="All cameras at once: stills about 1 Hz each, or live video">
               All cameras
             </button>
           )}
@@ -243,6 +263,16 @@ export function CameraPanel() {
             </option>
           ))}
         </select>
+        {effMode === "grid" && (
+          <div className="segmented" role="group" aria-label="All cameras kind">
+            <button className={gridKind === "stills" ? "on" : ""} onClick={() => setGridKind("stills")} title="A still per camera, about 1 Hz">
+              Stills
+            </button>
+            <button className={gridKind === "video" ? "on" : ""} onClick={() => setGridKind("video")} title="Live video of every camera in view">
+              Video
+            </button>
+          </div>
+        )}
         {effMode !== "grid" && (
         <select className="input input-sm" value={cam} onChange={e => setCam(e.target.value)} aria-label="Camera stream" disabled={!cams.length}>
           {!cams.length && <option value="">no cameras</option>}
@@ -268,7 +298,17 @@ export function CameraPanel() {
           </>
         )}
       </div>
-      {effMode === "grid" ? (
+      {effMode === "grid" && gridKind === "video" ? (
+        <GridVideo
+          key={r}
+          robot={r}
+          cams={cams}
+          onOpen={c => {
+            setCam(c);
+            setMode("video");
+          }}
+        />
+      ) : effMode === "grid" ? (
         <div className="camera-grid">
           {cams.map(c => (
             <GridTile

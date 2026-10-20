@@ -295,3 +295,42 @@ def test_time_endpoint(client):
 
     t = client.get("/api/time").json()["t"]
     assert abs(t - time.time()) < 5
+
+
+def test_mosaic_stream_passes_cameras_and_tiles(vlive):
+    """The "All cameras" grid video: one ``mosaic`` stream with a camera list;
+    its frames' ``tiles`` reach the browser untouched."""
+    client, svc, rx, relay = vlive
+    base = "/api/robots/euclid/video/mosaic"
+    cams = ["frontleft", "frontright", "left", "right", "back", "hand"]
+    # cameras goes with the mosaic, and only with it
+    assert client.post(f"{base}/start", json={"width": 320}).status_code == 422
+    r = client.post("/api/robots/euclid/video/rgb/start", json={"cameras": ["a"]})
+    assert r.status_code == 422
+    assert client.post(f"{base}/start", json={"cameras": []}).status_code == 422
+    r = client.post(
+        f"{base}/start",
+        json={"cameras": cams, "width": 320, "fps": 5, "kbps": 800, "viewer": "g"},
+    )
+    assert r.status_code == 200, r.text
+    assert rx.video_calls[-1][1] == "mosaic"
+    assert rx.video_calls[-1][4]["cameras"] == cams
+    assert rx.video_calls[-1][4]["width"] == 320
+    # a changed camera list (tiles scrolled out of view) is a retune
+    relay.clock.t += 2.0
+    r = client.post(f"{base}/start", json={"cameras": cams[:3], "width": 320})
+    assert r.json()["changed"] and rx.video_calls[-1][4]["cameras"] == cams[:3]
+    # robot keepalives repeat the list (the robot also keeps it without one)
+    relay.clock.t += 2.5
+    client.post(f"{base}/keepalive", json={"viewer": "g"})
+    relay.tick()
+    assert rx.video_calls[-1][2:4] == (True, False)
+    assert rx.video_calls[-1][4]["cameras"] == cams[:3]
+    c = svc.hub.add_client()
+    svc.hub.subscribe(c, ["video/euclid/mosaic"])
+    fr = _frame(0, True, cam="mosaic")
+    fr["tiles"] = [["frontleft", 0, 0, 320, 240, 7.0, 0.1]]
+    relay.on_frame("euclid", fr)
+    got = [msgpack.unpackb(f)["data"] for _, f in c.pop_all()]
+    assert got[0]["tiles"] == [["frontleft", 0, 0, 320, 240, 7.0, 0.1]]
+    assert relay.streams("euclid")["mosaic"]["params"]["cameras"] == cams[:3]

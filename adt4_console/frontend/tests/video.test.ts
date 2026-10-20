@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {KeyGate, RateMeter, chunkInit, decoderConfig, h264Decoder, parseVideoFrame, pickCodec} from "../src/lib/video";
+import {GRID_QUALITY, KeyGate, MIN_STREAM_KBPS, MOSAIC, RateMeter, StampRate, chunkInit, decoderConfig, dropCamera, gridStreams, h264Decoder, moveCamera, normalizeSelection, parseVideoFrame, pickCodec, selectedCameras, setAllCameras, streamCameras, toggleCamera} from "../src/lib/video";
 import {cropI420, i420Size, i420ToRgba} from "../src/lib/yuv";
 
 const f = (key: boolean, extra: Partial<{codec: "h264" | "vp8" | "jpeg"; width: number; height: number}> = {}) => ({key, codec: "h264" as const, width: 640, height: 360, ...extra});
@@ -123,5 +123,77 @@ describe("I420 helpers", () => {
     expect(red[0]).toBeGreaterThan(250);
     expect(red[1]).toBeLessThan(5);
     expect(red[2]).toBeLessThan(5);
+  });
+});
+
+describe("grid video (API.md §12.4)", () => {
+  it("mosaic = one stream of the visible cameras at the preset", () => {
+    const cams = ["frontleft", "frontright", "left", "right", "back", "hand"];
+    expect(gridStreams("mosaic", "medium", cams)).toEqual([{camera: MOSAIC, cameras: cams, ...GRID_QUALITY.medium}]);
+    expect(gridStreams("mosaic", "low", [])).toEqual([]);
+  });
+  it("per camera = the preset's total split over the tiles, with a floor", () => {
+    const s = gridStreams("tiles", "medium", ["a", "b", "c", "d"]);
+    expect(s.map(x => x.camera)).toEqual(["a", "b", "c", "d"]);
+    expect(s.every(x => x.kbps === 200 && x.width === 320 && x.fps === 5 && !x.cameras)).toBe(true);
+    const low = gridStreams("tiles", "low", ["1", "2", "3", "4", "5", "6", "7", "8"]);
+    expect(low[0].kbps).toBe(MIN_STREAM_KBPS); // 300 / 8 < 50
+  });
+  it("medium mosaic fits a quarter of the default C5 budget", () => {
+    expect((GRID_QUALITY.medium.kbps * 1000) / 8).toBeLessThanOrEqual(0.25 * 400_000);
+  });
+  it("parses mosaic tiles", () => {
+    const fr = parseVideoFrame({camera: "mosaic", codec: "h264", seq: 1, key: true, width: 640, height: 240, data: new Uint8Array(3), tiles: [["left", 0, 0, 320, 240, 7.5, 0.2], ["hand", 320, 0, 0, 0, null, null], "junk"]});
+    expect(fr?.tiles).toEqual([
+      {camera: "left", x: 0, y: 0, w: 320, h: 240, stamp: 7.5, age: 0.2},
+      {camera: "hand", x: 320, y: 0, w: 0, h: 0, stamp: null, age: null},
+    ]);
+    expect(parseVideoFrame({codec: "h264", seq: 1, data: new Uint8Array(1)})?.tiles).toBeUndefined();
+  });
+  it("StampRate counts new images per camera, not repeated mosaic frames", () => {
+    const r = new StampRate(1000);
+    for (let i = 0; i < 10; i++) {
+      r.add("a", Math.floor(i / 2), i * 100); // a new image every other mosaic frame
+      r.add("b", 1, i * 100); // frozen camera
+      r.add("c", null, i * 100); // no frame yet
+    }
+    expect(r.fps("a", 900)).toBe(5);
+    expect(r.fps("b", 900)).toBe(1);
+    expect(r.fps("b", 2500)).toBe(0);
+    expect(r.fps("c", 900)).toBe(0);
+  });
+});
+
+describe("grid camera selection", () => {
+  const cams = ["rgb", "overlay", "frontleft", "frontright", "left", "right", "back", "hand"];
+  it("defaults to every camera, in the robot's order", () => {
+    const s = normalizeSelection(null, cams);
+    expect(selectedCameras(s)).toEqual(cams);
+  });
+  it("keeps saved order and off list, drops unknown, appends new cameras on", () => {
+    const s = normalizeSelection({order: ["hand", "gone", "back", "hand"], off: ["back", "gone"]}, ["back", "hand", "left"]);
+    expect(s).toEqual({order: ["hand", "back", "left"], off: ["back"]});
+    expect(selectedCameras(s)).toEqual(["hand", "left"]);
+    expect(normalizeSelection({order: "junk" as unknown as string[]}, ["a"])).toEqual({order: ["a"], off: []});
+  });
+  it("toggle / all / none / reorder drive the mosaic camera list", () => {
+    let s = normalizeSelection(null, ["a", "b", "c", "d"]);
+    s = toggleCamera(s, "b");
+    expect(selectedCameras(s)).toEqual(["a", "c", "d"]);
+    s = moveCamera(s, "d", -2);
+    expect(s.order).toEqual(["a", "d", "b", "c"]);
+    expect(moveCamera(s, "a", -1)).toBe(s); // already first
+    s = dropCamera(s, "c", "a");
+    expect(s.order).toEqual(["c", "a", "d", "b"]);
+    expect(gridStreams("mosaic", "medium", selectedCameras(s))[0].cameras).toEqual(["c", "a", "d"]);
+    expect(selectedCameras(setAllCameras(s, false))).toEqual([]);
+    expect(selectedCameras(setAllCameras(s, true))).toEqual(["c", "a", "d", "b"]);
+  });
+  it("solo shows one camera, larger; selected ∩ visible is streamed", () => {
+    const s = toggleCamera(normalizeSelection(null, ["a", "b", "c"]), "c");
+    expect(selectedCameras(s, "b")).toEqual(["b"]);
+    expect(selectedCameras(s, "zz")).toEqual(["a", "b"]); // stale solo: ignored
+    expect(gridStreams("mosaic", "medium", ["b"], true)[0].width).toBe(640);
+    expect(streamCameras(selectedCameras(s), new Set(["c", "b"]))).toEqual(["b"]);
   });
 });

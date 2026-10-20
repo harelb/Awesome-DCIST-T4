@@ -20,6 +20,15 @@ is empty, delta frames are dropped and key frames may borrow up to one burst;
 after any drop the stream skips delta frames until the next key frame, because
 a delta without its predecessors cannot be decoded.
 
+Mosaic (the console's "All cameras" video grid): ``video {camera: "mosaic",
+cameras: [...], width, fps, kbps, codec}`` tiles the listed cameras into ONE
+picture and ONE encoder; ``width`` is then the width of each tile (4:3 cells,
+each camera fitted into its cell, aspect kept).  Every mosaic frame carries
+``tiles``: ``[[camera, x, y, w, h, stamp, age_s], ...]`` (the camera's rectangle
+in the picture, w = h = 0 while it has no frame yet; ``age_s`` = how old that
+camera's frame was when sampled).  One encoder for N cameras costs about half
+the CPU and a fifth of the memory of N encoders (docs in API.md §12).
+
 Units: ``kbps`` = kilobits per second (encoder bitrate); budgets are bytes/s.
 """
 
@@ -47,7 +56,12 @@ CODECS = ("h264", "vp8", "jpeg")
 LIMITS = {"fps": (0.5, 15.0), "kbps": (50, 2000), "width": (64, 1920)}
 DEFAULTS = {"fps": 5.0, "kbps": 300, "width": 640, "codec": "h264"}
 KEEPALIVE_S = 6.0
-MAX_STREAMS = 4
+# a Spot has 8 cameras: the per-camera grid plus a single stream winding down
+MAX_STREAMS = 10
+MOSAIC = "mosaic"  # pseudo camera: several cameras tiled into one stream
+MOSAIC_MAX_CAMERAS = 12
+MOSAIC_MAX_TILE_W = 640
+MOSAIC_MAX_PIXELS = 1920 * 1088  # whole mosaic picture
 MIN_KBPS = LIMITS["kbps"][0]  # floor of the budget cap
 
 
@@ -431,7 +445,38 @@ def clamp_params(args: dict, current: dict | None = None) -> dict:
     if c not in CODECS:
         raise ValueError(f"unknown codec {c!r} (use {', '.join(CODECS)})")
     out["codec"] = c
+    if "cameras" in args or "cameras" in base:
+        out["cameras"] = list(args.get("cameras", base.get("cameras")) or [])
     return out
+
+
+def mosaic_grid(n: int) -> tuple[int, int]:
+    """(cols, rows) for n tiles: as square as possible, wider than tall."""
+    if n <= 0:
+        return 1, 1
+    table = {1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
+    cols = table.get(n) or int(np.ceil(np.sqrt(n * 4 / 3)))
+    return cols, int(np.ceil(n / cols))
+
+
+def mosaic_cell(tile_w: int, n: int) -> tuple[int, int, int, int]:
+    """(cell_w, cell_h, cols, rows): 4:3 cells, even sizes, the whole picture
+    within ``MOSAIC_MAX_PIXELS`` (tiles shrink when there are many)."""
+    cols, rows = mosaic_grid(n)
+    w = max(32, min(int(tile_w), MOSAIC_MAX_TILE_W))
+    while w > 32 and cols * w * rows * (w * 3 // 4) > MOSAIC_MAX_PIXELS:
+        w -= 16
+    w -= w % 2
+    h = w * 3 // 4
+    return w, h - h % 2, cols, rows
+
+
+def fit(src_w: int, src_h: int, cell_w: int, cell_h: int) -> tuple[int, int]:
+    """Largest even (w, h) with the source aspect inside the cell."""
+    s = min(cell_w / src_w, cell_h / src_h)
+    w = max(2, int(src_w * s) // 2 * 2)
+    h = max(2, int(src_h * s) // 2 * 2)
+    return min(w, cell_w), min(h, cell_h)
 
 
 def to_rgb(frame: dict) -> np.ndarray:
@@ -446,8 +491,17 @@ def to_rgb(frame: dict) -> np.ndarray:
 def scale(img: np.ndarray, w: int, h: int) -> np.ndarray:
     if img.shape[1] == w and img.shape[0] == h:
         return img
-    if media._cv2 is not None:
-        return media._cv2.resize(img, (w, h), interpolation=media._cv2.INTER_AREA)
+    cv2 = media._cv2
+    if cv2 is not None:
+        # INTER_AREA is cheap for integer factors only (640 -> 240 costs ~10x
+        # 640 -> 320): shrink by the integer part with AREA, finish with LINEAR
+        k = int(min(img.shape[1] / w, img.shape[0] / h))
+        if k >= 2:
+            iw, ih = img.shape[1] // k, img.shape[0] // k
+            img = cv2.resize(img, (iw, ih), interpolation=cv2.INTER_AREA)
+            if iw == w and ih == h:
+                return img
+        return cv2.resize(img, (w, h), interpolation=cv2.INTER_LINEAR)
     ys = np.minimum((np.arange(h) * img.shape[0] / h).astype(int), img.shape[0] - 1)
     xs = np.minimum((np.arange(w) * img.shape[1] / w).astype(int), img.shape[1] - 1)
     return np.ascontiguousarray(img[ys][:, xs])
@@ -481,6 +535,13 @@ class _Stream:
         self.kbps_eff = int(params["kbps"])  # after the C5 budget cap
         self.forced = 0  # encoder restarts to get a key frame now
         self.last_force = -1e9
+        # mosaic only
+        self.canvas: np.ndarray | None = None
+        self.tile_cache: dict[str, tuple] = {}  # camera -> (frame id, rect)
+
+    @property
+    def mosaic(self) -> bool:
+        return self.camera == MOSAIC
 
     def state(self) -> dict:
         out = {
@@ -499,6 +560,8 @@ class _Stream:
             out["error"] = self.error
         if self.codec != self.params["codec"]:
             out["requested_codec"] = self.params["codec"]
+        if self.mosaic:
+            out["cameras"] = list(self.params.get("cameras") or [])
         return out
 
 
@@ -538,7 +601,7 @@ class VideoStreams:
         now = self.clock() if now is None else now
         camera = str(args.get("camera") or "")
         names = list(self.cameras())
-        if camera not in names:
+        if camera not in names and camera != MOSAIC:
             raise ValueError(f"unknown camera {camera!r} (have {names})")
         enable = bool(args.get("enable", True))
         with self._lock:
@@ -547,6 +610,8 @@ class VideoStreams:
                 if st is not None:
                     self._stop(st)
                 return {"camera": camera, "enabled": False}
+            if camera == MOSAIC:
+                args = dict(args, cameras=self._mosaic_cameras(args, st, names))
             params = clamp_params(args, st.params if st else None)
             if st is None:
                 if len(self.streams) >= MAX_STREAMS:
@@ -566,6 +631,32 @@ class VideoStreams:
                 "params": dict(params),
                 "state": st.state(),
             }
+
+    @staticmethod
+    def _mosaic_cameras(args: dict, st, names: list) -> list:
+        cams = args.get("cameras")
+        if cams is None and st is not None:  # a keepalive without the list
+            return list(st.params.get("cameras") or [])
+        if not isinstance(cams, (list, tuple)):
+            raise ValueError("mosaic needs a list of cameras")
+        out = []
+        for c in cams:
+            c = str(c)
+            if c not in names:
+                raise ValueError(f"unknown camera {c!r} (have {names})")
+            if c not in out:
+                out.append(c)
+        if not out or len(out) > MOSAIC_MAX_CAMERAS:
+            raise ValueError(f"mosaic needs 1..{MOSAIC_MAX_CAMERAS} cameras")
+        return out
+
+    def cameras_in_use(self) -> set[str]:
+        """Real cameras the live streams read (a mosaic reads several)."""
+        with self._lock:
+            out = set()
+            for st in self.streams.values():
+                out.update(st.params.get("cameras") or [] if st.mosaic else [st.camera])
+            return out
 
     def force_keyframe(
         self, camera: str, now: float | None = None, min_gap: float = FORCE_MIN_S
@@ -633,10 +724,13 @@ class VideoStreams:
                 st.next_t = (
                     st.next_t + period if now - st.next_t < period else now + period
                 )
-                frame = self.get_frame(st.camera)
-                if frame is None:
-                    continue
                 try:
+                    if st.mosaic:
+                        self._feed_mosaic(st, now)
+                        continue
+                    frame = self.get_frame(st.camera)
+                    if frame is None:
+                        continue
                     self._feed(st, frame, now)
                 except Exception as exc:  # noqa: BLE001 - bad frame: report, go on
                     st.error = f"frame: {exc}"
@@ -651,7 +745,10 @@ class VideoStreams:
         budget = self.bucket.budget_fn()
         if not budget or budget <= 0:
             return want
-        share = 0.8 * float(budget) * 8 / 1000.0 / max(1, len(self.streams))
+        # split in proportion to the requested bitrates (equal requests share
+        # equally): a 1-tile grid stream must not squeeze a full-size one
+        total = sum(int(s.params["kbps"]) for s in self.streams.values()) or want
+        share = 0.8 * float(budget) * 8 / 1000.0 * want / max(total, want)
         cap = max(MIN_KBPS, int(share // 25) * 25)
         return min(want, cap)
 
@@ -668,8 +765,58 @@ class VideoStreams:
             st.width, st.height = w, h
             st.wait_key = True  # a new encoder starts with a key frame
             st.fed_t.clear()
-        st.fed_t.append((now, frame.get("stamp")))
+        st.fed_t.append((now, frame.get("stamp"), None))
         st.enc.feed(scale(img, w, h))
+
+    def _feed_mosaic(self, st: _Stream, now: float) -> None:
+        """Tile the newest frame of every mosaic camera into one picture.  A
+        camera whose frame did not change since the last mosaic is not scaled
+        again; one without a frame (lazy subscription still starting) stays
+        black with w = h = 0 in ``tiles``."""
+        cams = list(st.params.get("cameras") or [])
+        cw, ch, cols, rows = mosaic_cell(st.params["width"], len(cams))
+        W, H = cw * cols, ch * rows
+        if st.canvas is None or st.canvas.shape[:2] != (H, W):
+            st.canvas = np.zeros((H, W, 3), np.uint8)
+            st.tile_cache.clear()
+        tiles, newest = [], None
+        for i, cam in enumerate(cams):
+            r, c = divmod(i, cols)
+            x0, y0 = c * cw, r * ch
+            frame = self.get_frame(cam)
+            if frame is None:
+                if st.tile_cache.pop(cam, None) is not None:
+                    st.canvas[y0 : y0 + ch, x0 : x0 + cw] = 0
+                tiles.append([cam, x0, y0, 0, 0, None, None])
+                continue
+            fid = (id(frame["data"]), frame.get("stamp"), frame.get("rx_t"))
+            cached = st.tile_cache.get(cam)
+            if cached is None or cached[0] != fid:
+                img = to_rgb(frame)
+                w, h = fit(img.shape[1], img.shape[0], cw, ch)
+                x, y = x0 + (cw - w) // 2 // 2 * 2, y0 + (ch - h) // 2 // 2 * 2
+                if cached is not None and cached[1] != (x, y, w, h):
+                    st.canvas[y0 : y0 + ch, x0 : x0 + cw] = 0
+                st.canvas[y : y + h, x : x + w] = scale(img, w, h)
+                cached = st.tile_cache[cam] = (fid, (x, y, w, h))
+            x, y, w, h = cached[1]
+            rx_t = frame.get("rx_t")
+            age = None if rx_t is None else round(max(0.0, now - float(rx_t)), 3)
+            tiles.append([cam, x, y, w, h, frame.get("stamp"), age])
+            if frame.get("stamp") is not None:
+                newest = max(newest or frame["stamp"], frame["stamp"])
+        p = st.params
+        st.kbps_eff = self.effective_kbps(st)
+        want = (st.codec, W, H, p["fps"], st.kbps_eff)
+        if st.enc is None or st.enc_key != want:
+            self._close_encoder(st)
+            st.enc = self._make_encoder(st, W, H)
+            st.enc_key = want
+            st.width, st.height = W, H
+            st.wait_key = True
+            st.fed_t.clear()
+        st.fed_t.append((now, newest, tiles))
+        st.enc.feed(st.canvas)
 
     def _force_later(self, camera: str, now: float) -> None:
         # called from an encoder's reader thread: closing that encoder there
@@ -708,7 +855,7 @@ class VideoStreams:
         with self._lock:
             if self.streams.get(st.camera) is not st:
                 return  # stopped / replaced
-            t, stamp = st.fed_t.popleft() if st.fed_t else (now, None)
+            t, stamp, tiles = st.fed_t.popleft() if st.fed_t else (now, None, None)
             if st.wait_key and not key:
                 st.dropped += 1
                 return
@@ -734,6 +881,8 @@ class VideoStreams:
                 "fps": st.params["fps"],
                 "data": bytes(data),
             }
+            if tiles is not None:
+                payload["tiles"] = tiles
             n = self.send(st.camera, payload)
             st.frames += 1
             st.keys += int(bool(key))

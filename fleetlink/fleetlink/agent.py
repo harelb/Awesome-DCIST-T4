@@ -419,7 +419,7 @@ class AgentCore:
         now = self.clock() if now is None else now
         idle = float(self.cfg["camera_idle_s"])
         try:
-            streaming = set(self.video.state())
+            streaming = self.video.cameras_in_use()  # a mosaic reads several
         except Exception:  # noqa: BLE001
             streaming = set()
         with self._media_lock:
@@ -568,7 +568,9 @@ class AgentCore:
             return {"requeued": len(keys)}
         if op == "video":
             if args.get("enable", True) and args.get("camera"):
-                self.want_camera(str(args["camera"]), now)
+                cams = args.get("cameras") if args["camera"] == video.MOSAIC else None
+                for cam in cams if isinstance(cams, list) else [args["camera"]]:
+                    self.want_camera(str(cam), now)
             return self.video.request(args, now)
         if op == "store":
             if self.store is None:

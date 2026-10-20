@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 import msgpack
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from ..video_service import RateLimited
+from ..video_service import MOSAIC, RateLimited
 from . import services
 
 router = APIRouter(prefix="/api/live")
@@ -142,6 +142,11 @@ class VideoStartBody(BaseModel):
     width: int = Field(640, ge=64, le=1920)
     codec: Literal["h264", "vp8", "jpeg"] = "h264"
     viewer: str = Field("", max_length=64)  # browser tab id (keepalive / stop)
+    # camera "mosaic" only: the cameras tiled into the one stream (``width`` is
+    # then the width of each tile)
+    cameras: list[Annotated[str, Field(max_length=64)]] | None = Field(
+        None, min_length=1, max_length=12
+    )
 
 
 async def _viewer(request: Request) -> str:
@@ -164,6 +169,8 @@ def video_streams(robot: str, request: Request):
 @robots_router.post("/{robot}/video/{camera}/start")
 def video_start(robot: str, camera: str, body: VideoStartBody, request: Request):
     _rx(request)
+    if (camera == MOSAIC) != (body.cameras is not None):
+        raise HTTPException(422, f"cameras goes with (only) the {MOSAIC!r} stream")
     params = body.model_dump(exclude={"viewer"})
     try:
         res = services(request).live.video.start(robot, camera, params, body.viewer)

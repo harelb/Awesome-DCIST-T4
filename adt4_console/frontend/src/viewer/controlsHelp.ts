@@ -51,6 +51,17 @@ export const COMMON_HELP: HelpSection[] = [
     ],
   },
   {
+    title: "Camera tab: All cameras video",
+    entries: [
+      {keys: "Mosaic / Per camera", does: "One tiled robot stream (default) / one stream per camera"},
+      {keys: "low / medium", does: "Grid quality (tile size, fps, total bitrate)"},
+      {keys: "Camera chips", does: "Switch cameras on/off · All / None (saved per robot)"},
+      {keys: "Drag chip / ‹ ›", does: "Reorder the tiles (= mosaic order)"},
+      {keys: "Click tile", does: "Solo that camera, larger · click again or Back to all"},
+      {keys: "full", does: "Open that camera's full live video"},
+    ],
+  },
+  {
     title: "Keys",
     entries: [
       {keys: "Enter (search)", does: "Pick the first hit"},

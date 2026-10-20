@@ -366,7 +366,8 @@ stay bytes per second.
   `fps` 0.5–15 (default 5), `kbps` 50–2000 (default 300), `width` 64–1920 (default 640), `codec`
   `h264` (default) | `vp8` | `jpeg`. Out-of-range values are clamped. A missing key keeps the
   stream's current value. `enable: false` stops it. An unknown camera is a failed ack
-  (`ok: false, result: {error}`). At most 4 streams. The ack result is
+  (`ok: false, result: {error}`). At most 10 streams (a Spot's 8 cameras as separate grid
+  streams plus a single stream winding down). The ack result is
   `{camera, enabled, params, state}`.
 * **Keepalive.** A stream stops when no `video` op with `enable: true` arrived for
   `video_keepalive_s` (6 s). Repeating the same parameters only refreshes it. Different parameters
@@ -442,6 +443,67 @@ stay bytes per second.
     queue). When either is full, a delta frame is dropped and that topic skips to the next key frame.
     A key frame replaces the topic's stale queued chain. The generic "drop the oldest frame" rule never
     evicts a video frame, so a client never receives a delta whose predecessor it missed.
+
+### 12.4 All-cameras grid video (mosaic)
+
+The Camera tab's "All cameras" view can show live video of every camera at once
+(`frontend/src/viewer/GridVideo.tsx`). Two robot-side modes:
+
+* **Mosaic (default).** `video {camera: "mosaic", cameras: [...], width, fps, kbps, codec}`: the
+  agent tiles the listed cameras (1–12, known cameras, de-duplicated) into ONE picture fed to ONE
+  encoder. `width` is the width of each tile; cells are 4:3 (`cell_h = 3/4 cell_w`, even), laid out
+  1, 2, 3, 2x2, 3x2 (5–6), 4x2 (7–8), then about 4:3 columns, the whole picture at most 1920x1088
+  (tiles shrink otherwise). Each camera is fitted into its cell with its aspect kept, centred,
+  black around it; a camera with no frame yet (lazy subscription still starting) stays black. A
+  camera whose frame did not change is not rescaled. A keepalive may omit `cameras` (the robot keeps
+  the list); a changed list restarts the encoder (key frame first). Every frame's payload gains
+  `tiles: [[camera, x, y, w, h, stamp, age_s], ...]` in request order: the camera's rectangle in the
+  picture (`w = h = 0` while it has no frame), its image stamp and how old its frame was when
+  sampled. The C5 key is `adt4/<r>/video/mosaic`; the state entry gains `cameras`. The mosaic
+  cameras count as wanted by the lazy subscriber while the stream runs.
+* **Per camera.** One ordinary stream per tile, all at the tile width and fps, `kbps` = the grid
+  total / N (at least 50).
+
+**Budget split.** The encoder bitrate of every stream is capped to its share of 80% of the C5
+budget, in proportion to the requested bitrates (equal requests share equally), quantised to 25
+kbit/s, at least 50 kbit/s.
+
+**Console.** `POST /api/robots/{r}/video/mosaic/start` takes `cameras: [str]` (1–12); `cameras`
+with any other camera, or `mosaic` without it, is a 422. Everything else (keepalive, relay, GOP
+cache, `video/<r>/mosaic` topic) is unchanged; `tiles` passes through.
+
+**Browser.** Grid quality presets (tile width / fps / total kbit/s): **low** 240 px / 3 fps / 300,
+**medium** (default) 320 px / 5 fps / 800. Operator selection: per-camera on/off chips, All /
+None, drag a chip or ‹ › to reorder (order = tile order = mosaic order), saved per robot in
+localStorage (`adt4.gridVideo.sel.<robot>` = `{order, off}`; cameras the robot adds later appear
+on). Clicking a tile solos it (only that camera, at twice the tile width, same bitrate) until
+clicked again or "Back to all"; a tile's **full** button opens its single-camera video. What is
+streamed = selected ∩ in view (IntersectionObserver), only while the page is visible, debounced
+1 s: in mosaic mode that list is the `cameras` list, in per-camera mode each of those tiles runs
+its own stream. The mosaic is decoded
+once and each tile's rectangle drawn into that tile's canvas. Per tile: fps (rate of new image
+stamps in mosaic mode, received frames per camera otherwise), kbit/s (per-camera mode; the mosaic
+shows its total in the header) and age (capture-to-display lag plus the tile's `age_s`). A new
+stream starts with a key frame; a viewer that joins a running stream gets the GOP cache and asks
+for a key frame when it has to skip deltas.
+
+**Why mosaic is the default** (measured on the dev laptop, Threadripper 3960X, with the real
+`VideoStreams` pipeline, synthetic 640x480 rgb8 cameras at 10 Hz, CPU in % of one core):
+
+| cameras | preset | mosaic: CPU / ffmpeg RSS | per camera: CPU / ffmpeg RSS | sent |
+|---|---|---|---|---|
+| 6 | low | 3.2% / 56 MB | 4.3% / 320 MB | ~42 kB/s both |
+| 6 | medium | 5.6% / 66 MB | 6.8% / 312 MB | ~95 kB/s both |
+| 8 | low | 3.3% / 60 MB | 5.2% / 427 MB | 37 vs 56 kB/s (50 kbit/s floor x8) |
+| 8 | medium | 6.5% / 70 MB | 8.7% / 417 MB | ~96 kB/s both |
+| 8 | medium @ 10 fps | 12.0% / 70 MB | 15.4% / 417 MB | ~98 kB/s both |
+
+The mosaic costs about 25% less CPU, a sixth of the memory and 6–8x fewer C5 messages, and the
+browser runs one decoder (one WASM worker on plain-http pages) instead of N. Per-camera mode
+remains for when tiles need different freshness or the operator scrolls most tiles out of view.
+`scale()` also changed: `INTER_AREA` only for the integer part of the factor (a non-integer
+`INTER_AREA` resize like 640 -> 240 costs ~10x 640 -> 320 and fans out over every OpenCV thread),
+then `INTER_LINEAR`.
 
 ## 13. Live image-store mirror (C6)
 

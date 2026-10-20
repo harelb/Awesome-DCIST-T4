@@ -11,6 +11,10 @@ on the hub topic ``video/<robot>/<camera>`` with :meth:`Hub.publish_video`
 (GOP cache + per-client drop-until-key-frame).  A frame that follows lost
 frames (``gap``) is withheld until the next key frame, so the relay never
 forwards a broken delta chain.
+
+The ``mosaic`` stream (the Camera tab's "All cameras" video) is one robot
+stream that tiles ``cameras`` into one picture; its frames carry ``tiles``
+(each camera's rectangle) and are relayed like any other.
 """
 
 from __future__ import annotations
@@ -21,7 +25,8 @@ import time
 
 log = logging.getLogger(__name__)
 
-PARAM_KEYS = ("fps", "kbps", "width", "codec")
+PARAM_KEYS = ("fps", "kbps", "width", "codec", "cameras")
+MOSAIC = "mosaic"  # fleetlink pseudo camera: several cameras tiled in one stream
 
 
 class RateLimited(Exception):
@@ -125,6 +130,8 @@ class VideoRelay:
         parameters change again within ``min_change_s``."""
         now = self.clock()
         params = {k: params[k] for k in PARAM_KEYS if params.get(k) is not None}
+        if "cameras" in params:
+            params["cameras"] = list(params["cameras"])
         with self._lock:
             st = self._streams.get((robot, camera))
             if st is None:

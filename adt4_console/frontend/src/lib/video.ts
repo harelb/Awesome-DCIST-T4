@@ -17,6 +17,94 @@ export interface VideoFrame {
   fps: number;
   data: Uint8Array;
   robot?: string;
+  /** mosaic stream only: where each camera sits in the picture */
+  tiles?: MosaicTile[];
+}
+
+/** One camera's rectangle in a mosaic frame (API.md §12.4); w = h = 0 while
+ * the robot has no frame of it yet. */
+export interface MosaicTile {
+  camera: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  stamp: number | null;
+  /** how old the camera's frame was when the mosaic was sampled (s) */
+  age: number | null;
+}
+
+/** The robot's pseudo camera that tiles several cameras into one stream. */
+export const MOSAIC = "mosaic";
+
+export type GridVideoMode = "mosaic" | "tiles";
+export type GridQuality = "low" | "medium";
+
+/** Grid video presets: tile width (px), fps, total kbit/s for the whole grid.
+ * medium = ~100 kB/s, a quarter of the default 400 kB/s C5 budget. */
+export const GRID_QUALITY: Record<GridQuality, {width: number; fps: number; kbps: number}> = {
+  low: {width: 240, fps: 3, kbps: 300},
+  medium: {width: 320, fps: 5, kbps: 800},
+};
+export const MIN_STREAM_KBPS = 50;
+
+export interface GridStreamParams {
+  camera: string;
+  cameras?: string[];
+  width: number;
+  fps: number;
+  kbps: number;
+}
+
+/** What to request for the grid: one mosaic stream of the visible cameras, or
+ * one stream per visible camera sharing the preset's total bitrate (each at
+ * least MIN_STREAM_KBPS). */
+export function gridStreams(mode: GridVideoMode, quality: GridQuality, cams: string[], solo = false): GridStreamParams[] {
+  if (!cams.length) return [];
+  const p = GRID_QUALITY[quality];
+  // a soloed camera fills the whole grid: twice the tile width, same bitrate
+  const q = solo ? {...p, width: Math.min(640, 2 * p.width)} : p;
+  if (mode === "mosaic") return [{camera: MOSAIC, cameras: [...cams], width: q.width, fps: q.fps, kbps: q.kbps}];
+  const kbps = Math.max(MIN_STREAM_KBPS, Math.round(q.kbps / cams.length));
+  return cams.map(camera => ({camera, width: q.width, fps: q.fps, kbps}));
+}
+
+/** Per-camera rate of NEW images inside a mosaic (distinct stamps over a
+ * sliding window): the mosaic repeats a camera's last image when it has no
+ * newer one, so mosaic frames/s says nothing about one camera's freshness. */
+export class StampRate {
+  private last = new Map<string, number | null>();
+  private seen = new Map<string, number[]>();
+  constructor(private windowMs = 3000) {}
+
+  add(camera: string, stamp: number | null, now: number) {
+    if (stamp === null) return;
+    if (this.last.get(camera) === stamp) return;
+    this.last.set(camera, stamp);
+    const l = this.seen.get(camera) ?? [];
+    l.push(now);
+    this.seen.set(camera, l);
+    this.trim(l, now);
+  }
+
+  private trim(l: number[], now: number) {
+    while (l.length && now - l[0] > this.windowMs) l.shift();
+  }
+
+  fps(camera: string, now: number): number {
+    const l = this.seen.get(camera);
+    if (!l) return 0;
+    this.trim(l, now);
+    return l.length / (this.windowMs / 1000);
+  }
+}
+
+function parseTiles(v: unknown): MosaicTile[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : null);
+  return v
+    .filter((t): t is unknown[] => Array.isArray(t) && t.length >= 5)
+    .map(t => ({camera: String(t[0]), x: num(t[1]) ?? 0, y: num(t[2]) ?? 0, w: num(t[3]) ?? 0, h: num(t[4]) ?? 0, stamp: num(t[5]), age: num(t[6])}));
 }
 
 export const FPS_OPTIONS = [1, 2, 5, 10, 15];
@@ -167,6 +255,7 @@ export function parseVideoFrame(d: unknown): VideoFrame | null {
     fps: Number(o.fps ?? 0),
     data,
     robot: o.robot === undefined ? undefined : String(o.robot),
+    tiles: parseTiles(o.tiles),
   };
 }
 
@@ -175,4 +264,62 @@ export function parseVideoFrame(d: unknown): VideoFrame | null {
 export function frameLagMs(f: Pick<VideoFrame, "tBase">, nowMs: number, offset: number | null): number | null {
   if (f.tBase == null || offset == null) return null;
   return (nowMs / 1000 + offset - f.tBase) * 1000;
+}
+
+/** Operator's grid camera selection (per robot): tile order and the cameras
+ * switched off. Stored as the "off" list so cameras the robot adds later
+ * appear switched on. */
+export interface GridSelection {
+  order: string[];
+  off: string[];
+}
+
+/** Fit a saved selection to the robot's current cameras: unknown cameras go,
+ * new ones are appended (on) in the robot's order. */
+export function normalizeSelection(saved: Partial<GridSelection> | null | undefined, cams: string[]): GridSelection {
+  const known = new Set(cams);
+  const order = (Array.isArray(saved?.order) ? saved.order : []).filter((c, i, a) => known.has(c) && a.indexOf(c) === i);
+  for (const c of cams) if (!order.includes(c)) order.push(c);
+  const off = (Array.isArray(saved?.off) ? saved.off : []).filter(c => known.has(c));
+  return {order, off: [...new Set(off)]};
+}
+
+/** The cameras to show, in tile order: just the solo camera while one is
+ * soloed (and still exists), else every camera that is switched on. */
+export function selectedCameras(sel: GridSelection, solo: string | null = null): string[] {
+  if (solo && sel.order.includes(solo)) return [solo];
+  const off = new Set(sel.off);
+  return sel.order.filter(c => !off.has(c));
+}
+
+/** What to stream: the selected cameras that are also in view, in tile order. */
+export function streamCameras(selected: string[], inView: Iterable<string>): string[] {
+  const v = new Set(inView);
+  return selected.filter(c => v.has(c));
+}
+
+export function toggleCamera(sel: GridSelection, cam: string): GridSelection {
+  return {...sel, off: sel.off.includes(cam) ? sel.off.filter(c => c !== cam) : [...sel.off, cam]};
+}
+
+export function setAllCameras(sel: GridSelection, on: boolean): GridSelection {
+  return {...sel, off: on ? [] : [...sel.order]};
+}
+
+/** Move `cam` by `delta` places (up/down buttons), clamped to the ends. */
+export function moveCamera(sel: GridSelection, cam: string, delta: number): GridSelection {
+  const i = sel.order.indexOf(cam);
+  if (i < 0) return sel;
+  const j = Math.max(0, Math.min(sel.order.length - 1, i + delta));
+  if (i === j) return sel;
+  const order = [...sel.order];
+  order.splice(i, 1);
+  order.splice(j, 0, cam);
+  return {...sel, order};
+}
+
+/** Drag-to-reorder: put `cam` where `target` is. */
+export function dropCamera(sel: GridSelection, cam: string, target: string): GridSelection {
+  const j = sel.order.indexOf(target);
+  return j < 0 ? sel : moveCamera(sel, cam, j - sel.order.indexOf(cam));
 }

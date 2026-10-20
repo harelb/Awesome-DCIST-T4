@@ -2719,3 +2719,46 @@ input[type="checkbox"] {
 .lease-control {
   align-items: center;
 }
+.camera-tile-img canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.camera-grid.solo {
+  grid-template-columns: 1fr;
+}
+.grid-cam-chips {
+  align-items: center;
+}
+.grid-cam-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1px 2px;
+  cursor: grab;
+  background: var(--bg);
+}
+.grid-cam-chip.off {
+  opacity: 0.55;
+}
+.grid-cam-chip label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+.grid-cam-chip .chip-move {
+  all: unset;
+  cursor: pointer;
+  padding: 0 4px;
+  color: var(--muted, inherit);
+}
+.grid-cam-chip .chip-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.grid-cam-chip .chip-move:focus-visible {
+  outline: 2px solid var(--accent);
+}

@@ -36,16 +36,16 @@ interface Stats {
   height: number;
 }
 
-const viewerId = () => (globalThis.crypto?.randomUUID?.() ?? `v${Math.random().toString(36).slice(2)}`).slice(0, 36);
+export const viewerId = () => (globalThis.crypto?.randomUUID?.() ?? `v${Math.random().toString(36).slice(2)}`).slice(0, 36);
 
-async function post(path: string, body: unknown, keepalive = false): Promise<Response> {
+export async function post(path: string, body: unknown, keepalive = false): Promise<Response> {
   const headers = new Headers({"Content-Type": "application/json"});
   const t = getToken();
   if (t) headers.set("Authorization", `Bearer ${t}`);
   return fetch(path, {method: "POST", headers, body: JSON.stringify(body), keepalive});
 }
 
-async function detail(res: Response): Promise<string> {
+export async function detail(res: Response): Promise<string> {
   try {
     const j = await res.json();
     if (typeof j.detail === "string") return j.detail;
@@ -55,7 +55,7 @@ async function detail(res: Response): Promise<string> {
   return `HTTP ${res.status}`;
 }
 
-const usePageVisible = () => {
+export const usePageVisible = () => {
   const [visible, setVisible] = useState(typeof document === "undefined" || document.visibilityState !== "hidden");
   useEffect(() => {
     const on = () => setVisible(document.visibilityState !== "hidden");
