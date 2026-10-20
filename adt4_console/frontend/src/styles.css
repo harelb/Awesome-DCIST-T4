@@ -2669,3 +2669,40 @@ input[type="checkbox"] {
   font-size: 13px;
   font-weight: 600;
 }
+
+/* ---- Maps page: fuzzy search, image store / file badges ---- */
+.maps-search {
+  min-width: 260px;
+}
+.fz-hit {
+  background: none;
+  color: var(--warn);
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 176, 32, 0.55);
+  text-underline-offset: 2px;
+}
+.chip-missing {
+  color: var(--text-3, var(--text-2));
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.chip-dim {
+  color: var(--text-2);
+}
+.maps-table .nowrap {
+  white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .page-actions .maps-search {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+  .page-actions .maps-sort {
+    flex: 1 1 140px;
+  }
+}
+.img-badge .badge {
+  text-transform: none;
+  letter-spacing: 0;
+}

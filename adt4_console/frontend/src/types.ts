@@ -96,16 +96,46 @@ export interface Job {
   result?: unknown;
 }
 
+export interface ImageStoreInfo {
+  /** frame counts by kind: keyframe / subkeyframe / object */
+  frames: Partial<Record<"keyframe" | "subkeyframe" | "object", number>> & Record<string, number>;
+  frames_total: number;
+  observations: number;
+  sensors: number;
+  schema_version?: string | null;
+  keyframes_unanchored?: number;
+  /** du of <run>/image_store; null while sizes are pending */
+  size_bytes?: number | null;
+  check: {ok: boolean; problems: string[]};
+}
+
 export interface MapEntry {
   name: string;
   size: string | number;
   subdirs?: string[];
   is_prior?: boolean;
   path?: string;
+  abs_path?: string;
+  /** epoch seconds */
+  mtime?: number | null;
+  ctime?: number | null;
+  name_date?: number | null;
+  dsg_mtime?: number | null;
+  size_bytes?: number | null;
+  size_pending?: boolean;
+  has_dsg?: boolean;
+  has_dsg_mesh?: boolean;
+  has_mesh?: boolean;
+  has_image_store?: boolean;
+  image_store?: ImageStoreInfo | null;
+  sessions?: number;
+  error?: string;
 }
 
 export interface MapsResponse {
   machines: Record<string, MapEntry[] | {error: string}>;
+  /** machines whose sizes are still being measured in the background */
+  pending?: string[];
 }
 
 export interface GraphSource {

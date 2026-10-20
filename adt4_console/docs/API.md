@@ -116,7 +116,30 @@ job = {id, kind, title, state: "running"|"waiting"|"succeeded"|"failed"|"cancell
 ## 7. Maps & graph
 
 Maps:
-* `GET /api/maps` → `{machines: {name: [{name, size, subdirs, is_prior, path}] | {error}}}` (the local machine listed from the filesystem under output_root + configured `--map` dirs)
+* `GET /api/maps` → `{machines: {name: [RUN] | {error}}, pending: [machine]}`. The local machine is listed from
+  the filesystem (output_root + configured `--map` dirs). Every other online machine is listed by
+  `dcist_launch_system.fleet.run_scan`, whose source is shipped over **one ssh round trip** per machine
+  (`fleet.maps.remote_scan_command`). It runs under `$ADT4_ENV/spark_env/bin/python3`, or `python3`, using only
+  the standard library, so no sqlite3 CLI is needed. It is read-only: the store index is opened `mode=ro`
+  (`immutable=1` fallback) and nothing is written on the robot. A machine whose ssh/scan fails returns `{error}`.
+  `RUN` = `{name, path, abs_path? (remote: expanded path), subdirs, is_prior, mtime, ctime, name_date, size,
+  size_bytes, size_pending, signature, has_dsg, has_dsg_mesh, has_mesh, dsg_mtime?, has_image_store,
+  image_store, sessions?, error?}`:
+  * `mtime`/`ctime` are the run dir's epoch seconds. `name_date` is a date parsed from the name (`20261018`, `2026-10-18`,
+    `03192026` MMDDYYYY, `2026-07`) or null. The page sorts by `mtime`, else `name_date`.
+  * `has_dsg`/`has_dsg_mesh`/`has_mesh` are `hydra/backend/{dsg.json, dsg_with_mesh.json, mesh.ply}`.
+  * `image_store` is null without `<run>/image_store/store.sqlite`, else `{frames: {keyframe, subkeyframe, object},
+    frames_total, observations, sensors, schema_version, keyframes_unanchored, sampled_files, size_bytes,
+    check: {ok, problems: [str]}}`. The quick check passes when: the index opens, `schema_version` is present,
+    no frame lacks its sensor, every keyframe is anchored, and the image files of the first and last 4 frames exist.
+    `sessions` = number of `sessions/<k>/image_store` (stores of earlier sessions).
+  * Sizes: `size_bytes`/`image_store.size_bytes` come from one `du -b -d1 <run>` (python walk fallback), and `size`
+    is the `du -sh`-style string. They are cached on the console host, in memory and in
+    `~/.cache/adt4_console/map_sizes.json`, per machine+run and keyed by `signature`. The signature is the newest mtime of the run dir, its
+    immediate subdirs, `hydra/backend` and the store index/WAL. Uncached runs are measured within a budget
+    (3 s local, 4 s per remote machine). The rest come back `size_pending: true, size_bytes: null`, their machine is
+    listed in `pending`, and a background thread measures them (local in-process, remote with one more ssh using
+    `only=[names]`). The page re-lists every 4 s while `pending` is non-empty.
 * `POST /api/maps/transfer` `{src, experiment, dst?: local, as_name?, include_bags=false, bwlimit_kbps?}` → job (`rsync_transfer` + progress)
 * `POST /api/maps/verify` `{experiment, machines?}` → job; result `{machines:[...], rows:[{path, consistent, cells:{m: str}}]}` (`compare_hashes`)
 * `POST /api/maps/ingest` `{path: RUN_DIR, target: neo4j_name, image_root?}` (`image_root` = image store dir, default `<run>/image_store`) → job. Steps: load
@@ -692,6 +715,11 @@ A backend that follows these works with the UI unchanged.
   `bwlimit_kbps` only if the limit is enabled.
 * "Open in viewer" reuses `file:<experiment name>` if that source exists. Otherwise it calls `POST /api/maps/register
   {name, path}` and opens `#/viewer?src=file:<name>`. The backend is expected to name the source `file:<name>`.
+* Maps page search and sort run client-side (`src/lib/mapList.ts`). The fzf-style fuzzy matcher (`fuzzyMatch` in
+  `src/lib/fuzzy.ts`) gives bonuses for word boundaries and consecutive runs. Queries of 4+ characters tolerate one
+  typo (a dropped/extra or transposed character). Every whitespace token must match the run name, the machine or
+  the path, and the best field wins (weights 1 / 0.8 / 0.6). Sort is best match / newest / oldest / size / name /
+  machine / most keyframes. The sort and "group by machine" choices are stored in `localStorage["adt4.maps.prefs"]`.
 * Goto/TSP: `points` are raw node symbols (`"O(12)"`, `"P(850)"`). The backend converts them.
 * PDDL "visit" template: `(visited-object o12)` for objects and `(visited-place p850)` for places,
   joined with `(and ...)` when there are several. The symbol is the lower-case prefix plus the index, matching `dsg_pddl` `normalize_symbol`.

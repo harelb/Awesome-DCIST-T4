@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -87,68 +88,199 @@ def _endpoint(svc, name: str | None) -> dict:
     return m
 
 
-def _du(path: pathlib.Path) -> str:
-    try:
-        out = subprocess.run(
-            ["du", "-sh", str(path)], capture_output=True, text=True, timeout=5
-        ).stdout
-        return out.split()[0] if out else "?"
-    except Exception:  # noqa: BLE001
-        return "?"
+# ---------------------------------------------------------------------------
+# Listing.  Each machine is scanned by dcist_launch_system.fleet.run_scan (in-process
+# here, one ssh round trip elsewhere).  Directory sizes (du) are the slow part: they are
+# cached per run keyed by its mtime signature (memory + a JSON file on this host, never
+# on the robots), measured within a short budget during GET /api/maps, and whatever is
+# left is measured by a background thread; the response lists those machines under
+# ``pending`` so the page polls again.
+# ---------------------------------------------------------------------------
+
+LOCAL_BUDGET_S = 3.0
+REMOTE_BUDGET_S = 4.0
+REMOTE_TIMEOUT_S = 20
+FILL_TIMEOUT_S = 600
+_CACHE_FILE = pathlib.Path(os.path.expanduser("~/.cache/adt4_console/map_sizes.json"))
+_cache_lock = threading.Lock()
+_size_cache: dict[str, dict[str, list]] | None = None  # machine -> key -> [sig, size, store]
+_filling: set[str] = set()
 
 
-def _local_entry(path: pathlib.Path, size: str) -> dict:
-    from dcist_launch_system.fleet.maps import is_prior_map
+def _cache() -> dict[str, dict[str, list]]:
+    global _size_cache
+    if _size_cache is None:
+        try:
+            import json
 
-    subdirs = (
-        sorted(p.name for p in path.iterdir() if p.is_dir()) if path.is_dir() else []
-    )
-    entry = {"name": path.name, "subdirs": subdirs, "size": size, "path": str(path)}
-    entry["is_prior"] = is_prior_map(entry)
-    return entry
+            data = json.loads(_CACHE_FILE.read_text())
+            _size_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _size_cache = {}
+    return _size_cache
 
 
-def list_local(svc) -> list[dict]:
+def _cache_get(machine: str) -> dict[str, list]:
+    with _cache_lock:
+        return dict(_cache().get(machine, {}))
+
+
+def _cache_put(machine: str, items: dict[str, list]) -> None:
+    import json
+
+    if not items:
+        return
+    with _cache_lock:
+        _cache().setdefault(machine, {}).update(items)
+        try:
+            _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _CACHE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(_cache()))
+            tmp.replace(_CACHE_FILE)
+        except OSError:
+            pass
+
+
+def _sized(entries: list[dict], key=lambda e: e["name"]) -> dict[str, list]:
+    """Cache rows for the entries that got a size."""
+    return {
+        key(e): [e["signature"], e["size_bytes"], (e.get("image_store") or {}).get("size_bytes")]
+        for e in entries
+        if e.get("size_bytes") is not None and "signature" in e
+    }
+
+
+def _local_dirs(svc) -> list[pathlib.Path]:
     root = svc.settings.output_root_path
-    dirs = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
+    dirs = (
+        sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+        if root.is_dir()
+        else []
+    )
     extra = [s.run_dir for s in svc.graph.sources.values() if isinstance(s, FileSource)]
-    dirs += [d for d in extra if d not in dirs and d.is_dir()]
-    sizes = dict(svc.helpers.run_parallel(_du, dirs, max_workers=8)) if dirs else {}
-    return [
-        _local_entry(d, sizes.get(d) if isinstance(sizes.get(d), str) else "?")
-        for d in dirs
-    ]
+    return dirs + [d for d in extra if d not in dirs and d.is_dir()]
+
+
+def _scan_local(dirs, machine: str, budget: float | None) -> list[dict]:
+    from dcist_launch_system.fleet.run_scan import scan_run
+
+    cache = _cache_get(machine)
+    deadline = None if budget is None else time.monotonic() + budget
+    out = []
+    for d in dirs:
+        left = None if deadline is None else deadline - time.monotonic()
+        known = {d.name: cache[str(d)]} if str(d) in cache else None
+        try:
+            out.append(scan_run(str(d), known, measure=left is None or left > 0.05, timeout=left))
+        except Exception as e:  # noqa: BLE001
+            out.append({"name": d.name, "path": str(d), "subdirs": [], "error": str(e)})
+    _cache_put(machine, _sized(out, key=lambda e: e["path"]))
+    return out
+
+
+def _budget(machine: str, budget: float) -> float:
+    """No foreground du while a background fill measures this machine."""
+    with _cache_lock:
+        return 0.0 if machine in _filling else budget
+
+
+def _start_fill(machine: str, fn) -> None:
+    """Measure the pending sizes of ``machine`` in the background (one at a time)."""
+    with _cache_lock:
+        if machine in _filling:
+            return
+        _filling.add(machine)
+
+    def run():
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - best effort; the next listing retries
+            pass
+        finally:
+            with _cache_lock:
+                _filling.discard(machine)
+
+    threading.Thread(target=run, name=f"map-sizes-{machine}", daemon=True).start()
+
+
+def _finish(entries: list[dict]) -> list[dict]:
+    from dcist_launch_system.fleet.maps import finish_entry
+
+    return [finish_entry(e) for e in entries]
+
+
+def list_local(svc, pending: set | None = None) -> list[dict]:
+    machine = _local_name(svc)
+    dirs = _local_dirs(svc)
+    out = _scan_local(dirs, machine, _budget(machine, LOCAL_BUDGET_S))
+    todo = [pathlib.Path(e["path"]) for e in out if e.get("size_pending")]
+    if todo:
+        if pending is not None:
+            pending.add(machine)
+        _start_fill(machine, lambda: _scan_local(todo, machine, None))
+    return _finish(out)
+
+
+def list_remote(svc, m: dict, pending: set | None = None) -> list[dict]:
+    from dcist_launch_system.fleet.maps import parse_scan_output, remote_scan_command
+
+    h, root, name = svc.helpers, svc.settings.output_root, m["name"]
+    cache = _cache_get(name)
+    rc, stdout, stderr = h.ssh_cmd(
+        m["user"], m["ip"], remote_scan_command(root, cache, _budget(name, REMOTE_BUDGET_S)),
+        timeout=REMOTE_TIMEOUT_S,
+    )
+    if rc != 0:
+        raise RuntimeError(f"listing failed (rc {rc}): {(stderr or stdout)[-300:]}")
+    runs = parse_scan_output(stdout)
+    _cache_put(name, _sized(runs))
+    todo = [e["name"] for e in runs if e.get("size_pending")]
+    if todo:
+        if pending is not None:
+            pending.add(name)
+
+        def fill():
+            rc, out, _ = h.ssh_cmd(
+                m["user"], m["ip"],
+                remote_scan_command(root, _cache_get(name), None, todo),
+                timeout=FILL_TIMEOUT_S,
+            )
+            if rc == 0:
+                _cache_put(name, _sized(parse_scan_output(out)))
+
+        _start_fill(name, fill)
+    for e in runs:
+        e["abs_path"] = e.get("path")
+        e["path"] = f"{root}/{e['name']}"
+    return _finish(runs)
 
 
 @router.get("")
 def list_maps(request: Request):
-    from dcist_launch_system.fleet.maps import is_prior_map
-
     svc = services(request)
     h = svc.helpers
-    out = {}
-    try:
-        out[_local_name(svc)] = list_local(svc)
-    except Exception as e:  # noqa: BLE001
-        out[_local_name(svc)] = {"error": str(e)}
+    out: dict = {}
+    pending: set[str] = set()
     with svc.fleet.lock:
         remotes = [
             dict(m)
             for m in svc.fleet.runtime_config.values()
             if m.get("online") and not m.get("local")
         ]
-    root = svc.settings.output_root
 
     def fetch(m):
-        exps = h.list_remote_experiments(m["user"], m["ip"], root)
-        for e in exps:
-            e["is_prior"] = is_prior_map(e)
-            e["path"] = f"{root}/{e['name']}"
-        return exps
+        return list_remote(svc, m, pending)
 
-    for m, r in h.run_parallel(fetch, remotes) if remotes else []:
-        out[m["name"]] = r if isinstance(r, list) else {"error": str(r)}
-    return {"machines": out}
+    # remote ssh scans run while the local scan does its own budgeted pass
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        remote_future = pool.submit(lambda: h.run_parallel(fetch, remotes) if remotes else [])
+        try:
+            out[_local_name(svc)] = list_local(svc, pending)
+        except Exception as e:  # noqa: BLE001
+            out[_local_name(svc)] = {"error": str(e)}
+        for m, r in remote_future.result():
+            out[m["name"]] = r if isinstance(r, list) else {"error": str(r)}
+    return {"machines": out, "pending": sorted(pending)}
 
 
 class TransferBody(BaseModel):
