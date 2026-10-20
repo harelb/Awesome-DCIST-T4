@@ -116,7 +116,56 @@ function loadMaskPref(): boolean {
   }
 }
 
-export function ObjectImages({images, masks, title, isObject}: {images: string[]; masks?: boolean[]; title: string; isObject: boolean}) {
+/** Per-image metadata from node detail (`image_info`): agent frames carry how far
+ *  the frame was taken from the node's pose; object images have kind null. */
+export interface ImageInfo {
+  kind: "keyframe" | "subkeyframe" | null;
+  own?: boolean;
+  dist_m?: number | null;
+  yaw_deg?: number | null;
+  frame_id?: number | null;
+  anchor?: string | null;
+}
+
+/** Corner label of an agent frame: "keyframe" for the node's own, else
+ *  "sub-keyframe · 0.42 m, 12° from a(14)" (`long`) / "sub-keyframe · 0.42 m · 12°". */
+export function frameBadge(info: ImageInfo | undefined, sym?: string, long = false): string {
+  if (!info?.kind) return "";
+  if (info.own) return "keyframe";
+  const kind = info.kind === "keyframe" ? "keyframe" : "sub-keyframe";
+  const parts: string[] = [];
+  if (info.dist_m != null) parts.push(`${info.dist_m.toFixed(2)} m`);
+  if (info.yaw_deg != null) parts.push(`${Math.round(info.yaw_deg)}°`);
+  if (!parts.length) return kind;
+  return long ? `${kind} · ${parts.join(", ")}${sym ? ` from ${sym}` : ""}` : `${kind} · ${parts.join(" · ")}`;
+}
+
+/** Strip badge: wraps only between the kind and the distances. */
+function ThumbTag({text}: {text: string}) {
+  const k = text.indexOf(" · ");
+  if (k < 0) return <span className="thumb-tag mono">{text}</span>;
+  return (
+    <span className="thumb-tag mono">
+      <span className="nowrap">{text.slice(0, k)}</span> · <span className="nowrap">{text.slice(k + 3)}</span>
+    </span>
+  );
+}
+
+export function ObjectImages({
+  images,
+  masks,
+  info,
+  title,
+  sym,
+  isObject,
+}: {
+  images: string[];
+  masks?: boolean[];
+  info?: ImageInfo[];
+  title: string;
+  sym?: string;
+  isObject: boolean;
+}) {
   const [lightbox, setLightbox] = useState<number | null>(null);
   const [maskOn, setMaskOn] = useState(loadMaskPref);
   useEffect(() => setLightbox(null), [images]);
@@ -131,7 +180,14 @@ export function ObjectImages({images, masks, title, isObject}: {images: string[]
       /* private mode */
     }
   };
-  const hero = isObject ? 0 : -1;
+  // agents with frame metadata: the chosen (own / nearest) frame large, badged
+  const agentFrames = !isObject && Boolean(info?.[0]?.kind);
+  const hero = isObject || agentFrames ? 0 : -1;
+  const badge = (i: number, long = false) => (agentFrames ? frameBadge(info?.[i], sym, long) : "");
+  const via = (i: number) => {
+    const a = info?.[i]?.anchor;
+    return agentFrames && a && a !== sym ? ` (anchored to ${a})` : "";
+  };
   const rest = images.map((u, i) => [u, i] as const).filter(([, i]) => i !== hero);
   return (
     <div className="obj-images">
@@ -139,7 +195,13 @@ export function ObjectImages({images, masks, title, isObject}: {images: string[]
         <h4 className="sub-title">Images ({images.length})</h4>
         {anyMask && <Toggle checked={maskOn} onChange={setMask} label="Mask overlay" />}
       </div>
-      {hero === 0 && (
+      {hero === 0 && agentFrames && (
+        <button className="obj-hero" onClick={() => setLightbox(0)} aria-label="Nearest frame, open full size" title={`${badge(0, true)}${via(0)}`}>
+          <img src={withToken(imageUrl(images[0], {w: 720}))} alt={`${title}: ${badge(0, true)}`} />
+          <span className={`obj-hero-tag frame-tag mono ${info?.[0]?.own ? "frame-own" : ""}`}>{badge(0, true)}</span>
+        </button>
+      )}
+      {hero === 0 && !agentFrames && (
         <button className="obj-hero" onClick={() => setLightbox(0)} aria-label="Best image, open full size">
           <img src={withToken(imageUrl(images[0], {w: 720, mask: withMask(0)}))} alt={`${title} best view`} />
           <span className="obj-hero-tag mono">best view{masks?.[0] ? (maskOn ? " · mask" : "") : ""}</span>
@@ -148,14 +210,19 @@ export function ObjectImages({images, masks, title, isObject}: {images: string[]
       {rest.length > 0 && (
         <div className="image-strip">
           {rest.map(([u, i]) => (
-            <button key={u} className="thumb" onClick={() => setLightbox(i)} aria-label={`Image ${i + 1}`}>
+            <button key={u} className={`thumb ${agentFrames ? "thumb-badged" : ""}`} onClick={() => setLightbox(i)} aria-label={`Image ${i + 1}`} title={agentFrames ? `${badge(i)}${via(i)}` : undefined}>
               <img src={withToken(imageUrl(u, {w: 240, mask: withMask(i)}))} loading="lazy" alt={`${title} frame ${i + 1}`} />
+              {agentFrames && <ThumbTag text={badge(i)} />}
             </button>
           ))}
         </div>
       )}
       {lightbox !== null && images[lightbox] && (
-        <Modal title={`${title}: frame ${lightbox + 1}/${images.length}`} onClose={() => setLightbox(null)} wide>
+        <Modal
+          title={`${title}: frame ${lightbox + 1}/${images.length}${agentFrames ? ` · ${badge(lightbox, true)}${via(lightbox)}` : ""}`}
+          onClose={() => setLightbox(null)}
+          wide
+        >
           <img className="lightbox-img" src={withToken(imageUrl(images[lightbox], {mask: withMask(lightbox)}))} alt="" />
           <div className="row gap center">
             <button className="btn btn-sm" disabled={lightbox === 0} onClick={() => setLightbox(lightbox - 1)}>

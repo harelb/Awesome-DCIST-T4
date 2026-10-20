@@ -237,6 +237,24 @@ class NodeImage:
     mask_path: pathlib.Path | None = None  # Neo4j Observation.mask_path
     mask_rle: str | None = None  # Neo4j Observation.mask_rle (sensor-sized)
     bbox2d: tuple | None = None  # min_x, min_y, max_x, max_y
+    # agent frames (see agent_images): which frame, how far from the node's pose
+    kind: str | None = None  # "keyframe" | "subkeyframe" (None: object image)
+    own: bool = False  # the agent node's own keyframe
+    dist_m: float | None = None
+    yaw_deg: float | None = None
+    frame_id: int | None = None
+    anchor: str | None = None  # agent node the frame is anchored to
+
+    def info(self) -> dict:
+        """Per-image metadata for node_detail (``kind`` None = object image)."""
+        return {
+            "kind": self.kind,
+            "own": self.own,
+            "dist_m": self.dist_m,
+            "yaw_deg": self.yaw_deg,
+            "frame_id": self.frame_id,
+            "anchor": self.anchor,
+        }
 
     @property
     def has_mask(self) -> bool:
@@ -292,6 +310,54 @@ def list_images(store, node_id: int) -> list[NodeImage]:
             if len(out) >= MAX_IMAGES:
                 break
     return out[:MAX_IMAGES]
+
+
+def is_agent_record(rec) -> bool:
+    """An agent (trajectory keyframe) node: layer 2 in its robot-prefix partition."""
+    if rec is None or rec.layer != AGENT_LAYER:
+        return False
+    if rec.part == AGENT_PART:
+        return True
+    return rec.part not in (0, 115) and bool(rec.sym) and rec.sym[0] == chr(rec.part)
+
+
+def store_signature(store) -> tuple:
+    """Cheap identity of a store's keyframe/sub-keyframe contents (live stores grow)."""
+    if store is None:
+        return (None,)
+    try:
+        rows = store._query(  # noqa: SLF001
+            "SELECT count(*), max(frame_id), count(anchor_node_id) FROM frames"
+            " WHERE kind IN (0, 1) AND rgb_path IS NOT NULL"
+        )
+        return (id(store), *(tuple(r) for _, r in rows))
+    except Exception:  # noqa: BLE001
+        return (id(store),)
+
+
+def agent_frame_images(index, sym: str, rec=None) -> list[NodeImage]:
+    """The agent node's own keyframe, else the nearest frames by pose (agent_images)."""
+    from .agent_images import KEYFRAME
+
+    pose = index.node_pose(sym)
+    if pose is None:
+        pose = (rec.pos, None) if rec is not None else (None, None)
+    return [
+        NodeImage(
+            pathlib.Path(f.path),
+            kind=f.kind if f.kind == KEYFRAME else "subkeyframe",
+            own=f.own,
+            dist_m=f.dist_m,
+            yaw_deg=f.yaw_deg,
+            frame_id=f.frame_id,
+            anchor=f.anchor,
+        )
+        for f in index.select(sym, pos=pose[0], yaw=pose[1])
+    ]
+
+
+def _quat_yaw(w, x, y, z) -> float:
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
 
 def symbol_of(node_id: int) -> str:
@@ -384,6 +450,39 @@ class Source:
 
     def _imaged_syms(self) -> set[str]:
         return imaged_store_nodes(self.image_store())
+
+    def agent_index(self, key, build):
+        """The AgentFrameIndex for ``key`` (graph version + store contents), built
+        once by ``build()`` and reused until the key changes."""
+        with self._lock:
+            cur = getattr(self, "_agent_idx", None)
+            if cur is not None and cur[0] == key:
+                return cur[1]
+        t0 = time.time()
+        idx = build()
+        log.info("%s: agent frame index (%d frames) in %.2fs", self.id, len(idx),
+                 time.time() - t0)  # fmt: skip
+        with self._lock:
+            self._agent_idx = (key, idx)
+        return idx
+
+    def store_agent_images(self, store, sym: str, loaded, lookup=None) -> list:
+        """Agent images from an ImageStore; poses from ``lookup`` (node id → 4x4),
+        else from the loaded node records."""
+        from .agent_images import AgentFrameIndex
+
+        rec = loaded.records.get(sym)
+        key = ("store", loaded.version, store_signature(store))
+
+        def build():
+            positions = None
+            if lookup is None:
+                positions = {
+                    k: r.pos for k, r in loaded.records.items() if is_agent_record(r)
+                }
+            return AgentFrameIndex.from_store(store, lookup=lookup, positions=positions)
+
+        return agent_frame_images(self.agent_index(key, build), sym, rec)
 
     def trajectory(self) -> list:
         return _records_trajectory(self.loaded())
@@ -511,6 +610,8 @@ class Source:
             "n_images": len(images),
             # per image: a segmentation mask exists (?mask=1 overlays it)
             "masks": [im.has_mask for im in images],
+            # per image: agent-frame metadata (kind None for object images)
+            "image_info": [im.info() for im in images],
         }
 
     def image_path(self, sym: str, i: int) -> pathlib.Path:
@@ -665,7 +766,14 @@ class FileSource(Source):
         attrs = node.attributes
         store = self.image_store()
         with self._store_lock:
-            images = list_images(store, int(node.id.value))
+            if store is not None and is_agent_record(loaded.records.get(sym)):
+                from hydra_image_store import as_pose_lookup
+
+                images = self.store_agent_images(
+                    store, sym, loaded, lookup=as_pose_lookup(loaded.G)
+                )
+            else:
+                images = list_images(store, int(node.id.value))
         return spark_attributes(attrs), images
 
     def image_store(self):
@@ -869,7 +977,85 @@ class Neo4jSource(Source):
             r = readable(v)
             if r is not _DROP:
                 attrs[k] = r
+        if loaded is not None and is_agent_record(loaded.records.get(sym)):
+            try:
+                images = self.agent_images(sym, loaded)
+            except GraphUnavailable:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log.warning("agent images for %s failed: %s", sym, e)
+                images = []
+            if images:
+                return attrs, images
         return attrs, self.node_images(sym, props)
+
+    def agent_images(self, sym: str, loaded) -> list:
+        """Own keyframe, else the nearest sub-keyframes (heracles Agent / SubKeyframe
+        rows; the image store when the DB carries no frame paths)."""
+        from .agent_images import KEYFRAME, SUBKEYFRAME, AgentFrameIndex
+
+        poses: dict[str, tuple] = {}
+        rows = []
+
+        def build():
+            for r in self.query(
+                "MATCH (a:Agent) WHERE a.center IS NOT NULL RETURN a.nodeSymbol AS s, "
+                "a.center AS c, a.rot_w AS w, a.rot_x AS x, a.rot_y AS y, "
+                "a.rot_z AS z, a.rgb_path AS p, a.frame_id AS f"
+            ):
+                try:
+                    s = canonical_symbol(str(r["s"]))
+                except ValueError:
+                    continue
+                xyz = [float(v) for v in r["c"]][:3]
+                yaw = (
+                    _quat_yaw(r["w"], r["x"], r["y"], r["z"])
+                    if r["w"] is not None
+                    else None
+                )
+                poses[s] = (np.array(xyz), yaw)
+                if r["p"]:
+                    rows.append((r["p"], KEYFRAME, s, r["f"], xyz, yaw))
+            for r in self.query(
+                "MATCH (k:SubKeyframe) WHERE k.rgb_path IS NOT NULL "
+                "AND k.center IS NOT NULL "
+                "OPTIONAL MATCH (k)-[:ANCHORED_TO]->(a) RETURN k.center AS c, "
+                "k.rot_w AS w, k.rot_x AS x, k.rot_y AS y, k.rot_z AS z, "
+                "k.rgb_path AS p, k.frame_id AS f, a.nodeSymbol AS a"
+            ):
+                try:
+                    a = canonical_symbol(str(r["a"])) if r["a"] else None
+                except ValueError:
+                    a = None
+                yaw = (
+                    _quat_yaw(r["w"], r["x"], r["y"], r["z"])
+                    if r["w"] is not None
+                    else None
+                )
+                rows.append(
+                    (r["p"], SUBKEYFRAME, a, r["f"], [float(v) for v in r["c"]][:3], yaw)
+                )
+            if rows:
+                return AgentFrameIndex(rows, poses.get)
+            store = self.image_store()
+            if store is None:
+                return AgentFrameIndex([], poses.get)
+
+            def lookup(nid):
+                p = poses.get(symbol_of(int(nid)))
+                if p is None:
+                    return None
+                c, s_ = math.cos(p[1] or 0.0), math.sin(p[1] or 0.0)
+                T = np.eye(4)
+                T[:2, :2] = [[c, -s_], [s_, c]]
+                T[:3, 3] = p[0]
+                return T
+
+            with self._store_lock:
+                return AgentFrameIndex.from_store(store, lookup=lookup)
+
+        idx = self.agent_index(("neo4j", self.version()), build)
+        return agent_frame_images(idx, sym, loaded.records.get(sym))
 
     def node_images(self, sym: str, props: dict) -> list[pathlib.Path]:
         """Image files from the heracles ``rgb_path`` properties (Agent, SubKeyframe,
@@ -1040,7 +1226,14 @@ class LiveSource(Source):
 
     def node_detail_extra(self, sym, loaded):
         try:
-            images = list_images(self.image_store(), node_id_of(sym))
+            store = self.image_store()
+            if (
+                store is not None
+                and loaded is not None
+                and is_agent_record(loaded.records.get(sym))
+            ):
+                return {}, self.store_agent_images(store, sym, loaded)
+            images = list_images(store, node_id_of(sym))
         except Exception as e:  # noqa: BLE001
             log.debug("live images for %s: %s", sym, e)
             images = []
