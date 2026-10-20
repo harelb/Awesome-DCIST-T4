@@ -24,8 +24,8 @@ import urllib.request
 # search silently misses objects that are in the archive).
 QUERY_MODE = "frustum"
 QUERY_TOP_K = 60
-QUERY_MAX_FRAMES = 60
-QUERY_PATIENCE = 25
+QUERY_MAX_FRAMES = 30
+QUERY_PATIENCE = 3
 
 
 class Sam3Unavailable(RuntimeError):

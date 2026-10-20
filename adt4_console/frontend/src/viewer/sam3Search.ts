@@ -119,8 +119,8 @@ export const DEFAULT_PARAMS: SearchParams = {
   source: "all",
   mode: "frustum",
   topK: 60,
-  maxFrames: 60,
-  patience: 25,
+  maxFrames: 30,
+  patience: 3,
   conf: null,
   minScore: 0,
 };

@@ -65,7 +65,7 @@ describe("SearchImagesPanel", () => {
     await act(async () => (document.querySelector("form") as HTMLFormElement).requestSubmit());
     await flush();
     const q = fetchMock.mock.calls.find(c => c[0] === "api/sam3/query")!;
-    expect(JSON.parse(String(q[1]?.body))).toMatchObject({prompt: "mug", mode: "frustum", top_k: 60, max_frames: 60, patience: 25, source: "all"});
+    expect(JSON.parse(String(q[1]?.body))).toMatchObject({prompt: "mug", mode: "frustum", top_k: 60, max_frames: 30, patience: 3, source: "all"});
     const text = document.body.textContent ?? "";
     expect(text).toContain("2 candidates");
     expect(text).toContain("would merge into O7 (0.20 m)");
