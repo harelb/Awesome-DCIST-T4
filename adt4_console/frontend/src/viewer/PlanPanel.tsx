@@ -8,6 +8,8 @@ import {Badge, Empty, ErrorBox, Loading, Segmented, Spinner} from "../components
 import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {parseSym} from "../codec";
 import {LeaseControl, LeaseRefusalNotice} from "./LeaseControl";
+import {FocusChip} from "./RobotFocusPicker";
+import {useFocusedRobot} from "./useRobotFocus";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
 export function pddlSymbol(sym: string): string {
@@ -28,7 +30,10 @@ export async function sendGoal(robot: string, kind: string, body: unknown) {
 
 export function PlanPanel() {
   const robots = useApi<PlanRobot[]>("api/plan/robots");
-  const {planRobot, set, gotoDraft, pickMode, pddlDraft} = useViewer();
+  const {planRobot: chosen, set, setFocus, gotoDraft, pickMode, pddlDraft} = useViewer();
+  // a robot focus decides the plan robot; "all robots" keeps the panel's own pick
+  const focused = useFocusedRobot();
+  const planRobot = focused ?? chosen;
   const plan = useRobots(s => (planRobot ? s.plan[planRobot] : undefined));
   const [tool, setTool] = useState<Tool>("goto");
   const [lang, setLang] = useState("");
@@ -39,8 +44,10 @@ export function PlanPanel() {
 
   const list = robots.data ?? [];
   useEffect(() => {
-    if (!planRobot && list.length) set({planRobot: list[0].robot});
-  }, [list, planRobot, set]);
+    if (!focused && !planRobot && list.length) set({planRobot: list[0].robot});
+    // keep the store in step (chat sends to planRobot)
+    else if (focused && chosen !== focused) set({planRobot: focused});
+  }, [list, planRobot, focused, chosen, set]);
   const current = list.find(r => r.robot === planRobot);
   const kinds = new Set(current?.plugins.map(p => p.kind) ?? []);
   const pddlPlugins = current?.plugins.filter(p => p.kind === "pddl") ?? [];
@@ -78,17 +85,30 @@ export function PlanPanel() {
   if (robots.loading && !robots.data) return <Loading label="Loading planners" />;
   if (robots.error && !robots.data) return <ErrorBox error={robots.error} onRetry={robots.reload} />;
   if (!list.length) return <Empty title="No planning robots">The console exposes planning for robots given with --robots.</Empty>;
+  if (focused && !current)
+    return (
+      <Empty title={`No planner for ${focused}`}>
+        The console exposes planning for robots given with --robots ({list.map(r => r.robot).join(", ")}).{" "}
+        <button className="btn btn-xs" onClick={() => setFocus("all")}>
+          All robots
+        </button>
+      </Empty>
+    );
 
   return (
     <div className="plan-panel">
       <div className="row gap between">
-        <select className="input" value={planRobot ?? ""} onChange={e => set({planRobot: e.target.value})} aria-label="Plan robot">
-          {list.map(r => (
-            <option key={r.robot} value={r.robot}>
-              {r.robot}
-            </option>
-          ))}
-        </select>
+        {focused ? (
+          <FocusChip robot={focused} />
+        ) : (
+          <select className="input" value={planRobot ?? ""} onChange={e => set({planRobot: e.target.value})} aria-label="Plan robot">
+            {list.map(r => (
+              <option key={r.robot} value={r.robot}>
+                {r.robot}
+              </option>
+            ))}
+          </select>
+        )}
         <div className="row gap-sm">
           {planRobot && <LeaseControl robot={planRobot} />}
           <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Pause", () => postJSON(`api/robots/${planRobot}/executor/pause`))}>

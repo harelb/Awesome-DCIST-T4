@@ -102,7 +102,7 @@ job = {id, kind, title, state: "running"|"waiting"|"succeeded"|"failed"|"cancell
   or the local run with the same run_id); with no local copy the record says `pending` and a later transfer of
   that run registers it. The record persists in `settings.launch_state_path` (cli: `~/.adt4_console/active_launch.json`).
 * `GET /api/launch/active` → `{active: {experiment, robots, mode, started_at, prior: {run_id, source_machine, path, label, local_path, source_id, pending} | null} | null, default_sources: [prior source id?, "live:<robot>"...]}`;
-  the Map viewer (no `?src=`) enables `default_sources`, and the ones not in the catalog yet when they appear.
+  the Robot viewer (no `?src=`) enables `default_sources`, and the ones not in the catalog yet when they appear.
   `DELETE /api/launch/active` forgets it.
 * `POST /api/robots/{r}/stop_save` → job: call `/{r}/shutdown` (std_srvs/Empty) via rclpy with 10 s timeout; fallback `send_tmux_keys(user, ip)` if the machine is in topology
 * `POST /api/robots/{r}/save_dsg` `{path?: str, include_mesh: bool=true}` → job: `/{r}/dsg_saver/save_dsg` (dcist_launch_system_msgs/srv/SaveDsg)
@@ -309,7 +309,7 @@ token usage and persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget
 Without credentials a deterministic fallback answers "find/go to <label>" queries by
 matching object labels in the selected graph source and proposing a goto goal.
 
-### 10.1 Image search (SAM3 query server, Map viewer "Images" tab)
+### 10.1 Image search (SAM3 query server, Robot viewer "Images" tab)
 
 Forwarded to the SAM3 query server (`--sam3-url`, agentic_navigation
 `sam3_frontend/query_server.py`); nothing is written until a commit.

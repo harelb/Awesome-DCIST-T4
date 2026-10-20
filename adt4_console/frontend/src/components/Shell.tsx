@@ -33,7 +33,7 @@ const NAV: {to: string; label: string; short?: string; icon: keyof typeof P}[] =
   {to: "/fleet", label: "Fleet", icon: "fleet"},
   {to: "/launch", label: "Launch", icon: "launch"},
   {to: "/maps", label: "Maps", icon: "maps"},
-  {to: "/viewer", label: "Map viewer", short: "Viewer", icon: "viewer"},
+  {to: "/viewer", label: "Robot viewer", short: "Viewer", icon: "viewer"},
   {to: "/network", label: "Network", icon: "network"},
   {to: "/config", label: "Config", icon: "config"},
 ];

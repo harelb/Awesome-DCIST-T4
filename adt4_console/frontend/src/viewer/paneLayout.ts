@@ -1,5 +1,7 @@
-// Map viewer pane layout: splitter widths and floating (popped-out) side-panel
-// tabs. Pure state + geometry helpers, persisted per browser in localStorage.
+// Robot viewer pane layout: splitter widths, floating (popped-out) side-panel
+// tabs and the drive layout (camera pinned over the side-panel tabs, teleop
+// selected). Pure state + geometry helpers, persisted per browser in
+// localStorage.
 // Every storage access is wrapped: the layout falls back to defaults when
 // storage is blocked, empty or holds junk.
 
@@ -25,6 +27,11 @@ export interface PaneLayout {
   windows: Partial<Record<PaneTab, FloatWin>>;
   /** stacking order of floating windows, back to front */
   order: PaneTab[];
+  /** drive layout: true / false as the operator chose; null = automatic
+   *  (on while a robot is focused, off for all robots) */
+  drive: boolean | null;
+  /** drive layout: height of the camera pane over the side-panel tabs */
+  cameraH: number;
 }
 
 export const LAYOUT_KEY = "adt4.viewer.layout.v1";
@@ -32,6 +39,8 @@ export const LEFT = {def: 280, min: 200, max: 560};
 export const RIGHT = {def: 380, min: 280, max: 960};
 /** the canvas keeps at least this much width between the docked panels */
 export const MIN_CANVAS = 320;
+/** drive layout camera pane height */
+export const CAM_H = {def: 340, min: 140, max: 900};
 export const WIN_MIN = {w: 260, h: 160};
 /** collapsed (minimized) window height: the title bar */
 export const TITLE_H = 32;
@@ -50,7 +59,7 @@ const DEFAULT_SIZE: Record<PaneTab, {w: number; h: number}> = {
   camera: {w: 520, h: 420},
 };
 
-export const defaultLayout = (): PaneLayout => ({leftW: LEFT.def, rightW: RIGHT.def, windows: {}, order: []});
+export const defaultLayout = (): PaneLayout => ({leftW: LEFT.def, rightW: RIGHT.def, windows: {}, order: [], drive: null, cameraH: CAM_H.def});
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), Math.max(lo, hi));
 const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -62,6 +71,8 @@ export function sanitizeLayout(raw: unknown): PaneLayout {
   const r = raw as Record<string, unknown>;
   if (num(r.leftW)) out.leftW = clamp(Math.round(r.leftW), LEFT.min, LEFT.max);
   if (num(r.rightW)) out.rightW = clamp(Math.round(r.rightW), RIGHT.min, RIGHT.max);
+  if (typeof r.drive === "boolean") out.drive = r.drive;
+  if (num(r.cameraH)) out.cameraH = clamp(Math.round(r.cameraH), CAM_H.min, CAM_H.max);
   const wins = r.windows && typeof r.windows === "object" ? (r.windows as Record<string, unknown>) : {};
   for (const t of PANE_TABS) {
     const w = wins[t] as Record<string, unknown> | undefined;
@@ -205,4 +216,26 @@ export function updateWin(l: PaneLayout, tab: PaneTab, patch: Partial<FloatWin>)
   const w = l.windows[tab];
   if (!w) return l;
   return {...l, windows: {...l.windows, [tab]: {...w, ...patch}}};
+}
+
+/** Whether the drive layout is in effect: the operator's choice, else on
+ *  while a robot is focused. */
+export function driveOn(l: Pick<PaneLayout, "drive">, focused: string | null): boolean {
+  return l.drive ?? focused !== null;
+}
+
+/** The drive-layout toggle: flips what is in effect now and records it. */
+export function toggleDrive(l: PaneLayout, focused: string | null): PaneLayout {
+  return {...l, drive: !driveOn(l, focused)};
+}
+
+/** Tabs on the side-panel strip: in the drive layout the camera has its own
+ *  pane above the strip (unless it floats in a window). */
+export function stripTabs(drive: boolean, cameraFloats: boolean): PaneTab[] {
+  return drive && !cameraFloats ? PANE_TABS.filter(t => t !== "camera") : PANE_TABS;
+}
+
+/** Camera pane height that leaves the tabs below at least `minBelow` px. */
+export function clampCameraH(h: number, panelH: number, minBelow = 220): number {
+  return clamp(Math.round(h), CAM_H.min, Math.min(CAM_H.max, panelH - minBelow));
 }

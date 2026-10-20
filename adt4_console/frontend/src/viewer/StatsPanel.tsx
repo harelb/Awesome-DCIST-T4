@@ -3,6 +3,8 @@ import {useEffect, useRef, useState} from "react";
 import {useViewer, srcPath} from "../stores/viewer";
 import {errorText, getJSON} from "../lib/api";
 import {Spinner} from "../components/ui";
+import {robotOfSource} from "../lib/frameAlign";
+import {useFocusedRobot} from "./useRobotFocus";
 
 export interface GraphStats {
   layers: {key: string; name: string; kind?: string; nodes: number}[];
@@ -106,7 +108,12 @@ function SourceStats({id, label, kind, rev, version}: {id: string; label: string
 
 export function StatsPanel() {
   const {sources, order} = useViewer();
-  const enabled = order.map(id => sources[id]).filter(s => s?.enabled && s.status === "ready");
+  const focused = useFocusedRobot();
+  // a robot focus hides other robots' live sources (shared maps stay)
+  const enabled = order
+    .map(id => sources[id])
+    .filter(s => s?.enabled && s.status === "ready")
+    .filter(s => !focused || !robotOfSource(s.id) || robotOfSource(s.id) === focused);
   if (!enabled.length) return null;
   return (
     <div className="stats-panel">

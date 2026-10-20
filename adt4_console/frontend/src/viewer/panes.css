@@ -1,4 +1,5 @@
-/* Map viewer pane chrome: splitters, floating tab windows (Panes.tsx). */
+/* Robot viewer pane chrome: splitters, floating tab windows (Panes.tsx), the
+   robot focus picker and the drive layout (ViewerPage.tsx). */
 
 .tab-slot,
 .tab-host {
@@ -332,4 +333,314 @@ body.pane-dragging-row * {
   border-radius: 999px;
   font-size: 12.5px;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+/* ---------- robot focus picker (RobotFocusPicker.tsx) ---------- */
+.focus-picker {
+  position: relative;
+  flex: none;
+}
+.focus-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(16, 22, 29, 0.92);
+  backdrop-filter: blur(4px);
+  font-weight: 600;
+  max-width: 260px;
+}
+.focus-btn.focused {
+  border-width: 1px;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.focus-btn .focus-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.focus-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.focus-dot.live-stale {
+  opacity: 0.6;
+}
+.focus-dot.live-offline {
+  opacity: 0.35;
+  outline: 1px dashed var(--muted);
+  outline-offset: 1px;
+}
+.focus-all-mark {
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1;
+}
+.focus-live {
+  font: 500 11px var(--sans);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.focus-live.live-online {
+  color: var(--ok);
+}
+.focus-live.live-stale {
+  color: var(--warn);
+}
+.focus-live.live-offline {
+  color: var(--muted);
+}
+.focus-caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+.focus-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 70;
+  min-width: 220px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+.focus-menu li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.focus-menu li .focus-name {
+  flex: 1;
+}
+.focus-menu li.active {
+  background: var(--bg-3);
+}
+.focus-menu li.selected {
+  font-weight: 650;
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.focus-menu li.focus-empty {
+  cursor: default;
+}
+
+/* panels that follow the focus show it as a chip */
+.focus-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 2px 4px 2px 9px;
+  font: 600 13px var(--sans);
+  white-space: nowrap;
+}
+.focus-chip-x {
+  all: unset;
+  cursor: pointer;
+  color: var(--muted);
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+.focus-chip-x:hover,
+.focus-chip-x:focus-visible {
+  color: var(--text);
+  background: var(--bg-3);
+}
+
+/* toolbar toggles (Follow / Drive layout) */
+.vtoolbar .panel-btn.on,
+.phone-bar2 .panel-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* legend chips focus their robot */
+.robot-legend .robot-chip {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.robot-chip.dim {
+  opacity: 0.55;
+}
+.robot-chip.focused {
+  background: rgba(22, 30, 39, 0.95);
+}
+.robot-tag.dim {
+  opacity: 0.4;
+}
+.robot-tag.focused {
+  font-size: 13px;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+/* ---------- drive layout: camera pinned above the side-panel tabs ---------- */
+.vright.drive {
+  overflow: hidden;
+}
+.vright.drive .vright-body {
+  overflow: auto;
+}
+.drive-cam {
+  flex: none;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+.drive-cam-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.drive-cam .pop-btn {
+  width: 24px;
+  height: 24px;
+}
+.drive-cam .tab-slot {
+  overflow: auto;
+}
+/* the picture fills what the pane has left */
+.drive-cam .camera-panel {
+  flex: 1;
+  min-height: 0;
+  gap: 6px;
+}
+.drive-cam .camera-frame {
+  flex: 1;
+  min-height: 80px;
+}
+.drive-cam .camera-frame img {
+  height: 100%;
+  object-fit: contain;
+}
+.vright.drive > .pane-splitter.row {
+  margin: -6px 0;
+}
+
+/* phone: camera picture-in-picture over the map, below the toolbars */
+.vtoolbar.phone-bar2 {
+  top: 58px;
+}
+.drive-pip {
+  position: absolute;
+  z-index: 35;
+  top: 104px;
+  left: max(8px, env(safe-area-inset-left));
+  right: max(8px, env(safe-area-inset-right));
+  height: min(26dvh, 220px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(11, 15, 20, 0.92);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 6px;
+  overflow: hidden;
+}
+.drive-pip .camera-panel {
+  flex: 1;
+  min-height: 0;
+}
+.camera-panel.compact {
+  gap: 6px;
+}
+.camera-panel.compact .camera-frame {
+  flex: 1;
+  min-height: 0;
+}
+.camera-panel.compact .camera-frame img,
+.camera-panel.compact .camera-frame canvas {
+  height: 100%;
+  object-fit: contain;
+}
+.camera-panel.compact .camera-grid {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  overflow: auto;
+}
+
+/* Camera tab, all robots: one main camera per robot */
+.camera-robot-tile > .camera-tile,
+.camera-robots > .camera-tile {
+  border-width: 2px;
+  border-color: inherit;
+}
+.camera-robot-tile {
+  border-color: var(--line);
+}
+.camera-robot-label {
+  align-items: center;
+  min-width: 0;
+}
+
+/* Teleop with all robots in focus: pick one */
+.teleop-pick-title {
+  font-weight: 650;
+  font-size: 15px;
+}
+.teleop-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.teleop-pick-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.teleop-pick-name {
+  font-weight: 650;
+}
+
+/* drive pane / PiP camera: "⋯" more controls */
+.camera-more.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* desktop toolbar: Layers + robot focus, then the search box (wraps under
+   them when the canvas is narrow); the right toolbar keeps its room */
+.vtoolbar.top-left {
+  flex-wrap: wrap;
+  right: 470px;
+}
+.vtoolbar.top-left .searchbox {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+@media (max-width: 1100px) {
+  .vtoolbar.top-left {
+    right: 450px;
+  }
+}
+@media (max-width: 900px) {
+  .vtoolbar.top-left {
+    right: 10px;
+  }
+}
+.camera-panel.compact > .row.camera-ctl {
+  flex-wrap: nowrap;
+}
+.camera-panel.compact > .row.camera-ctl select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.camera-panel.compact .segmented button {
+  padding: 4px 9px;
 }

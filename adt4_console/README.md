@@ -88,16 +88,36 @@ The header shows the server, WebSocket ("live"), ROS and fleetlink status, plus 
   *Launch* runs the same workflow as the `fleet-adt4` TUI as a job.
 * **Maps.** Experiment outputs on every machine. Actions: *transfer* (rsync to this machine),
   *verify* (hash comparison across machines), *load into Neo4j* (ingest), and *open in viewer*.
-* **Map viewer.** The 3D scene graph and mesh for any number of sources at once: `file:` run
-  dirs, `neo4j:` databases and `live:` robots. Panels:
+* **Robot viewer** (`#/viewer`, formerly "Map viewer"). The 3D scene graph and mesh for any number of
+  sources at once (`file:` run dirs, `neo4j:` databases and `live:` robots), plus each robot's
+  cameras, teleop, plans and link.
+  * **Robot focus** (toolbar, next to *Layers*): *All robots* or one robot, each with its colour and
+    online / stale / offline state; `[` / `]` cycle it, clicking a legend chip or a robot's camera
+    tile focuses that robot. Remembered per browser (a robot the console no longer knows reads as
+    all). Every robot-specific part follows it: **Camera** (that robot's cameras incl. the Spot
+    all-cameras grid; all robots: one main camera per robot), **Teleop** (drives the focused
+    robot only; with all robots it offers a button per robot, which focuses it; changing the focus
+    while armed disarms first: zero velocity + release), **Plan** and **Chat** (the plan robot is
+    the focused robot; all robots: the Plan tab's own pick), **Live link** (that robot only),
+    graph statistics (other robots' `live:` sources hidden), **Images** (preselects that robot's
+    newest live keyframe pool) and the 3D view (other robots' live map, paths, plan and glyph
+    are dimmed; *Display → Other robots*: dim / hide / always full; *Follow* keeps the camera on
+    the focused robot). Panels that follow show the robot as a chip (× = all robots).
+  * **Drive layout** (toolbar *Drive layout*; on by default while a robot is focused, your choice is
+    remembered): the map, the focused robot's camera and the Teleop tab at once, no floating
+    windows. Wide screens pin the camera above the side-panel tabs (drag the edge between them;
+    ⧉ pops it out, the tabs below default to Teleop); phones show the camera as a
+    picture-in-picture under the toolbar with Teleop in the bottom sheet. Teleop keys still drive
+    only while the Teleop panel has focus: clicking the map or the camera disarms it.
+  Panels:
   * left: *Sources* (enable, mesh/graph toggles, tile progress), *Layers* and *Edges* toggles,
     *Live overlays* (below), *Display* (layer stacking, mesh opacity, bounding boxes, trajectory);
-  * toolbar: search (labels, names, symbols), 3D/top camera, follow a robot;
+  * toolbar: robot focus, search (labels, names, symbols), follow a robot, drive layout, 3D/top camera;
   * right tabs: **Inspect** (selected node, attributes, images; with nothing selected,
     **graph statistics** for each enabled source: nodes per layer, edges per kind, mesh size and top
     object labels), **Plan** (goto/TSP picking, PDDL, language goals, current plan and executor
     pause/resume), **Chat**, **Live link** (per-robot staleness, latency, budgets and auto mode;
-    see below), and **Camera**.
+    see below), **Teleop**, **Images** and **Camera**.
 * **Network.** The zenoh router and its links (deploy configs, start/stop the local router),
   the Silvus radio RSSI matrix and routes, and an iperf throughput test.
 * **Config.** Topology editor (machines, roles, addresses) and the console settings.

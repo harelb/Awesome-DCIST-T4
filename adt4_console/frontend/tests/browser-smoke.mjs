@@ -141,6 +141,22 @@ try {
       await shot(page, `viewer-${tab.toLowerCase().replace(/\s+/g, "-")}`);
     }
   }
+  // robot focus: the first robot (read-only: focusing never arms teleop), the
+  // drive layout it brings up, then back to all robots
+  const picker = page.getByTestId("focus-picker");
+  if (await picker.count()) {
+    await picker.click();
+    const opts = page.getByRole("listbox", {name: "Robot focus"}).getByRole("option");
+    if ((await opts.count()) > 1) {
+      await opts.nth(1).click();
+      await settle(page, 1500);
+      if (!(await page.locator(".vright.drive .drive-cam").count())) jsErrors.push("focusing a robot did not bring up the drive layout");
+      await shot(page, "viewer-focus-drive");
+      await picker.click();
+      await page.getByRole("listbox", {name: "Robot focus"}).getByRole("option").first().click();
+      await settle(page, 500);
+    } else await page.keyboard.press("Escape");
+  }
   // top-down
   const top = page.getByRole("tab", {name: "Top", exact: true});
   if (await top.count()) {

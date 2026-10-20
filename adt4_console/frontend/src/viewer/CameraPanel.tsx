@@ -3,14 +3,22 @@
 // "Video" mode switches to the live C5 stream (VideoView, API.md §12).
 // "All" mode tiles every advertised camera (Spot: frontleft ... hand): stills
 // at ~1 Hz, or live video (GridVideo: one mosaic stream by default).
+// The panel follows the viewer's robot focus: one robot's cameras when a robot
+// is focused, else one main camera (its first) per live robot; clicking a
+// robot's tile focuses that robot. `compact` (phone drive layout) keeps only
+// the picture and the camera picker.
 import {useEffect, useRef, useState} from "react";
 import {getJSON, errorText} from "../lib/api";
 import {getToken} from "../lib/auth";
 import {Empty, Toggle} from "../components/ui";
 import {useLiveRobots} from "../stores/robots";
+import {useViewer} from "../stores/viewer";
+import {useRobotColorOf} from "../lib/palette";
+import {useFocusedRobot} from "./useRobotFocus";
 import {useFleet} from "../stores/fleet";
 import {VideoView} from "./VideoView";
 import {GridVideo} from "./GridVideo";
+import {FocusChip} from "./RobotFocusPicker";
 
 const GRID_KIND_KEY = "adt4.cameraGrid.kind";
 const loadGridKind = (): "stills" | "video" => {
@@ -85,7 +93,7 @@ export function showGrid(platform: string | undefined, cams: string[]): boolean 
 }
 
 /** One grid tile: its own fetch loop, one request in flight, ~1 Hz. */
-function GridTile({robot, cam, width, hz, onOpen, onVideo}: {robot: string; cam: string; width: number; hz: number; onOpen: () => void; onVideo: () => void}) {
+function GridTile({robot, cam, width, hz, onOpen, onVideo, label, openTitle}: {robot: string; cam: string; width: number; hz: number; onOpen: () => void; onVideo?: () => void; label?: React.ReactNode; openTitle?: string}) {
   const [frame, setFrame] = useState<CameraFrame | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const ref = useRef<CameraFrame | null>(null);
@@ -123,11 +131,11 @@ function GridTile({robot, cam, width, hz, onOpen, onVideo}: {robot: string; cam:
   );
   return (
     <div className="camera-tile">
-      <button className="camera-tile-img" onClick={onOpen} title={`Open ${cam}`}>
+      <button className="camera-tile-img" onClick={onOpen} title={openTitle ?? `Open ${cam}`}>
         {frame ? <img src={frame.url} alt={`${robot} ${cam}`} /> : <span className="muted small">{err ? "" : "..."}</span>}
       </button>
       <div className="camera-tile-bar row between">
-        <span className="mono small">{cam}</span>
+        {label ?? <span className="mono small">{cam}</span>}
         <span className="row gap-sm">
           {err ? (
             <span className="small tone-err" title={err}>
@@ -136,18 +144,76 @@ function GridTile({robot, cam, width, hz, onOpen, onVideo}: {robot: string; cam:
           ) : frame ? (
             <span className="small muted">{(frame.bytes / 1024).toFixed(0)} KB</span>
           ) : null}
-          <button className="btn btn-xs" onClick={onVideo} title={`Live video of ${cam}`}>
-            video
-          </button>
+          {onVideo && (
+            <button className="btn btn-xs" onClick={onVideo} title={`Live video of ${cam}`}>
+              video
+            </button>
+          )}
         </span>
       </div>
     </div>
   );
 }
 
-export function CameraPanel() {
+/** One main camera (the robot's first) per robot; a click focuses that robot. */
+function RobotMainTile({robot}: {robot: string}) {
+  const [cams, setCams] = useState<string[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const setFocus = useViewer(s => s.setFocus);
+  const color = useRobotColorOf()(robot);
+  useEffect(() => {
+    let alive = true;
+    getJSON<{cameras: string[]} | string[]>(`api/robots/${encodeURIComponent(robot)}/cameras`)
+      .then(d => alive && setCams(Array.isArray(d) ? d : (d.cameras ?? [])))
+      .catch(e => alive && setErr(errorText(e)));
+    return () => {
+      alive = false;
+    };
+  }, [robot]);
+  const label = (
+    <span className="row gap-sm camera-robot-label">
+      <span className="focus-dot" style={{background: color}} />
+      <strong className="small">{robot}</strong>
+      {cams?.[0] && <span className="mono small muted">{cams[0]}</span>}
+    </span>
+  );
+  if (!cams?.length)
+    return (
+      <div className="camera-tile" style={{borderColor: color}}>
+        <button className="camera-tile-img" onClick={() => setFocus(robot)} title={`Focus ${robot}`}>
+          <span className="muted small">{err ? "no cameras" : cams ? "no cameras" : "..."}</span>
+        </button>
+        <div className="camera-tile-bar row between">{label}</div>
+      </div>
+    );
+  return (
+    <div className="camera-robot-tile" style={{borderColor: color}}>
+      <GridTile robot={robot} cam={cams[0]} width={320} hz={1} label={label} openTitle={`Focus ${robot}`} onOpen={() => setFocus(robot)} />
+    </div>
+  );
+}
+
+export function CameraPanel({compact = false}: {compact?: boolean}) {
   const robots = useLiveRobots();
-  const [robot, setRobot] = useState<string>("");
+  const focused = useFocusedRobot();
+  if (focused) return <RobotCameras key={focused} robot={focused} live={robots.includes(focused)} compact={compact} />;
+  if (!robots.length) return <Empty title="No live robots">Camera frames come from a robot's fleetlink agent. None has reported yet.</Empty>;
+  return (
+    <div className={`camera-panel ${compact ? "compact" : ""}`}>
+      {!compact && <div className="muted small">One main camera per robot. Click a robot to focus it (all its cameras, teleop and plan follow).</div>}
+      <div className="camera-grid camera-robots">
+        {robots.map(r => (
+          <RobotMainTile key={r} robot={r} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RobotCameras({robot: r, live, compact: dense}: {robot: string; live: boolean; compact: boolean}) {
+  // compact (drive layout panes): picture + camera picker; "⋯" shows the rest
+  const [more, setMore] = useState(false);
+  const compact = dense && !more;
   const [cams, setCams] = useState<string[]>([]);
   const [cam, setCam] = useState<string>("");
   const [mode, setMode] = useState<"still" | "video" | "grid">("still");
@@ -170,7 +236,6 @@ export function CameraPanel() {
   const [nonce, setNonce] = useState(0);
   const frameRef = useRef<CameraFrame | null>(null);
 
-  const r = robot && robots.includes(robot) ? robot : (robots[0] ?? "");
   const platform = useFleet(s => s.machines?.machines.find(m => m.name === r)?.platform_type);
   const grid = showGrid(platform, cams);
   const effMode = mode === "grid" && !grid ? "still" : mode;
@@ -238,11 +303,11 @@ export function CameraPanel() {
     [],
   );
 
-  if (!robots.length) return <Empty title="No live robots">Camera frames come from a robot's fleetlink agent. None has reported yet.</Empty>;
   const age = frame ? frameAge(frame, now) : null;
   return (
-    <div className="camera-panel">
-      <div className="row gap-sm wrap">
+    <div className={`camera-panel ${compact ? "compact" : ""}`}>
+      {!live && !frame && <div className="small tone-warn">{r} has not reported over fleetlink yet; frames may not arrive.</div>}
+      <div className="row gap-sm wrap camera-ctl">
         <div className="segmented" role="group" aria-label="Camera mode">
           <button className={effMode === "still" ? "on" : ""} onClick={() => setMode("still")} title="On-demand still frames">
             Still
@@ -252,17 +317,11 @@ export function CameraPanel() {
           </button>
           {grid && (
             <button className={effMode === "grid" ? "on" : ""} onClick={() => setMode("grid")} title="All cameras at once: stills about 1 Hz each, or live video">
-              All cameras
+              {compact ? "All" : "All cameras"}
             </button>
           )}
         </div>
-        <select className="input input-sm" value={r} onChange={e => setRobot(e.target.value)} aria-label="Robot">
-          {robots.map(x => (
-            <option key={x} value={x}>
-              {x}
-            </option>
-          ))}
-        </select>
+        {!dense && <FocusChip robot={r} />}
         {effMode === "grid" && (
           <div className="segmented" role="group" aria-label="All cameras kind">
             <button className={gridKind === "stills" ? "on" : ""} onClick={() => setGridKind("stills")} title="A still per camera, about 1 Hz">
@@ -283,7 +342,12 @@ export function CameraPanel() {
           ))}
         </select>
         )}
-        {effMode === "still" && (
+        {dense && (
+          <button className={`btn btn-xs camera-more ${more ? "on" : ""}`} onClick={() => setMore(m => !m)} aria-pressed={more} aria-label="More camera controls" title={more ? "Fewer controls" : "Frame width, refresh rate, frame info"}>
+            ⋯
+          </button>
+        )}
+        {effMode === "still" && !compact && (
           <>
             <select className="input input-sm" value={width} onChange={e => setWidth(Number(e.target.value))} aria-label="Frame width">
               {[320, 640, 960, 1280].map(w => (
@@ -339,17 +403,19 @@ export function CameraPanel() {
   function stillView() {
     return (
       <>
-        <div className="row gap-sm wrap">
-          <Toggle checked={auto} onChange={setAuto} label="Auto refresh" />
-          <label className="slider-row camera-hz">
-            <input type="range" min={MIN_HZ} max={MAX_HZ} step={0.1} value={hz} disabled={!auto} aria-label="Refresh rate" onChange={e => setHz(clampHz(Number(e.target.value)))} />
-            <span className="mono small">{hz.toFixed(1)} Hz</span>
-          </label>
-        </div>
+        {!compact && (
+          <div className="row gap-sm wrap">
+            <Toggle checked={auto} onChange={setAuto} label="Auto refresh" />
+            <label className="slider-row camera-hz">
+              <input type="range" min={MIN_HZ} max={MAX_HZ} step={0.1} value={hz} disabled={!auto} aria-label="Refresh rate" onChange={e => setHz(clampHz(Number(e.target.value)))} />
+              <span className="mono small">{hz.toFixed(1)} Hz</span>
+            </label>
+          </div>
+        )}
         <div className={`camera-frame ${busy ? "busy" : ""}`}>
           {frame ? <img src={frame.url} alt={`${r} ${cam}`} /> : <div className="muted small camera-empty">{busy ? "Requesting frame..." : "No frame"}</div>}
         </div>
-        {frame && (
+        {frame && !compact && (
           <div className="mono small camera-meta">
             <span className={age !== null && age > 5 ? "tone-warn" : ""}>age {age === null ? "?" : `${age.toFixed(1)} s`}</span>
             {" · "}

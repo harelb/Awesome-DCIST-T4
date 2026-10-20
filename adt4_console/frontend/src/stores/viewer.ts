@@ -1,4 +1,4 @@
-// Map-viewer state: overlaid graph sources (heavy data kept in mutable GraphModel
+// Robot-viewer state: overlaid graph sources (heavy data kept in mutable GraphModel
 // objects, React re-renders keyed on `rev`) plus all viewer UI toggles.
 import {create} from "zustand";
 import {decodeDelta, decodeGraph} from "../codec";
@@ -7,6 +7,7 @@ import {errorText, getJSON, getMsgpack} from "../lib/api";
 import type {GraphSource, TileManifest} from "../types";
 import type {VizStyle} from "../viewer/layout";
 import {ws} from "../ws";
+import {loadFocus, saveFocus, type Focus} from "../viewer/robotFocus";
 
 export interface SourceView {
   id: string;
@@ -57,6 +58,12 @@ interface ViewerStore {
   meshClipOn: boolean;
   meshClipHeight: number;
   planRobot: string | null;
+  /** robot focus: "all" or a robot name; every robot-specific panel follows
+   *  it (viewer/robotFocus.ts). Read it through useFocusedRobot(), which
+   *  falls back to "all" for a robot the console does not know. */
+  focus: Focus;
+  /** how the robots not in focus are drawn in 3D */
+  focusOthers: "dim" | "hide" | "show";
   pddlDraft: string;
   // interaction
   selected: Selection | null;
@@ -75,6 +82,9 @@ interface ViewerStore {
   set: (patch: Partial<ViewerStore>) => void;
   select: (sel: Selection | null) => void;
   fly: (target: [number, number, number]) => void;
+  /** Change the robot focus (persisted). A robot focus also becomes the plan
+   *  robot, and moves an active camera follow onto that robot. */
+  setFocus: (f: Focus) => void;
 }
 
 const subs = new Map<string, () => void>();
@@ -100,6 +110,8 @@ function blankSource(s: GraphSource): SourceView {
 
 export const srcPath = (id: string) => `api/graph/${encodeURIComponent(id)}`;
 
+const initialFocus = loadFocus();
+
 export const useViewer = create<ViewerStore>((set, get) => ({
   sources: {},
   order: [],
@@ -120,7 +132,9 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   meshCull: true,
   meshClipOn: false,
   meshClipHeight: 2.0,
-  planRobot: null,
+  planRobot: initialFocus === "all" ? null : initialFocus,
+  focus: initialFocus,
+  focusOthers: "dim",
   pddlDraft: "",
   selected: null,
   query: "",
@@ -203,6 +217,11 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   set: patch => set(patch as Partial<ViewerStore>),
   select: sel => set({selected: sel}),
   fly: target => set(s => ({flyTo: {target, nonce: (s.flyTo?.nonce ?? 0) + 1}})),
+  setFocus: f => {
+    const focus = f || "all";
+    saveFocus(focus);
+    set(s => (focus === "all" ? {focus} : {focus, planRobot: focus, follow: s.follow ? focus : null}));
+  },
 }));
 
 async function refetchManifest(id: string) {

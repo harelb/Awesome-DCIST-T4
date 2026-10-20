@@ -10,6 +10,7 @@ import {Toggle} from "../components/ui";
 import {lift, type DecodedGrid} from "../lib/overlays";
 import {shade, useRobotColorOf} from "../lib/palette";
 import {AlignedGroup} from "./AlignedGroup";
+import {DimGroup} from "./DimGroup";
 
 /** Executor overlay colours derived from a robot's colour. */
 export function pathColors(robotHex: string) {
@@ -87,10 +88,10 @@ export function LiveOverlays() {
   return (
     <>
       {robots.map(r => (
-        <group key={r}>
+        <DimGroup key={r} robot={r}>
           {(gridOn[r] ?? true) && <GridLayer robot={r} />}
           <PathLayer robot={r} />
-        </group>
+        </DimGroup>
       ))}
     </>
   );

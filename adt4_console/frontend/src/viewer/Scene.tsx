@@ -16,6 +16,7 @@ import {LiveOverlays} from "./LiveOverlays";
 import {useViewStyle} from "../stores/viewStyle";
 import {contrastFor, STYLE_BACKGROUND, type ColorOpts} from "./style";
 import {captureBridge} from "./screenshot";
+import {DimGroup, useFocusLook} from "./DimGroup";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -91,8 +92,15 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
       )}
     </group>
   );
-  // a live source is in its robot's scene-graph frame: draw it in the global frame
-  return robot ? <AlignedGroup robot={robot}>{content}</AlignedGroup> : content;
+  // a live source is in its robot's scene-graph frame: draw it in the global
+  // frame; dimmed (or dropped) while another robot is in focus
+  return robot ? (
+    <DimGroup robot={robot}>
+      <AlignedGroup robot={robot}>{content}</AlignedGroup>
+    </DimGroup>
+  ) : (
+    content
+  );
 }
 
 /** Click picking: nearest projected node within a few pixels, else the mesh surface. */
@@ -194,6 +202,21 @@ function quatYaw(qw: number, qx: number, qy: number, qz: number) {
   return Math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz));
 }
 
+function RobotGlyph({robot, children}: {robot: string; children: React.ReactNode}) {
+  return <DimGroup robot={robot}>{children}</DimGroup>;
+}
+
+function GlyphTag({robot, color, stale}: {robot: string; color: string; stale: boolean}) {
+  const look = useFocusLook(robot);
+  const focused = useViewer(s => s.focus) === robot;
+  return (
+    <div className={`robot-tag ${look === "dim" ? "dim" : ""} ${focused ? "focused" : ""}`} style={{borderColor: color}}>
+      {robot}
+      {stale ? " (stale)" : ""}
+    </div>
+  );
+}
+
 function RobotGlyphs() {
   const states = useRobots(s => s.state);
   const stateAt = useRobots(s => s.stateAt);
@@ -208,7 +231,8 @@ function RobotGlyphs() {
         const color = robotColor(r);
         const stale = now - (stateAt[r] ?? 0) > 5000;
         return (
-          <AlignedGroup key={r} robot={r} frame={p.frame}>
+          <RobotGlyph key={r} robot={r}>
+          <AlignedGroup robot={r} frame={p.frame}>
           <group position={[p.x, p.y, p.z]} rotation={[0, 0, yaw]}>
             <mesh position={[0.35, 0, 0.3]} rotation={[0, 0, -Math.PI / 2]}>
               <coneGeometry args={[0.32, 0.9, 3]} />
@@ -219,13 +243,11 @@ function RobotGlyphs() {
               <meshBasicMaterial color={color} side={THREE.DoubleSide} transparent opacity={stale ? 0.3 : 0.85} />
             </mesh>
             <Html position={[0, 0, 1.4]} center zIndexRange={[20, 0]} className="robot-tag-wrap">
-              <div className="robot-tag" style={{borderColor: color}}>
-                {r}
-                {stale ? " (stale)" : ""}
-              </div>
+              <GlyphTag robot={r} color={color} stale={stale} />
             </Html>
           </group>
           </AlignedGroup>
+          </RobotGlyph>
         );
       })}
     </>
@@ -244,7 +266,7 @@ function PlanOverlay() {
         const cur = currentActionIndex(plan);
         const color = robotColor(r);
         return (
-          <group key={r}>
+          <DimGroup key={r} robot={r}>
             {plan.plan.actions.map((a, i) => {
               const pts = (a.path ?? []).filter(p => p && p.length >= 3) as [number, number, number][];
               const lifted = pts.map(p => [p[0], p[1], p[2] + 0.15] as [number, number, number]);
@@ -275,7 +297,7 @@ function PlanOverlay() {
                 </group>
               );
             })}
-          </group>
+          </DimGroup>
         );
       })}
     </>

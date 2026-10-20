@@ -303,3 +303,15 @@ export const commitCandidate = (pendingId: string, index: number, src?: string) 
   postJSON<{symbol?: string; created?: boolean; merged?: boolean}>("api/sam3/commit", {pending_id: pendingId, index, src});
 
 export const discardPending = (pendingId: string) => postJSON<{discarded: boolean}>("api/sam3/discard", {pending_id: pendingId});
+
+/** Keyframe pool after a robot-focus change: the focused robot's newest live
+ *  mirror (if it has one), else unchanged; back to "all" from another robot's
+ *  mirror when the focus goes to all robots. */
+export function poolForFocus(sources: Sam3Source[] | undefined, focused: string | null, current: string): string {
+  const robotOf = (id: string) => /^live\/([^/]+)\//.exec(id)?.[1] ?? null;
+  if (!focused) return robotOf(current) ? "all" : current;
+  const mine = (sources ?? []).filter(s => robotOf(s.id) === focused);
+  if (!mine.length) return robotOf(current) && robotOf(current) !== focused ? "all" : current;
+  const t = (id: string) => Number(id.split("/").pop());
+  return mine.reduce((a, b) => (t(b.id) > t(a.id) ? b : a)).id;
+}
