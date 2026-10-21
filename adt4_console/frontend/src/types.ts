@@ -443,6 +443,8 @@ export interface LaunchPlan {
   bs_session: string | null;
   /** network the robot <-> base links use; null = the topology default */
   link_network?: string | null;
+  /** "router" | "fleetlink" for this launch; null = the topology default */
+  link_mode?: string | null;
 }
 
 export interface LaunchDefaults {
@@ -457,5 +459,10 @@ export interface LaunchDefaults {
   link_network?: string | null;
   /** the network this console reaches the machines on */
   active_network?: string | null;
+  /** robot link modes and the topology's default (fleet_defaults.fleet_link) */
+  link_modes?: string[];
+  link_mode?: string | null;
+  /** base station that runs the fleetlink router */
+  fleetlink_base?: string | null;
   [k: string]: unknown;
 }

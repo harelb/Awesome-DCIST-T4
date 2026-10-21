@@ -126,6 +126,11 @@ experiments:
     config: [classic]
 
   # development — offline/simulation experiments
+  # a simulated Spot (FakeSpot executor) in fleetlink mode: plan -> action_result
+  # over fleetlink without the real robot (fleetlink/docs/bench_cutover.md)
+  spot_sim_fleetlink:
+    launch_config: [robot_main, spot_sim, fleetlink]
+    config: [default]
   spot_prior_dsg:
     launch_config: [plan_prior, spot_sim]
     config: [prior_dsg]

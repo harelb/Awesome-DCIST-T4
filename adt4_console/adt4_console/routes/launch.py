@@ -27,6 +27,8 @@ class LaunchPlanBody(BaseModel):
     bs_session: str | None = None
     # robot <-> base link network (a topology network name); None = topology default
     link_network: str | None = None
+    # "router" | "fleetlink" for this launch; None = fleet_defaults.fleet_link
+    link_mode: str | None = None
 
 
 def _plan(body: LaunchPlanBody, topo: dict | None = None):
@@ -34,17 +36,27 @@ def _plan(body: LaunchPlanBody, topo: dict | None = None):
 
     if body.link_network and body.link_network not in ((topo or {}).get("networks") or {}):
         raise HTTPException(400, f"unknown link network {body.link_network!r}")
+    if body.link_mode:
+        from dcist_launch_system.fleet.launch_workflow import LaunchError, with_link_mode
+
+        try:
+            with_link_mode(topo or {}, body.link_mode)
+        except LaunchError as e:
+            raise HTTPException(400, str(e)) from None
     return LaunchPlan(**body.model_dump())
 
 
 def link_choices(topo: dict | None, active: str | None) -> dict:
     """Networks a launch can put the robot links on, and the default one."""
-    from dcist_launch_system.fleet_helpers import link_network
+    from dcist_launch_system.fleet_helpers import FLEET_LINK_MODES, fleet_link_mode, fleetlink_base, link_network
 
     return {
         "link_networks": list(((topo or {}).get("networks") or {}).keys()),
         "link_network": link_network(topo or {}, None, active),
         "active_network": active,
+        "link_modes": list(FLEET_LINK_MODES),
+        "link_mode": fleet_link_mode(topo or {}),
+        "fleetlink_base": fleetlink_base(topo or {}),
     }
 
 

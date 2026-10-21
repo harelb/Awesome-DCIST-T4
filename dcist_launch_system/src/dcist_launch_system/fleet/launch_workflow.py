@@ -27,9 +27,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 from dcist_launch_system.fleet_helpers import (
+    FLEET_LINK_MODES,
     _quote_path,
     deploy_zenoh_config,
     fleet_link_mode,
+    fleetlink_base,
     fleetlink_summary,
     generate_namespaced_rviz,
     generate_zenoh_endpoints,
@@ -69,6 +71,24 @@ class LaunchPlan:
     # network the robot <-> base links use (None: zenoh.connect_network, else the
     # active network); see fleet_helpers.link_network
     link_network: str | None = None
+    # "router" | "fleetlink" for this launch (None: fleet_defaults.fleet_link)
+    link_mode: str | None = None
+
+
+def with_link_mode(topo: dict | None, mode: str | None) -> dict | None:
+    """``topo`` with ``fleet_defaults.fleet_link`` set to the launch's ``mode``
+    (a copy; ``topo`` itself when ``mode`` is None).  Every step of a launch
+    reads the mode from the topology (zenoh endpoints, each machine's fleet
+    env, summaries), so one copy keeps them consistent."""
+    if topo is None or not mode:
+        return topo
+    if mode not in FLEET_LINK_MODES:
+        raise LaunchError(f"unknown link mode {mode!r} (one of {', '.join(FLEET_LINK_MODES)})")
+    if mode == "fleetlink" and not fleetlink_base(topo):
+        raise LaunchError("fleetlink mode needs fleet_defaults.fleetlink_base in the topology")
+    out = dict(topo)
+    out["fleet_defaults"] = {**(topo.get("fleet_defaults") or {}), "fleet_link": mode}
+    return out
 
 
 @dataclass
@@ -252,12 +272,14 @@ def dry_run_lines(
     topo: dict | None = None,
     active_network: str | None = None,
 ):
+    topo = with_link_mode(topo, plan.link_mode)
     cmds = build_robot_commands(plan, runtime_config, output_root, topo)
     lines = []
     if topo is not None:
         net = link_network(topo, plan.link_network, active_network)
-        how = "robots dial the fleetlink base" if fleet_link_mode(topo) == "fleetlink" else "base dials the robots"
-        lines.append(f"Robot links: {net or '?'} ({how}); console/ssh: {active_network or '?'}")
+        mode = fleet_link_mode(topo)
+        how = "robots dial the fleetlink base" if mode == "fleetlink" else "base dials the robots"
+        lines.append(f"Robot links: {net or '?'}, {mode} mode ({how}); console/ssh: {active_network or '?'}")
     if plan.prior_path and plan.prior_source:
         exp_name = pathlib.Path(plan.prior_path).name
         for m, _ in cmds:
@@ -638,6 +660,7 @@ def run_launch(
     deps = deps or LaunchDeps()
     cb = callbacks
     try:
+        topo = with_link_mode(topo, plan.link_mode)
         cmds = build_robot_commands(plan, runtime_config, output_root, topo)
     except LaunchError as e:
         cb.log("warn", str(e))

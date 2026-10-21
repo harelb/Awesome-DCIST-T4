@@ -275,3 +275,25 @@ def test_zenoh_publisher_not_undeclared_while_a_put_is_running():
     # the cap holds and a re-used key gets a fresh publisher
     tr.put("adt4/r/mesh/slow", b"x", "C3")
     assert tr.publisher_count() == 1 and sess.pubs["adt4/r/mesh/other"].undeclared
+
+
+def test_shared_channel_splits_airtime_between_links():
+    from fleetlink.transport import LinkEmulator, SharedChannel, VirtualClock
+
+    clock = VirtualClock()
+    links = [LinkEmulator(clock, bandwidth=10_000.0, latency=0.01, loss=0.0, seed=i) for i in range(2)]
+    ch = SharedChannel(links, clock, airtime=[1.0, 2.0])
+    got = {0: 0, 1: 0}
+    for i, lk in enumerate(links):
+        lk.base.subscribe("k/**", lambda key, data, i=i: got.__setitem__(i, got[i] + len(data)))
+    for _ in range(40):  # far more than the channel carries in 2 s
+        for lk in links:
+            lk.robot.put("k/a", b"x" * 1000, "C3")
+    for _ in range(20):
+        clock.advance(0.1)
+        ch.advance()
+    # one 10 kB/s channel for both (not 20 kB/s each); equal turns, and the 2-hop
+    # link's fragments take twice the air: 2 kB per 0.3 s -> ~13.3 kB in 2 s
+    total = got[0] + got[1]
+    assert 12_000 <= total <= 14_500
+    assert abs(got[0] - got[1]) <= 1000

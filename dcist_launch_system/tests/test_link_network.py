@@ -82,4 +82,25 @@ def test_fleetlink_robot_dials_the_base_on_the_chosen_network_only():
 
 def test_dry_run_names_the_link_network():
     lines = dry_run_lines(_plan(), RUNTIME, OUT, TOPO, "mit_wifi")
-    assert lines[0] == "Robot links: silvus (base dials the robots); console/ssh: mit_wifi"
+    assert lines[0] == "Robot links: silvus, router mode (base dials the robots); console/ssh: mit_wifi"
+
+
+def test_launch_link_mode_overrides_the_topology():
+    import pytest
+
+    from dcist_launch_system.fleet.launch_workflow import LaunchError, with_link_mode
+
+    # fleetlink for this launch: the base router links to no robot, robots dial the base
+    deployed, rec = _launch(_plan(link_mode="fleetlink"))
+    assert deployed == [[]]
+    [(_, cmd)] = build_robot_commands(_plan(link_mode="fleetlink"), RUNTIME, OUT, with_link_mode(TOPO, "fleetlink"))
+    assert "ADT4_FLEET_LINK=fleetlink " in cmd and "ADT4_FLEETLINK_CONNECT=tcp/192.168.100.100:7450" in cmd
+    lines = dry_run_lines(_plan(link_mode="fleetlink"), RUNTIME, OUT, TOPO, "mit_wifi")
+    assert lines[0].startswith("Robot links: silvus, fleetlink mode (robots dial the fleetlink base)")
+    # the topology's own mode otherwise
+    assert dry_run_lines(_plan(), RUNTIME, OUT, TOPO, "mit_wifi")[0].startswith("Robot links: silvus, router mode")
+    with pytest.raises(LaunchError):
+        with_link_mode(TOPO, "carrier-pigeon")
+    no_base = {**TOPO, "fleet_defaults": {"fleet_link": "router"}}
+    with pytest.raises(LaunchError, match="fleetlink_base"):
+        with_link_mode(no_base, "fleetlink")

@@ -39,6 +39,7 @@ export function LaunchPage() {
   const [experiment, setExperiment] = useState(defaultExperiment("mapping"));
   const [record, setRecord] = useState(false);
   const [linkNet, setLinkNet] = useState(""); // "" = topology default
+  const [linkMode, setLinkMode] = useState(""); // "" = topology default
   const [prior, setPrior] = useState<string>(preset ? `${preset.source}\u0000${preset.prior}` : ""); // "machine\u0000path"
   const [dry, setDry] = useState<{lines: string[]} | null>(null);
   const [busy, setBusy] = useState<"dry" | "launch" | null>(null);
@@ -101,6 +102,7 @@ export function LaunchPage() {
       base_station: baseStation || null,
       bs_session: baseStation ? bsSession || null : null,
       link_network: linkNet || null,
+      link_mode: linkMode || null,
     };
   };
 
@@ -207,6 +209,23 @@ export function LaunchPage() {
               {(defaults.data?.link_networks ?? []).map(n => (
                 <option key={n} value={n}>
                   {n}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field
+            label="Robot link mode"
+            hint={
+              (linkMode || defaults.data?.link_mode) === "fleetlink"
+                ? `Only fleetlink crosses the radio: each robot dials ${defaults.data?.fleetlink_base ?? "the fleetlink base"}; robot ROS graphs stay local.`
+                : "Router mode: the base's zenoh router links to each robot's (ROS topics cross the radio)."
+            }
+          >
+            <select className="input" value={linkMode} onChange={e => setLinkMode(e.target.value)} aria-label="Robot link mode">
+              <option value="">topology default ({defaults.data?.link_mode ?? "?"})</option>
+              {(defaults.data?.link_modes ?? ["router", "fleetlink"]).map(m => (
+                <option key={m} value={m}>
+                  {m}
                 </option>
               ))}
             </select>

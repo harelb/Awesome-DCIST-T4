@@ -373,6 +373,9 @@ class Receiver:
             "resync_requests": r.resync_requests,
             "auto": stats.get("auto", False),
             "robot_queue": stats.get("queue", {}),
+            # the robot's own per-class view: bytes/s put on the link and totals
+            "robot_rates": stats.get("rate", {}),
+            "robot_sent": stats.get("sent", {}),
             "store": self.store.stats(r.name) if self.store is not None else None,
             # global frame <- scene-graph frame from the C1 state (None from
             # agents that predate it); ``state_age_s`` above ages the whole state
