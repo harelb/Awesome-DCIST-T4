@@ -64,6 +64,9 @@ DEFAULT_CONFIG = {
     "mesh_period_s": 5.0,
     "manifest_period_s": 5.0,
     "tile_size": codec.DEFAULT_TILE_SIZE,
+    # vertex-clustering cell of the "decimated" mesh LOD (codec.decimate_mesh);
+    # the robot sends full tiles until a base asks for a LOD (``mesh_lod``)
+    "mesh_decimate_cell": codec.DEFAULT_DECIMATE_CELL,
     "max_msg_bytes": 64 * 1024,
     "burst_s": 1.0,
     "ack_cache": 256,
@@ -260,6 +263,12 @@ class AgentCore:
         self.tiles: dict[str, dict] = {}
         self.sent_manifest: dict[str, str] = {}
         self._tiles_dirty = False
+        # level of detail: None until a base asks (an old base never does, and
+        # then gets the full tiles it always had); per-tile overrides on top
+        self.mesh_lod: str | None = None
+        self.mesh_lod_tiles: dict[str, str] = {}
+        self._lod_dirty = False
+        self._tiles_by_lod: dict[str, dict] = {}  # LOD -> tiles of _tiled_version
         # state
         self.pose: dict | None = None
         # global frame -> scene-graph frame (``frame_align``), None until looked up
@@ -568,6 +577,22 @@ class AgentCore:
                 self.sent_paths_hash = None
                 self._paths_dirty = True
             return {"resend": streams, **out}
+        if op == "mesh_lod":
+            level = str(args.get("level") or "")
+            if level not in codec.MESH_LODS:
+                raise ValueError(f"unknown mesh LOD {level!r} (one of {codec.MESH_LODS})")
+            keys = args.get("tiles")
+            if keys:  # just these tiles; the default stays
+                for k in keys:
+                    self.mesh_lod_tiles[str(k)] = level
+                if self.mesh_lod is None:
+                    self.mesh_lod = "full"
+            else:
+                self.mesh_lod = level
+                self.mesh_lod_tiles = {}
+            self._lod_dirty = True
+            self._tiles_dirty = True
+            return {"level": self.mesh_lod, "tiles": dict(self.mesh_lod_tiles)}
         if op == "tiles":
             keys = list(args.get("keys") or [])
             for k in keys:
@@ -664,7 +689,32 @@ class AgentCore:
     # ------------------------------------------------------------------- C3
 
     def _manifest_payload(self):
-        return {"tiles": dict(self.sent_manifest), "tile_size": self.cfg["tile_size"]}
+        out = {"tiles": dict(self.sent_manifest), "tile_size": self.cfg["tile_size"]}
+        if self.mesh_lod is not None:  # a base that asked for a LOD
+            out["lod"] = {
+                "level": self.mesh_lod,
+                "tiles": dict(self.mesh_lod_tiles),
+                "cell": self.cfg["mesh_decimate_cell"],
+            }
+        return out
+
+    def _lod_of(self, key: str) -> str:
+        return self.mesh_lod_tiles.get(key) or self.mesh_lod or "full"
+
+    def _lod_tiles(self, level: str) -> dict:
+        """Tiles of the current mesh at ``level`` (built once per mesh version)."""
+        tiles = self._tiles_by_lod.get(level)
+        if tiles is None:
+            pos, col, faces = self._mesh
+            if level == "decimated":
+                pos, col, faces = codec.decimate_mesh(
+                    pos, col, faces, self.cfg["mesh_decimate_cell"]
+                )
+            tiles = codec.tile_mesh(pos, col, faces, self.cfg["tile_size"])
+            for t in tiles.values():
+                t["lod"] = level
+            self._tiles_by_lod[level] = tiles
+        return tiles
 
     def _queue_manifest(self) -> None:
         # front of C3, built at send time → lists exactly the tiles already put
@@ -678,10 +728,19 @@ class AgentCore:
         )
 
     def _c3_tick(self) -> None:
-        if self._mesh is not None and self._tiled_version != self._mesh_version:
-            pos, col, faces = self._mesh
-            self.tiles = codec.tile_mesh(pos, col, faces, self.cfg["tile_size"])
-            self._tiled_version = self._mesh_version
+        new_mesh = self._mesh is not None and self._tiled_version != self._mesh_version
+        if new_mesh or (self._mesh is not None and self._lod_dirty):
+            if new_mesh:
+                self._tiles_by_lod = {}
+                self._tiled_version = self._mesh_version
+            self._lod_dirty = False
+            levels = {self._lod_of(k) for k in self.mesh_lod_tiles} | {self.mesh_lod or "full"}
+            by_lod = {lv: self._lod_tiles(lv) for lv in levels}
+            default = by_lod[self.mesh_lod or "full"]
+            keys = set(default) | {k for k in self.mesh_lod_tiles if k in by_lod[self._lod_of(k)]}
+            self.tiles = {
+                k: by_lod[self._lod_of(k)][k] for k in keys if k in by_lod[self._lod_of(k)]
+            }
             for k in [k for k in self.sent_manifest if k not in self.tiles]:
                 del self.sent_manifest[k]
         elif not self._tiles_dirty:
@@ -871,6 +930,7 @@ class AgentCore:
             "auto": s.auto,
             "nodes": len(self._target[0]) if self._target else 0,
             "tiles": len(self.tiles),
+            "mesh_lod": self.mesh_lod,
             "c2_resent": self.c2_resent,
             "dsg": {k: v for k, v in dict(self.dsg_diag).items() if k[0] != "_"},
         }
@@ -1205,6 +1265,7 @@ class AgentNode:
         tick_hz = p("tick_hz", 20.0)
         cfg["mesh_period_s"] = p("mesh_period_s", float(cfg["mesh_period_s"]))
         cfg["tile_size"] = p("tile_size", float(cfg["tile_size"]))
+        cfg["mesh_decimate_cell"] = p("mesh_decimate_cell", float(cfg["mesh_decimate_cell"]))
         # one endpoint or a comma-separated list (zenoh keeps retrying them all)
         connect = split_endpoints(p("zenoh_connect", "tcp/127.0.0.1:7447"))
         cfg["c2_ring"] = p("c2_ring", int(cfg["c2_ring"]))
