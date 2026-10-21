@@ -74,6 +74,7 @@ def _pair(tmp_path, link_kw=None, store_cfg=None, clock=None, agent=None):
     cfg = {
         "store_path": str(tmp_path / "robot" / "image_store"),
         "store_poll_s": 0.2,
+        "store_send": True,  # off by default; test_store_send_* cover the switch
         **(store_cfg or {}),
     }
     core = AgentCore("r", link.robot, cfg, clock=clock)
@@ -263,7 +264,7 @@ def test_threaded_mirror_writes_on_worker(tmp_path):
     link = LinkEmulator(clock=clock, bandwidth=None, latency=0.01)
     core = AgentCore(
         "r", link.robot,
-        {"store_path": str(tmp_path / "robot" / "image_store"), "store_poll_s": 0.2},
+        {"store_path": str(tmp_path / "robot" / "image_store"), "store_poll_s": 0.2, "store_send": True},
         clock=clock,
     )  # fmt: skip
     rx = Receiver(link.base, clock=clock, threaded=False, store_root=str(tmp_path / "live"))
@@ -273,3 +274,77 @@ def test_threaded_mirror_writes_on_worker(tmp_path):
     assert _mirror_ids(rx) == kf
     rx.stop()
     robot.close()
+
+
+def test_store_send_off_by_default_and_console_switch(tmp_path):
+    """Nothing goes on C6 until the base asks; off again keeps the chain, so
+    turning it back on continues with no loss and no duplicates."""
+    robot = RobotStore(tmp_path / "robot" / "image_store")
+    kf = robot.add(4)
+    clock, link, core, rx = _pair(tmp_path, store_cfg={"store_send": False})
+    _run(clock, link, core, rx, 4.0)
+    assert core.store.frames_sent == 0 and rx.link("r")["bytes"].get("C6", 0) == 0
+    st = rx.link("r")
+    assert st["store_send"] == {"robot": False, "wanted": None}
+    assert st["store"]["backlog"] == 4  # armed, waiting
+
+    rx.set_store_send("r", True)
+    _run(clock, link, core, rx, 4.0)
+    assert _mirror_ids(rx) == kf
+    assert rx.link("r")["store_send"] == {"robot": True, "wanted": True}
+
+    # off with frames still queued (tiny budget): they go back, nothing lost
+    rx.set_budget("r", "C6", 1_000)
+    kf += robot.add(3)
+    _run(clock, link, core, rx, 1.0)
+    rx.set_store_send("r", False)
+    _run(clock, link, core, rx, 2.0)
+    assert core.store_send is False and not core.sched.queues["C6"]
+    sent_off = core.store.frames_sent
+    kf += robot.add(2)
+    _run(clock, link, core, rx, 3.0)
+    assert core.store.frames_sent == sent_off  # nothing sent while off
+
+    rx.set_budget("r", "C6", 150_000)
+    rx.set_store_send("r", True)
+    _run(clock, link, core, rx, 6.0)
+    assert _mirror_ids(rx) == kf
+    assert rx.store_stats("r")["duplicates"] == 0
+    rx.stop()
+    robot.close()
+
+
+def test_store_send_reasked_after_agent_restart(tmp_path):
+    robot = RobotStore(tmp_path / "robot" / "image_store")
+    kf = robot.add(3)
+    clock, link, core, rx = _pair(tmp_path, store_cfg={"store_send": False})
+    rx.set_store_send("r", True)
+    _run(clock, link, core, rx, 4.0)
+    assert _mirror_ids(rx) == kf
+
+    core.close()  # the new agent starts with it off again
+    kf += robot.add(2)
+    cfg = dict(core.cfg, store_send=False)
+    core2 = AgentCore("r", link.robot, cfg, clock=clock)
+    _run(clock, link, core2, rx, 6.0)
+    assert core2.store_send is True
+    assert _mirror_ids(rx) == kf
+    rx.stop()
+    robot.close()
+
+
+def test_store_send_without_store_is_refused(tmp_path):
+    clock = VirtualClock()
+    link = LinkEmulator(clock=clock, bandwidth=None, latency=0.0)
+    core = AgentCore("r", link.robot, {}, clock=clock)  # store_path unset
+    rx = Receiver(link.base, clock=clock, threaded=False)
+    rx.start()
+    rx.set_store_send("r", True)
+    for _ in range(40):
+        clock.advance(0.05)
+        core.tick()
+        link.advance()
+        rx.tick()
+    assert core.store_send is False
+    assert rx.link("r")["store_send"]["robot"] is None  # no store: no switch shown
+    assert not rx.pending_requests()  # refused once, never re-asked

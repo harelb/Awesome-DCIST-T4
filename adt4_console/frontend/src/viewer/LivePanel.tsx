@@ -38,6 +38,17 @@ const MAX = Math.log(2_000_000);
 export const sliderToBps = (v: number) => Math.round(Math.exp(MIN + ((MAX - MIN) * v) / 100));
 export const bpsToSlider = (b: number) => Math.max(0, Math.min(100, ((Math.log(Math.max(b, 1)) - MIN) / (MAX - MIN)) * 100));
 
+/** "Image store" plus what is still to come or that the robot has not followed yet. */
+function storeSendLabel(l: LinkInfo): string {
+  const ss = l.store_send;
+  if (!ss) return "Image store";
+  if (ss.wanted !== null && ss.wanted !== ss.robot) return `Image store (${ss.wanted ? "starting" : "stopping"}…)`;
+  const backlog = l.store?.backlog;
+  if (ss.robot && backlog) return `Image store (${backlog} to send)`;
+  if (!ss.robot && backlog) return `Image store (off, ${backlog} waiting)`;
+  return "Image store";
+}
+
 function staleTone(l: LinkInfo): Tone {
   if (!l.connected) return "err";
   const s = l.staleness_s ?? 0;
@@ -193,6 +204,14 @@ export function LivePanel() {
                 label="Auto budget"
                 title="Let the robot adapt budgets to measured link capacity"
               />
+              {l.store_send && l.store_send.robot !== null && (
+                <Toggle
+                  checked={Boolean(l.store_send.wanted ?? l.store_send.robot)}
+                  onChange={v => void postJSON(`api/live/${encodeURIComponent(r)}/store_send`, {enabled: v}).catch(() => undefined)}
+                  label={storeSendLabel(l)}
+                  title="Mirror this robot's image store to the base (C6, lowest priority) so SAM3 search sees live keyframes. Off by default: with 5 robots it needs ~10 Mbit/s."
+                />
+              )}
               <button className="btn btn-sm" onClick={() => void postJSON(`api/live/${encodeURIComponent(r)}/resync`).catch(() => undefined)}>
                 Resync
               </button>

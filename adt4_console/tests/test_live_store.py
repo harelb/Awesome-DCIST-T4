@@ -44,7 +44,7 @@ def test_live_reports_store_mirror(settings, tmp_path):
     link = LinkEmulator(clock=clock, bandwidth=None, latency=0.01)
     core = AgentCore(
         "hamilton", link.robot,
-        {"store_path": str(tmp_path / "robot" / "image_store"), "store_poll_s": 0.2},
+        {"store_path": str(tmp_path / "robot" / "image_store"), "store_poll_s": 0.2, "store_send": True},
         clock=clock,
     )  # fmt: skip
     rx = Receiver(
@@ -76,3 +76,51 @@ def test_store_root_default_and_disabled(settings):
     assert LiveService(settings).store_root.endswith("/out/live")
     off = dataclasses.replace(settings, live_store_root="")
     assert LiveService(off).store_root is None
+
+
+def test_store_send_route_switches_the_mirror(settings, tmp_path):
+    """Off by default; POST /api/live/{r}/store_send turns it on and off."""
+    from fleetlink.agent import AgentCore
+    from fleetlink.receiver import Receiver
+    from fleetlink.store_mirror import StoreMirror
+    from fleetlink.transport import LinkEmulator, VirtualClock
+
+    st = dataclasses.replace(settings, live_store_root=str(tmp_path / "live"))
+    ids = _robot_store(tmp_path / "robot" / "image_store", 3)
+    clock = VirtualClock()
+    link = LinkEmulator(clock=clock, bandwidth=None, latency=0.01)
+    core = AgentCore(
+        "hamilton", link.robot,
+        {"store_path": str(tmp_path / "robot" / "image_store"), "store_poll_s": 0.2},
+        clock=clock,
+    )  # fmt: skip
+    rx = Receiver(
+        link.base, clock=clock, threaded=False,
+        store_mirror=StoreMirror(tmp_path / "live", clock=clock, threaded=False),
+    )  # fmt: skip
+
+    def run(n=80):
+        for _ in range(n):
+            clock.advance(0.05)
+            core.tick()
+            link.advance()
+            rx.tick()
+
+    client, _svc = make_client(st, receiver=rx)
+    with client:
+        run()
+        live = client.get("/api/live").json()["robots"]["hamilton"]
+        assert live["store_send"] == {"robot": False, "wanted": None}
+        assert live["store"]["frames"] == 0 and live["store"]["backlog"] == 3
+
+        r = client.post("/api/live/hamilton/store_send", json={"enabled": True})
+        assert r.status_code == 200 and r.json()["store_send"]["wanted"] is True
+        run()
+        live = client.get("/api/live").json()["robots"]["hamilton"]
+        assert live["store_send"] == {"robot": True, "wanted": True}
+        assert live["store"]["frames"] == 3 and live["store"]["watermark"] == ids[-1]
+
+        client.post("/api/live/hamilton/store_send", json={"enabled": False})
+        run(20)
+        assert core.store_send is False
+        assert client.get("/api/live").json()["robots"]["hamilton"]["store_send"]["robot"] is False

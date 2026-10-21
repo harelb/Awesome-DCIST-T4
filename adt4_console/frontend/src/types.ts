@@ -419,6 +419,11 @@ export interface LinkInfo {
   /** mesh level of detail: the robot's (``lod`` null: an older robot sending
    *  full tiles), the one this console asks for, tiles still to arrive, bytes held */
   mesh?: MeshLodStatus;
+  /** C6 image-store mirror switch: what the robot does (null: no store or an
+   *  older agent without the switch) and what this console asked (null: nothing) */
+  store_send?: {robot: boolean | null; wanted: boolean | null};
+  /** base-side mirror of this robot's store (empty until a store is seen) */
+  store?: {backlog?: number | null; frames?: number; watermark?: number | null} | null;
 }
 
 export interface MeshLodStatus {

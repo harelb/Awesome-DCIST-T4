@@ -33,6 +33,7 @@ eager_cameras: [rgb, overlay]
 camera_idle_s: 15.0
 # C6 live image-store mirror (the ROS param store_path defaults to
 # $ADT4_OUTPUT_DIR/image_store; "" disables)
+store_send: false  # off by default; the console's Live panel turns it on per robot
 store_frames: keyframes  # keyframes | all
 store_compression: fast  # none | lossless | fast (hydra_image_store.transfer)
 store_poll_s: 1.0  # how often the store is checked for new frames

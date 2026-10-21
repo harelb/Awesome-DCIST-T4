@@ -88,6 +88,9 @@ DEFAULT_CONFIG = {
     "c2_ring": 256,  # last C2 messages kept for ``resend`` (gap repair)
     # C6 live image-store mirror (fleetlink.store_mirror); None/"" disables
     "store_path": None,
+    # frames are only sent while this is on: off by default (5 robots need ~10
+    # Mbit/s with it), the console turns it on per robot (C0 ``store_send``)
+    "store_send": False,
     "store_frames": "keyframes",  # keyframes | all
     "store_compression": "fast",  # none | lossless | fast
     "store_poll_s": 1.0,  # how often new store frames are looked for
@@ -334,6 +337,7 @@ class AgentCore:
         self.store = None
         self.store_error: str | None = None
         self._t_store = -1e9
+        self.store_send = bool(self.cfg.get("store_send"))
         if self.cfg.get("store_path"):
             try:
                 from fleetlink.store_mirror import StoreTail
@@ -672,6 +676,18 @@ class AgentCore:
             self.sched.clear("C6")
             self._t_store = -1e9
             return res
+        if op == "store_send":
+            if self.store is None:
+                raise ValueError(self.store_error or "store mirror disabled (no store_path)")
+            enable = bool(args.get("enable", True))
+            if self.store_send and not enable:
+                # drop what is queued and step the cursor back to the last frame
+                # on the wire, so turning it on again continues the chain
+                self.sched.clear("C6")
+                self.store.pause()
+            self.store_send = enable
+            self._t_store = -1e9
+            return {"send": self.store_send}
         if op == "video_keyframe":
             cam = str(args.get("camera") or "")
             return {"camera": cam, "forced": self.video.force_keyframe(cam, now)}
@@ -1014,7 +1030,7 @@ class AgentCore:
         if self.store is None:
             return {"id": None, "enabled": False, "error": self.store_error}
         try:
-            return {**self.store.state(), "enabled": True}
+            return {**self.store.state(), "enabled": True, "send": self.store_send}
         except Exception as exc:  # noqa: BLE001
             return {"id": None, "enabled": True, "error": str(exc)}
 
@@ -1024,7 +1040,7 @@ class AgentCore:
         queued, so it never delays the graph or the mesh."""
         st = self.store
         st.refresh()
-        if not st.active:
+        if not st.active or not self.store_send:
             return
         if self.sched.auto and (self.sched.queues["C2"] or self.sched.queues["C3"]):
             return
@@ -1381,6 +1397,7 @@ class AgentNode:
         if os.environ.get("ADT4_OUTPUT_DIR"):
             default_store = os.path.join(os.environ["ADT4_OUTPUT_DIR"], "image_store")
         cfg["store_path"] = p("store_path", default_store) or None
+        cfg["store_send"] = p("store_send", bool(cfg["store_send"]))
         cfg["store_frames"] = p("store_frames", str(cfg["store_frames"]))
         cfg["store_compression"] = p(
             "store_compression", str(cfg["store_compression"])
@@ -1400,7 +1417,8 @@ class AgentNode:
         elif self.core.store is not None:
             self.log.info(
                 f"store mirror: {cfg['store_path']} frames={cfg['store_frames']} "
-                f"compression={cfg['store_compression']} C6={cfg['budgets']['C6']} B/s"
+                f"compression={cfg['store_compression']} C6={cfg['budgets']['C6']} B/s "
+                f"send={'on' if cfg['store_send'] else 'off (console toggles it)'}"
             )
         self.spark_dsg_path = spark_dsg_location()
         self.log.info(f"spark_dsg: {self.spark_dsg_path}")

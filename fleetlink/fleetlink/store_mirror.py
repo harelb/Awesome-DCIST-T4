@@ -190,6 +190,14 @@ class StoreTail:
             self.active = True
             return {"id": self.id, "after": self.after, "backlog": self.backlog()}
 
+    def pause(self) -> None:
+        """Sending stopped: frames handed out but never sent go back, the next
+        ``take`` continues after the last frame sent (or the base's watermark)."""
+        with self._lock:
+            if self.active:
+                done = [f for f in (self.last_sent, self.after) if f is not None]
+                self.cursor = max(done) if done else None
+
     def _select(self, after: int | None, limit: int | None):
         store = self._open()
         if store is None:

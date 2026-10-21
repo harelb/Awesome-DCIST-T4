@@ -104,6 +104,7 @@ class _Robot:
     def __init__(self, name: str):
         self.name = name
         self.epoch: str | None = None
+        self.store_send_t = -1e9  # last ``store_send`` re-sent to match the wanted state
         self.seqs: dict[str, int] = {}
         self.graph = GraphState()
         self.tiles: dict[str, dict] = {}
@@ -211,6 +212,9 @@ class Receiver:
         # robots send full tiles); per-robot choices from ``set_mesh_lod`` win
         self.default_mesh_lod = mesh_lod
         self._mesh_lod_wanted: dict[str, dict] = {}
+        # C6 image-store mirror on/off asked per robot (``set_store_send``);
+        # a robot absent here keeps what it was launched with (off by default)
+        self._store_send_wanted: dict[str, bool] = {}
         self._outbox: list[tuple[str, dict]] = []
         self._robots: dict[str, _Robot] = {}
         self._pending: dict[str, dict] = {}  # req id -> {robot, req, t, tries}
@@ -396,6 +400,7 @@ class Receiver:
             "robot_rates": stats.get("rate", {}),
             "robot_sent": stats.get("sent", {}),
             "store": self.store.stats(r.name) if self.store is not None else None,
+            "store_send": self._store_send_status(r),
             # global frame <- scene-graph frame from the C1 state (None from
             # agents that predate it); ``state_age_s`` above ages the whole state
             "frame_align": (r.state or {}).get("frame_align"),
@@ -534,6 +539,40 @@ class Receiver:
             args["tiles"] = [str(k) for k in tiles]
         return self._send(robot, "mesh_lod", args)
 
+    def set_store_send(self, robot: str, enable: bool) -> str:
+        """C0 ``store_send {enable}``: start / stop the robot's C6 image-store
+        mirror. Remembered and re-asked whenever the robot's state disagrees
+        (e.g. after an agent restart, which starts with it off)."""
+        with self._lock:
+            self._store_send_wanted[robot] = bool(enable)
+            self._robot(robot).store_send_t = self.clock()
+            for rid in [k for k, v in self._pending.items() if v["robot"] == robot and v["req"]["op"] == "store_send"]:
+                del self._pending[rid]
+        return self._send(robot, "store_send", {"enable": bool(enable)})
+
+    def store_send_status(self, robot: str) -> dict:
+        """``{robot, wanted}``: whether the robot sends C6 frames (None: no
+        store, or an agent without the switch) and what this base asked."""
+        with self._lock:
+            r = self._robots.get(robot)
+            return self._store_send_status(r) if r is not None else {"robot": None, "wanted": self._store_send_wanted.get(robot)}
+
+    def _store_send_status(self, r: _Robot) -> dict:
+        st = (r.state or {}).get("store") or {}
+        return {"robot": st.get("send") if st.get("enabled") else None, "wanted": self._store_send_wanted.get(r.name)}
+
+    def _store_send_reconcile(self, r: _Robot, st: dict | None, now: float) -> None:
+        """Lock held: re-ask ``store_send`` when the robot's state disagrees."""
+        want = self._store_send_wanted.get(r.name)
+        if want is None or not st or not st.get("enabled") or "send" not in st:
+            return
+        if bool(st["send"]) == want or now - r.store_send_t < self.retry_s:
+            return
+        if any(v["robot"] == r.name and v["req"]["op"] == "store_send" for v in self._pending.values()):
+            return
+        r.store_send_t = now
+        self._pending_send(r.name, "store_send", {"enable": want})
+
     def set_auto(self, robot: str, enabled: bool) -> str:
         return self._send(robot, "auto", {"enabled": bool(enabled)})
 
@@ -634,6 +673,7 @@ class Receiver:
             self._c2_check_tail(r, p, now)
             if self.store is not None:
                 self._store_requests(self.store.on_state(r.name, p.get("store"), now))
+            self._store_send_reconcile(r, p.get("store"), now)
         elif stream == "grid/occupancy":
             r.grid = p
             keys = ("hash", "frame", "width", "height", "resolution", "t")
@@ -994,6 +1034,9 @@ class Receiver:
             }
         if "auto" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["auto"] = res["auto"]
+        if pend is not None and pend["req"]["op"] == "store_send" and "send" in res:
+            if isinstance(r.state, dict) and isinstance(r.state.get("store"), dict):
+                r.state["store"]["send"] = bool(res["send"])  # shown before the next state
         return []
 
     # ---------------------------------------------------------------- tick

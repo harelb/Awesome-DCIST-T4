@@ -674,6 +674,7 @@ base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirr
 
 ### 13.1 Robot (agent)
 * **Params.** `store_path` (default `$ADT4_OUTPUT_DIR/image_store`; `""` disables),
+  `store_send` (default **false**: frames are sent only after the base turns it on, see 13.4),
   `store_frames` (`keyframes` = kind 0, default, or `all`), `store_compression` (`none` |
   `lossless` | `fast`, default `fast`: RGB re-encoded JPEG q75, depth half resolution + row-delta
   zstd), `budget_C6` (default 150 000 B/s); yaml also `store_poll_s` (1 s), `store_queue_s` (2 s
@@ -684,7 +685,7 @@ base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirr
 * **Store id.** `id` names one Hydra store session (inode of `store.sqlite` + first frame
   timestamp). Hydra rotates the store when it restarts (frame ids restart), giving a new id and a
   new mirror directory.
-* **State.** C1 `state.store = {id, enabled, active, after, sent, last, backlog, frames_sent,
+* **State.** C1 `state.store = {id, enabled, send, active, after, sent, last, backlog, frames_sent,
   bytes_sent, avg_frame_bytes, frames, compression, rewinds, error}`.
 * **Auto mode.** C6 is never AIMD-adjusted; with `auto` on, store frames are only queued while
   C2 and C3 have nothing queued. C6 is last in priority (zenoh `BACKGROUND`, after C5).
@@ -716,7 +717,18 @@ base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirr
 * Budget: `POST /api/live/{r}/budget {cls: "C6", bps}` (the Live link panel's "image store"
   slider). Measured on a Penn-bag run: 115 keyframes, 64 kB/frame (`fast`), ~61 kB/s.
 
-### 13.4 Other agent additions (same change)
+### 13.4 On/off switch (`store_send`)
+* C0 op **`store_send {enable}`** → ack `{send}`; `ok: false` when the agent has no store
+  (`store_path` unset). `enabled` in the state means a store is configured. `send` means frames are
+  being sent. While off, the store is still tailed and armed (`store {id, after}` works, `backlog` counts
+  what waits). Off drops queued C6 frames and moves the cursor back to the last frame sent.
+* Base: `Receiver.set_store_send(robot, enable)` remembers the choice and re-sends it whenever a state
+  disagrees (an agent restart starts with it off). A robot never switched keeps its launch value.
+* **`POST /api/live/{r}/store_send {enabled}`** → `{ok, request, store_send}`; each `robots[r]` link
+  gains `store_send: {robot, wanted}` (`robot` null: no store or an older agent). The Live link
+  panel shows the "Image store" switch when `robot` is not null.
+
+### 13.5 Other agent additions (same change)
 * **Lazy cameras.** Only `eager_cameras` (default `[rgb, overlay]`) are subscribed all the time;
   any other `cameras` entry is subscribed while a C4 query or a C5 `video` request wanted it within
   `camera_idle_s` (15 s), or while its video stream runs, then unsubscribed and its cached frame

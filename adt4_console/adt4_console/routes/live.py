@@ -92,6 +92,20 @@ def mesh_lod(robot: str, body: MeshLodBody, request: Request):
     return {"ok": True, "request": req, "wanted": rx.mesh_lod_wanted(robot)}
 
 
+class StoreSendBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/{robot}/store_send")
+def store_send(robot: str, body: StoreSendBody, request: Request):
+    """Turn the robot's C6 image-store mirror on or off (off by default: it is
+    what fills the radio). The receiver remembers it and asks again after an
+    agent restart; the link status ``store_send`` shows {robot, wanted}."""
+    rx = _rx(request)
+    req = rx.set_store_send(robot, body.enabled)
+    return {"ok": True, "request": req, "store_send": rx.store_send_status(robot)}
+
+
 class AutoBody(BaseModel):
     enabled: bool
 

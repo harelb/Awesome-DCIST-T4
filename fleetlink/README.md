@@ -133,7 +133,7 @@ graph; the image-store mirror only uses what is left.
 ### Live image-store mirror (C6)
 
 `store_mirror.py`. The agent tails the robot's hydra image store read-only (`store_path`, default
-`$ADT4_OUTPUT_DIR/image_store`) and sends each new frame (`store_frames`: `keyframes` | `all`)
+`$ADT4_OUTPUT_DIR/image_store`) and, **only while sending is on**, sends each new frame (`store_frames`: `keyframes` | `all`)
 encoded with `hydra_image_store.transfer.encode_frame` (`store_compression`: `none` | `lossless` |
 `fast`) within the C6 budget. The console's receiver writes them into
 `<live_store_root>/<robot>/<store_id>/image_store` (default `~/adt4_output/live/...`), a valid store
@@ -141,6 +141,13 @@ SAM3 can search. The base tells the agent its watermark (C0 `store {id, after}`)
 after an agent restart and after a gap, so nothing is lost or duplicated across restarts; a new
 Hydra session (store rotation) starts a new mirror directory. Protocol details: console API.md §13.
 On a Penn-bag run (`fast`): 64 kB per keyframe, 115 keyframes mirrored at ~61 kB/s.
+
+**Off by default.** The mirror is what fills the radio (5 robots need ~10 Mbit/s with it on), so
+the agent starts with sending off (`store_send: false`). The store is still tailed and armed, so
+the state shows the backlog. The console's Live link panel has an "Image store" switch per robot
+(C0 `store_send {enable}`). The receiver remembers it and asks again when the robot's state
+disagrees, e.g. after an agent restart. Turning it off drops queued C6 frames and steps the cursor back
+to the last frame sent, so turning it on again continues the chain with nothing lost.
 
 ### Lazy cameras
 
