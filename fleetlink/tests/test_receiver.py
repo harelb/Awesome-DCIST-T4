@@ -279,3 +279,13 @@ def test_frame_align_passes_through_state_and_link():
     assert rx.state("r")["frame_align"] == fa
     assert rx.link("r")["frame_align"] == fa
     assert events[-1][1] == "state" and events[-1][2]["frame_align"]["ok"]
+
+
+def test_link_reports_the_robots_own_per_class_rates():
+    tr, clock, rx, events = _rx()
+    stats = {"rate": {"C3": 90_000.0}, "sent": {"C3": 1_234_567}, "queue": {"C3": {"n": 4, "bytes": 30_000}}}
+    rx._on_msg("adt4/r/state", env_bytes("r", "state", 0, "E1", {"pose": None, "stats": stats}))
+    link = rx.link("r")
+    assert link["robot_rates"] == {"C3": 90_000.0}
+    assert link["robot_sent"] == {"C3": 1_234_567}
+    assert link["robot_queue"]["C3"]["bytes"] == 30_000

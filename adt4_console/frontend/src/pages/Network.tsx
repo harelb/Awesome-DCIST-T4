@@ -1,5 +1,6 @@
 import {useState} from "react";
 import {SilvusMesh, type MeshLink, type MeshRadio} from "./SilvusMesh";
+import {FleetlinkTraffic, type TrafficLink} from "./FleetlinkTraffic";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {trackJob, useJobs} from "../stores/jobs";
 import {useFleet} from "../stores/fleet";
@@ -57,6 +58,7 @@ function linkText(l: unknown): string {
 export function NetworkPage() {
   const zenoh = useApi<ZenohStatus>("api/network/zenoh", 10_000);
   const silvus = useApi<SilvusStatus>("api/network/silvus", 15_000);
+  const live = useApi<{robots: Record<string, TrafficLink>}>("api/live", 2_000);
   const machines = useFleet(s => s.machines)?.machines ?? []; // selector must return a stable value (zustand 5)
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ok: boolean; text: string} | null>(null);
@@ -218,6 +220,10 @@ export function NetworkPage() {
       </div>
 
       <BandwidthSection />
+
+      <Card title="fleetlink traffic per class" actions={<span className="muted small">robot → base, every 2 s</span>}>
+        {live.data ? <FleetlinkTraffic links={live.data.robots ?? {}} /> : <span className="muted small">{live.error ? "live link unavailable" : "loading ..."}</span>}
+      </Card>
 
       <Card
         title="Silvus radio mesh"

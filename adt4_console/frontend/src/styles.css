@@ -3291,3 +3291,22 @@ input[type="checkbox"] {
   white-space: pre;
   overflow-x: auto;
 }
+
+/* ---------- fleetlink traffic per class (Network page) ---------- */
+.traffic {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.traffic-head {
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.traffic-table th {
+  text-align: left;
+  white-space: nowrap;
+}
+.traffic-table td {
+  white-space: nowrap;
+}
