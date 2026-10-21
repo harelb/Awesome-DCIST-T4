@@ -2991,3 +2991,129 @@ input[type="checkbox"] {
   flex: 1;
   min-width: 0;
 }
+
+/* ---------- Silvus mesh (Network page) ---------- */
+.mesh {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mesh-graph {
+  width: 100%;
+  max-height: 440px;
+  background: radial-gradient(ellipse at center, var(--bg-2) 0%, var(--bg-1) 70%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.mesh-link-live {
+  stroke-dasharray: 2 10;
+  animation: mesh-flow 1.6s linear infinite;
+}
+.mesh-link-dashed {
+  stroke-dasharray: 6 6;
+}
+@keyframes mesh-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mesh-link-live {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+.mesh-link-text {
+  font: 600 12.5px var(--mono);
+}
+.mesh-node-title {
+  font: 600 14px var(--sans);
+}
+.mesh-node-sub {
+  font: 11px var(--mono);
+}
+.mesh-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.mesh-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.mesh-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.mesh-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: 10px;
+}
+.mesh-card {
+  min-width: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.mesh-card-err {
+  background: var(--err-bg);
+}
+.mesh-dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.mesh-dl dt {
+  color: var(--muted);
+}
+.mesh-dl dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.mesh-battery {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.mesh-battery-bar {
+  width: 64px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.mesh-battery-fill {
+  display: block;
+  height: 100%;
+}
+.mesh-battery-fill.tone-ok {
+  background: var(--ok);
+}
+.mesh-battery-fill.tone-warn {
+  background: var(--warn);
+}
+.mesh-battery-fill.tone-err {
+  background: var(--err);
+}
+.mesh-err {
+  margin-top: 8px;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+.mesh-details {
+  margin-top: 12px;
+}
+.mesh-details > summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+}

@@ -1759,6 +1759,7 @@ _SILVUS_BATCH = [
     {"jsonrpc": "2.0", "method": "link_stats", "params": [], "id": 5},
     {"jsonrpc": "2.0", "method": "snr_stats", "params": [], "id": 6},
     {"jsonrpc": "2.0", "method": "network_status", "params": [], "id": 7},
+    {"jsonrpc": "2.0", "method": "read_client_list", "params": [], "id": 8},
 ]
 
 
@@ -1771,7 +1772,8 @@ def get_silvus_radio_details(topology):
 
     Returns dict[radio_name → info] where info has:
       node_id, mgmt_ip, via, battery, routing_tree, rssi, link_stats, snr_stats,
-      link_quality ({neighbour node_id: value}), error
+      link_quality ({neighbour node_id: value}), clients ([{mac, ip}] of the
+      computers on the radio's ethernet port, the radio itself excluded), error
     Radios are labeled by their name in topology["silvus_radios"]["radios"].
     """
     radios = topology.get("silvus_radios", {}).get("radios", {})
@@ -1831,6 +1833,7 @@ def get_silvus_radio_details(topology):
                 "link_stats": None,
                 "snr_stats": None,
                 "link_quality": {},
+                "clients": [],
                 "error": "; ".join(attempts) or "unreachable",
             }
             continue
@@ -1856,6 +1859,10 @@ def get_silvus_radio_details(topology):
             "link_stats": parsed.get(5),
             "snr_stats": parsed.get(6),
             "link_quality": parse_network_status(parsed.get(7)),
+            "clients": [
+                c for c in parsed.get(8) or []
+                if isinstance(c, dict) and not str(c.get("mac", "")).lower().startswith(SILVUS_OUI)
+            ],  # fmt: skip
             "error": None,
         }
 

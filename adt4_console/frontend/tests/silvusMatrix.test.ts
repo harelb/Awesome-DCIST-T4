@@ -14,3 +14,30 @@ describe("Silvus matrix", () => {
     expect(linkColor(null)).toBe("transparent");
   });
 });
+
+import {linkLabel, meshLayout, meshSize, radioTitle} from "../src/pages/SilvusMesh";
+
+describe("Silvus mesh view", () => {
+  it("names a radio after the computer behind it", () => {
+    const r = {name: "radio_1", node_id: 1, battery: 90, via: null, error: null, local: false};
+    expect(radioTitle({...r, hosts: [{ip: "192.168.100.2", machine: "hamilton"}]})).toBe("hamilton");
+    expect(radioTitle({...r, hosts: [{ip: "10.0.0.9", machine: null}]})).toBe("radio_1");
+  });
+  it("labels both directions", () => {
+    const l = {a: "x", b: "y", ab: 40.4, ba: null, unit: "dB" as const, quality: "good" as const};
+    expect(linkLabel(l)).toBe("40 / – dB");
+    expect(linkLabel({...l, ab: null, quality: "linked"})).toBe("routed");
+  });
+  it("keeps every node and its labels inside the view", () => {
+    for (const phone of [false, true])
+      for (const n of [1, 2, 3, 4, 6]) {
+        const [w, h] = meshSize(n, phone);
+        for (const [x, y] of meshLayout(n, w, h, phone)) {
+          expect(x - 40).toBeGreaterThanOrEqual(0);
+          expect(x + 40).toBeLessThanOrEqual(w);
+          expect(y - 40).toBeGreaterThanOrEqual(0);
+          expect(y + 75).toBeLessThanOrEqual(h);
+        }
+      }
+  });
+});

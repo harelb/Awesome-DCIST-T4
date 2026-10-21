@@ -130,3 +130,23 @@ def test_radio_missing_everywhere_reports_why(monkeypatch):
     d = fh.get_silvus_radio_details(_radios_topo())
     assert "172.17.0.95: timed out" in d["radio_a"]["error"]
     assert "radio dongle unplugged" in d["radio_a"]["error"]
+
+
+def test_mesh_view_names_hosts_and_pairs_links():
+    from dcist_launch_system.fleet.silvus import mesh_view
+
+    details = {
+        "r_w": {"node_id": 1, "routing_tree": [2], "link_quality": {2: 40.0},
+                "clients": [{"mac": "30:68", "ip": "192.168.100.100"}], "battery": 95.0, "via": "fe80::1%e"},
+        "r_h": {"node_id": 2, "routing_tree": [1], "link_quality": {1: 38.0},
+                "clients": [{"mac": "20:23", "ip": "192.168.100.2"}]},
+        "r_x": {"node_id": 3, "error": "timed out"},
+    }  # fmt: skip
+    topo = {"machines": {"willow": {"addresses": {"silvus": "192.168.100.100"}},
+                         "hamilton": {"addresses": {"silvus": "192.168.100.2"}}}}  # fmt: skip
+    v = mesh_view(details, topo, local_ips=["192.168.100.100", "10.31.0.1"])
+    radios = {r["name"]: r for r in v["radios"]}
+    assert radios["r_w"]["hosts"] == [{"ip": "192.168.100.100", "machine": "willow"}] and radios["r_w"]["local"]
+    assert radios["r_h"]["hosts"][0]["machine"] == "hamilton" and not radios["r_h"]["local"]
+    assert radios["r_x"]["error"] == "timed out"
+    assert v["links"] == [{"a": "r_h", "b": "r_w", "ab": 38.0, "ba": 40.0, "unit": "dB", "quality": "good"}]

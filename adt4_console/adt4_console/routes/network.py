@@ -166,7 +166,7 @@ def zenohd_stop(request: Request):
 
 @router.get("/silvus")
 def silvus(request: Request):
-    from dcist_launch_system.fleet.silvus import link_matrix, routing_summary
+    from dcist_launch_system.fleet.silvus import link_matrix, mesh_view, routing_summary
 
     svc = services(request)
     details = svc.helpers.get_silvus_radio_details(svc.fleet.topo)
@@ -180,7 +180,8 @@ def silvus(request: Request):
                 for dst, c in row.items()
             }
         )
-    return {"matrix": matrix, "routing": routing_summary(details)}
+    mesh = mesh_view(details, svc.fleet.topo, svc.fleet.local_ips)
+    return {"matrix": matrix, "routing": routing_summary(details), **mesh}
 
 
 @router.get("/silvus/route")

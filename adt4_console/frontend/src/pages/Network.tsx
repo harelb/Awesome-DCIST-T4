@@ -1,4 +1,5 @@
 import {useState} from "react";
+import {SilvusMesh, type MeshLink, type MeshRadio} from "./SilvusMesh";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {trackJob, useJobs} from "../stores/jobs";
 import {useFleet} from "../stores/fleet";
@@ -20,6 +21,8 @@ type Cell = {rssi_db?: number | null; link_db?: number | null; quality?: number 
 interface SilvusStatus {
   matrix: Record<string, Record<string, Cell> | string>;
   routing: unknown;
+  radios?: MeshRadio[];
+  links?: MeshLink[];
 }
 
 /** RSSI (dBm) -> background colour: green strong, amber marginal, red weak. */
@@ -232,7 +235,10 @@ export function NetworkPage() {
         {silvus.loading && !silvus.data && <Loading label="Querying radios" />}
         {silvus.error && !silvus.data && <ErrorBox error={silvus.error} onRetry={silvus.reload} />}
         {silvus.data && nodes.length === 0 && <Empty title="No radios">No Silvus radios configured in the topology.</Empty>}
+        {silvus.data?.radios && silvus.data.radios.length > 0 && <SilvusMesh radios={silvus.data.radios} links={silvus.data.links ?? []} />}
         {silvus.data && nodes.length > 0 && (
+          <details className="mesh-details" open={!silvus.data.radios || route !== null}>
+            <summary className="small muted">Details: link matrix and routing</summary>
           <div className="grid-2 silvus">
             <div>
               <h4 className="sub-title">{mode === "rssi" ? "RSSI matrix (dBm, row hears column)" : "Link quality (dB, row hears column)"}</h4>
@@ -299,6 +305,7 @@ export function NetworkPage() {
               )}
             </div>
           </div>
+          </details>
         )}
       </Card>
       {deploy && <DeployDialog onClose={() => setDeploy(false)} machines={machines.map(m => ({name: m.name, role: m.role}))} />}

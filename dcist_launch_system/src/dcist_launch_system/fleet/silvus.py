@@ -97,3 +97,53 @@ def routing_summary(details: dict) -> dict[str, dict]:
         for name, info in sorted(details.items())
         if not info.get("error")
     }
+
+
+def mesh_view(details: dict, topology: dict | None = None, local_ips=()) -> dict:
+    """Radios and links for drawing the mesh.
+
+    ``radios``: name, node_id, battery, via, error, ``hosts`` (the computers on
+    its ethernet port, named from topology addresses) and ``local`` (one of them
+    is this machine). ``links``: one per radio pair either side reports, with
+    both directions' values and the best quality.
+    """
+    by_ip = {}
+    for mname, m in ((topology or {}).get("machines") or {}).items():
+        for addr in ((m or {}).get("addresses") or {}).values():
+            by_ip.setdefault(str(addr), mname)
+    local = {str(ip) for ip in local_ips}
+    radios = []
+    for name, info in sorted(details.items()):
+        hosts = [
+            {"ip": c.get("ip"), "machine": by_ip.get(str(c.get("ip")))}
+            for c in info.get("clients") or []
+        ]
+        radios.append({
+            "name": name,
+            "node_id": info.get("node_id"),
+            "battery": info.get("battery"),
+            "via": info.get("via"),
+            "error": info.get("error"),
+            "hosts": hosts,
+            "local": any(h["ip"] in local for h in hosts),
+        })  # fmt: skip
+    matrix = link_matrix(details)
+    rank = {"good": 4, "fair": 3, "poor": 2, "linked": 1, "unknown": 0}
+    links, names = [], sorted(details)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            ab = matrix[a].get(b) if isinstance(matrix.get(a), dict) else None
+            ba = matrix[b].get(a) if isinstance(matrix.get(b), dict) else None
+            cells = [c for c in (ab, ba) if c is not None]
+            if not any(c.linked or c.link_db is not None or c.rssi_db is not None for c in cells):
+                continue
+            best = max(cells, key=lambda c: rank[c.quality])
+            def val(c):
+                return None if c is None else (c.rssi_db if c.rssi_db is not None else c.link_db)
+            links.append({
+                "a": a, "b": b,
+                "ab": val(ab), "ba": val(ba),
+                "unit": "dBm" if any(c.rssi_db is not None for c in cells) else "dB",
+                "quality": best.quality,
+            })  # fmt: skip
+    return {"radios": radios, "links": links}
