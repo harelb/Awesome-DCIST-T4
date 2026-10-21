@@ -26,7 +26,7 @@ import re
 import threading
 import time
 
-from . import sam3_client
+from . import cypher_tools, sam3_client
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +40,16 @@ PRICES = {
     "gpt-4o": (2.50, 10.00),
 }
 DEFAULT_PRICE = (5.00, 15.00)
-OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+# gpt-4.1 writes correct Cypher far more often than mini (heracles_agents used it)
+OPENAI_DEFAULT_MODEL = "gpt-4.1"
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
+# what the chat's model picker offers per provider (``settings.llm_model`` is added)
+OPENAI_MODELS = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini"]
+ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+MAX_TOOL_ROUNDS = 8
+HISTORY_ITEMS = 60  # transcript items kept from earlier turns
+TOOL_CONTENT_CHARS = 6000  # a tool result as kept in the transcript
+WRITE_TTL_S = 3600.0  # an unapproved write proposal expires
 
 
 def price_for(model: str) -> tuple[float, float]:
@@ -172,6 +180,8 @@ class ChatService:
         self.ros = ros
         self._client = None
         self._client_provider = None
+        self._schema = cypher_tools.SchemaCache()
+        self._writes = WriteProposals()
         self.ledger = UsageLedger(
             getattr(settings, "llm_usage_path", "~/.adt4_console/llm_usage.json"),
             getattr(settings, "llm_budget_usd", 10.0),
@@ -211,18 +221,31 @@ class ChatService:
             return "anthropic"
         return None
 
-    def model(self) -> str | None:
+    def model(self, requested: str | None = None) -> str | None:
+        """``requested`` when the picker offers it, else the configured default."""
         prov = self.provider()
         if prov is None:
             return None
+        if requested and requested in self.models():
+            return requested
         return self.settings.llm_model or (
             OPENAI_DEFAULT_MODEL if prov == "openai" else ANTHROPIC_DEFAULT_MODEL
         )
+
+    def models(self) -> list[str]:
+        prov = self.provider()
+        if prov is None:
+            return []
+        out = list(OPENAI_MODELS if prov == "openai" else ANTHROPIC_MODELS)
+        if self.settings.llm_model and self.settings.llm_model not in out:
+            out.insert(0, self.settings.llm_model)
+        return out
 
     def usage(self) -> dict:
         return {
             "provider": self.provider(),
             "model": self.model(),
+            "models": self.models(),
             "budget_usd": self.ledger.budget_usd,
             **self.ledger.data,
         }
@@ -248,8 +271,19 @@ class ChatService:
         return self._client
 
     # ------------------------------------------------------------------ entry
-    def stream(self, message: str, robot: str | None = None, src: str | None = None):
+    def stream(
+        self,
+        message: str,
+        robot: str | None = None,
+        src: str | None = None,
+        history: list | None = None,
+        model: str | None = None,
+    ):
+        """One chat turn.  ``history``: the transcript items of earlier turns
+        (the client keeps them; each turn ends with a ``transcript`` event
+        carrying this turn's items).  ``model``: from the picker."""
         src = self._default_src(src)
+        history = clean_history(history)
         try:
             client = self.llm_client()
             if client is not None and self.ledger.remaining() <= 0:
@@ -262,9 +296,9 @@ class ChatService:
             if client is None:
                 yield from self._fallback(message, robot, src)
             elif self._client_provider == "openai":
-                yield from self._llm_openai(client, message, robot, src)
+                yield from self._llm_openai(client, message, robot, src, history, model)
             else:
-                yield from self._llm(client, message, robot, src)
+                yield from self._llm_anthropic(client, message, robot, src, history, model)
         except Exception as e:  # noqa: BLE001
             log.exception("chat failed")
             yield {"type": "error", "text": f"{type(e).__name__}: {e}"}
@@ -326,146 +360,183 @@ class ChatService:
         }
 
     # -------------------------------------------------------------------- LLM
-    _TOOLS = [
-        {
-            "name": "find_objects",
-            "description": "Search the selected scene graph for objects whose semantic label or "
-            "name matches a short noun phrase (e.g. 'chair', 'trash can'). Returns "
-            "total_matches (the true count) and up to 10 objects (nearest the robot first) "
-            "with symbols like 'O(12)' and positions in metres.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-                "additionalProperties": False,
-            },
+    # Cypher is the primary interface (heracles_agents chatdsg); the label
+    # search only stands in when there is no Neo4j source to query.
+    _T_RUN_CYPHER = {
+        "name": "run_cypher",
+        "description": "Run a READ-ONLY Cypher query on the Neo4j scene-graph database and get "
+        "the rows back (points as [x, y, z] metres, at most 200 rows; 'truncated' says if "
+        "there were more). Errors come back as {error}: fix the query and retry.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Cypher, no apoc"}},
+            "required": ["query"],
+            "additionalProperties": False,
         },
-        {
-            "name": "search_robot_images",
-            "description": "Run the SAM3 open-vocabulary detector over the robot's stored "
-            "camera keyframes to find an object that is NOT in the scene graph. Use it when "
-            "find_objects returns no matches, or when the operator asks to look in the "
-            "robot's images. Takes a short noun phrase. Returns candidates (label, score, "
-            "3D centroid); they are NOT added to the map: the operator sees each candidate's "
-            "masked image and decides whether to add it, so ask them.",
-            "input_schema": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-                "additionalProperties": False,
+    }
+    _T_PROPOSE_WRITE = {
+        "name": "propose_cypher_write",
+        "description": "Propose a Cypher query that CHANGES the database (CREATE / MERGE / SET / "
+        "DELETE ...). It does not run: the operator sees the exact query and approves or "
+        "rejects it, and you are told the outcome in a later message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "summary": {"type": "string", "description": "one line: what it changes and why"},
             },
+            "required": ["query", "summary"],
+            "additionalProperties": False,
         },
-        {
-            "name": "propose_goal",
-            "description": "Propose a navigation goal for the operator to approve. kind='goto' "
-            "visits points in order, 'tsp' visits them in the best order; points are node "
-            "symbols returned by find_objects. kind='pddl' sends pddl_goal to the "
-            "visit_objects_pddl planner, e.g. '(and (visited-object o12) (visited-object o7))' "
-            "(object symbol O(12) -> o12). kind='language' passes a command to the robot's "
-            "language planner.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": ["goto", "tsp", "pddl", "language"],
+    }
+    _T_SHOW_IMAGES = {
+        "name": "show_object_images",
+        "description": "Show the operator camera images of scene-graph nodes (objects, or agent "
+        "keyframes), cropped to the object with its mask. Takes symbols like 'O12' or 'O(12)'. "
+        "Returns how many images each node has.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbols": {"type": "array", "items": {"type": "string"}}},
+            "required": ["symbols"],
+            "additionalProperties": False,
+        },
+    }
+    _T_SEARCH_IMAGES = {
+        "name": "search_robot_images",
+        "description": "Run the SAM3 open-vocabulary detector over the robot's stored camera "
+        "keyframes to find an object that is NOT in the scene graph (or when the operator asks "
+        "to look in the images). Takes a short noun phrase. Returns candidates (label, score, 3D "
+        "centroid, whether it would merge into an existing object). They are NOT in the map: the "
+        "operator sees each candidate's image and approves (adds) or discards it; you are told "
+        "which symbol an approved candidate got.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
+    _T_PROPOSE_GOAL = {
+        "name": "propose_goal",
+        "description": "Propose a robot goal for the operator to approve and send. kind='pddl' "
+        "(preferred) sends pddl_goal through the plan-repair goal manager, e.g. "
+        "'(and (visited-object o12) (visited-object o7))' (lower case, no parentheses in "
+        "symbols); optional constraints keep the planner away from places or edges: "
+        "{predicate: 'forbidden-poi', symbols: ['o14']} or {predicate: 'forbidden-edge', "
+        "symbols: ['p1', 'p2']}. kind='goto' / 'tsp' visit node symbols (points) in order / in "
+        "the best order. kind='language' passes a command to the robot's language planner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["pddl", "goto", "tsp", "language"]},
+                "robot": {"type": "string", "description": "the robot to send; default: the selected robot"},
+                "pddl_goal": {"type": "string"},
+                "constraints": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge"]},
+                            "symbols": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["predicate", "symbols"],
+                        "additionalProperties": False,
                     },
-                    "points": {"type": "array", "items": {"type": "string"}},
-                    "pddl_goal": {"type": "string"},
-                    "command": {"type": "string"},
                 },
-                "required": ["kind"],
-                "additionalProperties": False,
+                "points": {"type": "array", "items": {"type": "string"}},
+                "command": {"type": "string"},
             },
+            "required": ["kind"],
+            "additionalProperties": False,
         },
-    ]
+    }
+    _T_FIND_OBJECTS = {
+        "name": "find_objects",
+        "description": "Search the selected scene graph for objects whose semantic label or "
+        "name matches a short noun phrase (e.g. 'chair', 'trash can'). Returns total_matches "
+        "(the true count) and up to 10 objects (nearest the robot first) with symbols like "
+        "'O(12)' and positions in metres.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    }
 
-    def _llm(self, client, message, robot, src):
-        """Anthropic tool loop; tools run through ``_run_tool`` (shared with OpenAI)."""
-        import anthropic
+    def _tools(self, src) -> list[dict]:
+        if self._cypher_src(src) is not None:
+            return [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
+                    self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
+        return [self._T_FIND_OBJECTS, self._T_SHOW_IMAGES, self._T_SEARCH_IMAGES,
+                self._T_PROPOSE_GOAL]  # fmt: skip
 
-        model = self.model()
-        messages = [{"role": "user", "content": message}]
-        origin = self._robot_pos(robot)
-        for _ in range(6):
-            if self.ledger.remaining() <= 0:
-                yield {
-                    "type": "error",
-                    "text": "LLM budget exhausted mid-conversation.",
-                }
-                return
-            kwargs = dict(
-                model=model,
-                max_tokens=4000,
-                system=self._system(src, robot),
-                tools=self._TOOLS,
-                messages=messages,
-                # server-side refusal fallback; the installed SDK predates the
-                # typed params, so they travel in extra_body
-                betas=["server-side-fallback-2026-07-01"],
-                extra_body={"output_config": {"effort": "low"}, "fallbacks": "default"},
-            )
-            try:
-                resp = client.beta.messages.create(**kwargs)
-            except anthropic.APIStatusError as e:
-                yield {
-                    "type": "error",
-                    "text": f"LLM error ({e.status_code}): {e.message}",
-                }
-                return
-            except anthropic.APIConnectionError:
-                yield {
-                    "type": "error",
-                    "text": "LLM unreachable; falling back to offline search.",
-                }
-                yield from self._fallback(message, robot, src)
-                return
-            usage = getattr(resp, "usage", None)
-            if usage is not None:
-                self.ledger.record(
-                    getattr(resp, "model", None) or model,
-                    int(getattr(usage, "input_tokens", 0) or 0),
-                    int(getattr(usage, "output_tokens", 0) or 0),
-                )
-            if resp.stop_reason == "refusal":
-                yield {"type": "error", "text": "The model declined this request."}
-                return
-            results = []
-            for block in resp.content:
-                if block.type == "text" and block.text.strip():
-                    yield {"type": "text", "text": block.text}
-                elif block.type == "tool_use":
-                    events, out = self._run_tool(
-                        block.name, dict(block.input or {}), message, robot, src, origin
-                    )
-                    yield from events
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(out),
-                        }
-                    )
-            if resp.stop_reason != "tool_use" or not results:
-                return
-            messages.append({"role": "assistant", "content": resp.content})
-            messages.append({"role": "user", "content": results})
+    def _cypher_src(self, src):
+        """The Neo4j source Cypher runs on (the planner's map), or None."""
+        sid = self._neo4j_src(src)
+        if not sid or not sid.startswith("neo4j:") or self.graph is None:
+            return None
+        try:
+            return self.graph.get(sid)
+        except Exception:  # noqa: BLE001
+            return None
 
     # ---------------------------------------------------------------- shared
     def _system(self, src, robot) -> str:
-        return (
-            "You are the operator assistant of a multi-robot mapping console. Answer "
-            "briefly. Use find_objects to look things up in the scene graph. If it finds "
-            "nothing (or the operator asks to look in the robot's images), call "
-            "search_robot_images; its candidates are not in the map until the operator "
-            "clicks 'Add to Neo4j', so ask whether to add them. When the operator wants a "
-            "robot to go somewhere, call propose_goal (the operator approves it in the UI "
-            "— never claim the robot is already moving). "
-            f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}."
+        csrc = self._cypher_src(src)
+        pos = self._robot_pos(robot)
+        where = (
+            f" Robot {robot} is at point({{x: {pos[0]:.2f}, y: {pos[1]:.2f}, z: {pos[2]:.2f}}})."
+            if pos
+            else ""
+        )
+        if csrc is None:
+            return (
+                "You are the operator assistant of a multi-robot mapping console. Answer "
+                "briefly. Use find_objects to look things up in the scene graph; if it finds "
+                "nothing (or the operator asks to look in the robot's images), call "
+                "search_robot_images (the operator approves candidates). When the operator wants "
+                "a robot to go somewhere, call propose_goal (the operator approves goals in the "
+                "UI; never claim the robot is moving). "
+                f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}.{where}"
+            )
+        return "\n\n".join(
+            [
+                cypher_tools.SYSTEM,
+                cypher_tools.SCENE_GRAPH,
+                cypher_tools.INTERFACE,
+                self._schema.text(csrc),
+                f"Database: {csrc.id}. Selected robot: {robot or 'none'}.{where}",
+            ]
         )
 
     def _run_tool(self, name, args, message, robot, src, origin):
         """Execute one tool call; returns (events_to_stream, result_for_model)."""
+        if name == "run_cypher":
+            csrc = self._cypher_src(src)
+            q = str(args.get("query", "")).strip()
+            if csrc is None:
+                return [], {"error": "no Neo4j database is connected"}
+            out = cypher_tools.run_read(csrc, q) if q else {"error": "empty query"}
+            ui = dict(out)
+            if "rows" in ui:
+                ui["rows"] = ui["rows"][:50]  # the table in the chat; the model gets them all
+            return [{"type": "tool", "name": name, "args": {"query": q}, "result": ui}], out
+        if name == "propose_cypher_write":
+            csrc = self._cypher_src(src)
+            q = str(args.get("query", "")).strip()
+            if csrc is None or not q:
+                return [], {"error": "no Neo4j database is connected" if csrc is None else "empty query"}
+            wid = self._writes.add(q, str(args.get("summary", "")), csrc.id)
+            card = {"type": "cypher_write", "id": wid, "query": q,
+                    "summary": str(args.get("summary", "")), "src": csrc.id}  # fmt: skip
+            return [card], {
+                "pending_approval": True,
+                "id": wid,
+                "note": "Not run yet. The operator approves or rejects it; you will be told.",
+            }
+        if name == "show_object_images":
+            return self._show_images(list(args.get("symbols") or []), src)
         if name == "find_objects":
             hits, for_model = search_for_model(
                 self.graph, src, str(args.get("query", "")), origin
@@ -474,21 +545,43 @@ class ChatService:
                 {"type": "tool", "name": name, "args": args, "result": hits}
             ], for_model
         if name == "propose_goal":
-            kind = args.get("kind", "goto")
+            kind = args.get("kind", "pddl")
             if kind == "language":
                 body = {"command": args.get("command") or message}
             elif kind == "pddl":
-                body = {
-                    "plugin": "visit_objects_pddl",
-                    "goal": args.get("pddl_goal", ""),
-                }
+                body = {"goal": args.get("pddl_goal", "")}
+                if args.get("constraints"):
+                    body["constraints"] = list(args["constraints"])
             else:
                 body = {"points": list(args.get("points") or [])}
-            goal = {"type": "goal", "kind": kind, "body": body, "robot": robot}
-            return [goal], {"proposed": True}
+            target = str(args.get("robot") or "").strip() or robot
+            goal = {"type": "goal", "kind": kind, "body": body, "robot": target}
+            return [goal], {"proposed": True, "note": "The operator approves and sends it."}
         if name == "search_robot_images":
             return self._search_images(str(args.get("query", "")), src)
         return [], {"error": f"unknown tool {name}"}
+
+    def _show_images(self, symbols, src):
+        """``images`` event (URLs the chat renders) + per-node counts for the model."""
+        sid = self._neo4j_src(src) or src
+        items, for_model = [], {}
+        for raw in symbols[:8]:
+            try:
+                d = self.graph.get(sid).node_detail(str(raw))
+            except Exception as e:  # noqa: BLE001
+                for_model[str(raw)] = {"error": str(e)}
+                continue
+            n = d.get("n_images", 0)
+            urls = [
+                f"api/graph/{sid}/image/{d['sym']}/{i}?w=480&crop=1"
+                + ("&mask=1" if (d.get("masks") or [False] * n)[i] else "")
+                for i in range(min(n, 6))
+            ]
+            items.append({"sym": d["sym"], "label": d.get("label_name") or d.get("name") or "",
+                          "pos": d.get("pos"), "images": urls})  # fmt: skip
+            for_model[d["sym"]] = {"images": n, "label": d.get("label_name") or ""}
+        events = [{"type": "images", "src": sid, "items": items}] if items else []
+        return events, for_model
 
     def _search_images(self, query, src):
         """SAM3 dry run → (``tool`` + ``object_candidate`` events, model summary)."""
@@ -532,8 +625,106 @@ class ChatService:
                 return s["id"]
         return src
 
+    # ------------------------------------------------------- approved writes
+    def execute_write(self, wid: str, approve: bool) -> dict:
+        """Run (or drop) a proposed write; bumps the map version so viewers and
+        the heracles DSG publisher (plan repair) pick the change up."""
+        w = self._writes.pop(wid)
+        if w is None:
+            return {"ok": False, "error": "unknown or expired write proposal"}
+        if not approve:
+            return {"ok": True, "rejected": True, "query": w["query"]}
+        src = self.graph.get(w["src"])
+        out = cypher_tools.run_write(src, w["query"])
+        if "error" in out:
+            return {"ok": False, "query": w["query"], **out}
+        version = None
+        if out.get("counters"):
+            try:
+                from .routes.maps import bump_map_counters
+
+                version = bump_map_counters(src.db())
+            except Exception as e:  # noqa: BLE001
+                log.warning("write ran but the map version bump failed: %s", e)
+            try:
+                src.invalidate()
+            except Exception:  # noqa: BLE001
+                pass
+            self.graph.notify_version(w["src"], "chat write")
+        return {"ok": True, "query": w["query"], "map_version": version, **out}
+
+    # ----------------------------------------------------------- transcript
+    def _turn(self, message):
+        """Neutral transcript of this turn (``items``) on top of the history."""
+        return [{"role": "user", "text": message}]
+
+    # ---------------------------------------------------------------- Anthropic
+    def _llm_anthropic(self, client, message, robot, src, history=(), requested_model=None):
+        """Anthropic tool loop; tools run through ``_run_tool`` (shared with OpenAI)."""
+        import anthropic
+
+        model = self.model(requested_model)
+        turn = self._turn(message)
+        origin = self._robot_pos(robot)
+        tools = self._tools(src)
+        system = self._system(src, robot)
+        try:
+            for _ in range(MAX_TOOL_ROUNDS):
+                if self.ledger.remaining() <= 0:
+                    yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
+                    return
+                kwargs = dict(
+                    model=model,
+                    max_tokens=4000,
+                    system=system,
+                    tools=tools,
+                    messages=to_anthropic(list(history) + turn),
+                    # server-side refusal fallback; the installed SDK predates the
+                    # typed params, so they travel in extra_body
+                    betas=["server-side-fallback-2026-07-01"],
+                    extra_body={"output_config": {"effort": "low"}, "fallbacks": "default"},
+                )
+                try:
+                    resp = client.beta.messages.create(**kwargs)
+                except anthropic.APIStatusError as e:
+                    yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
+                    return
+                except anthropic.APIConnectionError:
+                    yield {"type": "error", "text": "LLM unreachable; falling back to offline search."}
+                    yield from self._fallback(message, robot, src)
+                    return
+                usage = getattr(resp, "usage", None)
+                if usage is not None:
+                    self.ledger.record(
+                        getattr(resp, "model", None) or model,
+                        int(getattr(usage, "input_tokens", 0) or 0),
+                        int(getattr(usage, "output_tokens", 0) or 0),
+                    )
+                if resp.stop_reason == "refusal":
+                    yield {"type": "error", "text": "The model declined this request."}
+                    return
+                text, calls = "", []
+                for block in resp.content:
+                    if block.type == "text" and block.text.strip():
+                        text += block.text
+                        yield {"type": "text", "text": block.text}
+                    elif block.type == "tool_use":
+                        calls.append({"id": block.id, "name": block.name, "args": dict(block.input or {})})
+                turn.append({"role": "assistant", "text": text, "calls": calls})
+                if not calls:
+                    return
+                for c in calls:
+                    events, out = self._run_tool(c["name"], c["args"], message, robot, src, origin)
+                    yield from events
+                    turn.append({"role": "tool", "id": c["id"], "name": c["name"],
+                                 "content": _clip(json.dumps(out, default=str))})  # fmt: skip
+                if resp.stop_reason != "tool_use":
+                    return
+        finally:
+            yield {"type": "transcript", "items": turn}
+
     # ------------------------------------------------------------------ OpenAI
-    def _openai_tools(self):
+    def _openai_tools(self, src=None):
         return [
             {
                 "type": "function",
@@ -543,96 +734,183 @@ class ChatService:
                     "parameters": t["input_schema"],
                 },
             }
-            for t in self._TOOLS
+            for t in self._tools(src)
         ]
 
-    def _llm_openai(self, client, message, robot, src):
+    def _llm_openai(self, client, message, robot, src, history=(), requested_model=None):
         import openai
 
-        model = self.model()
-        messages = [
-            {"role": "system", "content": self._system(src, robot)},
-            {"role": "user", "content": message},
-        ]
+        model = self.model(requested_model)
+        turn = self._turn(message)
         origin = self._robot_pos(robot)
-        for _ in range(6):
-            if self.ledger.remaining() <= 0:
-                yield {
-                    "type": "error",
-                    "text": "LLM budget exhausted mid-conversation.",
-                }
-                return
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=self._openai_tools(),
-                    temperature=0,
-                    max_tokens=800,
-                )
-            except openai.APIStatusError as e:
-                yield {
-                    "type": "error",
-                    "text": f"LLM error ({e.status_code}): {e.message}",
-                }
-                return
-            except openai.APIConnectionError:
-                yield {
-                    "type": "error",
-                    "text": "LLM unreachable; falling back to offline search.",
-                }
-                yield from self._fallback(message, robot, src)
-                return
-            if resp.usage is not None:
-                cost = self.ledger.record(
-                    resp.model or model,
-                    resp.usage.prompt_tokens,
-                    resp.usage.completion_tokens,
-                )
-                log.info(
-                    "chat LLM %s: %d in / %d out tokens, $%.5f (total $%.4f of $%.2f)",
-                    resp.model,
-                    resp.usage.prompt_tokens,
-                    resp.usage.completion_tokens,
-                    cost,
-                    self.ledger.spent,
-                    self.ledger.budget_usd,
-                )
-            msg = resp.choices[0].message
-            if msg.content and msg.content.strip():
-                yield {"type": "text", "text": msg.content}
-            calls = msg.tool_calls or []
-            if not calls:
-                return
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": [
-                        {
-                            "id": c.id,
-                            "type": "function",
-                            "function": {
-                                "name": c.function.name,
-                                "arguments": c.function.arguments,
-                            },
-                        }
-                        for c in calls
-                    ],
-                }
-            )
-            for c in calls:
+        tools = self._openai_tools(src)
+        system = self._system(src, robot)
+        try:
+            for _ in range(MAX_TOOL_ROUNDS):
+                if self.ledger.remaining() <= 0:
+                    yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
+                    return
                 try:
-                    args = json.loads(c.function.arguments or "{}")
-                except ValueError:
-                    args = {}
-                events, out = self._run_tool(
-                    c.function.name, args, message, robot, src, origin
-                )
-                yield from events
-                messages.append(
-                    {"role": "tool", "tool_call_id": c.id, "content": json.dumps(out)}
-                )
+                    resp = client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "system", "content": system}]
+                        + to_openai(list(history) + turn),
+                        tools=tools,
+                        temperature=0.2,
+                        max_tokens=1500,
+                    )
+                except openai.APIStatusError as e:
+                    yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
+                    return
+                except openai.APIConnectionError:
+                    yield {"type": "error", "text": "LLM unreachable; falling back to offline search."}
+                    yield from self._fallback(message, robot, src)
+                    return
+                if resp.usage is not None:
+                    cost = self.ledger.record(
+                        resp.model or model,
+                        resp.usage.prompt_tokens,
+                        resp.usage.completion_tokens,
+                    )
+                    log.info(
+                        "chat LLM %s: %d in / %d out tokens, $%.5f (total $%.4f of $%.2f)",
+                        resp.model, resp.usage.prompt_tokens, resp.usage.completion_tokens,
+                        cost, self.ledger.spent, self.ledger.budget_usd,
+                    )  # fmt: skip
+                msg = resp.choices[0].message
+                if msg.content and msg.content.strip():
+                    yield {"type": "text", "text": msg.content}
+                calls = []
+                for c in msg.tool_calls or []:
+                    try:
+                        args = json.loads(c.function.arguments or "{}")
+                    except ValueError:
+                        args = {}
+                    calls.append({"id": c.id, "name": c.function.name, "args": args})
+                turn.append({"role": "assistant", "text": msg.content or "", "calls": calls})
+                if not calls:
+                    return
+                for c in calls:
+                    events, out = self._run_tool(c["name"], c["args"], message, robot, src, origin)
+                    yield from events
+                    turn.append({"role": "tool", "id": c["id"], "name": c["name"],
+                                 "content": _clip(json.dumps(out, default=str))})  # fmt: skip
+        finally:
+            yield {"type": "transcript", "items": turn}
+
+
+class WriteProposals:
+    """Writes the model proposed, held server-side so only the exact query the
+    operator saw can run (by id), for ``WRITE_TTL_S``."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._items: dict[str, dict] = {}
+        self._n = 0
+
+    def add(self, query: str, summary: str, src: str) -> str:
+        with self._lock:
+            now = time.time()
+            self._items = {k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S}
+            self._n += 1
+            wid = f"w{self._n}-{int(now)}"
+            self._items[wid] = {"query": query, "summary": summary, "src": src, "t": now}
+            return wid
+
+    def pop(self, wid: str) -> dict | None:
+        with self._lock:
+            w = self._items.pop(wid, None)
+        if w is None or time.time() - w["t"] >= WRITE_TTL_S:
+            return None
+        return w
+
+
+def _clip(text: str, n: int = TOOL_CONTENT_CHARS) -> str:
+    return text if len(text) <= n else text[:n] + f"... [{len(text) - n} more chars]"
+
+
+def clean_history(items) -> list[dict]:
+    """Validate a client-supplied transcript: known roles only, tool results
+    only right after the assistant call that made them, at most
+    ``HISTORY_ITEMS`` items, starting at a user message."""
+    out: list[dict] = []
+    open_calls: set[str] = set()
+    for it in list(items or [])[-HISTORY_ITEMS * 2 :]:
+        if not isinstance(it, dict):
+            continue
+        role = it.get("role")
+        if role == "user" and isinstance(it.get("text"), str):
+            if open_calls:  # an assistant call without its results: drop that exchange
+                while out and out[-1]["role"] != "user":
+                    out.pop()
+                open_calls = set()
+            out.append({"role": "user", "text": it["text"]})
+        elif role == "assistant":
+            calls = [
+                {"id": str(c.get("id")), "name": str(c.get("name")), "args": c.get("args") or {}}
+                for c in (it.get("calls") or [])
+                if isinstance(c, dict) and c.get("id") and c.get("name")
+            ]
+            out.append({"role": "assistant", "text": str(it.get("text") or ""), "calls": calls})
+            open_calls = {c["id"] for c in calls}
+        elif role == "tool" and str(it.get("id")) in open_calls:
+            out.append({"role": "tool", "id": str(it["id"]), "name": str(it.get("name") or ""),
+                        "content": _clip(str(it.get("content") or ""))})  # fmt: skip
+            open_calls.discard(str(it["id"]))
+    if open_calls:
+        while out and out[-1]["role"] != "user":
+            out.pop()
+        if out:
+            out.pop()  # and the question it was answering
+    out = out[-HISTORY_ITEMS:]
+    while out and out[0]["role"] != "user":
+        out.pop(0)
+    return out
+
+
+def to_openai(items: list[dict]) -> list[dict]:
+    msgs = []
+    for it in items:
+        if it["role"] == "user":
+            msgs.append({"role": "user", "content": it["text"]})
+        elif it["role"] == "assistant":
+            m = {"role": "assistant", "content": it.get("text") or ""}
+            if it.get("calls"):
+                m["tool_calls"] = [
+                    {"id": c["id"], "type": "function",
+                     "function": {"name": c["name"], "arguments": json.dumps(c["args"])}}  # fmt: skip
+                    for c in it["calls"]
+                ]
+            msgs.append(m)
+        else:
+            msgs.append({"role": "tool", "tool_call_id": it["id"], "content": it["content"]})
+    return msgs
+
+
+def to_anthropic(items: list[dict]) -> list[dict]:
+    """Alternating user/assistant messages; tool results ride in a user message."""
+    msgs: list[dict] = []
+
+    def add(role, blocks):
+        if msgs and msgs[-1]["role"] == role:
+            msgs[-1]["content"].extend(blocks)
+        else:
+            msgs.append({"role": role, "content": list(blocks)})
+
+    for it in items:
+        if it["role"] == "user":
+            add("user", [{"type": "text", "text": it["text"]}])
+        elif it["role"] == "assistant":
+            blocks = [{"type": "text", "text": it["text"]}] if it.get("text") else []
+            blocks += [
+                {"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["args"]}
+                for c in it.get("calls") or []
+            ]
+            if blocks:
+                add("assistant", blocks)
+        else:
+            add("user", [{"type": "tool_result", "tool_use_id": it["id"], "content": it["content"]}])
+    return msgs
 
 
 def _openai_key() -> str | None:

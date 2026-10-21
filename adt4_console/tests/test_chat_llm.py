@@ -82,12 +82,13 @@ def test_openai_tool_loop_proposes_goal_and_meters_spend(llm_svc):
     svc.chat._client, svc.chat._client_provider = fake, "openai"
     out = _chat(client, "take the robot to the chair", robot="euclid", src="file:syn")
     kinds = [o["type"] for o in out]
-    assert kinds == ["tool", "goal", "text", "done"]
+    assert kinds == ["tool", "goal", "text", "transcript", "done"]
     assert out[0]["name"] == "find_objects" and out[0]["result"]
-    assert out[1]["body"] == {
-        "plugin": "visit_objects_pddl",
-        "goal": "(visited-object o1)",
-    }
+    # the console routes pddl goals (plan repair goal_manager, else the planner)
+    assert out[1]["body"] == {"goal": "(visited-object o1)"}
+    # this turn as transcript items for the next request: user, 3 assistant steps, 2 tool results
+    roles = [i["role"] for i in out[3]["items"]]
+    assert roles == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
     # tool results were fed back with matching ids
     sent = fake.chat.completions.calls[-1]["messages"]
     tool_msgs = [m for m in sent if m["role"] == "tool"]
@@ -95,8 +96,10 @@ def test_openai_tool_loop_proposes_goal_and_meters_spend(llm_svc):
     found = json.loads(tool_msgs[0]["content"])  # the model sees the true count
     assert found["total_matches"] >= found["returned"] == len(out[0]["result"])
     usage = client.get("/api/chat/usage").json()
-    assert usage["provider"] == "openai" and usage["model"] == "gpt-4.1-mini"
+    assert usage["provider"] == "openai" and usage["model"] == "gpt-4.1"
+    assert "gpt-4.1-mini" in usage["models"]
     assert usage["calls"] == 3
+    # metered at the model each response reports (the fake answers as mini)
     assert usage["spent_usd"] == pytest.approx(3 * (1000 * 0.40 + 100 * 1.60) / 1e6)
 
 
@@ -131,6 +134,8 @@ def test_provider_selection(settings, monkeypatch, tmp_path):
     svc = ChatService(settings, graph=None)
     assert svc.provider() is None
     monkeypatch.setenv("OPENAI_API_KEY", "sk-x")
-    assert svc.provider() == "openai" and svc.model() == "gpt-4.1-mini"
+    assert svc.provider() == "openai" and svc.model() == "gpt-4.1"
+    assert svc.model("gpt-4.1-mini") == "gpt-4.1-mini"  # the picker's choice
+    assert svc.model("not-a-model") == "gpt-4.1"  # unknown names are ignored
     settings.llm_provider = "anthropic"
     assert svc.provider() is None  # openai key alone does not satisfy "anthropic"

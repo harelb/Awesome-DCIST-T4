@@ -224,6 +224,7 @@ def candidates(result: dict) -> list[dict]:
 def candidate_events(result: dict, src: str | None) -> list[dict]:
     """One ``object_candidate`` NDJSON event per candidate."""
     pending = result.get("pending_id")
+    expires = result.get("expires_in_s")
     out = []
     for i, c in enumerate(candidates(result)):
         out.append(
@@ -240,10 +241,21 @@ def candidate_events(result: dict, src: str | None) -> list[dict]:
                 "num_points": c.get("num_points"),
                 "num_views": c.get("num_views") or len(c.get("views") or []),
                 "num_frames": c.get("num_frames"),
+                # {"symbol", "distance_m"} when committing merges into a mapped object
+                "would_merge_into": _merge_target(c),
+                "expires_in_s": float(expires) if isinstance(expires, (int, float)) else None,
                 "src": src,
             }
         )
     return out
+
+
+def _merge_target(c: dict) -> dict | None:
+    m = c.get("would_merge_into")
+    if isinstance(m, dict) and m.get("symbol"):
+        d = m.get("distance_m")
+        return {"symbol": str(m["symbol"]), "distance_m": round(float(d), 2) if isinstance(d, (int, float)) else None}
+    return None
 
 
 def candidates_for_model(result: dict) -> dict:
@@ -260,13 +272,16 @@ def candidates_for_model(result: dict) -> dict:
                 "centroid": _round(c.get("centroid")),
                 "views": c.get("num_views") or len(c.get("views") or []),
                 "frames": c.get("num_frames"),
+                "would_merge_into": (_merge_target(c) or {}).get("symbol"),
             }
             for i, c in enumerate(cands)
         ],
         "note": (
             "These are NOT in the map yet. The operator sees each candidate's "
-            "image with its mask and an 'Add to Neo4j' button. Ask the operator "
-            "whether to add them; do not propose a goal to them until added."
+            "images with its mask and approves (adds) or discards it. Ask the operator "
+            "to approve the right one; you will be told which symbol it got. would_merge_into names the mapped "
+            "object it would merge into. Do not propose a goal to a candidate until "
+            "it is added."
             if cands
             else "SAM3 found nothing in the robot's stored images."
         ),

@@ -17,6 +17,10 @@ class ChatBody(BaseModel):
     message: str
     robot: str | None = None
     src: str | None = None
+    # the transcript items of earlier turns (each turn's ``transcript`` event)
+    history: list[dict] | None = None
+    # from the chat's model picker (``GET /api/chat/usage`` lists ``models``)
+    model: str | None = None
 
 
 @router.post("/chat")
@@ -24,7 +28,7 @@ def chat(body: ChatBody, request: Request):
     chat_svc = services(request).chat
 
     def lines():
-        for item in chat_svc.stream(body.message, body.robot, body.src):
+        for item in chat_svc.stream(body.message, body.robot, body.src, body.history, body.model):
             yield json.dumps(item, default=str) + "\n"
 
     return StreamingResponse(
@@ -38,3 +42,15 @@ def chat(body: ChatBody, request: Request):
 def chat_usage(request: Request):
     """Provider/model in use and cumulative spend against the budget."""
     return services(request).chat.usage()
+
+
+class WriteDecision(BaseModel):
+    id: str
+    approve: bool
+
+
+@router.post("/chat/cypher_write")
+def cypher_write(body: WriteDecision, request: Request):
+    """Run or reject a write the chat proposed (only the exact proposed query,
+    by id).  An approved write that changed something bumps the map version."""
+    return services(request).chat.execute_write(body.id, body.approve)

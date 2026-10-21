@@ -334,20 +334,51 @@ Driving goes through `spot_executor_node`, which holds the Spot lease (never
 * `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
   clients without the socket (409 when another session drives).
 
-## 10. Chat (optional LLM)
+## 10. Chat (optional LLM): Cypher-first
 
-`POST /api/chat` `{message, robot?, src?}` → NDJSON stream of `{type: "text", text}` /
-`{type: "tool", name, args, result}` / `{type: "goal", kind, body}` / `{type: "error", text}` /
-`{type: "done"}`. A `goal` line is a *proposal*; the UI shows a "Send to robot" button that
-calls the §9 endpoint. Providers: OpenAI (`ADT4_OPENAI_API_KEY`/`OPENAI_API_KEY`, default
-model `gpt-4.1-mini`) or Anthropic; `--llm-provider auto|openai|anthropic`, `--llm-model`.
-Tools: `find_objects` (returns `total_matches` plus up to 10 objects, nearest the robot first)
-and `propose_goal` (`goto`/`tsp`/`pddl`/`language`). Spend is metered from each response's
-token usage and persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget-usd`
-(default 10) the chat switches to the offline fallback. `GET /api/chat/usage` →
-`{provider, model, budget_usd, spent_usd, calls, input_tokens, output_tokens, last}`.
-Without credentials a deterministic fallback answers "find/go to <label>" queries by
-matching object labels in the selected graph source and proposing a goto goal.
+Modelled on heracles_agents `chatdsg`: Cypher over the planner's Neo4j map is how the
+assistant reads the scene graph. Nothing changes the map or moves a robot without the
+operator: writes, SAM3 objects and goals arrive as cards to approve.
+
+`POST /api/chat` `{message, robot?, src?, history?, model?}` → NDJSON stream:
+
+- `{type: "text", text}`, `{type: "error", text}`, then always `{type: "done"}`.
+- `{type: "tool", name, args, result}`; for `run_cypher`: `args.query`, `result` =
+  `{columns, rows (first 50), row_count, truncated}` or `{error}`.
+- `{type: "cypher_write", id, query, summary, src}`: a proposed change; nothing ran.
+- `{type: "images", src, items: [{sym, label, pos, images: [url]}]}` (cropped, masked).
+- `{type: "object_candidate", pending_id, index, label, score, image_uri, centroid, bbox_min,
+  bbox_max, num_views, would_merge_into: {symbol, distance_m}|null, expires_in_s, src}`.
+- `{type: "goal", kind, body, robot}`: a proposal. `pddl` bodies are `{goal, constraints?}`
+  and go through §9 (`/goal/pddl`, plan repair goal_manager when it runs).
+- `{type: "transcript", items}` just before `done`: this turn as transcript items
+  (`{role: user, text}`, `{role: assistant, text, calls: [{id, name, args}]}`,
+  `{role: tool, id, name, content}`). The client sends earlier turns back as `history`
+  (validated server-side: incomplete tool exchanges dropped, last 60 items).
+
+Tools with a Neo4j source: `run_cypher` (read-only: runs in a READ transaction, so the
+database rejects writes; 30 s timeout; 200 rows), `propose_cypher_write`,
+`show_object_images`, `search_robot_images` (SAM3, §10.1), `propose_goal`
+(`pddl`/`goto`/`tsp`/`language`, optional `robot` and plan-repair `constraints`). The
+system prompt is heracles_agents' (system, scene-graph description, Cypher interface) plus
+a live summary of the database (labels with counts and properties, relationship types,
+`_Labelspace` names), refreshed every 60 s. Without a Neo4j source, `find_objects`
+(label search over the selected source) replaces the Cypher tools.
+
+`POST /api/chat/cypher_write` `{id, approve}` → runs (or drops) exactly the proposed query,
+once: `{ok, query, rows, counters, map_version}` / `{ok, rejected: true}` /
+`{ok: false, error}`. A write that changed something bumps both map version counters
+(viewers refresh; heracles republishes the DSG for plan repair). Proposals expire after 1 h.
+The UI tells the assistant each decision with an `[operator] ...` note (and asks it to
+continue after an approval); approved SAM3 candidates are reported the same way.
+
+Providers: OpenAI (`ADT4_OPENAI_API_KEY`/`OPENAI_API_KEY`/`HERACLES_OPENAI_API_KEY`, default
+`gpt-4.1`) or Anthropic; `--llm-provider`, `--llm-model`. `model` picks per request among
+`GET /api/chat/usage` → `{provider, model, models, budget_usd, spent_usd, calls,
+input_tokens, output_tokens, last}`. Spend is metered from each response's token usage and
+persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget-usd` (default 10) the chat
+switches to the offline fallback, which answers "find/go to <label>" by matching labels and
+proposing a goto goal.
 
 ### 10.1 Image search (SAM3 query server, Robot viewer "Images" tab)
 
@@ -365,6 +396,8 @@ Forwarded to the SAM3 query server (`--sam3-url`, agentic_navigation
   ranking (no SAM3): `{pool, frames: [{rank, frame_key, score, source, camera_position,
   thumb_uri}], timings}`.
 - `GET /api/sam3/frame?key=<frame_key>&max_dim=` → `{uri, width, height}` (raw keyframe).
+- `GET /api/sam3/frame.jpg?pending_id=&index=&view=&max_dim=` → a candidate's view with
+  its mask as JPEG (the chat's candidate cards page through views with it).
 - `POST /api/sam3/commit` `{pending_id, index, src?}` / `POST /api/sam3/discard`
   `{pending_id}`: write (or drop) a candidate; a commit refreshes the Neo4j source(s).
 

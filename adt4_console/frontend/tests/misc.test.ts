@@ -32,7 +32,7 @@ describe("chat NDJSON", () => {
     const line = JSON.stringify({
       type: "object_candidate", pending_id: "p-1", index: 1, label: "fire extinguisher", score: 0.912,
       image_uri: "data:image/jpeg;base64,/9j/AA", centroid: [1, 2, 0.5], bbox_min: [0.9, 1.9, 0.1], bbox_max: [1.1, 2.1, 0.9],
-      num_views: 2, src: "neo4j:live",
+      num_views: 2, src: "neo4j:live", would_merge_into: {symbol: "O12", distance_m: 0.31}, expires_in_s: 600,
     });
     const [objs, rest] = parseNdjson(line + "\n" + '{"type":"done"}\n');
     expect(rest).toBe("");
@@ -41,7 +41,8 @@ describe("chat NDJSON", () => {
     expect(items[0]).toEqual({
       type: "object_candidate", pending_id: "p-1", index: 1, label: "fire extinguisher", score: 0.912,
       image_uri: "data:image/jpeg;base64,/9j/AA", centroid: [1, 2, 0.5], bbox_min: [0.9, 1.9, 0.1], bbox_max: [1.1, 2.1, 0.9],
-      num_views: 2, src: "neo4j:live",
+      num_views: 2, src: "neo4j:live", would_merge_into: {symbol: "O12", distance_m: 0.31}, expires_in_s: 600,
+      received: expect.any(Number),
     });
   });
   it("rejects non-image URIs and missing pending ids", () => {
