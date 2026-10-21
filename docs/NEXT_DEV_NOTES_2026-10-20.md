@@ -42,3 +42,20 @@ State when written: `integrate/features-20261020` @ 72b4630 (harelb), deployed t
 - Remap leak (PR #345 group-scoped ZED remaps + #351 global /tf remap): another agent handles it.
 - Phone drive: Android Chrome joystick root cause unconfirmed; Drive now auto-focuses the only
   streaming robot.
+
+## Live mesh over the radio (measured 2026-10-20 on the Pennovation courtyard-alleyways run)
+- Mesh 972,201 vertices / 1,617,780 faces over 200 x 180 m -> fleetlink 8 m tiles: 406 tiles,
+  28.5 MB raw, 13.4 MB zstd (largest tile 391 kB). Fleetlink sends only tiles whose hash changed,
+  but a loop closure moves (nearly) every tile: up to ~13.4 MB per LC = ~2.2 min at the default
+  C3 budget (100 kB/s), up to ~45 min at the auto minimum (5 kB/s).
+- Option A (small, fleetlink only): per-tile mesh decimation on the robot for viewing (5-10x
+  fewer faces -> ~1.5-3 MB per full send). The planner does not use the console mesh.
+- Option B (needs Hydra): deform on the base. Kimera-PGMO moves each vertex by blending the rigid
+  transforms of its k=3 nearest control points (weights 1 - d/d_max, time window 15 s,
+  control points every 2.5 m; kimera_pgmo mesh_deformation.cpp interpDeformation). Send the
+  odometric (undeformed) mesh tiles once (they only grow) + control points (position, stamp) once
+  + optimized control-point poses per LC: 4,837 control points here -> ~135 kB raw / ~60-100 kB
+  packed per LC (~1 s at 100 kB/s), ~100-200x less than re-sending tiles. Needs Hydra to publish
+  the odometric mesh, per-vertex stamps, control points and optimized values; base ports the
+  ~40-line blend to numpy; per-tile checksum vs the robot's deformed mesh with tile fallback.
+- Measure first: replay a bag with loop closures through fleetlink and log C3 bytes per LC.
