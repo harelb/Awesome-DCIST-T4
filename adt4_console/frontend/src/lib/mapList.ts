@@ -101,15 +101,24 @@ export function sortMaps(rows: SearchHit[], key: SortKey, query = ""): SearchHit
   return r.sort(cmp[key] ?? cmp.newest);
 }
 
+/** A run missing a hydra backend output (dsg.json, dsg_with_mesh.json or
+ *  mesh.ply): crashed, still running, or stopped before hydra saved. Unknown
+ *  (an older backend that does not report the files) counts as complete. */
+export function isIncomplete(map: MapEntry): boolean {
+  if (map.has_dsg === undefined) return false;
+  return !map.has_dsg || !map.has_dsg_mesh || !map.has_mesh;
+}
+
 // ---- remembered view settings (localStorage may be unavailable) ----
 
 export interface MapsPrefs {
   sort: SortKey;
   grouped: boolean;
+  hideIncomplete: boolean;
 }
 
 const PREFS_KEY = "adt4.maps.prefs";
-export const DEFAULT_PREFS: MapsPrefs = {sort: "newest", grouped: true};
+export const DEFAULT_PREFS: MapsPrefs = {sort: "newest", grouped: true, hideIncomplete: false};
 
 export function loadPrefs(): MapsPrefs {
   try {
@@ -119,6 +128,7 @@ export function loadPrefs(): MapsPrefs {
     return {
       sort: p.sort && p.sort in SORT_LABELS ? p.sort : DEFAULT_PREFS.sort,
       grouped: typeof p.grouped === "boolean" ? p.grouped : DEFAULT_PREFS.grouped,
+      hideIncomplete: typeof p.hideIncomplete === "boolean" ? p.hideIncomplete : DEFAULT_PREFS.hideIncomplete,
     };
   } catch {
     return DEFAULT_PREFS;

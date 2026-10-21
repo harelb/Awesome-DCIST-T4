@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it, vi} from "vitest";
 import {fuzzyMatch, matchRanges} from "../src/lib/fuzzy";
-import {DEFAULT_PREFS, loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, type MapRow} from "../src/lib/mapList";
+import {DEFAULT_PREFS, isIncomplete, loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, type MapRow} from "../src/lib/mapList";
 import type {MapEntry} from "../src/types";
 
 const picked = (s: string, idx: number[]) => idx.map(i => s[i]).join("");
@@ -110,8 +110,11 @@ describe("prefs", () => {
   });
 
   it("round-trips and validates", () => {
-    savePrefs({sort: "size", grouped: false});
-    expect(loadPrefs()).toEqual({sort: "size", grouped: false});
+    savePrefs({sort: "size", grouped: false, hideIncomplete: true});
+    expect(loadPrefs()).toEqual({sort: "size", grouped: false, hideIncomplete: true});
+    // prefs saved before the toggle existed keep showing everything
+    localStorage.setItem("adt4.maps.prefs", JSON.stringify({sort: "size", grouped: false}));
+    expect(loadPrefs()).toEqual({sort: "size", grouped: false, hideIncomplete: false});
     localStorage.setItem("adt4.maps.prefs", JSON.stringify({sort: "bogus", grouped: "x"}));
     expect(loadPrefs()).toEqual(DEFAULT_PREFS);
     localStorage.setItem("adt4.maps.prefs", "{not json");
@@ -126,6 +129,18 @@ describe("prefs", () => {
       throw new Error("blocked");
     });
     expect(loadPrefs()).toEqual(DEFAULT_PREFS);
-    expect(() => savePrefs({sort: "name", grouped: true})).not.toThrow();
+    expect(() => savePrefs({sort: "name", grouped: true, hideIncomplete: false})).not.toThrow();
+  });
+});
+
+describe("isIncomplete", () => {
+  const m = (files: Partial<MapEntry>): MapEntry => ({name: "r", size: 1, ...files});
+  it("needs all three hydra backend outputs", () => {
+    expect(isIncomplete(m({has_dsg: true, has_dsg_mesh: true, has_mesh: true}))).toBe(false);
+    expect(isIncomplete(m({has_dsg: true, has_dsg_mesh: false, has_mesh: true}))).toBe(true);
+    expect(isIncomplete(m({has_dsg: false, has_dsg_mesh: false, has_mesh: false}))).toBe(true);
+  });
+  it("an older backend that does not report files is not hidden", () => {
+    expect(isIncomplete(m({}))).toBe(false);
   });
 });

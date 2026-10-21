@@ -9,7 +9,7 @@ import {ChecksumMatrix, JobStateBadge} from "../components/Jobs";
 import {jobIdOf} from "./Fleet";
 import {launchHref} from "../lib/launchLink";
 import {fmtBytes, matchRanges} from "../lib/fuzzy";
-import {loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, SORT_LABELS, type MapRow, type MapsPrefs, type SearchHit, type SortKey} from "../lib/mapList";
+import {isIncomplete, loadPrefs, mapTime, savePrefs, searchMaps, sortMaps, SORT_LABELS, type MapRow, type MapsPrefs, type SearchHit, type SortKey} from "../lib/mapList";
 import {COPY_STATE_TEXT, copyBadge, copyEntry, copyOfText, verifyNames} from "../lib/runCopies";
 
 type Dialog =
@@ -151,7 +151,11 @@ export function MapsPage() {
   const machineNames = entries.map(([m]) => m);
 
   const rows = useMemo<MapRow[]>(() => entries.flatMap(([machine, list]) => (Array.isArray(list) ? list.map(map => ({machine, map})) : [])), [maps.data]); // eslint-disable-line react-hooks/exhaustive-deps
-  const shown = useMemo(() => sortMaps(searchMaps(rows, query), prefs.sort, query), [rows, query, prefs.sort]);
+  const incomplete = useMemo(() => rows.filter(r => isIncomplete(r.map)).length, [rows]);
+  const shown = useMemo(() => {
+    const kept = prefs.hideIncomplete ? rows.filter(r => !isIncomplete(r.map)) : rows;
+    return sortMaps(searchMaps(kept, query), prefs.sort, query);
+  }, [rows, query, prefs.sort, prefs.hideIncomplete]);
   const searching = query.trim().length > 0;
 
   const startJob = async (path: string, body: unknown, title: string) => {
@@ -212,7 +216,8 @@ export function MapsPage() {
         sub={
           maps.data ? (
             <span className="row gap wrap">
-              {searching ? `${shown.length} of ${total} runs` : `${total} runs`} across {entries.length} machines · {withImages} with an image store
+              {searching || (prefs.hideIncomplete && incomplete) ? `${shown.length} of ${total} runs` : `${total} runs`} across {entries.length} machines · {withImages} with an image store
+              {prefs.hideIncomplete && incomplete > 0 && ` · ${incomplete} incomplete hidden`}
               {pending.length > 0 && (
                 <span className="muted small row gap-sm">
                   <Spinner /> measuring sizes on {pending.join(", ")}
@@ -243,6 +248,7 @@ export function MapsPage() {
               ))}
             </select>
             <Toggle checked={prefs.grouped} onChange={v => setPrefs({grouped: v})} label="Group by machine" />
+            <Toggle checked={prefs.hideIncomplete} onChange={v => setPrefs({hideIncomplete: v})} label="Hide incomplete" />
             <button className="btn" onClick={maps.reload} disabled={maps.loading}>
               {maps.loading && <Spinner />} Rescan
             </button>
