@@ -87,7 +87,7 @@ Silvus SC4200H pair: 4520 MHz, 20 MHz BW, one network id; bench link value ~40-5
 
 **Stage 0: bench, no radio (laptop).**
 - Existing: `cd fleetlink && PYTHONPATH=$PWD python -m pytest -q -s tests/test_integration_pennovation.py` (prints the per-class table), `tests/test_fleet_harness.py` (multi-router, throttled link, stall, router restart; see `docs/bench_cutover.md`).
-- Add: `tests/bench_multi_robot.py`: N = 1..5 `AgentCore`s replaying the Penn map (staged reveal as in the integration test, staggered starts, one forced loop closure = re-tile at t=120 s), C6 synthetic keyframes at 1.4 Hz x 65 kB, 0/1/2 C5 streams (synthetic CBR frames), all sharing ONE `LinkEmulator` capacity (add a shared-capacity mode) at 2 / 5 / 10 Mbit/s, 150 ms, 3 % loss. Output per robot and class: bytes, queue drops, C1 max age, C2/C3 convergence times, video frame gaps.
+- Built (see section 5): `fleetlink/bench/multi_robot_bench.py` (was planned as `tests/bench_multi_robot.py`): N = 1..5 `AgentCore`s replaying the Penn map (staged reveal as in the integration test, staggered starts, one forced loop closure = re-tile at t=120 s), C6 synthetic keyframes at 1.4 Hz x 65 kB, 0/1/2 C5 streams (synthetic CBR frames), all sharing ONE `LinkEmulator` capacity (add a shared-capacity mode) at 2 / 5 / 10 Mbit/s, 150 ms, 3 % loss. Output per robot and class: bytes, queue drops, C1 max age, C2/C3 convergence times, video frame gaps.
 
 **Stage 1: 1 real Spot + willow over Silvus (fleetlink mode).**
 1. Link baseline: console Network page iperf (`POST /api/iperf {machine: hamilton}`) at 5 m, 50 m, through a relay radio; record Silvus `network_status` value and `routing_tree` (Network page mesh view).
@@ -112,5 +112,130 @@ Silvus SC4200H pair: 4520 MHz, 20 MHz BW, one network id; bench link value ~40-5
 
 **Tooling to add:** per-class byte/drop counters in `link_status` + Network page chart; `tests/bench_multi_robot.py` with a shared-capacity LinkEmulator; a synthetic load agent (`fleetlink-agent --synthetic <kbit/s per class>`) to fill airtime without bags; base-side global allocator (follow-up, after measurements).
 
+
+## 5. Stage 1 measured: multi-robot bench (2026-10-21)
+
+`fleetlink/bench/multi_robot_bench.py`: N real `AgentCore`/`Receiver` pairs on ONE shared
+emulated channel (`transport.SharedChannel`: every robot and both directions take turns on the
+air, fragment by fragment; a relay hop costs its airtime again), 30 ms latency, 1 % loss per
+8 kB fragment. Each robot replays the real Penn map (revealed over 300 s along the trajectory,
+then a forced loop closure at 330 s that moves every node and mesh vertex), optional Med video
+(frame sizes from the bag's real ZED frames through fleetlink's own ffmpeg arguments; the base
+asks for a key frame after a gap, as the console does) and the image-store mirror (real
+fast-mode keyframe blobs: **59.5 kB** = 38.2 kB JPEG q75 + 20.7 kB half-res depth, 1.4 kf/s).
+Default budgets. All 73 runs: `fleetlink/bench/results/2026-10-21.md` (+ raw JSON lines).
+
+**Per robot, unconstrained (1 robot, 10 Mbit/s), kbit/s on the air:** C0 2, C1 15, C2 3-5,
+base->robot 3; C5 Med video **420 per stream**; C6 image mirror **670**; C3 mesh is budget-bound
+at **800 while the mesh fills or after a loop closure** (13.4 MB, ~150 s), ~0 otherwise.
+
+**Condensed results** (worst robot; channel busy = fraction of airtime used):
+
+| robots | channel | video (Med) | mirror | busy | C1 age p99 / max | cmd RTT p99 | graph after LC | mesh after LC | video freezes / 15 min, min fps | mirror lag |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2 Mbit/s | 1 | on | 0.69 | 0.27 / 0.33 s | 0.17 s | 2 s | 149 s | 11, 14.5 | 3 s |
+| 2 | 2 | 2 | off | 0.68 | 0.27 / 0.40 | 0.23 | 3 | 158 | 50, 11.2 | — |
+| 2 | 2 | 2 | **on** | **1.00** | 0.23 / 0.43 | 0.24 | 3 | 149 | 46, 11.2 | **157 s** (646 kf behind) |
+| 3 | 2 | 2 | on | 1.00 | 0.27 / 0.50 | 0.31 | 3 | 219 | 70, 7.6 | **555 s** |
+| 5 | 2 | 2 | off | 0.87 | 0.30 / 0.60 | 0.41 | 4 | 349 | 31, 4.2 | — |
+| 5 | 2 | 2 | on | 1.00 | 0.30 / 0.63 | 0.51 | 4 | 362 | 12, **0.1** | 516 s |
+| 5 | 5 | 2 | off | 0.46 | 0.27 / 0.37 | 0.23 | 3 | 163 | 36, 13.9 | — |
+| 5 | 5 | 2 | **on** | **0.93** | 0.27 / 0.43 | 0.27 | 3 | 163 | 37, 11.1 | **159 s** (502 kf) |
+| 5 | 10 | 2 | off | 0.23 | 0.27 / 0.33 | 0.17 | 3 | 150 | 10, 14.4 | — |
+| 5 | 10 | 2 | on | 0.57 | 0.27 / 0.37 | 0.17 | 3 | 162 | 14, 14.4 | 3 s |
+| 5 | 5 | 2 **High** | on | 1.00 | 0.27 / 0.50 | 0.24 | 3 | 158 | 65, 8.2 | 285 s |
+| 5 | 10 | 2 High | on | 0.69 | 0.27 / 0.40 | 0.20 | 3 | 155 | 25, 13.9 | 12 s |
+| 5 | 5 | 2, last robot 2 relay hops | off | 0.49 | 0.27 / 0.40 | 0.27 | 3 | 167 | 49, 11.1 | — |
+| 5 | 5 | 1, **TCP head-of-line** | off | 0.38 | **0.97 / 1.93** | **2.19** | **13** | 157 | 21, 14.1 | — |
+
+**Findings**
+1. **Strict priority protects control and the graph.** In every run with per-priority queues,
+   C1 state age stays p99 <= 0.33 s (max 0.63 s), command round trips p99 <= 0.51 s, and the
+   graph catches up within 2 s of a change and 4 s of a loop closure, even with 5 robots on a
+   saturated 2 Mbit/s channel. The bulk classes (C3 mesh, C5 video, C6 images) absorb the shortage.
+2. **The image-store mirror is the load that breaks the channel.** 0.67 Mbit/s per robot steady:
+   2 robots already fill 2 Mbit/s; 5 robots need ~10 Mbit/s (at 5 Mbit/s the mirror falls 160 s
+   behind and video drops to 11 fps). Make it opt-in / idle-only / thinned before multi-robot.
+3. **Full-mesh resends take ~150 s per loop closure** at the default C3 budget whenever the
+   channel has room, and ~5.5-6 min for 5 robots at 2 Mbit/s (there, 1-4 robots had not even
+   finished the initial mesh 30 s after the last reveal when the loop closure hit).
+   The decided decimation + base-side deformation removes this; until then a loop closure means
+   a 2.5 min mesh catch-up.
+4. **Video at Med** (~0.42 Mbit/s/stream) is fine on an uncongested link (0-5 freezes in 15 min,
+   caused by the 1 % loss and recovered by a key-frame request), but degrades first under
+   congestion (C5 is below C3 in priority): 2 robots at 2 Mbit/s -> ~50 freezes / 15 min.
+   High (1 Mbit/s) with the mirror on needs 10 Mbit/s for 5 robots.
+5. **A relay hop costs real airtime:** one of five robots behind a relay raised freezes 36 -> 49.
+6. **TCP head-of-line blocking is the real risk to control traffic** (zenoh runs over TCP; the
+   bench's `--tcp-hol` is the worst case of one FIFO per link): with 5 robots C1 age p99 0.97 s
+   (max 1.9 s), command RTT p99 2.2 s, graph after LC 13 s. Watch C1 age / RTT on the Network
+   page during step d (resync burst) tomorrow; if it behaves like this, the fixes are a smaller
+   zenoh batch / fragment size for bulk classes and keeping C3/C6 bursts small (decimation).
+
+**Capacity guidance** (usable channel throughput, measure it with iperf tomorrow):
+| fleet | without mirror | with mirror (default) |
+|---|---|---|
+| 1 robot + 1 Med video | 1 Mbit/s | 2 Mbit/s |
+| 2 robots + 2 Med | 2 Mbit/s (video degrades) / 5 comfortable | 5 Mbit/s |
+| 5 robots + 2 Med | 5 Mbit/s | **10 Mbit/s** |
+
+**Bench limits:** the map is revealed ~7x faster than the real 34.5 min run (C3 averages are
+inflated; bursts are realistic); all robots map the same area; Silvus TDMA/MCS adaptation is
+approximated by fair round-robin at a fixed rate; 1 % fragment loss and 30 ms are assumptions
+(bench measured 0 % / 24 ms RTT on 2026-10-20); zenoh/TCP framing overhead is not modelled.
+
 ## Not measured here
-C6 real bytes (estimate from codec benchmarks x keyframe rate); occupancy-grid size; live C2 rate during a real run (memory: ~68 kB over 5 min on this bag, 2026-10-09, i.e. ~1.8 kbit/s); real Silvus throughput at range or through relays; TCP head-of-line effects.
+(C6 real bytes: now measured from the bag's frames, 59.5 kB per keyframe.) Occupancy-grid size; live C2 rate during a real run (memory: ~68 kB over 5 min on this bag, 2026-10-09, i.e. ~1.8 kbit/s); real Silvus throughput at range or through relays; TCP head-of-line effects.
+
+## TOMORROW (2026-10-21): stage 2 on willow + hamilton over Silvus, fleetlink mode
+
+Tooling now in place (branch `feature/comms-eval`): Launch page **Robot link mode** picker
+(router / fleetlink, per launch; the dry run's first line states mode + network), Network page
+**fleetlink traffic per class** card (per robot: received, robot sent, budget, queued, lost per
+class + state age, RTT, gaps, drops, resyncs; refreshes every 2 s), session
+`spot_sim_fleetlink-default` (FakeSpot + fleetlink, for plan -> result without the real robot),
+and the multi-robot bench (`fleetlink/bench/`). All ZED configs now grab at 30 fps (source fix).
+
+**0. Switch both machines to the merged integration branch** (the parent merges
+`feature/comms-eval`, `feature/mesh-lod`, `feature/mesh-deform` into `integrate/features-20261020`
+and pushes to harelb). On each machine:
+```bash
+cd ~/dcist_ws/src/awesome_dcist_t4
+git stash push -m before-stage2 -- network_diagnostics/config/topology.yaml   # DHCP edits
+git fetch --no-recurse-submodules harelb integrate/features-20261020
+git checkout -B integrate/features-20261020 FETCH_HEAD
+git stash apply "$(git stash list | grep -m1 dhcp-before-revert-A-20261020 | cut -d: -f1)"
+git submodule sync --recursive && git submodule update --init --recursive
+# hamilton only: git config submodule.agentic_navigation.update none
+cd ~/dcist_ws && colcon build --continue-on-error   # incremental is fine
+```
+Check radios first (IPv4 needed ~20 min after boot on 2026-10-20): from willow
+`ping -c3 192.168.100.2`; console Network page -> Silvus mesh shows both radios, link "good".
+
+**1. Console on willow** (`adt4-console --port 8090 --terminal --neo4j live=bolt://localhost:7687`).
+Launch page: robots `hamilton`, base `willow`, base session `base_station_web_repair-default`
+(or `base_station_web-default`), **Robot link network = silvus**, **Robot link mode =
+fleetlink**. Press **Dry run**: line 1 must read `Robot links: silvus, fleetlink mode (robots
+dial the fleetlink base)` and the robot command must carry `ADT4_FLEET_LINK=fleetlink
+ADT4_FLEETLINK_CONNECT=tcp/192.168.100.100:7450`. Launch. (Fleetlink mode clears the base
+zenoh router's robot endpoints at launch; no manual zenoh edit needed.)
+
+**2. Verify the cutover** (`fleetlink/docs/bench_cutover.md` §4): willow `ros2 node list` has no
+hamilton nodes; willow's `fleetlink_base` window prints `fleetlink-router ... :7450` and
+`fleetlink-bridge base=willow`; hamilton's `fleetlink` window prints `fleetlink relay
+robot=hamilton`; `ros2 topic echo /fleetlink/link_status` shows `connected: true, cfg_match:
+true`; `ss -tn state established '( dport = :7450 )'` on hamilton shows 192.168.100.100.
+
+**3. Step schedule** (5 min each, Network page traffic card + Silvus card open; screenshot each):
+| step | do | watch | pass |
+|---|---|---|---|
+| a | mapping, no video | C1/C2/C3 received vs robot sent; C3 at budget while the mesh fills | C1 age < 1 s, RTT < 0.5 s, graph keeps up |
+| b | + full-screen drive video Med | C5 ~250 kbit/s received, freezes | < 1 freeze / 5 min |
+| c | + Camera tab second camera | C5 total | as b |
+| d | console "resync" (Live link tab) = LC-like burst | C2 catch-up, C3 queued drains | graph < 10 s; mesh per bench table |
+| e | image mirror on (default) vs off (`store_path:=""`) | C6 received, total kbit/s | C6 must not starve C1/C2 |
+| f | walk hamilton away / behind a corner | Silvus link value, RTT, loss column | no transport close; recovers |
+| g | goal from chat / Plan tab | plan -> action_result over the relay | result arrives, robot moves |
+
+**Fail / stop conditions:** `Unable to push non droppable` in any log; C1 state age > 3 s
+sustained; Pause/Resume not acked. Revert: Launch with Robot link mode = router.
