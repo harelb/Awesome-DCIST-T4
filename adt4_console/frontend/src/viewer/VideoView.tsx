@@ -65,8 +65,9 @@ export const usePageVisible = () => {
   return visible;
 };
 
-export function VideoView({robot, cam}: {robot: string; cam: string}) {
-  const [fps, setFps] = useState(5);
+/** ``bare``: the picture only (full-screen drive view), no controls or stats. */
+export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: string; cam: string; bare?: boolean; initialFps?: number}) {
+  const [fps, setFps] = useState(initialFps);
   const [kbps, setKbps] = useState(300);
   const [width, setWidth] = useState(640);
   const [codecChoice, setCodecChoice] = useState<"auto" | VideoCodec>("auto");
@@ -331,6 +332,15 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
   const rob = server?.robot;
   const showJpeg = stats?.codec === "jpeg";
   const showWasm = stats?.decoder === "wasm";
+  const picture = (
+    <div className={`camera-frame ${bare ? "bare" : ""}`}>
+      <canvas ref={canvasRef} className="camera-canvas" style={{display: showJpeg || !stats?.codec || showWasm ? "none" : "block"}} aria-label={`${robot} ${cam} video`} />
+      <canvas ref={glCanvasRef} className="camera-canvas" style={{display: showWasm ? "block" : "none"}} aria-label={`${robot} ${cam} video (wasm)`} />
+      {showJpeg && jpegUrl && <img src={jpegUrl} alt={`${robot} ${cam}`} />}
+      {!stats?.codec && <div className="muted small camera-empty">{bare && err ? err : visible ? "Waiting for video..." : "Paused (tab hidden)"}</div>}
+    </div>
+  );
+  if (bare) return picture;
   return (
     <>
       <div className="row gap-sm wrap">
@@ -366,12 +376,7 @@ export function VideoView({robot, cam}: {robot: string; cam: string}) {
           <option value="jpeg">jpeg</option>
         </select>
       </div>
-      <div className="camera-frame">
-        <canvas ref={canvasRef} className="camera-canvas" style={{display: showJpeg || !stats?.codec || showWasm ? "none" : "block"}} aria-label={`${robot} ${cam} video`} />
-        <canvas ref={glCanvasRef} className="camera-canvas" style={{display: showWasm ? "block" : "none"}} aria-label={`${robot} ${cam} video (wasm)`} />
-        {showJpeg && jpegUrl && <img src={jpegUrl} alt={`${robot} ${cam}`} />}
-        {!stats?.codec && <div className="muted small camera-empty">{visible ? "Waiting for video..." : "Paused (tab hidden)"}</div>}
-      </div>
+      {picture}
       {stats && (
         <div className="mono small camera-meta">
           {stats.codec}

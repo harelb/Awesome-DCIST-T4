@@ -94,6 +94,36 @@ export function showGrid(platform: string | undefined, cams: string[]): boolean 
 
 /** One grid tile: its own fetch loop, one request in flight, ~1 Hz. */
 function GridTile({robot, cam, width, hz, onOpen, onVideo, label, openTitle}: {robot: string; cam: string; width: number; hz: number; onOpen: () => void; onVideo?: () => void; label?: React.ReactNode; openTitle?: string}) {
+  const {frame, err} = useStillFrames(robot, cam, width, hz);
+  return (
+    <div className="camera-tile">
+      <button className="camera-tile-img" onClick={onOpen} title={openTitle ?? `Open ${cam}`}>
+        {frame ? <img src={frame.url} alt={`${robot} ${cam}`} /> : <span className="muted small">{err ? "" : "..."}</span>}
+      </button>
+      <div className="camera-tile-bar row between">
+        {label ?? <span className="mono small">{cam}</span>}
+        <span className="row gap-sm">
+          {err ? (
+            <span className="small tone-err" title={err}>
+              no frame
+            </span>
+          ) : frame ? (
+            <span className="small muted">{(frame.bytes / 1024).toFixed(0)} KB</span>
+          ) : null}
+          {onVideo && (
+            <button className="btn btn-xs" onClick={onVideo} title={`Live video of ${cam}`}>
+              video
+            </button>
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Still frames of one camera: a fetch loop with one request in flight, the
+ *  next one ``1/hz`` after the previous started. */
+export function useStillFrames(robot: string, cam: string, width: number, hz: number): {frame: CameraFrame | null; err: string | null} {
   const [frame, setFrame] = useState<CameraFrame | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const ref = useRef<CameraFrame | null>(null);
@@ -129,30 +159,7 @@ function GridTile({robot, cam, width, hz, onOpen, onVideo, label, openTitle}: {r
     },
     [],
   );
-  return (
-    <div className="camera-tile">
-      <button className="camera-tile-img" onClick={onOpen} title={openTitle ?? `Open ${cam}`}>
-        {frame ? <img src={frame.url} alt={`${robot} ${cam}`} /> : <span className="muted small">{err ? "" : "..."}</span>}
-      </button>
-      <div className="camera-tile-bar row between">
-        {label ?? <span className="mono small">{cam}</span>}
-        <span className="row gap-sm">
-          {err ? (
-            <span className="small tone-err" title={err}>
-              no frame
-            </span>
-          ) : frame ? (
-            <span className="small muted">{(frame.bytes / 1024).toFixed(0)} KB</span>
-          ) : null}
-          {onVideo && (
-            <button className="btn btn-xs" onClick={onVideo} title={`Live video of ${cam}`}>
-              video
-            </button>
-          )}
-        </span>
-      </div>
-    </div>
-  );
+  return {frame, err};
 }
 
 /** One main camera (the robot's first) per robot; a click focuses that robot. */
