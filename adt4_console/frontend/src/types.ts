@@ -249,6 +249,7 @@ export interface Pose {
 
 export interface ActionResult {
   plan_id?: string;
+  action_type?: string;
   action_index?: number;
   status?: string;
   detail?: string;

@@ -1,4 +1,5 @@
 import {useEffect, useState} from "react";
+import {PlanExecStatus} from "./PlanExecStatus";
 import {useViewer} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
@@ -249,6 +250,9 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
         Current plan
         {plan?.plan && <span className="mono small muted"> {plan.plan.plan_id}</span>}
       </h4>
+      <div className="plan-exec-line small">
+        <PlanExecStatus robot={robot} />
+      </div>
       {!plan?.plan ? (
         <div className="muted small">No plan received yet.</div>
       ) : (

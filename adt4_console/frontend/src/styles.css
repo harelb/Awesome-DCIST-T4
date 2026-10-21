@@ -1464,6 +1464,25 @@ input[type="checkbox"] {
 .robot-chip .align-status.tone-err {
   color: #ff9b9b;
 }
+.robot-chip .plan-exec {
+  font: 500 11px var(--sans);
+  pointer-events: auto;
+  cursor: help;
+}
+.robot-chip .plan-exec::before {
+  content: "·";
+  margin-right: 5px;
+  color: var(--text-2);
+}
+.robot-chip .plan-exec.tone-ok {
+  color: #9be7b5;
+}
+.robot-chip .plan-exec.tone-err {
+  color: #ff9b9b;
+}
+.plan-exec-line {
+  margin: 4px 0;
+}
 .reloc-details summary {
   cursor: pointer;
   color: var(--text-2);
