@@ -7,17 +7,24 @@ from dataclasses import dataclass
 
 @dataclass
 class LinkCell:
-    rssi_db: float | None = None  # measured RSSI
-    linked: bool = False  # in the routing tree but no RSSI sample
+    rssi_db: float | None = None  # measured RSSI (older firmware: rssi / link_stats)
+    linked: bool = False  # in the routing tree
+    # StreamScape 5 network_status value for this neighbour (SNR-like, dB); the
+    # firmware has no rssi / link_stats / snr_stats
+    link_db: float | None = None
 
     @property
     def quality(self) -> str:
         """good | fair | poor | linked | unknown"""
-        if self.rssi_db is None:
-            return "linked" if self.linked else "unknown"
-        if self.rssi_db > -60:
-            return "good"
-        return "fair" if self.rssi_db > -80 else "poor"
+        if self.rssi_db is not None:
+            if self.rssi_db > -60:
+                return "good"
+            return "fair" if self.rssi_db > -80 else "poor"
+        if self.link_db is not None:
+            if self.link_db >= 25:
+                return "good"
+            return "fair" if self.link_db >= 12 else "poor"
+        return "linked" if self.linked else "unknown"
 
 
 def node_names(details: dict) -> dict[int, str]:
@@ -40,6 +47,7 @@ def link_matrix(details: dict) -> dict[str, dict[str, LinkCell] | str]:
             continue
         link_stats = info.get("link_stats")
         rssi_raw = info.get("rssi")
+        link_quality = info.get("link_quality") or {}
         routing_tree = [int(x) for x in (info.get("routing_tree") or [])]
         row = {}
         for dst in names:
@@ -68,7 +76,8 @@ def link_matrix(details: dict) -> dict[str, dict[str, LinkCell] | str]:
                 except (TypeError, ValueError):
                     pass
             linked = dst_nid is not None and int(dst_nid) in routing_tree
-            row[dst] = LinkCell(val, linked)
+            link_db = link_quality.get(int(dst_nid)) if dst_nid is not None else None
+            row[dst] = LinkCell(val, linked, link_db)
         matrix[src] = row
     return matrix
 
@@ -79,6 +88,7 @@ def routing_summary(details: dict) -> dict[str, dict]:
     return {
         name: {
             "node_id": info.get("node_id"),
+            "via": info.get("via"),
             "battery": info.get("battery"),
             "routes": [
                 nid_to_name.get(int(n), str(n)) for n in info.get("routing_tree") or []

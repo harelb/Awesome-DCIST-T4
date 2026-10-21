@@ -1626,15 +1626,154 @@ except Exception as e:
         }
 
 
+SILVUS_OUI = "c4:7c:8d"  # MAC prefix of Silvus radios
+_SILVUS_LL_CACHE = {"t": 0.0, "iface": None, "by_node": {}}
+_SILVUS_LL_TTL_S = 120.0
+
+
+def silvus_interface(topology, network="silvus"):
+    """The local interface with an address on ``network`` (the radio's USB
+    ethernet dongle), or None."""
+    subnet_str = (topology.get("networks", {}).get(network) or {}).get("subnet")
+    if not subnet_str:
+        return None
+    subnet = ipaddress.ip_network(subnet_str, strict=False)
+    try:
+        out = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet":
+            try:
+                if ipaddress.ip_interface(parts[3]).ip in subnet:
+                    return parts[1]
+            except ValueError:
+                pass
+    return None
+
+
+def silvus_link_locals(iface):
+    """IPv6 link-local addresses of the Silvus radios bridged onto ``iface``.
+
+    The radios answer an all-nodes ping on the dongle's segment with no route or
+    address setup; their MACs carry Silvus' OUI.
+    """
+    try:
+        subprocess.run(
+            ["ping", "-6", "-c", "2", "-i", "0.2", "-W", "1", f"ff02::1%{iface}"],
+            capture_output=True, timeout=5,
+        )  # fmt: skip
+        out = subprocess.run(
+            ["ip", "-6", "neigh", "show", "dev", iface],
+            capture_output=True, text=True, timeout=5,
+        ).stdout  # fmt: skip
+    except Exception:
+        return []
+    addrs = []
+    for line in out.splitlines():
+        parts = line.split()
+        if (
+            parts
+            and parts[0].startswith("fe80:")
+            and "lladdr" in parts
+            and parts[parts.index("lladdr") + 1].lower().startswith(SILVUS_OUI)
+        ):
+            addrs.append(parts[0])
+    return addrs
+
+
+def silvus_rpc(host, payload, timeout=3.0, iface=None):
+    """POST a JSON-RPC payload to a radio's streamscape API; parsed JSON back.
+
+    ``host``: an IPv4 address, or an IPv6 link-local address reached through
+    ``iface``. (urllib puts the ``%iface`` zone in the Host header, which the
+    radio rejects with 400, so the request is made by hand.)
+    """
+    import http.client
+
+    target = f"{host}%{iface}" if iface else host
+    conn = http.client.HTTPConnection(target, 80, timeout=timeout)
+    try:
+        conn.request(
+            "POST",
+            "/cgi-bin/streamscape_api",
+            body=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Host": f"[{host}]" if ":" in host else host,
+            },
+        )
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise OSError(f"HTTP {resp.status} from radio {host}")
+        return json.loads(resp.read())
+    finally:
+        conn.close()
+
+
+def _silvus_link_local_by_node(topology, refresh=False):
+    """``(iface, {node_id: link-local addr})`` of the radios on the local dongle
+    (cached for a couple of minutes)."""
+    c = _SILVUS_LL_CACHE
+    if not refresh and c["iface"] and time.time() - c["t"] < _SILVUS_LL_TTL_S:
+        return c["iface"], c["by_node"]
+    iface = silvus_interface(topology)
+    by_node = {}
+    if iface:
+        for addr in silvus_link_locals(iface):
+            try:
+                r = silvus_rpc(addr, {"jsonrpc": "2.0", "method": "nodeid", "id": 1}, 2.0, iface)
+                by_node[int(r["result"][0])] = addr
+            except Exception:
+                pass
+    c.update(t=time.time(), iface=iface, by_node=by_node)
+    return iface, by_node
+
+
+def parse_network_status(raw):
+    """``network_status`` -> ``{neighbour node_id: link value}``.
+
+    StreamScape 5 returns ``[self, nbr, value, nbr, value, ...]`` (value ~50 for
+    radios a few metres apart, tracking signal quality: SNR-like, in dB).
+    """
+    if not isinstance(raw, list) or len(raw) < 3:
+        return {}
+    out = {}
+    rest = raw[1:]
+    for i in range(0, len(rest) - 1, 2):
+        try:
+            out[int(rest[i])] = float(rest[i + 1])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+_SILVUS_BATCH = [
+    {"jsonrpc": "2.0", "method": "nodeid", "params": [], "id": 1},
+    {"jsonrpc": "2.0", "method": "routing_tree", "params": [], "id": 2},
+    {"jsonrpc": "2.0", "method": "battery_percent", "params": [], "id": 3},
+    {"jsonrpc": "2.0", "method": "rssi", "params": [], "id": 4},
+    {"jsonrpc": "2.0", "method": "link_stats", "params": [], "id": 5},
+    {"jsonrpc": "2.0", "method": "snr_stats", "params": [], "id": 6},
+    {"jsonrpc": "2.0", "method": "network_status", "params": [], "id": 7},
+]
+
+
 def get_silvus_radio_details(topology):
-    """Query all Silvus radios directly via HTTP from the local machine.
+    """Query all Silvus radios directly from the local machine.
+
+    Each radio is tried at its ``mgmt_ip``; when that does not answer (no route
+    to the management subnet, or a subnet clash), through the local radio
+    dongle at its IPv6 link-local address (found by MAC, matched by node id).
 
     Returns dict[radio_name → info] where info has:
-      node_id, mgmt_ip, battery, routing_tree, rssi, link_stats, snr_stats, error
+      node_id, mgmt_ip, via, battery, routing_tree, rssi, link_stats, snr_stats,
+      link_quality ({neighbour node_id: value}), error
     Radios are labeled by their name in topology["silvus_radios"]["radios"].
     """
-    import urllib.request as _urlreq
-
     radios = topology.get("silvus_radios", {}).get("radios", {})
     if not radios:
         return {}
@@ -1643,58 +1782,82 @@ def get_silvus_radio_details(topology):
     for radio_name, radio_cfg in radios.items():
         mgmt_ip = radio_cfg.get("mgmt_ip")
         topo_node_id = radio_cfg.get("node_id")
-        if not mgmt_ip:
+        if not mgmt_ip and topo_node_id is None:
             continue
+        attempts = []
+        resp_data, via = None, None
 
-        url = f"http://{mgmt_ip}/cgi-bin/streamscape_api"
-        batch = [
-            {"jsonrpc": "2.0", "method": "nodeid", "params": [], "id": 1},
-            {"jsonrpc": "2.0", "method": "routing_tree", "params": [], "id": 2},
-            {"jsonrpc": "2.0", "method": "battery_percent", "params": [], "id": 3},
-            {"jsonrpc": "2.0", "method": "rssi", "params": [], "id": 4},
-            {"jsonrpc": "2.0", "method": "link_stats", "params": [], "id": 5},
-            {"jsonrpc": "2.0", "method": "snr_stats", "params": [], "id": 6},
-        ]
-        try:
-            req = _urlreq.Request(
-                url,
-                data=json.dumps(batch).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            with _urlreq.urlopen(req, timeout=3) as resp:
-                resp_data = json.loads(resp.read())
-            parsed = {}
-            for r in resp_data:
-                rid = r.get("id", 0)
-                parsed[rid] = r.get("result") if "error" not in r else None
+        def via_mgmt():
+            nonlocal resp_data, via
+            try:
+                resp_data, via = silvus_rpc(mgmt_ip, _SILVUS_BATCH, 1.5), mgmt_ip
+            except Exception as e:
+                attempts.append(f"{mgmt_ip}: {e}")
 
-            nid_raw = parsed.get(1)
-            node_id = int(nid_raw[0]) if nid_raw else topo_node_id
+        def via_dongle():
+            nonlocal resp_data, via
+            iface, by_node = _silvus_link_local_by_node(topology)
+            if iface and int(topo_node_id) not in by_node:
+                iface, by_node = _silvus_link_local_by_node(topology, refresh=True)
+            addr = by_node.get(int(topo_node_id))
+            if not addr:
+                attempts.append(
+                    f"not seen on the radio dongle ({iface})" if iface
+                    else "no local interface on the silvus network (radio dongle unplugged?)"
+                )  # fmt: skip
+                return
+            try:
+                resp_data, via = silvus_rpc(addr, _SILVUS_BATCH, 3.0, iface), f"{addr}%{iface}"
+            except Exception as e:
+                attempts.append(f"{addr}%{iface}: {e}")
 
-            bat_raw = parsed.get(3)
-            battery = float(bat_raw[0]) if bat_raw else None
-
-            results[radio_name] = {
-                "node_id": node_id,
-                "mgmt_ip": mgmt_ip,
-                "battery": battery,
-                "routing_tree": [int(x) for x in (parsed.get(2) or [])],
-                "rssi": parsed.get(4),
-                "link_stats": parsed.get(5),
-                "snr_stats": parsed.get(6),
-                "error": None,
-            }
-        except Exception as e:
+        # a radio already found on the dongle is asked there first (its mgmt IP
+        # is usually what failed), else the mgmt IP first
+        known = topo_node_id is not None and int(topo_node_id) in _SILVUS_LL_CACHE["by_node"]
+        order = ([via_dongle] if topo_node_id is not None else []) + ([via_mgmt] if mgmt_ip else [])
+        if not known:
+            order.reverse()
+        for step in order:
+            if resp_data is None:
+                step()
+        if resp_data is None:
             results[radio_name] = {
                 "node_id": topo_node_id,
                 "mgmt_ip": mgmt_ip,
+                "via": None,
                 "battery": None,
                 "routing_tree": [],
                 "rssi": None,
                 "link_stats": None,
                 "snr_stats": None,
-                "error": str(e),
+                "link_quality": {},
+                "error": "; ".join(attempts) or "unreachable",
             }
+            continue
+
+        parsed = {}
+        for r in resp_data:
+            rid = r.get("id", 0)
+            parsed[rid] = r.get("result") if "error" not in r else None
+
+        nid_raw = parsed.get(1)
+        node_id = int(nid_raw[0]) if nid_raw else topo_node_id
+
+        bat_raw = parsed.get(3)
+        battery = float(bat_raw[0]) if bat_raw else None
+
+        results[radio_name] = {
+            "node_id": node_id,
+            "mgmt_ip": mgmt_ip,
+            "via": via,
+            "battery": battery,
+            "routing_tree": [int(x) for x in (parsed.get(2) or [])],
+            "rssi": parsed.get(4),
+            "link_stats": parsed.get(5),
+            "snr_stats": parsed.get(6),
+            "link_quality": parse_network_status(parsed.get(7)),
+            "error": None,
+        }
 
     return results
 

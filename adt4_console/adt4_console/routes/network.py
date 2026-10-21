@@ -176,7 +176,7 @@ def silvus(request: Request):
             row
             if isinstance(row, str)
             else {
-                dst: {"rssi_db": c.rssi_db, "quality": c.quality, "linked": c.linked}
+                dst: {"rssi_db": c.rssi_db, "link_db": c.link_db, "quality": c.quality, "linked": c.linked}
                 for dst, c in row.items()
             }
         )

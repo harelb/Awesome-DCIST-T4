@@ -16,7 +16,7 @@ interface ZenohStatus {
   fleetlink?: {base: string | null; port: number; endpoints: string[]; summary: string};
 }
 
-type Cell = {rssi_db?: number | null; quality?: number | string | null; linked?: boolean};
+type Cell = {rssi_db?: number | null; link_db?: number | null; quality?: number | string | null; linked?: boolean};
 interface SilvusStatus {
   matrix: Record<string, Record<string, Cell> | string>;
   routing: unknown;
@@ -28,6 +28,19 @@ export function rssiColor(db: number | null | undefined): string {
   const t = Math.max(0, Math.min(1, (db + 90) / 45)); // -90 dBm -> 0, -45 dBm -> 1
   const hue = t * 130; // 0 red .. 130 green
   return `hsl(${hue.toFixed(0)} 70% ${(24 + t * 8).toFixed(0)}%)`;
+}
+
+/** Link value (dB, the radio's network_status; StreamScape 5 has no RSSI query)
+ *  -> colour: 5 dB red .. 35 dB green. */
+export function linkColor(db: number | null | undefined): string {
+  if (db === null || db === undefined || !Number.isFinite(db)) return "transparent";
+  return rssiColor(-90 + (Math.max(0, Math.min(1, (db - 5) / 30)) * 45));
+}
+
+/** What the matrix shows: RSSI when the firmware reports it, else the link value. */
+export function matrixMode(matrix: SilvusStatus["matrix"]): "rssi" | "link" {
+  const cells = Object.values(matrix).flatMap(r => (typeof r === "object" ? Object.values(r) : []));
+  return cells.some(c => c.rssi_db != null) || !cells.some(c => c.link_db != null) ? "rssi" : "link";
 }
 
 function linkText(l: unknown): string {
@@ -95,6 +108,7 @@ export function NetworkPage() {
   const z = zenoh.data;
   const nodes = silvus.data ? Object.keys(silvus.data.matrix) : [];
   // columns in the same order as rows so the diagonal is the radio itself
+  const mode = silvus.data ? matrixMode(silvus.data.matrix) : "rssi";
   const dsts = [...new Set([...nodes, ...nodes.flatMap(n => (typeof silvus.data!.matrix[n] === "object" ? Object.keys(silvus.data!.matrix[n] as object) : []))])];
   const ij = iperfJob ? jobs[iperfJob] : null;
 
@@ -221,7 +235,7 @@ export function NetworkPage() {
         {silvus.data && nodes.length > 0 && (
           <div className="grid-2 silvus">
             <div>
-              <h4 className="sub-title">RSSI matrix (dBm, row hears column)</h4>
+              <h4 className="sub-title">{mode === "rssi" ? "RSSI matrix (dBm, row hears column)" : "Link quality (dB, row hears column)"}</h4>
               <div className="table-wrap">
                 <table className="heatmap">
                   <thead>
@@ -248,9 +262,15 @@ export function NetworkPage() {
                             dsts.map(d => {
                               const c = row[d];
                               if (src === d) return <td key={d} className="heat-self" />;
+                              const v = mode === "rssi" ? c?.rssi_db : c?.link_db;
                               return (
-                                <td key={d} style={{background: rssiColor(c?.rssi_db)}} className={c?.linked === false ? "heat-nolink" : ""} title={c ? `rssi ${c.rssi_db} dBm, quality ${c.quality ?? "-"}` : "no data"}>
-                                  {c?.rssi_db !== undefined && c?.rssi_db !== null ? Number(c.rssi_db).toFixed(0) : "-"}
+                                <td
+                                  key={d}
+                                  style={{background: mode === "rssi" ? rssiColor(v) : linkColor(v)}}
+                                  className={c?.linked === false ? "heat-nolink" : ""}
+                                  title={c ? `${mode === "rssi" ? `rssi ${c.rssi_db} dBm` : `link ${c.link_db} dB`}, ${c.quality ?? "-"}${c.linked ? ", in routing tree" : ""}` : "no data"}
+                                >
+                                  {v !== undefined && v !== null ? Number(v).toFixed(0) : "-"}
                                 </td>
                               );
                             })
@@ -262,9 +282,9 @@ export function NetworkPage() {
                 </table>
               </div>
               <div className="heat-legend small muted">
-                <span>-90</span>
+                <span>{mode === "rssi" ? "-90" : "5"}</span>
                 <span className="heat-scale" />
-                <span>-45 dBm</span>
+                <span>{mode === "rssi" ? "-45 dBm" : "35 dB"}</span>
                 <span className="heat-nolink-swatch" /> not linked
               </div>
             </div>
