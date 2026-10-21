@@ -252,49 +252,66 @@ function RobotGlyphs() {
 }
 
 // Plans come from omniplanner in the frame of the scene graph it plans on
-// (relocalize / fleet: the global map), so they are drawn as is.
+// (relocalize / fleet: the global map), so they are drawn as is. Every part is
+// in the robot's colour (agent trails use it too, so a plan is wider, outlined
+// in black and drawn over the mesh / graph): done steps faded, the current one
+// solid and widest, pending ones dashed; a ring marks where the plan ends.
+const PLAN_Z = 0.25;
+const PLAN_ORDER = 20;
 function PlanOverlay() {
   const plans = useRobots(s => s.plan);
   const robotColor = useRobotColor3D();
-  const hi = useMarkerInk().hi;
   return (
     <>
       {Object.entries(plans).map(([r, plan]) => {
         if (!plan?.plan) return null;
         const cur = currentActionIndex(plan);
         const color = robotColor(r);
+        const paths = plan.plan.actions.map(a =>
+          ((a.path ?? []).filter(p => p && p.length >= 3) as [number, number, number][]).map(p => [p[0], p[1], p[2] + PLAN_Z] as [number, number, number]),
+        );
+        const lastPath = [...paths].reverse().find(p => p.length > 0);
+        const end = lastPath?.[lastPath.length - 1];
         return (
           <DimGroup key={r} robot={r}>
             {plan.plan.actions.map((a, i) => {
-              const pts = (a.path ?? []).filter(p => p && p.length >= 3) as [number, number, number][];
-              const lifted = pts.map(p => [p[0], p[1], p[2] + 0.15] as [number, number, number]);
+              const lifted = paths[i];
               const state = i < cur ? "done" : i === cur ? "current" : "pending";
+              const width = state === "current" ? 7 : state === "pending" ? 4 : 3;
               return (
                 <group key={i}>
                   {lifted.length > 1 && (
-                    <Line
-                      points={lifted}
-                      color={state === "current" ? hi : color}
-                      lineWidth={state === "current" ? 5 : 2.5}
-                      dashed={state === "pending"}
-                      dashSize={0.4}
-                      gapSize={0.25}
-                      transparent
-                      opacity={state === "done" ? 0.35 : 1}
-                    />
-                  )}
-                  {state === "current" && lifted.length > 1 && (
-                    <Line points={lifted} color={color} lineWidth={9} transparent opacity={0.35} />
+                    <>
+                      <Line points={lifted} color="#000000" lineWidth={width + 4} transparent opacity={state === "done" ? 0.2 : 0.55} depthTest={false} renderOrder={PLAN_ORDER} />
+                      <Line
+                        points={lifted}
+                        color={color}
+                        lineWidth={width}
+                        dashed={state === "pending"}
+                        dashSize={0.6}
+                        gapSize={0.3}
+                        transparent
+                        opacity={state === "done" ? 0.35 : 1}
+                        depthTest={false}
+                        renderOrder={PLAN_ORDER + 1}
+                      />
+                    </>
                   )}
                   {a.point && a.point.length >= 3 && (
-                    <mesh position={[a.point[0], a.point[1], a.point[2] + 0.2]}>
-                      <octahedronGeometry args={[0.3]} />
-                      <meshBasicMaterial color={state === "current" ? hi : color} />
+                    <mesh position={[a.point[0], a.point[1], a.point[2] + PLAN_Z]} renderOrder={PLAN_ORDER + 2}>
+                      <octahedronGeometry args={[state === "current" ? 0.45 : 0.3]} />
+                      <meshBasicMaterial color={color} depthTest={false} transparent opacity={state === "done" ? 0.35 : 1} />
                     </mesh>
                   )}
                 </group>
               );
             })}
+            {end && cur < plan.plan.actions.length && (
+              <mesh position={end} renderOrder={PLAN_ORDER + 2}>
+                <ringGeometry args={[0.45, 0.75, 32]} />
+                <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.9} side={THREE.DoubleSide} />
+              </mesh>
+            )}
           </DimGroup>
         );
       })}
