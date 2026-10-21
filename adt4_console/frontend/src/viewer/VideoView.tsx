@@ -65,11 +65,42 @@ export const usePageVisible = () => {
   return visible;
 };
 
-/** ``bare``: the picture only (full-screen drive view), no controls or stats. */
-export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: string; cam: string; bare?: boolean; initialFps?: number}) {
-  const [fps, setFps] = useState(initialFps);
-  const [kbps, setKbps] = useState(300);
-  const [width, setWidth] = useState(640);
+const INFO_KEY = "adt4.video.info";
+/** Settings + stats rows shown (remembered per browser; default on). */
+export function loadInfo(): boolean {
+  try {
+    return localStorage.getItem(INFO_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+function saveInfo(on: boolean) {
+  try {
+    localStorage.setItem(INFO_KEY, on ? "on" : "off");
+  } catch {
+    /* private window: keep the in-memory choice */
+  }
+}
+
+type Tune = {fps: number; kbps: number; width: number};
+
+/** ``bare``: the picture only (full-screen drive view), no controls or stats.
+ *  ``tune``: stream settings set by the parent (retunes the running stream). */
+export function VideoView({robot, cam, bare = false, initialFps = 5, tune}: {robot: string; cam: string; bare?: boolean; initialFps?: number; tune?: Tune}) {
+  const [fps, setFps] = useState(tune?.fps ?? initialFps);
+  const [kbps, setKbps] = useState(tune?.kbps ?? 300);
+  const [width, setWidth] = useState(tune?.width ?? 640);
+  useEffect(() => {
+    if (!tune) return;
+    setFps(tune.fps);
+    setKbps(tune.kbps);
+    setWidth(tune.width);
+  }, [tune?.fps, tune?.kbps, tune?.width]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [info, setInfoRaw] = useState(loadInfo);
+  const setInfo = (on: boolean) => {
+    setInfoRaw(on);
+    saveInfo(on);
+  };
   const [codecChoice, setCodecChoice] = useState<"auto" | VideoCodec>("auto");
   const [autoCodec, setAutoCodec] = useState<VideoCodec | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -334,6 +365,18 @@ export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: st
   const showWasm = stats?.decoder === "wasm";
   const picture = (
     <div className={`camera-frame ${bare ? "bare" : ""}`}>
+      {!bare && (
+        <button
+          className={`video-info-btn ${info ? "on" : ""}`}
+          onClick={() => setInfo(!info)}
+          aria-pressed={info}
+          aria-label={info ? "Hide video settings and stats" : "Show video settings and stats"}
+          title={info ? "Hide settings and stats (bigger picture)" : "Show settings and stats"}
+          data-testid="video-info-toggle"
+        >
+          ⚙
+        </button>
+      )}
       <canvas ref={canvasRef} className="camera-canvas" style={{display: showJpeg || !stats?.codec || showWasm ? "none" : "block"}} aria-label={`${robot} ${cam} video`} />
       <canvas ref={glCanvasRef} className="camera-canvas" style={{display: showWasm ? "block" : "none"}} aria-label={`${robot} ${cam} video (wasm)`} />
       {showJpeg && jpegUrl && <img src={jpegUrl} alt={`${robot} ${cam}`} />}
@@ -341,8 +384,7 @@ export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: st
     </div>
   );
   if (bare) return picture;
-  return (
-    <>
+  const controls = (
       <div className="row gap-sm wrap">
         <select className="input input-sm" value={fps} onChange={e => setFps(Number(e.target.value))} aria-label="Video frame rate">
           {FPS_OPTIONS.map(f => (
@@ -376,8 +418,12 @@ export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: st
           <option value="jpeg">jpeg</option>
         </select>
       </div>
+  );
+  return (
+    <>
+      {info && controls}
       {picture}
-      {stats && (
+      {info && stats && (
         <div className="mono small camera-meta">
           {stats.codec}
           {stats.decoder === "wasm" ? " (wasm)" : ""} · {stats.fps.toFixed(1)} fps · {Math.round(stats.kbps)} kbit/s
@@ -389,7 +435,7 @@ export function VideoView({robot, cam, bare = false, initialFps = 5}: {robot: st
           {stats.waitingKey && stats.codec && <span className="tone-warn"> · waiting for key frame</span>}
         </div>
       )}
-      {(rob || server?.params) && (
+      {info && (rob || server?.params) && (
         <div className="mono small camera-meta">
           {rob
             ? `${rob.codec} ${rob.width}x${rob.height} @ ${rob.fps} fps, target ${rob.kbps} kbit/s, sent ${Math.round(rob.sent_kbps)} kbit/s, robot dropped ${rob.dropped}`

@@ -321,3 +321,24 @@ describe("Teleop tab stands down for the full-screen view", () => {
     vi.unstubAllGlobals();
   });
 });
+
+import {parseQuality, QUALITY} from "../src/viewer/DriveFullscreen";
+import {loadInfo} from "../src/viewer/VideoView";
+
+describe("video quality + info toggle", () => {
+  it("quality presets: medium by default, 15 fps (the camera rate) for med/high", () => {
+    expect(parseQuality(null)).toBe("med");
+    expect(parseQuality("bogus")).toBe("med");
+    expect(parseQuality("high")).toBe("high");
+    expect(QUALITY.med.fps).toBe(15);
+    expect(QUALITY.high.kbps).toBeGreaterThan(QUALITY.med.kbps);
+    expect(QUALITY.low.kbps).toBeLessThan(QUALITY.med.kbps);
+  });
+  it("settings/stats rows are on unless turned off", () => {
+    localStorage.removeItem("adt4.video.info");
+    expect(loadInfo()).toBe(true);
+    localStorage.setItem("adt4.video.info", "off");
+    expect(loadInfo()).toBe(false);
+    localStorage.removeItem("adt4.video.info");
+  });
+});

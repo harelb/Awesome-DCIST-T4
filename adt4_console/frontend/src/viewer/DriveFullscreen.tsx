@@ -26,10 +26,20 @@ import "./driveFullscreen.css";
 const stickRadius = (w: number, h: number) => Math.max(48, Math.min(90, Math.min(w, h) * 0.17));
 const POLL_MS = 3000;
 const VIEW_KEY = "adt4.driveFull.view";
+const QUALITY_KEY = "adt4.driveFull.quality";
 const MEDIA_KEY = "adt4.driveFull.media";
 
 export type DriveView = {kind: "cam"; cam: string} | {kind: "all"} | {kind: "map"};
 type Media = "video" | "still";
+export type Quality = "low" | "med" | "high";
+/** Stream settings per quality. 15 fps is the ZED's publish rate (a lower rate
+ *  that is not a divisor of it judders); 640 px is the widest it publishes. */
+export const QUALITY: Record<Quality, {fps: number; kbps: number; width: number; label: string}> = {
+  low: {fps: 10, kbps: 150, width: 480, label: "Low"},
+  med: {fps: 15, kbps: 400, width: 640, label: "Med"},
+  high: {fps: 15, kbps: 1000, width: 640, label: "High"},
+};
+export const parseQuality = (v: string | null): Quality => (v === "low" || v === "high" ? v : "med");
 type Cmd = "stand" | "sit" | "stop";
 
 const load = (k: string) => {
@@ -98,6 +108,11 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
   const [cams, setCams] = useState<string[] | null>(null);
   const [view, setViewRaw] = useState<DriveView>({kind: "map"});
   const [media, setMediaRaw] = useState<Media>(() => (load(MEDIA_KEY) === "still" ? "still" : "video"));
+  const [quality, setQualityRaw] = useState<Quality>(() => parseQuality(load(QUALITY_KEY)));
+  const setQuality = (q: Quality) => {
+    setQualityRaw(q);
+    save(QUALITY_KEY, q);
+  };
   const [menu, setMenu] = useState(false);
   const setView = (v: DriveView) => {
     setViewRaw(v);
@@ -324,7 +339,7 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
           ))}
         </div>
       );
-    return media === "video" ? <VideoView key={`${robot}/${view.cam}`} robot={robot} cam={view.cam} bare initialFps={10} /> : <StillPicture key={`${robot}/${view.cam}`} robot={robot} cam={view.cam} />;
+    return media === "video" ? <VideoView key={`${robot}/${view.cam}`} robot={robot} cam={view.cam} bare tune={QUALITY[quality]} /> : <StillPicture key={`${robot}/${view.cam}`} robot={robot} cam={view.cam} />;
   };
 
   const moving = armed && !isZero(cmd);
@@ -386,6 +401,23 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
               </button>
             </div>
           </div>
+          {media === "video" && view.kind === "cam" && (
+            <div className="dfs-menu-row">
+              <div className="segmented" role="group" aria-label="Video quality" data-testid="drive-full-quality">
+                {(Object.keys(QUALITY) as Quality[]).map(q => (
+                  <button
+                    key={q}
+                    className={quality === q ? "on" : ""}
+                    aria-pressed={quality === q}
+                    onClick={() => setQuality(q)}
+                    title={`${QUALITY[q].fps} fps · ${QUALITY[q].kbps} kbit/s · ${QUALITY[q].width} px`}
+                  >
+                    {QUALITY[q].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="dfs-menu-row">
             <button className="btn btn-sm" disabled={!!busy} onClick={() => void post("stand")}>
               {busy === "stand" && <Spinner />} Stand
