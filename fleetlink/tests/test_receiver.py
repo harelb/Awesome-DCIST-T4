@@ -282,6 +282,16 @@ def test_frame_align_passes_through_state_and_link():
     assert events[-1][1] == "state" and events[-1][2]["frame_align"]["ok"]
 
 
+def test_reloc_passes_through_state_and_link():
+    tr, clock, rx, events = _rx()
+    rl = {"prior_lcs": 3, "best_assoc": 9, "last_lc_age_s": 2.0, "lcs": [], "jumps": 1}
+    rx._on_msg("adt4/r/state", env_bytes("r", "state", 0, "E1", {"pose": None}))
+    assert rx.link("r")["reloc"] is None  # old agent: no field
+    rx._on_msg("adt4/r/state", env_bytes("r", "state", 1, "E1", {"pose": None, "reloc": rl}))
+    assert rx.state("r")["reloc"] == rl
+    assert rx.link("r")["reloc"] == rl
+
+
 def test_link_reports_the_robots_own_per_class_rates():
     tr, clock, rx, events = _rx()
     stats = {"rate": {"C3": 90_000.0}, "sent": {"C3": 1_234_567}, "queue": {"C3": {"n": 4, "bytes": 30_000}}}

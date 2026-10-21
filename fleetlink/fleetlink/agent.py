@@ -290,6 +290,9 @@ class AgentCore:
         self.pose: dict | None = None
         # global frame -> scene-graph frame (``frame_align``), None until looked up
         self.frame_align: dict | None = None
+        # prior-map loop closures + map -> odom jumps (``reloc``); None until
+        # the node subscribes to ROMAN (see :meth:`enable_reloc`)
+        self.reloc = None
         self.guards: dict = {}
         self.health: dict = {}
         self.results: deque = deque(maxlen=10)
@@ -428,6 +431,21 @@ class AgentCore:
         (see :func:`frame_align_ok` / :func:`frame_align_failed`)."""
         with self._lock:
             self.frame_align = None if align is None else dict(align)
+            if self.reloc is not None and align and align.get("ok"):
+                self.reloc.on_align(align.get("T"), self.clock())
+
+    def enable_reloc(self, live_id: int = 0) -> None:
+        """Start reporting ``reloc`` (ROMAN's id for this robot: ``live_id``)."""
+        from .reloc import RelocTracker
+
+        with self._lock:
+            self.reloc = RelocTracker(live_id)
+
+    def on_loop_closure(self, lc: dict) -> None:
+        """A ROMAN loop closure (:func:`reloc.loop_closure_to_dict`)."""
+        with self._lock:
+            if self.reloc is not None:
+                self.reloc.on_loop_closure(lc, self.clock())
 
     def on_guards(self, guards: dict) -> None:
         with self._lock:
@@ -988,7 +1006,15 @@ class AgentCore:
                 "video": self.video.state(),
                 "store": self._store_state(),
                 **self._frame_align_state(),
+                **self._reloc_state(),
             }
+
+    def _reloc_state(self) -> dict:
+        """Optional ``reloc`` key (absent unless ROMAN is subscribed, so old
+        consoles see the payload they always saw)."""
+        if self.reloc is None:
+            return {}
+        return {"reloc": self.reloc.state(self.clock())}
 
     def _frame_align_state(self) -> dict:
         """Optional ``frame_align`` key (absent until the first lookup, so old
@@ -1351,6 +1377,9 @@ class AgentNode:
         guards_topic = p("guards_topic", "spot_executor_node/runtime_guards")
         result_topic = p("result_topic", "spot_executor_node/action_result")
         health_topic = p("health_topic", "/global/ros_system_monitor/table_in")
+        # ROMAN loop closures (prior-map matches) for the ``reloc`` state; "" = off
+        roman_lc_topic = p("roman_lc_topic", "roman/roman_lc/loop_closure")
+        roman_live_id = p("roman_live_robot_id", 0)
         self.health_monitor = p("health_monitor_name", robot)
         for cls in ("C1", "C2", "C3"):
             cfg["budgets"][cls] = p(f"budget_{cls}", int(cfg["budgets"][cls]))
@@ -1500,6 +1529,21 @@ class AgentNode:
             nd.create_subscription(StatusTable, health_topic, self._on_health, 10)
         except ImportError:
             self.log.warn("ros_system_monitor_msgs unavailable: no health")
+        if roman_lc_topic:
+            try:
+                from roman_msgs.msg import LoopClosure
+
+                from .reloc import loop_closure_to_dict
+
+                self.core.enable_reloc(int(roman_live_id))
+                nd.create_subscription(
+                    LoopClosure,
+                    roman_lc_topic,
+                    lambda m: self.core.on_loop_closure(loop_closure_to_dict(m)),
+                    10,
+                )
+            except ImportError:
+                self.log.warn("roman_msgs unavailable: no relocalization evidence")
 
         self._tf_buffer = None
         try:

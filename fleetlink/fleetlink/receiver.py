@@ -404,6 +404,8 @@ class Receiver:
             # global frame <- scene-graph frame from the C1 state (None from
             # agents that predate it); ``state_age_s`` above ages the whole state
             "frame_align": (r.state or {}).get("frame_align"),
+            # prior-map loop closures and map -> odom jumps (None: older agent)
+            "reloc": (r.state or {}).get("reloc"),
         }
 
     def _totals(self, r: _Robot, now: float) -> dict:

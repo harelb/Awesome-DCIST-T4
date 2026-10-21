@@ -1461,6 +1461,28 @@ input[type="checkbox"] {
 .robot-chip .align-status.tone-ok {
   color: #9be7b5;
 }
+.robot-chip .align-status.tone-err {
+  color: #ff9b9b;
+}
+.reloc-details summary {
+  cursor: pointer;
+  color: var(--text-2);
+}
+.reloc-table {
+  width: 100%;
+  margin: 4px 0;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.reloc-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-2);
+}
+.reloc-table td,
+.reloc-table th {
+  padding: 1px 6px 1px 0;
+}
 .live-align {
   display: flex;
   gap: 6px;

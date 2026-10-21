@@ -15,7 +15,7 @@
 // A layer already in the parent frame (e.g. a pose the agent could only resolve
 // in `map`) is drawn as is; a layer in some other frame is drawn as is too.
 import * as THREE from "three";
-import type {FrameAlign, Pose} from "../types";
+import type {FrameAlign, Pose, Reloc} from "../types";
 import {nearestPlace, type GraphModel} from "./graphModel";
 
 export type Vec3 = [number, number, number];
@@ -93,7 +93,7 @@ export function poseInGlobal(pose: Pose, fa: FrameAlign | null | undefined): Pos
 }
 
 export interface AlignStatus {
-  tone: "ok" | "warn" | "none";
+  tone: "ok" | "warn" | "err" | "none";
   text: string;
   title: string;
 }
@@ -120,6 +120,59 @@ export function alignStatus(fa: FrameAlign | null | undefined, sinceStateS = 0):
     tone: "ok",
     text: `aligned to ${fa.parent} (relocalized)${age === null ? " · static" : ` · ${fmtAge(age)}`}`,
     title: `${fa.parent} -> ${fa.child}: t = (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}) m, yaw ${((quatYaw(fa.T) * 180) / Math.PI).toFixed(1)}°${age === null ? " (static transform)" : `, transform ${fmtAge(age)} old`}`,
+  };
+}
+
+/** A correction this big is a relocalization (or a wrong one), not drift. */
+export const BIG_JUMP_M = 3;
+export const BIG_JUMP_DEG = 30;
+/** A robot pose this far from every prior place is outside the prior map. */
+export const OUTSIDE_PRIOR_M = 5;
+
+export function isBigJump(j: {dxy: number; dyaw: number}): boolean {
+  return j.dxy > BIG_JUMP_M || Math.abs(j.dyaw) > BIG_JUMP_DEG;
+}
+
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "es"}`;
+
+/** Legend / Live-panel status with the relocalization evidence (``reloc``):
+ *  amber until a prior-map loop closure, red when the placement is suspect
+ *  (outside the prior map, or a second big correction: the first one is the
+ *  relocalization itself), green otherwise. ``distToPrior`` = metres from the
+ *  robot to the nearest prior-map place (null: no prior shown / no pose).
+ *  Agents without ``reloc`` keep :func:`alignStatus`. */
+export function relocStatus(
+  fa: FrameAlign | null | undefined,
+  reloc: Reloc | null | undefined,
+  distToPrior: number | null,
+  sinceStateS = 0,
+): AlignStatus {
+  const base = alignStatus(fa, sinceStateS);
+  if (!reloc || base.tone !== "ok" || !fa || fa.parent === fa.child) return base;
+  const since = Math.max(0, sinceStateS);
+  const lcAge = reloc.last_lc_age_s === null || reloc.last_lc_age_s === undefined ? null : reloc.last_lc_age_s + since;
+  const lines = [
+    `${reloc.prior_lcs} loop closures against the prior map${reloc.prior_lcs ? ` (best ${reloc.best_assoc} objects, last ${fmtAge(lcAge ?? 0)} ago)` : ""}`,
+    `${fa.parent} -> ${fa.child} moved ${reloc.jumps} times` +
+      (reloc.total ? `, in all ${reloc.total.dxy.toFixed(1)} m / ${reloc.total.dyaw.toFixed(0)}°` : ""),
+    distToPrior === null ? "prior map not shown: cannot check the robot is inside it" : `nearest prior place ${distToPrior.toFixed(1)} m away`,
+    base.title,
+  ];
+  const title = lines.join("\n");
+  if (reloc.prior_lcs === 0) {
+    return {tone: "warn", text: "no prior match yet — starting guess", title: `not relocalized: ROMAN has not matched the prior map yet, so ${fa.parent} -> ${fa.child} is hydra's starting guess\n${title}`};
+  }
+  const big = (reloc.recent_jumps ?? (reloc.last_jump ? [reloc.last_jump] : [])).filter(isBigJump).length;
+  if (distToPrior !== null && distToPrior > OUTSIDE_PRIOR_M) {
+    return {tone: "err", text: `suspect — ${distToPrior.toFixed(0)} m outside the prior map`, title: `placed outside the prior map: a wrong loop closure is likely\n${title}`};
+  }
+  if (big >= 2) {
+    return {tone: "err", text: `suspect — placement jumped ${big}×`, title: `${big} large corrections (> ${BIG_JUMP_M} m or ${BIG_JUMP_DEG}°): loop closures disagree\n${title}`};
+  }
+  return {
+    tone: "ok",
+    text: `relocalized · ${plural(reloc.prior_lcs, "match")}${lcAge === null ? "" : ` · last ${fmtAge(lcAge)} ago`}`,
+    title,
   };
 }
 

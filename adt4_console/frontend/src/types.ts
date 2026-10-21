@@ -270,9 +270,40 @@ export interface FrameAlign {
   age_s?: number | null;
 }
 
+/** fleetlink C1 ``reloc``: what supports ``frame_align``. ROMAN loop closures
+ *  between this robot and another robot id (the prior map), and how
+ *  ``map -> odom`` moved. Ages are seconds on the robot clock at send. */
+export interface RelocLoopClosure {
+  prior: number;
+  live_submap: number;
+  prior_submap: number;
+  assoc: number;
+  age_s: number | null;
+}
+
+export interface RelocJump {
+  dxy: number;
+  /** degrees */
+  dyaw: number;
+  age_s: number | null;
+}
+
+export interface Reloc {
+  prior_lcs: number;
+  self_lcs?: number;
+  best_assoc: number;
+  last_lc_age_s: number | null;
+  lcs: RelocLoopClosure[];
+  jumps: number;
+  last_jump: RelocJump | null;
+  recent_jumps?: RelocJump[];
+  total: {dxy: number; dyaw: number} | null;
+}
+
 export interface RobotState {
   pose?: Pose;
   frame_align?: FrameAlign;
+  reloc?: Reloc;
   guards?: Record<string, unknown>;
   health?: {nominal?: number; warning?: number; error?: number; nodes?: unknown};
   results?: ActionResult[];
@@ -404,6 +435,7 @@ export type Cls = "C1" | "C2" | "C3" | "C4" | "C5" | "C6" | (string & {});
 export interface LinkInfo {
   connected: boolean;
   frame_align?: FrameAlign | null;
+  reloc?: Reloc | null;
   epoch?: string;
   last_seen?: number | null;
   staleness_s?: number | null;
