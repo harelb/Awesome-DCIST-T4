@@ -7,6 +7,7 @@ import types
 import pytest
 
 from adt4_console.routes import launch as launch_routes
+from adt4_console.routes.launch import HYDRA_PGREP
 from adt4_console.ros_bridge import RosBridge
 from tests.conftest import make_client
 
@@ -28,7 +29,7 @@ class FakeHelpers:
 
     def ssh_cmd(self, user, ip, cmd, timeout=5):
         self.ssh.append(cmd)
-        if cmd.startswith("pgrep -f hydra_ros_node"):
+        if cmd == HYDRA_PGREP:
             self.hydra_polls -= 1
             return 0, "up" if self.hydra_polls > 0 else "gone", ""
         if "send-keys" in cmd:
@@ -268,3 +269,15 @@ def test_stop_save_never_kills_a_hydra_that_is_still_saving(app, monkeypatch):
     assert job["result"]["teardown"] is False
     assert "hydra is still saving" in log
     assert not any("send-keys" in c or "kill-session" in c for c in helpers.ssh)
+
+
+def test_hydra_pgrep_does_not_match_its_own_shell():
+    """Run over ssh, the command's own ``sh -c`` carries the pattern in its
+    command line; a plain ``pgrep -f hydra_ros_node`` matched it and reported
+    hydra up forever (fleetlink Stop & Save, 2026-10-21)."""
+    import subprocess
+
+    out = subprocess.run(["sh", "-c", HYDRA_PGREP], capture_output=True, text=True).stdout.strip()
+    assert out == "gone"
+    naive = HYDRA_PGREP.replace("'[h]ydra_ros_node'", "hydra_ros_node")
+    assert subprocess.run(["sh", "-c", naive], capture_output=True, text=True).stdout.strip() == "up"

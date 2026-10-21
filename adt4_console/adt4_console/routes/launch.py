@@ -259,13 +259,18 @@ def _wait_hydra_exit(svc, job, robot: str) -> bool | None:
     return False
 
 
+# "[h]" keeps pgrep -f from matching the remote shell running this very command
+# (its command line contains the pattern), which made hydra look up forever
+HYDRA_PGREP = "pgrep -f '[h]ydra_ros_node' >/dev/null && echo up || echo gone"
+
+
 def _wait_hydra_exit_ssh(svc, job, m) -> bool | None:
     """Like _wait_hydra_exit, by looking for the hydra process on the robot."""
     t0 = time.monotonic()
     last_note = t0
     while time.monotonic() - t0 < HYDRA_EXIT_WAIT_S:
         rc, out, _ = svc.helpers.ssh_cmd(
-            m["user"], m["ip"], "pgrep -f hydra_ros_node >/dev/null && echo up || echo gone"
+            m["user"], m["ip"], HYDRA_PGREP
         )
         if rc != 0 or out.strip() not in ("up", "gone"):
             return None
