@@ -154,7 +154,8 @@ Robot positions are given below when known: point({x: .., y: .., z: ..}).
 - class is the semantic label name (see the labelspace).
 - Objects may carry admission_status: trusted_prior / admitted are confirmed, \
 candidate is unconfirmed, rejected was rejected. Leave out only rejected objects \
-unless asked otherwise.
+unless asked otherwise, null-safe (older maps have no admission_status): \
+WHERE coalesce(o.admission_status, '') <> 'rejected'.
 - is_active and is_predicted are Hydra bookkeeping (still in the active mapping \
 window / predicted), NOT whether an object exists: never filter on them.
 - Do not use apoc functions. Labels starting with _ are bookkeeping.
