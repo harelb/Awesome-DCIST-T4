@@ -628,41 +628,53 @@ class _Direction:
 
     def advance(self, t: float) -> list:
         """Transmit until ``t``; returns messages whose delivery time is <= t."""
-        lk = self.link
         while self.tx_time < t and self.busy():
-            if lk.tcp_hol:
-                cls = min(
-                    (c for c in CLASSES if self.queues[c]),
-                    key=lambda c: self.queues[c][0].order,
-                )
-            else:
-                cls = next(c for c in PRIORITY_ORDER if self.queues[c])
-            msg = self.queues[cls][0]
-            frag = min(lk.mtu, msg.remaining)
-            if lk.bandwidth:
-                self.tx_time += frag / lk.bandwidth
-            self.stats.wire_bytes[cls] += frag
-            if lk.loss and self.rng.random() < lk.loss:
-                if lk.reliable.get(cls, False):
-                    self.stats.retransmits[cls] += 1
-                    msg.extra_delay += 2.0 * lk.latency
-                    continue  # resend the same fragment
-                msg.lost = True
-            msg.remaining -= frag
-            if msg.remaining > 0:
-                continue
-            self.queues[cls].popleft()
-            self.queued[cls] -= len(msg.data)
-            if msg.lost:
-                self.stats.loss_drops[cls] += 1
-                continue
-            when = self.tx_time + lk.latency + msg.extra_delay
-            fifo = "all" if lk.tcp_hol else cls  # one stream: one delivery order
-            when = max(when, self.last_delivery.get(fifo, 0.0))  # FIFO
-            self.last_delivery[fifo] = when
-            heapq.heappush(self.inflight, (when, next(self.order), msg))
+            self.send_fragment()
         if not self.busy():
             self.tx_time = max(self.tx_time, t)
+        return self.deliver(t)
+
+    def send_fragment(self, airtime: float = 1.0) -> float:
+        """Put the next fragment on the air (strict priority, or FIFO with
+        ``tcp_hol``) at ``tx_time``; returns the seconds it took.  ``airtime``
+        scales that time (e.g. a multi-hop relay spends the channel per hop);
+        :class:`SharedChannel` drives several directions through this."""
+        lk = self.link
+        if lk.tcp_hol:
+            cls = min(
+                (c for c in CLASSES if self.queues[c]),
+                key=lambda c: self.queues[c][0].order,
+            )
+        else:
+            cls = next(c for c in PRIORITY_ORDER if self.queues[c])
+        msg = self.queues[cls][0]
+        frag = min(lk.mtu, msg.remaining)
+        dt = frag / lk.bandwidth * airtime if lk.bandwidth else 0.0
+        self.tx_time += dt
+        self.stats.wire_bytes[cls] += frag
+        if lk.loss and self.rng.random() < lk.loss:
+            if lk.reliable.get(cls, False):
+                self.stats.retransmits[cls] += 1
+                msg.extra_delay += 2.0 * lk.latency
+                return dt  # resend the same fragment
+            msg.lost = True
+        msg.remaining -= frag
+        if msg.remaining > 0:
+            return dt
+        self.queues[cls].popleft()
+        self.queued[cls] -= len(msg.data)
+        if msg.lost:
+            self.stats.loss_drops[cls] += 1
+            return dt
+        when = self.tx_time + lk.latency + msg.extra_delay
+        fifo = "all" if lk.tcp_hol else cls  # one stream: one delivery order
+        when = max(when, self.last_delivery.get(fifo, 0.0))  # FIFO
+        self.last_delivery[fifo] = when
+        heapq.heappush(self.inflight, (when, next(self.order), msg))
+        return dt
+
+    def deliver(self, t: float) -> list:
+        """Messages whose delivery time is <= ``t``."""
         out = []
         while self.inflight and self.inflight[0][0] <= t:
             _, _, msg = heapq.heappop(self.inflight)
@@ -761,6 +773,60 @@ class LinkEmulator:
             self.closed_until = self.clock() + float(duration_s)
             for d in (self.robot.tx, self.base.tx):
                 d.reset()
+
+
+class SharedChannel:
+    """Several :class:`LinkEmulator` links on ONE radio channel (a MANET shares
+    airtime among every node, both directions).  Each link keeps its own queues,
+    priorities, latency and loss; the channel puts one fragment on the air at a
+    time, round-robin over the busy directions of all links (roughly what TDMA /
+    CSMA fairness gives each radio), each fragment taking ``size / rate`` seconds
+    times the link's ``airtime`` factor (2 for a robot one relay hop away, ...).
+
+    Give every link ``bandwidth`` = the channel rate (bytes/s) and drive time with
+    :meth:`advance` instead of the links' own ``advance``.
+    """
+
+    def __init__(self, links: list, clock: Callable[[], float], airtime: list | None = None):
+        self.links = list(links)
+        self.clock = clock
+        self.airtime = list(airtime) if airtime else [1.0] * len(self.links)
+        self.air_t = clock()
+        self._rr = 0
+        self.busy_s = 0.0  # seconds the channel was on the air
+
+    def _dirs(self):
+        for lk, f in zip(self.links, self.airtime):
+            yield lk, lk.robot.tx, f
+            yield lk, lk.base.tx, f
+
+    def advance(self, t: float | None = None) -> None:
+        t = self.clock() if t is None else t
+        dirs = list(self._dirs())
+        while self.air_t < t:
+            busy = [x for x in dirs if x[1].busy() and not x[0].is_closed(self.air_t)]
+            if not busy:
+                break
+            lk, d, f = busy[self._rr % len(busy)]
+            self._rr += 1
+            with lk._lock:
+                d.tx_time = self.air_t
+                dt = d.send_fragment(f)
+            self.air_t += dt
+            self.busy_s += dt
+        self.air_t = max(self.air_t, t)
+        for lk in self.links:
+            with lk._lock:
+                for _ in range(1000):
+                    batch = []
+                    for d in (lk.robot.tx, lk.base.tx):
+                        batch.extend((m, d.peer) for m in d.deliver(t))
+                    if not batch:
+                        break
+                    for msg, peer in batch:
+                        peer._deliver_msg(msg)
+                for end in (lk.robot, lk.base):
+                    end._expire_queries(t)
 
 
 class MemoryTransport(Transport):
