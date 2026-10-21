@@ -10,7 +10,7 @@ import {Badge, Spinner} from "../components/ui";
 import {sendGoal} from "./PlanPanel";
 import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
-import {candidateNote, cellText, fmtLeft, mergeTargetsAfterCommit, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
+import {candidateNote, candidateOrdinals, cellText, fmtLeft, mergeTargetsAfterCommit, scrollAnchor, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
 
 export type ChatItem =
   | {type: "user"; text: string; note?: boolean}
@@ -156,11 +156,22 @@ export function ChatPanel() {
   const scroller = useRef<HTMLDivElement>(null);
   const abort = useRef<AbortController | null>(null);
   const busyRef = useRef(false);
+  // items before the current turn, and how many items the log last scrolled for
+  const turnStart = useRef(0);
+  const shown = useRef(0);
   // Cypher runs on the planner's Neo4j map; else the first shown source
   const src = order.find(id => sources[id]?.kind === "neo4j") ?? order.find(id => sources[id]?.enabled) ?? undefined;
 
   useEffect(() => {
-    scroller.current?.scrollTo({top: scroller.current.scrollHeight});
+    const el = scroller.current;
+    const grew = items.length > shown.current;
+    shown.current = items.length;
+    // a card changing state (approve / discard) leaves the log where the operator put it
+    if (!el || !grew) return;
+    // a SAM3 search: its first card on top, the others below (bottom-pinned, only the last was in view)
+    const a = scrollAnchor(items, turnStart.current);
+    const card = a === null ? null : el.querySelector<HTMLElement>(`[data-item="${a}"]`);
+    el.scrollTop = card ? el.scrollTop + card.getBoundingClientRect().top - el.getBoundingClientRect().top : el.scrollHeight;
   }, [items]);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => {
@@ -180,6 +191,7 @@ export function ChatPanel() {
     }
   };
   const chosenModel = model && models.includes(model) ? model : undefined;
+  const ords = candidateOrdinals(items);
 
   const push = (it: ChatItem) =>
     setItems(cur => {
@@ -190,6 +202,7 @@ export function ChatPanel() {
         const text = it.text.replace(/^\s+/, "");
         return text ? [...cur, {type: "text", text}] : cur;
       }
+      if (it.type === "user") turnStart.current = cur.length;
       return [...cur, it];
     });
 
@@ -264,6 +277,7 @@ export function ChatPanel() {
   const newChat = () => {
     abort.current?.abort();
     transcript.current = [];
+    turnStart.current = 0;
     setItems([]);
   };
 
@@ -381,7 +395,7 @@ export function ChatPanel() {
             );
           if (it.type === "text") return <div key={i} className={`msg msg-bot ${looksTabular(it.text) ? "msg-pre" : ""}`}>{it.text}</div>;
           if (it.type === "error") return <div key={i} className="msg msg-err">{it.text}</div>;
-          if (it.type === "object_candidate") return <CandidateCard key={i} it={it} onAct={add => void actOnCandidate(i, add)} />;
+          if (it.type === "object_candidate") return <CandidateCard key={i} idx={i} ord={ords[i]} it={it} onAct={add => void actOnCandidate(i, add)} />;
           if (it.type === "cypher_write") return <WriteCard key={i} it={it} onDecide={ok => void decideWrite(i, ok)} />;
           if (it.type === "images") return <ImagesCard key={i} it={it} />;
           if (it.type === "tool") return <ToolCard key={i} it={it} />;
@@ -568,7 +582,7 @@ function GoalCard({it, robot, onSend}: {it: Extract<ChatItem, {type: "goal"}>; r
   );
 }
 
-function CandidateCard({it, onAct}: {it: ObjectCandidate; onAct: (add: boolean) => void}) {
+function CandidateCard({it, idx, ord, onAct}: {it: ObjectCandidate; idx: number; ord: {k: number; n: number} | null; onAct: (add: boolean) => void}) {
   const st = it.status;
   const done = st && st.state !== "error";
   const [view, setView] = useState(0);
@@ -587,10 +601,16 @@ function CandidateCard({it, onAct}: {it: ObjectCandidate; onAct: (add: boolean) 
       ? it.image_uri
       : withToken(`api/sam3/frame.jpg?pending_id=${encodeURIComponent(it.pending_id)}&index=${it.index}&view=${view}&max_dim=640`);
   return (
-    <div className="msg msg-candidate">
+    <div className="msg msg-candidate" data-item={idx}>
       <div className="row gap between">
         <span>
           <Badge tone="warn">not in map</Badge> <strong>{it.label}</strong> <span className="muted small">score {it.score.toFixed(2)}</span>
+          {ord && ord.n > 1 && (
+            <span className="muted small">
+              {" "}
+              · {ord.k} of {ord.n}
+            </span>
+          )}
         </span>
         {left !== null && !done && <span className={`small mono ${expired ? "tone-err" : "muted"}`} title="The candidate is held this long; search again after">{fmtLeft(left)}</span>}
       </div>
