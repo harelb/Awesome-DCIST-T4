@@ -541,6 +541,56 @@ def mesh_arrays(mesh):
     return pos, col, f.T.astype(np.uint32)
 
 
+# mesh level of detail (tiles a robot sends): "full" = Hydra's mesh as is,
+# "decimated" = vertex clustering on a grid of ``cell`` metres (``decimate_mesh``)
+MESH_LODS = ("full", "decimated")
+DEFAULT_DECIMATE_CELL = 0.4  # divides DEFAULT_TILE_SIZE: clusters never straddle a tile edge; Penn: 8.7x fewer faces
+
+
+def decimate_mesh(pos, col, faces, cell: float = DEFAULT_DECIMATE_CELL):
+    """Vertex clustering: every vertex in a ``cell``-metre grid cell becomes the
+    cell's mean vertex (mean colour); faces that collapse or repeat are dropped.
+
+    Numpy only (robots have no mesh library in spark_env), linear in the mesh
+    size, and the grid is global and aligned with the tile grid when ``cell``
+    divides the tile size, so neighbouring tiles share their border vertices
+    exactly (no cracks). Returns (pos float32, col uint8, faces uint32).
+    """
+    pos = np.asarray(pos, np.float32)
+    faces = np.asarray(faces, np.uint32)
+    if len(faces) == 0 or len(pos) == 0 or not cell or cell <= 0:
+        return pos, np.asarray(col, np.uint8), faces
+    q = np.floor(pos / cell).astype(np.int64)
+    q -= q.min(axis=0)
+    dims = q.max(axis=0) + 1
+    lin = (q[:, 0] * dims[1] + q[:, 1]) * dims[2] + q[:, 2]
+    keys, inv = np.unique(lin, return_inverse=True)
+    n = len(keys)
+    cnt = np.bincount(inv, minlength=n).astype(np.float64)
+    new_pos = np.empty((n, 3), np.float64)
+    new_col = np.empty((n, 3), np.float64)
+    colf = np.asarray(col, np.float64)
+    for k in range(3):
+        new_pos[:, k] = np.bincount(inv, weights=pos[:, k], minlength=n)
+        new_col[:, k] = np.bincount(inv, weights=colf[:, k], minlength=n)
+    new_pos /= cnt[:, None]
+    new_col /= cnt[:, None]
+    f = inv[faces.astype(np.int64)]
+    f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+    if len(f) == 0:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8), np.zeros((0, 3), np.uint32)
+    # the same triangle from several original faces (either winding): keep one
+    srt = np.sort(f, axis=1)
+    _, first = np.unique((srt[:, 0] * n + srt[:, 1]) * n + srt[:, 2], return_index=True)
+    f = f[np.sort(first)]
+    used, remap = np.unique(f.reshape(-1), return_inverse=True)
+    return (
+        new_pos[used].astype(np.float32),
+        np.clip(np.round(new_col[used]), 0, 255).astype(np.uint8),
+        remap.reshape(-1, 3).astype(np.uint32),
+    )
+
+
 def tile_mesh(pos, col, faces, tile_size: float = DEFAULT_TILE_SIZE) -> dict[str, dict]:
     """Split a mesh into spatial tiles; returns ``{tile_key: tile}``.
 

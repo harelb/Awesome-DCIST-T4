@@ -3309,4 +3309,11 @@ input[type="checkbox"] {
 }
 .traffic-table td {
   white-space: nowrap;
+.mesh-lod {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 2px;
+  min-width: 0;
 }

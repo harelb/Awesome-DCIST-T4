@@ -2,15 +2,15 @@ import {useEffect, useMemo, useState} from "react";
 import {useViewer, readyModels, srcPath} from "../stores/viewer";
 import {layerInfo, searchNodes} from "../lib/graphModel";
 import {nodeColor, LAYER_COLORS, rgbCss} from "../lib/palette";
-import {errorText, getJSON} from "../lib/api";
+import {errorText, getJSON, postJSON} from "../lib/api";
 import {Badge, Dot, Empty, Spinner, Toggle} from "../components/ui";
 import type {NodeDetail} from "../types";
 import {displayPos, defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
 import {StatsPanel} from "./StatsPanel";
-import {applyPoint} from "../lib/frameAlign";
-import {sourceMatrix} from "../stores/robots";
+import {applyPoint, robotOfSource} from "../lib/frameAlign";
+import {sourceMatrix, useRobots} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
 import {useViewStyle} from "../stores/viewStyle";
 import {BackgroundControl, HeightsControl, RegionControls} from "./StylePanels";
@@ -63,6 +63,7 @@ export function SourcesPanel({stats}: {stats: Record<string, TileStats>}) {
                         </label>
                         <span className="muted">{s.model?.nodes.size ?? 0} nodes</span>
                       </div>
+                      {s.kind === "live" && robotOfSource(id) && <MeshLodControl robot={robotOfSource(id)!} />}
                       {st && st.total > 0 && (
                         <div className="tile-bar" title={`${st.loaded}/${st.total} tiles`}>
                           <div className="tile-fill" style={{width: `${(100 * st.loaded) / st.total}%`}} />
@@ -406,4 +407,40 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
 
 export function SourceDot({status}: {status: string}) {
   return <Dot tone={status === "ready" ? "ok" : status === "error" ? "err" : status === "loading" ? "warn" : "off"} />;
+}
+
+/** Live robot mesh level of detail: decimated by default (~8x fewer faces over
+ *  the radio), "Full mesh" asks the robot for Hydra's full tiles. */
+export function meshLodText(m: {lod: string | null; wanted: string | null; pending: number; bytes: number}): string {
+  const lod = m.lod ?? "full (robot has no LOD support)";
+  const pend = m.pending > 0 ? ` · ${m.pending} tile${m.pending === 1 ? "" : "s"} to go` : "";
+  return `${lod}${pend} · ${fmtBytes(m.bytes)}`;
+}
+
+function MeshLodControl({robot}: {robot: string}) {
+  const mesh = useRobots(s => s.link[robot]?.mesh);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  if (!mesh) return null;
+  const full = mesh.wanted === "full";
+  const set = async (on: boolean) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await postJSON(`api/live/${encodeURIComponent(robot)}/mesh_lod`, {level: on ? "full" : "decimated"});
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mesh-lod small">
+      <label className="mini-check" title="Full: Hydra's mesh as is (more radio traffic). Off: decimated, ~8x fewer faces.">
+        <input type="checkbox" checked={full} disabled={busy || mesh.lod === null} onChange={e => void set(e.target.checked)} aria-label={`Full mesh for ${robot}`} /> full mesh
+      </label>
+      <span className="muted mono">{meshLodText(mesh)}</span>
+      {err && <div className="inline-err small">{err}</div>}
+    </div>
+  );
 }

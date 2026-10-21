@@ -55,6 +55,13 @@ class FakeReceiver:
 
     def set_budget(self, robot, cls, bps):
         self.calls.append(("budget", robot, cls, bps))
+
+    def set_mesh_lod(self, robot, level, tiles=None):
+        self.calls.append(("mesh_lod", robot, level, tiles))
+        return "req-lod"
+
+    def mesh_lod_wanted(self, robot):
+        return {"level": "full", "tiles": {}}
         return "req-1"
 
     def request_resync(self, robot):
@@ -93,6 +100,13 @@ def test_live_endpoints_and_controls(live):
     client.post("/api/live/euclid/auto", json={"enabled": False})
     assert ("budget", "euclid", "C2", 20000.0) in rx.calls
     assert ("resync", "euclid") in rx.calls and ("auto", "euclid", False) in rx.calls
+    # mesh level of detail: whole mesh, or just some tiles; unknown levels refused
+    r = client.post("/api/live/euclid/mesh_lod", json={"level": "full"}).json()
+    assert r == {"ok": True, "request": "req-lod", "wanted": {"level": "full", "tiles": {}}}
+    client.post("/api/live/euclid/mesh_lod", json={"level": "full", "tiles": ["0_0_0"]})
+    assert ("mesh_lod", "euclid", "full", None) in rx.calls
+    assert ("mesh_lod", "euclid", "full", ["0_0_0"]) in rx.calls
+    assert client.post("/api/live/euclid/mesh_lod", json={"level": "ultra"}).status_code == 422
 
 
 def test_live_graph_source_snapshot_tiles_and_events(live):

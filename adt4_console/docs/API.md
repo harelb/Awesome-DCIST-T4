@@ -224,6 +224,10 @@ methods `start()`, `stop()`, `robots()`, `graph(robot) -> GraphState`, `tiles(ro
 Console endpoints:
 * `GET /api/live` → `{robots: {r: {connected, epoch, last_seen, staleness_s, latency_ms, nodes, tiles, budgets: {C1,C2,C3}, rates: {C1,C2,C3: bytes_per_s}, drops, gaps, resyncs, auto}}}`
 * `POST /api/live/{r}/budget` `{cls: "C1"…"C6", bps}`; `POST /api/live/{r}/resync`; `POST /api/live/{r}/auto` `{enabled}`
+* `POST /api/live/{r}/mesh_lod` `{level: "full"|"decimated", tiles?: [key]}` → `{ok, request, wanted}`: the mesh level
+  of detail the robot sends (fleetlink README, *Mesh level of detail*). Default `decimated` (~8x fewer faces); the
+  Robot viewer's per-robot **full mesh** checkbox switches it. Each link status has `mesh: {lod, lod_tiles, wanted,
+  tiles, pending, bytes}` (`lod` null: an older robot, full tiles); the viewer refetches tiles whose hash changed.
 * `GET /api/live/{r}/state` → latest C1 state (same payload as the `robot/<r>/state` topic); 404 before the robot has reported
 * Each `GET /api/live` robot entry also carries `frame_align` (from the latest C1 state; null from older agents).
 

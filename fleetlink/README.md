@@ -118,7 +118,7 @@ plus its *Deviations → fleetlink* section.
 
 | class | key(s) under `adt4/<robot>/` | zenoh priority, reliability | congestion control | default budget | contents | delivery guarantee |
 |---|---|---|---|---|---|---|
-| C0 control | `ctl/req` (base→robot), `ctl/ack` | INTERACTIVE_HIGH, express, reliable | DROP | unlimited | `resync`, `budget {cls: bps}`, `auto`, `ping`, `fb`, `tiles {keys}`, `resend {streams}` / `resend {stream: "dsg", from_seq, to_seq}`, `video`, `video_keyframe` | retried every 1 s until acked (`fb`, `ping` fire-and-forget) |
+| C0 control | `ctl/req` (base→robot), `ctl/ack` | INTERACTIVE_HIGH, express, reliable | DROP | unlimited | `resync`, `budget {cls: bps}`, `auto`, `ping`, `fb`, `tiles {keys}`, `mesh_lod {level, tiles?}`, `resend {streams}` / `resend {stream: "dsg", from_seq, to_seq}`, `video`, `video_keyframe` | retried every 1 s until acked (`fb`, `ping` fire-and-forget) |
 | C1 state | `state`, `paths` | INTERACTIVE_LOW | DROP | 5 kB/s | pose, guards, health, results, stats, `cameras`, `hashes`, `seqs`, `frame_align` at 4 Hz; executor paths on change | latest value; paths re-sent on hash mismatch |
 | C2 graph | `dsg/delta` | DATA_HIGH, reliable | DROP | 50 kB/s | snapshot begin/chunk/end, deltas (1 Hz tick) | in order; gap → `resend` from ring → resync |
 | C3 mesh | `mesh/tile/<key>`, `mesh/manifest`, `grid/occupancy` | DATA_LOW, best effort | DROP | 100 kB/s | mesh tiles, manifest every 5 s, occupancy grid (checked every 5 s, sent on change) | manifest → `tiles`; grid hash → `resend` |
@@ -183,6 +183,7 @@ for 20 ms instead of waiting for the next AUD) and about 10 ms for vp8.
 | `state_hz` | 4.0 | C1 rate (2 Hz is not enough for < 1 s staleness at 3 % loss) |
 | `c2_hz` | 1.0 | graph tick |
 | `mesh_period_s`, `manifest_period_s` | 5.0, 5.0 | |
+| `mesh_decimate_cell` | 0.4 | vertex-clustering cell (m) of the `decimated` mesh LOD; divides `tile_size` |
 | `tile_size` | 8.0 | m |
 | `max_msg_bytes` | 65536 | largest C2 message |
 | `burst_s` | 1.0 | token-bucket depth, in seconds of budget |
@@ -441,3 +442,23 @@ zsh -c 'source /opt/ros/jazzy/setup.zsh; source ~/dcist_ws/install/setup.zsh; \
   ```
 
   It is deterministic: same seed, same numbers. It skips when the map file is missing.
+
+## Mesh level of detail
+
+A robot sends its mesh at one of two levels of detail (`codec.MESH_LODS`):
+
+* `decimated`: vertex clustering on a global `mesh_decimate_cell` grid (0.4 m), every vertex of a cell
+  replaced by the cell's mean vertex and colour, collapsed and repeated faces dropped
+  (`codec.decimate_mesh`, numpy only). The grid divides the 8 m tile size, so neighbouring tiles share
+  their border vertices exactly. Pennovation courtyard: 1.62 M -> 0.19 M faces, 13.4 -> 1.8 MB
+  (zstd) for the whole mesh, 0.19 s + 0.08 s tiling on a laptop.
+* `full`: Hydra's mesh as is.
+
+The base asks with C0 `mesh_lod {level}` (whole mesh) or `mesh_lod {level, tiles: [keys]}` (just
+those tiles, e.g. full detail where the operator looks). Each tile carries its `lod` and its hash
+covers its content, so a change re-sends exactly the tiles that differ, closest to the robot first,
+within the C3 budget; the manifest carries `lod {level, tiles, cell}`. The Receiver asks every robot
+for `decimated` when its epoch starts (`Receiver(mesh_lod=...)`, None = never ask) and re-sends the
+console's choice (`set_mesh_lod`) to a restarted robot. Compatibility: a robot sends full tiles until
+a base asks (an old base never does); an old robot answers the unknown op with an error ack and keeps
+sending full tiles (the link status `mesh.lod` is then null).

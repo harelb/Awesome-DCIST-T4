@@ -107,6 +107,7 @@ class _Robot:
         self.graph = GraphState()
         self.tiles: dict[str, dict] = {}
         self.manifest: dict[str, str] = {}
+        self.mesh_lod: dict | None = None  # the robot's LOD (manifest ``lod``); None: full, old robot
         self.state: dict = {}
         self.last_seen: float | None = None
         self.last_state_rx: float | None = None
@@ -185,6 +186,7 @@ class Receiver:
         fb_period: float = 1.0,
         store_root: str | None = None,
         store_mirror=None,
+        mesh_lod: str | None = "decimated",
     ):
         self.transport = transport
         self.on_update = on_update or (lambda r, k, d: None)
@@ -202,6 +204,10 @@ class Receiver:
         self.resend_timeout_s = resend_timeout_s
         self.hold_max = hold_max
         self.fb_period = fb_period
+        # mesh LOD asked of every robot when its epoch starts (None: never ask,
+        # robots send full tiles); per-robot choices from ``set_mesh_lod`` win
+        self.default_mesh_lod = mesh_lod
+        self._mesh_lod_wanted: dict[str, dict] = {}
         self._outbox: list[tuple[str, dict]] = []
         self._robots: dict[str, _Robot] = {}
         self._pending: dict[str, dict] = {}  # req id -> {robot, req, t, tries}
@@ -358,6 +364,7 @@ class Receiver:
             "rtt_ms": None if r.rtt is None else 1000.0 * r.rtt,
             "nodes": len(r.graph.records),
             "tiles": len(r.tiles),
+            "mesh": self._mesh_status(r),
             "budgets": stats.get("budgets", {}),
             "rates": {c: r.rates[c] for c in REPORTED_CLASSES},
             "bytes": dict(r.bytes),
@@ -487,6 +494,33 @@ class Receiver:
             for cam, st in reported.items():
                 out.setdefault(cam, {})["robot"] = st
             return out
+
+    def mesh_lod_wanted(self, robot: str) -> dict | None:
+        """``{level, tiles}`` this base asks of ``robot`` (None: nothing asked)."""
+        with self._lock:
+            w = self._mesh_lod_wanted.get(robot)
+            if w is not None:
+                return {"level": w["level"], "tiles": dict(w["tiles"])}
+            return None if self.default_mesh_lod is None else {"level": self.default_mesh_lod, "tiles": {}}
+
+    def set_mesh_lod(self, robot: str, level: str, tiles: list | None = None) -> str:
+        """C0 ``mesh_lod {level, tiles?}``: the robot re-sends its mesh tiles at
+        ``level`` ("full" | "decimated"), only ``tiles`` when given (the rest
+        keep the robot-wide level). Remembered and re-sent when the robot's
+        epoch changes. An old robot answers "unknown op" and keeps full tiles."""
+        if level not in codec.MESH_LODS:
+            raise ValueError(f"unknown mesh LOD {level!r} (one of {codec.MESH_LODS})")
+        with self._lock:
+            cur = self._mesh_lod_wanted.get(robot) or {"level": self.default_mesh_lod or "full", "tiles": {}}
+            if tiles:
+                cur = {"level": cur["level"], "tiles": {**cur["tiles"], **{str(k): level for k in tiles}}}
+            else:
+                cur = {"level": level, "tiles": {}}
+            self._mesh_lod_wanted[robot] = cur
+        args = {"level": level}
+        if tiles:
+            args["tiles"] = [str(k) for k in tiles]
+        return self._send(robot, "mesh_lod", args)
 
     def set_auto(self, robot: str, enabled: bool) -> str:
         return self._send(robot, "auto", {"enabled": bool(enabled)})
@@ -791,6 +825,23 @@ class Receiver:
             r = self._robots.get(robot)
             return None if r is None else r.clock_offset
 
+    def _mesh_status(self, r: _Robot) -> dict:
+        """What the console shows next to a robot's mesh: the LOD the robot
+        reports (``lod`` None: an old robot, full tiles), the one asked, tiles
+        still to arrive and the bytes held."""
+        pending = sum(1 for k, h in r.manifest.items() if k not in r.tiles or r.tiles[k].get("hash") != h)
+        held = sum(len(t.get("pos", b"")) + len(t.get("col", b"")) + len(t.get("idx", b"")) for t in r.tiles.values())
+        w = self._mesh_lod_wanted.get(r.name)
+        wanted = w["level"] if w else self.default_mesh_lod
+        return {
+            "lod": (r.mesh_lod or {}).get("level"),
+            "lod_tiles": dict((r.mesh_lod or {}).get("tiles") or {}),
+            "wanted": wanted,
+            "tiles": len(r.manifest),
+            "pending": pending,
+            "bytes": held,
+        }
+
     def _new_epoch(self, r: _Robot, epoch: str, now: float) -> None:
         if r.epoch is not None:
             r.retired.add(r.epoch)
@@ -800,6 +851,7 @@ class Receiver:
         r.graph = GraphState()
         r.tiles.clear()
         r.manifest = {}
+        r.mesh_lod = None
         r.tile_req_t.clear()
         r.grid = None
         r.paths = None
@@ -816,6 +868,14 @@ class Receiver:
         for rid in [k for k, v in self._pending.items() if v["robot"] == r.name]:
             del self._pending[rid]
         self._maybe_resync(r, now, force=True)
+        # a new robot process starts with full tiles: ask for this base's LOD
+        w = self._mesh_lod_wanted.get(r.name)
+        level = (w or {}).get("level") or self.default_mesh_lod
+        if level is not None:
+            self._pending_send(r.name, "mesh_lod", {"level": level})
+            for lv in set((w or {}).get("tiles", {}).values()):
+                keys = [k for k, v in w["tiles"].items() if v == lv]
+                self._pending_send(r.name, "mesh_lod", {"level": lv, "tiles": keys})
 
     def _on_graph(self, r: _Robot, p: dict, seq: int) -> list:
         kind = p.get("kind", "delta")
@@ -870,6 +930,7 @@ class Receiver:
     def _on_manifest(self, r: _Robot, p: dict, now: float) -> list:
         manifest = p.get("tiles") or {}
         r.manifest = manifest
+        r.mesh_lod = p.get("lod") if isinstance(p.get("lod"), dict) else None
         removed = [k for k in r.tiles if k not in manifest]
         for k in removed:
             del r.tiles[k]

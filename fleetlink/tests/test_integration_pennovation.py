@@ -99,7 +99,9 @@ class Sim:
     def __init__(self, cfg=None, link=None):
         self.clock = VirtualClock()
         self.link = LinkEmulator(self.clock, **(link or LINK))
-        self.rx = Receiver(self.link.base, None, clock=self.clock, threaded=False)
+        # full mesh: this benchmark measures the heavy case (the decimated LOD
+        # is ~7x smaller; tests/test_mesh_lod.py covers it)
+        self.rx = Receiver(self.link.base, None, clock=self.clock, threaded=False, mesh_lod=None)
         self.rx.start()
         self.cfg = cfg
         self.agent = AgentCore(ROBOT, self.link.robot, cfg, self.clock)
@@ -212,7 +214,7 @@ def _print_table(penn, out):
         f"(full map binary: {penn['raw_full']:,} B with mesh, {penn['raw_nomesh']:,} B without)",
         f"raw DsgUpdate @1 Hz without mesh: {out['raw_nomesh_bytes']:,.0f} B vs fleetlink C2 "
         f"{out['sent']['C2']:,} B ({out['raw_nomesh_bytes'] / max(1, out['sent']['C2']):,.0f}x less)",
-        f"C1 max state age {sim.max_state_age:.3f}s; C3 backlogged {100 * out['c3_busy']:.0f} % of the "
+        f"C1 max state age {sim.max_state_age:.3f}s; C3 backlogged {100 * (out['c3_busy'] or 0):.0f} % of the "
         f"first 100 s; resyncs {sim.rx.link(ROBOT)['resyncs']}, drops {sim.rx.link(ROBOT)['drops']}",
     ]
     print("\n".join(lines))
