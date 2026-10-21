@@ -42,6 +42,16 @@ export function mixHex(a: string, b: string, t: number): string {
   return rgbToHex([0, 1, 2].map(i => ca[i] + (cb[i] - ca[i]) * t) as RGB);
 }
 
+/** `hex` darkened just enough to reach `min` contrast against `bg` (unchanged
+ *  if it already does). Keeps pale robot colours (yellow, cream, mint) visible
+ *  on a light 3D background. */
+export function readableOn(hex: string, bg: string, min = 3): string {
+  if (!hexToRgb(hex)) return hex;
+  let c = hex.toLowerCase();
+  for (let t = 0.1; contrastRatio(c, bg) < min && t <= 0.8 + 1e-9; t += 0.1) c = mixHex(hex, "#000000", t);
+  return c;
+}
+
 /** Background quick picks (Display panel). "RViz gray" is the hydra style default. */
 export const BG_PRESETS: {name: string; color: string}[] = [
   {name: "White", color: "#ffffff"},
@@ -53,6 +63,14 @@ export const BG_PRESETS: {name: string; color: string}[] = [
 
 /** Style defaults: RViz look for hydra, near-black for classic. */
 export const STYLE_BACKGROUND = {hydra: "#303030", classic: "#0b0f14"} as const;
+/** Light-theme defaults: a soft grey (not pure white) so white highlights and
+ *  pale mesh colours still separate from the background. */
+export const LIGHT_BACKGROUND = {hydra: "#e4e4e4", classic: "#f1f3f6"} as const;
+
+/** Default 3D background for a viz style under the console theme. */
+export function defaultBackground(style: "hydra" | "classic", theme: "dark" | "light" = "dark"): string {
+  return (theme === "light" ? LIGHT_BACKGROUND : STYLE_BACKGROUND)[style];
+}
 const STYLE_GRID = {hydra: ["#7a7a80", "#55555a"], classic: ["#2a3440", "#1a222b"]} as const;
 
 export interface Contrast {

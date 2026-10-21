@@ -11,10 +11,12 @@ import {layoutGraph, displayPos, type GraphLayout} from "./layout";
 import {GraphLayers, pickRegistry} from "./GraphLayers";
 import {pickBox, type BoxSet} from "../lib/bboxPick";
 import {MeshTiles, type TileStats} from "./MeshTiles";
-import {currentActionIndex, useRobotColorOf} from "./planUtil";
+import {currentActionIndex} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
 import {useViewStyle} from "../stores/viewStyle";
-import {contrastFor, STYLE_BACKGROUND, type ColorOpts} from "./style";
+import {contrastFor, defaultBackground, STYLE_BACKGROUND, type ColorOpts} from "./style";
+import {useTheme} from "../stores/theme";
+import {useBackground, useRobotColor3D} from "./background";
 import {captureBridge} from "./screenshot";
 import {DimGroup, useFocusLook} from "./DimGroup";
 
@@ -29,12 +31,7 @@ export interface SceneCallbacks {
   onLayout: (src: string, l: GraphLayout) => void;
 }
 
-/** Effective background colour (user choice or the style default). */
-export function useBackground(): string {
-  const style = useViewer(s => s.vizStyle);
-  const bg = useViewStyle(s => s.background);
-  return bg ?? STYLE_BACKGROUND[style];
-}
+export {useBackground};
 
 export function useColorOpts(): ColorOpts {
   const rules = useViewStyle(s => s.colors);
@@ -220,7 +217,7 @@ function GlyphTag({robot, color, stale}: {robot: string; color: string; stale: b
 function RobotGlyphs() {
   const states = useRobots(s => s.state);
   const stateAt = useRobots(s => s.stateAt);
-  const robotColor = useRobotColorOf();
+  const robotColor = useRobotColor3D();
   const now = Date.now();
   return (
     <>
@@ -258,7 +255,8 @@ function RobotGlyphs() {
 // (relocalize / fleet: the global map), so they are drawn as is.
 function PlanOverlay() {
   const plans = useRobots(s => s.plan);
-  const robotColor = useRobotColorOf();
+  const robotColor = useRobotColor3D();
+  const hi = useMarkerInk().hi;
   return (
     <>
       {Object.entries(plans).map(([r, plan]) => {
@@ -276,7 +274,7 @@ function PlanOverlay() {
                   {lifted.length > 1 && (
                     <Line
                       points={lifted}
-                      color={state === "current" ? "#ffffff" : color}
+                      color={state === "current" ? hi : color}
                       lineWidth={state === "current" ? 5 : 2.5}
                       dashed={state === "pending"}
                       dashSize={0.4}
@@ -291,7 +289,7 @@ function PlanOverlay() {
                   {a.point && a.point.length >= 3 && (
                     <mesh position={[a.point[0], a.point[1], a.point[2] + 0.2]}>
                       <octahedronGeometry args={[0.3]} />
-                      <meshBasicMaterial color={state === "current" ? "#ffffff" : color} />
+                      <meshBasicMaterial color={state === "current" ? hi : color} />
                     </mesh>
                   )}
                 </group>
@@ -304,8 +302,16 @@ function PlanOverlay() {
   );
 }
 
+/** Marker colours that stand out on the current background: white / yellow on
+ *  dark (the historical look), near-black / amber on a light background. */
+function useMarkerInk(): {hi: string; search: string} {
+  const light = contrastFor(useBackground()).light;
+  return light ? {hi: "#111111", search: "#e08a00"} : {hi: "#ffffff", search: "#ffe14d"};
+}
+
 function Markers() {
   const {selected, highlight, sources, flat, stackHeight, gotoDraft, vizStyle} = useViewer();
+  const ink = useMarkerInk();
   const heights = useViewStyle(s => s.heights);
   useRobots(s => s.state); // re-place markers on live sources when alignments change
   const findPos = (src: string, sym: string): [number, number, number] | null => {
@@ -322,7 +328,7 @@ function Markers() {
         return (
           <mesh key={h.src + h.sym} position={p}>
             <torusGeometry args={[0.55, 0.06, 6, 28]} />
-            <meshBasicMaterial color="#ffe14d" depthTest={false} transparent />
+            <meshBasicMaterial color={ink.search} depthTest={false} transparent />
           </mesh>
         );
       })}
@@ -330,7 +336,7 @@ function Markers() {
         <group position={sel}>
           <mesh>
             <torusGeometry args={[0.8, 0.09, 8, 36]} />
-            <meshBasicMaterial color="#ffffff" depthTest={false} transparent />
+            <meshBasicMaterial color={ink.hi} depthTest={false} transparent />
           </mesh>
           <Html position={[0, 0, 1.2]} center zIndexRange={[30, 0]}>
             <div className="node-tag">{sources[selected!.src]?.model?.displayName(selNode)}</div>
@@ -502,7 +508,7 @@ export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {mi
       gl={GL}
       camera={{fov: 50, near: 0.1, far: 5000, position: [-10, -30, 30], up: [0, 0, 1]}}
       onCreated={({gl}) => {
-        gl.setClearColor(useViewStyle.getState().background ?? BACKGROUND[useViewer.getState().vizStyle]);
+        gl.setClearColor(useViewStyle.getState().background ?? defaultBackground(useViewer.getState().vizStyle, useTheme.getState().theme));
         gl.localClippingEnabled = true; // mesh "max height" clip
       }}
       data-testid="viewer-canvas"

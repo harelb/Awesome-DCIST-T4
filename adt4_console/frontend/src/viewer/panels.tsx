@@ -13,7 +13,7 @@ import {applyPoint, robotOfSource} from "../lib/frameAlign";
 import {sourceMatrix, useRobots} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
 import {useViewStyle} from "../stores/viewStyle";
-import {BackgroundControl, HeightsControl, RegionControls} from "./StylePanels";
+import {BackgroundControl, HeightsControl, RegionControls, ThemeControl} from "./StylePanels";
 
 const KIND_LABEL: Record<string, string> = {neo4j: "Neo4j", file: "file", live: "live"};
 
@@ -179,6 +179,7 @@ export function DisplayPanel() {
           <option value="classic">Classic console</option>
         </select>
       </label>
+      <ThemeControl />
       <BackgroundControl />
       <HeightsControl />
       <label className="slider-row">

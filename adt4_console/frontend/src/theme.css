@@ -1,0 +1,225 @@
+/* Light theme + theme switch. The dark theme lives in styles.css (:root) and is
+   untouched; everything here is scoped to :root[data-theme="light"]
+   (stores/theme.ts sets it), so dark mode renders exactly as before.
+   Most of the app follows the variables; the rules below only fix places that
+   hard-code a colour tuned for the dark background. Things drawn over camera
+   video / images (tags, drive HUD, letterbox) stay dark on purpose. */
+
+/* ------------------------------------------------------------ the switch */
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+@media (max-width: 640px) {
+  .theme-btn {
+    margin-left: 0;
+  }
+  .theme-btn-label {
+    display: none;
+  }
+}
+.segmented.seg-sm button {
+  padding: 3px 12px;
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------ palette */
+:root[data-theme="light"] {
+  --bg: #f3f5f8;
+  --bg-1: #ffffff;
+  --bg-2: #eef1f5;
+  --bg-3: #e1e6ed;
+  --line: #d2d9e2;
+  --line-2: #b5c0cc;
+  --text: #0f1823;
+  --text-2: #364352;
+  --muted: #5d6b7b;
+  --accent: #0277bd;
+  --accent-2: #0288d1;
+  --ok: #18804a;
+  --warn: #a96100;
+  --err: #cf2b30;
+  --info: #0277bd;
+  --ok-bg: rgba(24, 128, 74, 0.1);
+  --warn-bg: rgba(214, 130, 0, 0.12);
+  --err-bg: rgba(207, 43, 48, 0.09);
+  --info-bg: rgba(2, 119, 189, 0.09);
+  --btn-hover-line: #9aa7b6;
+  --btn-hover-bg: #e4e9f0;
+  --on-accent: #fff;
+  --accent-hover: #0288d1;
+  --on-err: #fff;
+  --err-hover: #e53935;
+  color-scheme: light;
+}
+
+/* Drive full screen is a video HUD: keep its dark look (and dark variables
+   for the buttons inside it) in either theme. */
+:root[data-theme="light"] .drive-full {
+  --bg: #0b0f14;
+  --bg-1: #10161d;
+  --bg-2: #161e27;
+  --bg-3: #1d2732;
+  --line: #273342;
+  --line-2: #33435a;
+  --text: #e9eef4;
+  --text-2: #b4c0cc;
+  --muted: #8392a2;
+  --accent: #4fc3f7;
+  --accent-2: #2b8fc0;
+  --ok: #35d07f;
+  --warn: #ffb020;
+  --err: #ff5a5f;
+  --info: #4fc3f7;
+  --ok-bg: rgba(53, 208, 127, 0.14);
+  --warn-bg: rgba(255, 176, 32, 0.14);
+  --err-bg: rgba(255, 90, 95, 0.14);
+  --info-bg: rgba(79, 195, 247, 0.13);
+  --btn-hover-line: #4a5e78;
+  --btn-hover-bg: #243140;
+  --on-accent: #00131c;
+  --accent-hover: #7fd5fa;
+  --on-err: #1d0002;
+  --err-hover: #ff7d81;
+  color-scheme: dark;
+}
+/* ...except over the (now light) map, where the white sticks would vanish */
+:root[data-theme="light"] .drive-full.view-map .dfs-zone {
+  background: linear-gradient(to bottom, transparent, rgba(255, 255, 255, 0.45));
+}
+:root[data-theme="light"] .drive-full.view-map .dfs-stick-ring {
+  border-color: rgba(15, 24, 35, 0.5);
+  background: rgba(15, 24, 35, 0.06);
+}
+:root[data-theme="light"] .drive-full.view-map .dfs-stick.held .dfs-stick-ring {
+  border-color: rgba(15, 24, 35, 0.8);
+  background: rgba(15, 24, 35, 0.12);
+}
+:root[data-theme="light"] .drive-full.view-map .dfs-stick-knob {
+  background: rgba(15, 24, 35, 0.45);
+}
+:root[data-theme="light"] .drive-full.view-map .dfs-stick-label,
+:root[data-theme="light"] .drive-full.view-map .dfs-zone-hint {
+  color: rgba(15, 24, 35, 0.8);
+  text-shadow: 0 0 3px #fff;
+}
+
+/* ------------------------------------------------------------ text on tinted / accent fills */
+:root[data-theme="light"] .count,
+:root[data-theme="light"] .goto-tag,
+:root[data-theme="light"] .goto-n {
+  color: #fff;
+}
+:root[data-theme="light"] .count-warn {
+  color: #1d1200;
+  background: #ffb020;
+}
+:root[data-theme="light"] .btn-danger-outline,
+:root[data-theme="light"] .badge-err,
+:root[data-theme="light"] .inline-err,
+:root[data-theme="light"] .cell-odd,
+:root[data-theme="light"] .req-text {
+  color: #b71c1c;
+}
+:root[data-theme="light"] .heat-err {
+  color: #b71c1c !important;
+}
+:root[data-theme="light"] .banner-err,
+:root[data-theme="light"] .msg-err,
+:root[data-theme="light"] .error-box.tone-err {
+  color: #8e1b1b;
+}
+:root[data-theme="light"] .error-box.tone-warn {
+  color: #6b4100;
+}
+:root[data-theme="light"] .banner-ok,
+:root[data-theme="light"] .pick-banner {
+  color: #0f4d2c;
+}
+:root[data-theme="light"] .dryrun {
+  color: #0b4f7a;
+}
+:root[data-theme="light"] .input::placeholder {
+  color: #8a96a4;
+}
+:root[data-theme="light"] .dot-off,
+:root[data-theme="light"] .st-off .st-bar {
+  background: #a3aebb;
+}
+:root[data-theme="light"] .toggle input:checked + .toggle-track::after {
+  background: #fff;
+}
+:root[data-theme="light"] .table tbody tr:hover {
+  background: rgba(15, 24, 35, 0.035);
+}
+
+/* ------------------------------------------------------------ job log (was a black console) */
+:root[data-theme="light"] .joblog {
+  background: #f8fafc;
+}
+:root[data-theme="light"] .log-t {
+  color: #8592a0;
+}
+
+/* ------------------------------------------------------------ floating chrome over the 3D view */
+:root[data-theme="light"] .vtoolbar .segmented,
+:root[data-theme="light"] .vtoolbar .input-sm,
+:root[data-theme="light"] .vtoolbar .panel-btn,
+:root[data-theme="light"] .phone-bar .segmented,
+:root[data-theme="light"] .phone-bar .input-sm,
+:root[data-theme="light"] .phone-bar .panel-btn,
+:root[data-theme="light"] .focus-btn,
+:root[data-theme="light"] .searchbox .input,
+:root[data-theme="light"] .drive-pip {
+  background: rgba(255, 255, 255, 0.92);
+}
+:root[data-theme="light"] .vstatus,
+:root[data-theme="light"] .robot-chip,
+:root[data-theme="light"] .robot-tag {
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+}
+:root[data-theme="light"] .robot-chip.focused {
+  background: rgba(255, 255, 255, 0.98);
+}
+:root[data-theme="light"] .robot-chip .align-status.tone-ok {
+  color: var(--ok);
+}
+:root[data-theme="light"] .node-tag {
+  background: var(--text);
+  color: #fff;
+}
+:root[data-theme="light"] .tile-fill {
+  background: rgba(2, 119, 189, 0.3);
+}
+
+/* ------------------------------------------------------------ shadows + backdrops (softer on light) */
+:root[data-theme="light"] .fuzzy-list,
+:root[data-theme="light"] .search-results,
+:root[data-theme="light"] .focus-menu,
+:root[data-theme="light"] .node-tag,
+:root[data-theme="light"] .top-hint {
+  box-shadow: 0 6px 20px rgba(15, 24, 35, 0.16);
+}
+:root[data-theme="light"] .modal,
+:root[data-theme="light"] .float-win,
+:root[data-theme="light"] .help-card {
+  box-shadow: 0 16px 44px rgba(15, 24, 35, 0.22);
+}
+:root[data-theme="light"] .drawer {
+  box-shadow: -12px 0 36px rgba(15, 24, 35, 0.16);
+}
+:root[data-theme="light"] .sheet,
+:root[data-theme="light"] .vsheet {
+  box-shadow: 0 -12px 36px rgba(15, 24, 35, 0.18);
+}
+:root[data-theme="light"] .vleft,
+:root[data-theme="light"] .vright {
+  box-shadow: 0 0 30px rgba(15, 24, 35, 0.18);
+}
+:root[data-theme="light"] .modal-backdrop,
+:root[data-theme="light"] .sheet-backdrop {
+  background: rgba(15, 24, 35, 0.35);
+}

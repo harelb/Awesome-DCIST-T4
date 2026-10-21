@@ -11,7 +11,6 @@ import {
   COLOR_KEYS,
   DEFAULT_RULE_COLOR,
   HEIGHT_KEYS,
-  STYLE_BACKGROUND,
   defaultLabelColor,
   effectiveShot,
   heightScale,
@@ -20,12 +19,33 @@ import {
   type MeshColorMode,
 } from "./style";
 import {captureView, downloadBlob} from "./screenshot";
+import {useBackground} from "./Scene";
+import {useTheme, type Theme} from "../stores/theme";
+
+/** Console theme (same switch as the top bar): the whole app, incl. this viewer. */
+export function ThemeControl() {
+  const theme = useTheme(s => s.theme);
+  const setTheme = useTheme(s => s.setTheme);
+  return (
+    <div className="bg-row">
+      <span>Theme</span>
+      <span>
+        <span className="segmented seg-sm" role="group" aria-label="Console theme">
+          {(["dark", "light"] as Theme[]).map(t => (
+            <button key={t} type="button" className={theme === t ? "on" : ""} aria-pressed={theme === t} onClick={() => setTheme(t)}>
+              {t === "dark" ? "Dark" : "Light"}
+            </button>
+          ))}
+        </span>
+      </span>
+    </div>
+  );
+}
 
 export function BackgroundControl() {
-  const style = useViewer(s => s.vizStyle);
   const bg = useViewStyle(s => s.background);
   const patch = useViewStyle(s => s.patch);
-  const cur = (bg ?? STYLE_BACKGROUND[style]).toLowerCase();
+  const cur = useBackground().toLowerCase();
   return (
     <div className="bg-control">
       <div className="bg-row">
@@ -235,10 +255,10 @@ export function RegionControls() {
 
 function useShotContext() {
   const {sources, order, vizStyle} = useViewer();
-  const bg = useViewStyle(s => s.background);
+  const bg = useBackground();
   return useCallback(() => {
     const on = order.map(id => sources[id]).filter(s => s?.enabled);
-    return {sourceIds: on.map(s => s.id), sourceLabels: on.map(s => s.label), background: bg ?? STYLE_BACKGROUND[vizStyle], style: vizStyle};
+    return {sourceIds: on.map(s => s.id), sourceLabels: on.map(s => s.label), background: bg, style: vizStyle};
   }, [sources, order, vizStyle, bg]);
 }
 

@@ -6,6 +6,7 @@ import {isActive, useJobs} from "../stores/jobs";
 import {onBackendState} from "../lib/api";
 import {JobConfirmHost, JobsDrawer} from "./Jobs";
 import {Dot, Sheet} from "./ui";
+import {useTheme} from "../stores/theme";
 
 const P = {
   fleet: "M3 5h18v4H3zM3 11h18v4H3zM3 17h18v4H3z M6 7h.01M6 13h.01M6 19h.01",
@@ -18,6 +19,8 @@ const P = {
   layers: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
   search: "M11 18a7 7 0 100-14 7 7 0 000 14zM20.5 20.5l-4.6-4.6",
   panel: "M4 4h16v16H4zM4 13h16",
+  sun: "M12 16a4 4 0 100-8 4 4 0 000 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  moon: "M20.5 14.5A8.5 8.5 0 019.5 3.5a8.5 8.5 0 1011 11z",
   more: "M3.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M10.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M17.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0",
 };
 
@@ -122,6 +125,19 @@ function HealthButton({items}: {items: Health[]}) {
   );
 }
 
+/** Dark / light switch (remembered per browser). Shows what a click switches to. */
+export function ThemeToggle() {
+  const theme = useTheme(s => s.theme);
+  const toggle = useTheme(s => s.toggle);
+  const next = theme === "dark" ? "light" : "dark";
+  return (
+    <button className="btn theme-btn" onClick={toggle} aria-label={`Switch to ${next} theme`} title={`Switch to ${next} theme`} data-testid="theme-toggle">
+      <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
+      <span className="theme-btn-label">{next === "light" ? "Light" : "Dark"}</span>
+    </button>
+  );
+}
+
 function TopBar() {
   const items = useHealth();
   const jobs = useJobs(s => s.jobs);
@@ -142,6 +158,7 @@ function TopBar() {
         ))}
       </div>
       <HealthButton items={items} />
+      <ThemeToggle />
       <button className={`btn jobs-btn ${waiting ? "attention" : ""}`} onClick={() => (drawerOpen ? close() : open())} aria-label="Jobs">
         <Icon name="jobs" size={16} />
         Jobs
