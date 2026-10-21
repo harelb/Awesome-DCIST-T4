@@ -59,3 +59,6 @@ State when written: `integrate/features-20261020` @ 72b4630 (harelb), deployed t
   the odometric mesh, per-vertex stamps, control points and optimized values; base ports the
   ~40-line blend to numpy; per-tile checksum vs the robot's deformed mesh with tile fallback.
 - Measure first: replay a bag with loop closures through fleetlink and log C3 bytes per LC.
+- DECIDED (Harel, 2026-10-20): do BOTH A and B. Decimated tiles by default, plus a viewer toggle
+  "Full mesh" that requests full-detail tiles (per robot / per area) when the link allows it
+  (often it does); base-side deformation for loop closures.
