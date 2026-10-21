@@ -3,13 +3,14 @@ import {useViewer} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {fmtTime} from "../lib/fuzzy";
-import type {PlanRobot, RobotPlan} from "../types";
+import type {GoalSendResult, PlanRobot, RobotPlan} from "../types";
 import {Badge, Empty, ErrorBox, Loading, Segmented, Spinner} from "../components/ui";
 import {currentActionIndex, useRobotColorOf} from "./planUtil";
 import {parseSym} from "../codec";
 import {LeaseControl, LeaseRefusalNotice} from "./LeaseControl";
 import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
+import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, type SendTone} from "./PlanRepair";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
 export function pddlSymbol(sym: string): string {
@@ -24,8 +25,10 @@ export function visitGoal(syms: string[]): string {
 
 type Tool = "goto" | "pddl" | "language";
 
+/** POST a goal; PDDL goals go through plan repair v3's goal_manager when it
+ *  runs (``via``), else straight to omniplanner with a ``warning`` (API.md §9). */
 export async function sendGoal(robot: string, kind: string, body: unknown) {
-  return postJSON<{ok: boolean; topic: string; msg: unknown; subscribers?: number}>(`api/robots/${encodeURIComponent(robot)}/goal/${kind}`, body);
+  return postJSON<GoalSendResult>(`api/robots/${encodeURIComponent(robot)}/goal/${kind}`, body);
 }
 
 export function PlanPanel() {
@@ -40,7 +43,7 @@ export function PlanPanel() {
   const [langDomain, setLangDomain] = useState<"default" | "Pddl" | "goto_points">("default");
   const [pddlPlugin, setPddlPlugin] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<{ok: boolean; text: string} | null>(null);
+  const [msg, setMsg] = useState<{tone: SendTone; text: string} | null>(null);
 
   const list = robots.data ?? [];
   useEffect(() => {
@@ -70,13 +73,9 @@ export function PlanPanel() {
     setBusy(label);
     setMsg(null);
     try {
-      const r = (await fn()) as {ok?: boolean; topic?: string; subscribers?: number} | undefined;
-      if (r?.subscribers === 0)
-        // published, but nothing matched within the discovery window: the planner is not running
-        setMsg({ok: false, text: `No planner is listening on ${r.topic} — is omniplanner running?`});
-      else setMsg({ok: r?.ok !== false, text: r?.topic ? `Sent on ${r.topic}` : `${label}: ok`});
+      setMsg(goalSendMessage(label, (await fn()) as Partial<GoalSendResult> | undefined));
     } catch (e) {
-      setMsg({ok: false, text: errorText(e)});
+      setMsg({tone: "err", text: errorText(e)});
     } finally {
       setBusy(null);
     }
@@ -110,6 +109,7 @@ export function PlanPanel() {
           </select>
         )}
         <div className="row gap-sm">
+          <RepairBadge />
           {planRobot && <LeaseControl robot={planRobot} />}
           <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Pause", () => postJSON(`api/robots/${planRobot}/executor/pause`))}>
             Pause
@@ -205,6 +205,7 @@ export function PlanPanel() {
             {busy === "PDDL" && <Spinner />} Send PDDL goal
           </button>
           {!pddlPlugins.length && <div className="muted small">No PDDL plugin for this robot.</div>}
+          {planRobot && <ConstraintsBox robot={planRobot} constraints={plan?.constraints ?? []} />}
         </div>
       )}
 
@@ -229,7 +230,7 @@ export function PlanPanel() {
         </div>
       )}
 
-      {msg && <div className={`inline-msg ${msg.ok ? "tone-ok" : "tone-err"}`}>{msg.text}</div>}
+      {msg && <div className={`inline-msg tone-${msg.tone}`} role={msg.tone === "ok" ? "status" : "alert"}>{msg.text}</div>}
       <LeaseRefusalNotice robot={planRobot} />
 
       <CurrentPlan robot={planRobot} plan={plan} />
@@ -277,6 +278,7 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
           </ul>
         </>
       )}
+      <RepairAlerts alerts={plan?.repair_alerts ?? []} />
       {plan?.status && plan.status.length > 0 && (
         <>
           <h4 className="sub-title">Planner</h4>
@@ -308,7 +310,9 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
           <ul className="result-list small">
             {plan.goals.slice(-5).reverse().map((g, i) => (
               <li key={i}>
-                <span className="mono muted">{fmtTime(g.t)}</span> <Badge>{g.kind}</Badge> <span className="mono ellipsis">{typeof g.msg === "string" ? g.msg : JSON.stringify(g.msg)}</span>
+                <span className="mono muted">{fmtTime(g.t)}</span> <Badge>{g.kind}</Badge>
+                {g.via === "goal_manager" && <Badge tone="ok">plan repair</Badge>}
+                {g.warning && <Badge tone="warn" title={g.warning}>no plan repair</Badge>} <span className="mono ellipsis">{typeof g.msg === "string" ? g.msg : JSON.stringify(g.msg)}</span>
               </li>
             ))}
           </ul>

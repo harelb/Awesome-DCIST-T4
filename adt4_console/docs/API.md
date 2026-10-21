@@ -256,13 +256,14 @@ Omniplanner runs in the **base station's** namespace (`--planner-ns`, default
 `/<planner_ns>/omniplanner_node/<plugin>/<suffix>` and the goal's `robot_id` picks the
 robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.yaml`).
 
-* `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg)
+* `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg), `pddl_constrained` (plan repair v3's `MultiRobotPddlConstrained`; listed only, never addressed directly — see 9b)
 * `POST /api/robots/{r}/goal/language` `{command, domain_type?: "default"|"Pddl"|"goto_points"}` —
   `default` (the default) uses the planner's configured LLM→PDDL domain; `goto_points` takes node
   symbols ("O(12) P(850)") without an LLM and fails with a clear error on prose
 * `POST /api/robots/{r}/goal/goto` `{points: ["O(12)", "P(850)"]}` — symbols are converted to omniplanner point names (`str(NodeSymbol)` without parens if that is what omniplanner expects — check `goto_points_ros.py`)
 * `POST /api/robots/{r}/goal/tsp` same body
-* `POST /api/robots/{r}/goal/pddl` `{plugin, goal}`
+* `POST /api/robots/{r}/goal/pddl` `{goal, plugin?, constraints?, route?}` — through plan repair v3 when
+  its goal_manager runs, else straight to `plugin` (default: the first `pddl` plugin); see 9b
 * `POST /api/robots/{r}/executor/pause|resume` (goal_manager Bool topics if present)
 * every goal endpoint returns `{ok, topic, msg, subscribers}` (`subscribers == 0` after the
   discovery wait = no planner listening); also appended to the robot's plan history
@@ -270,7 +271,46 @@ robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.ya
   from `/<r>/omniplanner_node/compiled_plan_out` (ActionSequenceMsg), `~/llm_response`,
   `/<r>/spot_executor_node/action_result`, and `status` from omniplanner's
   `/<planner_ns>/omniplanner_node/plan_status` (one JSON String per handled goal — the only
-  place planning failures are reported).
+  place planning failures are reported). Plan repair v3 adds `repair_alerts` and `constraints`
+  (9b); a goal entry may carry `via` and `warning`.
+
+### 9b. Plan repair v3 (`goal_manager`, `launch_omniplanner_repair:=true`)
+
+goal_manager runs on the base station with `robot_name` = the planner namespace and takes
+operator goals on `/<planner_ns>/commanded_goal` (`omniplanner_msgs/ConstrainedPddlGoalMsg`
+= `{goal: PddlGoalMsg{robot_id, pddl_goal}, constraints: ConstraintFact[{predicate, symbols}]}`).
+It pauses the running plan, skips replanning when that plan already satisfies the goal, and
+otherwise forwards it to `multi_robot_pddl_constrained`. The topic is base-local (fleetlink
+never relays it).
+
+* `GET /api/plan/repair` → `{available, goal_manager, subscribers, topic, error?}`;
+  `goal_manager` = something subscribes to `commanded_goal` (ROS graph query).
+* `POST /api/robots/{r}/goal/pddl` body:
+  * `goal` — PDDL string, e.g. `(visited-object o7)`
+  * `plugin` — Pddl plugin for the fallback (optional)
+  * `constraints` — added to the robot's persistent set first: `[["forbidden-poi", "o14"],
+    ["forbidden-edge", "p1", "p2"]]` or `[{predicate, symbols}]`; symbols are lower-cased and
+    lose parens (`O(14)` → `o14`). Other predicates / arities → 400.
+  * `route` — `"auto"` (default): goal_manager when it runs, else the plugin;
+    `"planner"`: the plugin, no warning; `"goal_manager"`: 409 when it is down.
+
+  → `{ok, topic, msg, subscribers, via: "goal_manager"|"planner", constraints, warning?, plugin?}`.
+  `via: "goal_manager"` sends the robot's whole constraint set with the goal. `via: "planner"`
+  (auto) carries `warning: "plan repair goal_manager is not running; sent straight to
+  omniplanner — no constraints / replanning"` plus `"; N constraint(s) NOT applied"` when the
+  set is not empty; the UI must show it.
+* `GET /api/robots/{r}/constraints` → `{robot, constraints: [{predicate, symbols}]}`
+* `POST /api/robots/{r}/constraints` `{constraints}` → the new set (accumulates, de-duplicated)
+* `DELETE /api/robots/{r}/constraints` (no body: clear all; `{constraints}`: remove those) → the new set
+* Plan state (`GET /api/robots/{r}/plan`, WS `robot/{r}/plan`) adds
+  `repair_alerts: [{t, kind: "alert"|"plan_failed", text, seq}]` from
+  `/<planner_ns>/plan_repair/alert` (goal_manager's operator text) and
+  `/<planner_ns>/omniplanner_node/plan_failed`, attributed to the robot of the latest goal, and
+  `constraints`. goal_manager's `~/operator_display` arrives in `llm` (it is remapped to
+  `rviz2_node/llm_response`).
+* Constraints live in the console (lost on restart) and ride on each goal as per-goal
+  constraints, like heracles_agents' `send_pddl_goal_with_constraints`; the console does not
+  publish the planner's persistent `~/constraints` list.
 
 ### 9a. Teleop (Teleop tab; `routes/teleop.py`, `teleop_service.py`)
 
@@ -294,20 +334,51 @@ Driving goes through `spot_executor_node`, which holds the Spot lease (never
 * `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
   clients without the socket (409 when another session drives).
 
-## 10. Chat (optional LLM)
+## 10. Chat (optional LLM): Cypher-first
 
-`POST /api/chat` `{message, robot?, src?}` → NDJSON stream of `{type: "text", text}` /
-`{type: "tool", name, args, result}` / `{type: "goal", kind, body}` / `{type: "error", text}` /
-`{type: "done"}`. A `goal` line is a *proposal*; the UI shows a "Send to robot" button that
-calls the §9 endpoint. Providers: OpenAI (`ADT4_OPENAI_API_KEY`/`OPENAI_API_KEY`, default
-model `gpt-4.1-mini`) or Anthropic; `--llm-provider auto|openai|anthropic`, `--llm-model`.
-Tools: `find_objects` (returns `total_matches` plus up to 10 objects, nearest the robot first)
-and `propose_goal` (`goto`/`tsp`/`pddl`/`language`). Spend is metered from each response's
-token usage and persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget-usd`
-(default 10) the chat switches to the offline fallback. `GET /api/chat/usage` →
-`{provider, model, budget_usd, spent_usd, calls, input_tokens, output_tokens, last}`.
-Without credentials a deterministic fallback answers "find/go to <label>" queries by
-matching object labels in the selected graph source and proposing a goto goal.
+Modelled on heracles_agents `chatdsg`: Cypher over the planner's Neo4j map is how the
+assistant reads the scene graph. Nothing changes the map or moves a robot without the
+operator: writes, SAM3 objects and goals arrive as cards to approve.
+
+`POST /api/chat` `{message, robot?, src?, history?, model?}` → NDJSON stream:
+
+- `{type: "text", text}`, `{type: "error", text}`, then always `{type: "done"}`.
+- `{type: "tool", name, args, result}`; for `run_cypher`: `args.query`, `result` =
+  `{columns, rows (first 50), row_count, truncated}` or `{error}`.
+- `{type: "cypher_write", id, query, summary, src}`: a proposed change; nothing ran.
+- `{type: "images", src, items: [{sym, label, pos, images: [url]}]}` (cropped, masked).
+- `{type: "object_candidate", pending_id, index, label, score, image_uri, centroid, bbox_min,
+  bbox_max, num_views, would_merge_into: {symbol, distance_m}|null, expires_in_s, src}`.
+- `{type: "goal", kind, body, robot}`: a proposal. `pddl` bodies are `{goal, constraints?}`
+  and go through §9 (`/goal/pddl`, plan repair goal_manager when it runs).
+- `{type: "transcript", items}` just before `done`: this turn as transcript items
+  (`{role: user, text}`, `{role: assistant, text, calls: [{id, name, args}]}`,
+  `{role: tool, id, name, content}`). The client sends earlier turns back as `history`
+  (validated server-side: incomplete tool exchanges dropped, last 60 items).
+
+Tools with a Neo4j source: `run_cypher` (read-only: runs in a READ transaction, so the
+database rejects writes; 30 s timeout; 200 rows), `propose_cypher_write`,
+`show_object_images`, `search_robot_images` (SAM3, §10.1), `propose_goal`
+(`pddl`/`goto`/`tsp`/`language`, optional `robot` and plan-repair `constraints`). The
+system prompt is heracles_agents' (system, scene-graph description, Cypher interface) plus
+a live summary of the database (labels with counts and properties, relationship types,
+`_Labelspace` names), refreshed every 60 s. Without a Neo4j source, `find_objects`
+(label search over the selected source) replaces the Cypher tools.
+
+`POST /api/chat/cypher_write` `{id, approve}` → runs (or drops) exactly the proposed query,
+once: `{ok, query, rows, counters, map_version}` / `{ok, rejected: true}` /
+`{ok: false, error}`. A write that changed something bumps both map version counters
+(viewers refresh; heracles republishes the DSG for plan repair). Proposals expire after 1 h.
+The UI tells the assistant each decision with an `[operator] ...` note (and asks it to
+continue after an approval); approved SAM3 candidates are reported the same way.
+
+Providers: OpenAI (`ADT4_OPENAI_API_KEY`/`OPENAI_API_KEY`/`HERACLES_OPENAI_API_KEY`, default
+`gpt-4.1`) or Anthropic; `--llm-provider`, `--llm-model`. `model` picks per request among
+`GET /api/chat/usage` → `{provider, model, models, budget_usd, spent_usd, calls,
+input_tokens, output_tokens, last}`. Spend is metered from each response's token usage and
+persisted (`~/.adt4_console/llm_usage.json`); past `--llm-budget-usd` (default 10) the chat
+switches to the offline fallback, which answers "find/go to <label>" by matching labels and
+proposing a goto goal.
 
 ### 10.1 Image search (SAM3 query server, Robot viewer "Images" tab)
 
@@ -325,6 +396,8 @@ Forwarded to the SAM3 query server (`--sam3-url`, agentic_navigation
   ranking (no SAM3): `{pool, frames: [{rank, frame_key, score, source, camera_position,
   thumb_uri}], timings}`.
 - `GET /api/sam3/frame?key=<frame_key>&max_dim=` → `{uri, width, height}` (raw keyframe).
+- `GET /api/sam3/frame.jpg?pending_id=&index=&view=&max_dim=` → a candidate's view with
+  its mask as JPEG (the chat's candidate cards page through views with it).
 - `POST /api/sam3/commit` `{pending_id, index, src?}` / `POST /api/sam3/discard`
   `{pending_id}`: write (or drop) a candidate; a commit refreshes the Neo4j source(s).
 

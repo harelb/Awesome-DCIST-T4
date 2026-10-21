@@ -343,13 +343,53 @@ export interface TeleopView {
   ros?: boolean;
 }
 
+/** plan repair v3 runtime constraint, e.g. {predicate: "forbidden-poi", symbols: ["o14"]} */
+export interface ConstraintFact {
+  predicate: "forbidden-poi" | "forbidden-edge" | string;
+  symbols: string[];
+}
+
+/** goal_manager operator alert ("alert") or planner failure ("plan_failed") */
+export interface RepairAlert {
+  t: number;
+  kind: "alert" | "plan_failed" | string;
+  text: string;
+  seq: number;
+}
+
+/** POST /api/robots/{r}/goal/{kind} answer (API.md §9). ``via``/``warning``/
+ *  ``constraints`` only for PDDL goals. */
+export interface GoalSendResult {
+  ok: boolean;
+  topic: string;
+  msg: unknown;
+  subscribers?: number;
+  via?: "goal_manager" | "planner";
+  warning?: string;
+  constraints?: ConstraintFact[];
+  plugin?: string;
+}
+
 export interface RobotPlan {
-  goals: {t: number; kind: string; topic: string; msg: unknown}[];
+  goals: {t: number; kind: string; topic: string; msg: unknown; via?: "goal_manager" | "planner"; warning?: string}[];
   plan: null | {plan_id: string; robot_name: string; t: number; actions: PlanAction[]};
   results: ActionResult[];
   llm: string[];
   status?: PlanStatus[];
+  /** plan repair v3 alerts (goal_manager + planner failures) */
+  repair_alerts?: RepairAlert[];
+  /** persistent constraints sent with every goal_manager goal */
+  constraints?: ConstraintFact[];
   lease?: LeaseInfo | null;
+}
+
+/** GET /api/plan/repair */
+export interface RepairStatus {
+  available: boolean;
+  goal_manager: boolean;
+  subscribers: number;
+  topic: string | null;
+  error?: string | null;
 }
 
 export interface PlanRobot {

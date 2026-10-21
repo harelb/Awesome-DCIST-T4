@@ -143,7 +143,7 @@ def test_openai_searches_images_when_map_has_nothing(svc_client, sam3, monkeypat
     svc.chat._client, svc.chat._client_provider = fake, "openai"
     out = _chat(client, "where is the fire extinguisher", src="file:syn")
     kinds = [o["type"] for o in out]
-    assert kinds == ["tool", "tool", "object_candidate", "object_candidate", "text", "done"]
+    assert kinds == ["tool", "tool", "object_candidate", "object_candidate", "text", "transcript", "done"]
     assert out[0]["result"] == []
     c0 = out[2]
     assert c0["pending_id"] == "p-1" and c0["index"] == 0
@@ -259,9 +259,9 @@ def test_anthropic_path_uses_run_tool(svc_client, sam3):
     svc.chat.provider = lambda: "anthropic"
     out = _chat(client, "look for a fire extinguisher", robot="euclid", src="file:syn")
     kinds = [o["type"] for o in out]
-    assert kinds == ["tool", "object_candidate", "object_candidate", "goal", "text", "done"]
+    assert kinds == ["tool", "object_candidate", "object_candidate", "goal", "text", "transcript", "done"]
     # pddl mapping comes from the shared _run_tool
-    assert out[3]["body"] == {"plugin": "visit_objects_pddl", "goal": "(visited-object o3)"}
+    assert out[3]["body"] == {"goal": "(visited-object o3)"}
     results = msgs.calls[-1]["messages"][-1]["content"]
     assert [r["tool_use_id"] for r in results] == ["b"]
     assert svc.chat.ledger.data["calls"] == 3  # spend is metered here too

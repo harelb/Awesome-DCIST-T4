@@ -41,7 +41,50 @@ PLUGIN_TYPES = {
     ),
     "Tsp": ("tsp", "solve_tsp_goal", "omniplanner_msgs/msg/GotoPointsGoalMsg"),
     "Pddl": ("pddl", "pddl_goal", "omniplanner_msgs/msg/PddlGoalMsg"),
+    # plan repair v3's planner; the console reaches it through goal_manager
+    # (COMMANDED_GOAL_TYPE), never directly, so it is not a "pddl" plugin
+    "MultiRobotPddlConstrained": (
+        "pddl_constrained",
+        "pddl_goal",
+        "omniplanner_msgs/msg/ConstrainedPddlGoalMsg",
+    ),
 }
+# plan repair v3: goal_manager (master.launch.yaml, launch_omniplanner_repair)
+# takes operator goals on /<planner_ns>/commanded_goal, pauses the running plan,
+# skips replanning when it already satisfies the goal, else forwards to
+# multi_robot_pddl_constrained; its operator text goes to rviz2_node/llm_response
+# and /<planner_ns>/plan_repair/alert, planner failures come back on plan_failed
+COMMANDED_GOAL_TYPE = "omniplanner_msgs/msg/ConstrainedPddlGoalMsg"
+NO_GOAL_MANAGER_WARNING = (
+    "plan repair goal_manager is not running; sent straight to omniplanner "
+    "— no constraints / replanning"
+)
+CONSTRAINT_PREDICATES = ("forbidden-poi", "forbidden-edge")
+
+
+def normalize_constraints(facts) -> list[dict]:
+    """``[["forbidden-poi", "o1"], {"predicate": ..., "symbols": [...]}, ...]``
+    -> ``[{"predicate", "symbols"}]`` (PDDL symbols lower-cased, no parens:
+    "O(12)" -> "o12"). Raises ValueError on an unknown predicate or arity."""
+    out = []
+    for f in facts or []:
+        if isinstance(f, dict):
+            pred, syms = f.get("predicate"), list(f.get("symbols") or [])
+        elif isinstance(f, (list, tuple)) and f:
+            pred, syms = f[0], list(f[1:])
+        else:
+            raise ValueError(f"bad constraint {f!r}")
+        pred = str(pred).strip().lower()
+        if pred not in CONSTRAINT_PREDICATES:
+            raise ValueError(f"unknown constraint predicate {pred!r} (use {', '.join(CONSTRAINT_PREDICATES)})")
+        want = 1 if pred == "forbidden-poi" else 2
+        if len(syms) != want:
+            raise ValueError(f"{pred} takes {want} symbol(s), got {len(syms)}")
+        syms = [str(x).strip().replace("(", "").replace(")", "").lower() for x in syms]
+        if not all(syms):
+            raise ValueError(f"empty symbol in {pred}")
+        out.append({"predicate": pred, "symbols": syms})
+    return out
 DEFAULT_PLUGINS = {
     "goto_points": "GotoPoints",
     "language_planner": "LanguagePlanner",
@@ -169,6 +212,11 @@ class RobotPlanState:
         self.results = collections.deque(maxlen=100)
         self.llm = collections.deque(maxlen=20)
         self.status = collections.deque(maxlen=50)  # omniplanner ~/plan_status
+        # plan repair v3: goal_manager alerts + planner failures ({t, kind, text, seq})
+        self.repair_alerts = collections.deque(maxlen=50)
+        # persistent runtime constraints, sent with every goal_manager goal
+        # (they accumulate like heracles_agents' send_pddl_goal_with_constraints)
+        self.constraints: list[dict] = []
         self.lease: dict | None = None  # from the executor's runtime guards
         self.teleop: dict | None = None  # the executor's ~/teleop_state
 
@@ -179,6 +227,8 @@ class RobotPlanState:
             "results": list(self.results),
             "llm": list(self.llm),
             "status": list(self.status),
+            "repair_alerts": list(self.repair_alerts),
+            "constraints": list(self.constraints),
             "lease": self.lease,
         }
 
@@ -327,12 +377,20 @@ class RosBridge:
         caller's thread, never the executor's) for a match up to
         ``match_timeout`` before publishing.
         """
+        from rosidl_runtime_py.set_message import set_message_fields
+
         cls = import_type(msg_type)
         pub = self.run(lambda: self._publisher(topic, cls))
         deadline = time.time() + match_timeout
         while pub.get_subscription_count() == 0 and time.time() < deadline:
             time.sleep(0.05)
-        self.run(lambda: pub.publish(cls(**fields)))
+
+        def go():
+            msg = cls()
+            set_message_fields(msg, fields)  # nested fields (ConstrainedPddlGoalMsg)
+            pub.publish(msg)
+
+        self.run(go)
         return pub.get_subscription_count()
 
     def call_service(
@@ -491,6 +549,19 @@ class RosBridge:
                 lambda m: self._on_plan_status(robot, m),
                 10,
             )
+            # plan repair v3 (goal_manager runs with robot_name = the planner ns)
+            n.create_subscription(
+                string,
+                f"/{self.planner_ns}/plan_repair/alert",
+                lambda m: self._on_repair_alert(robot, "alert", m.data),
+                10,
+            )
+            n.create_subscription(
+                string,
+                f"/{self.planner_ns}/omniplanner_node/plan_failed",
+                lambda m: self._on_repair_alert(robot, "plan_failed", m.data),
+                10,
+            )
         # omniplanner's adaptor listens on spot_executor/, the executor node is
         # spot_executor_node — subscribe to both spellings.
         for ex in ("spot_executor_node", "spot_executor"):
@@ -550,6 +621,15 @@ class RosBridge:
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)
+        self._publish_plan(robot)
+
+    def _on_repair_alert(self, default_robot, kind: str, text: str) -> None:
+        """goal_manager's operator alert or a planner failure, attributed to the
+        robot of the most recent goal (both are planner-wide)."""
+        robot = self._last_goal_robot or default_robot
+        self._plan[robot].repair_alerts.append(
+            {"t": time.time(), "kind": kind, "text": str(text), "seq": next(self._status_seq)}
+        )
         self._publish_plan(robot)
 
     def _on_plan_status(self, default_robot, msg) -> None:
@@ -627,19 +707,88 @@ class RosBridge:
 
     def send_goal(self, robot: str, plugin: dict, fields: dict) -> dict:
         topic = goal_topic(self.planner_ns, plugin)
+        return self._send(robot, plugin["kind"], topic, plugin["msg_type"], fields)
+
+    def _send(self, robot, kind, topic, msg_type, fields, extra=None) -> dict:
         self.ensure_robot(robot)
-        subs = self.publish(topic, plugin["msg_type"], fields)
+        subs = self.publish(topic, msg_type, fields)
         self._last_goal_robot = robot
-        entry = {
-            "t": time.time(),
-            "kind": plugin["kind"],
-            "topic": topic,
-            "msg": fields,
-            "subscribers": subs,
-        }
+        extra = {k: v for k, v in (extra or {}).items() if v is not None}
+        out = {"ok": True, "topic": topic, "msg": fields, "subscribers": subs, **extra}
+        entry = {"t": time.time(), "kind": kind, "topic": topic, "msg": fields, "subscribers": subs}
+        for k in ("via", "warning"):
+            if out.get(k):
+                entry[k] = out[k]
         self._plan[robot].goals.append(entry)
         self._publish_plan(robot)
-        return {"ok": True, "topic": topic, "msg": fields, "subscribers": subs}
+        return out
+
+    # ------------------------------------------------------- plan repair v3
+    def commanded_goal_topic(self) -> str:
+        return f"/{self.planner_ns}/commanded_goal"
+
+    def goal_manager_subscribers(self) -> int:
+        """goal_manager's subscriptions on commanded_goal (a ROS graph query;
+        the topic is base-local, fleetlink never relays it)."""
+        topic = self.commanded_goal_topic()
+        return int(self.run(lambda: self.node.count_subscribers(topic)))
+
+    def constraints(self, robot: str) -> list[dict]:
+        return list(self._plan[robot].constraints)
+
+    def add_constraints(self, robot: str, facts) -> list[dict]:
+        """Add (normalized, de-duplicated) constraints; returns the active set."""
+        new = normalize_constraints(facts)
+        with self._lock:
+            cur = self._plan[robot].constraints
+            for f in new:
+                if f not in cur:
+                    cur.append(f)
+            out = list(cur)
+        self._publish_plan(robot)
+        return out
+
+    def clear_constraints(self, robot: str, facts=None) -> list[dict]:
+        """Drop ``facts`` (all of them when None); returns the active set."""
+        drop = None if facts is None else normalize_constraints(facts)
+        with self._lock:
+            cur = self._plan[robot].constraints
+            cur[:] = [] if drop is None else [f for f in cur if f not in drop]
+            out = list(cur)
+        self._publish_plan(robot)
+        return out
+
+    def send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto") -> dict:
+        """A PDDL goal through plan repair v3 when its goal_manager runs, else
+        straight to an omniplanner Pddl plugin with a warning.
+
+        ``constraints`` are added to the robot's persistent set first; the whole
+        set goes with a goal_manager goal. ``route``: "auto" (default),
+        "planner" (skip goal_manager) or "goal_manager" (fail if it is down).
+        """
+        active = self.add_constraints(robot, constraints) if constraints else self.constraints(robot)
+        gm = self.goal_manager_subscribers() if route != "planner" else 0
+        if gm > 0:
+            fields = {"goal": {"robot_id": robot, "pddl_goal": goal}, "constraints": active}
+            return self._send(
+                robot, "pddl", self.commanded_goal_topic(), COMMANDED_GOAL_TYPE, fields,
+                {"via": "goal_manager", "constraints": active},
+            )  # fmt: skip
+        if route == "goal_manager":
+            raise LookupError(NO_GOAL_MANAGER_WARNING.split(";")[0])
+        p = self.find_plugin("pddl", plugin)
+        if p is None:
+            raise LookupError("no pddl plugin" + (f" named {plugin}" if plugin else ""))
+        warning = None
+        if route != "planner":
+            warning = NO_GOAL_MANAGER_WARNING
+        if active:
+            warning = (warning + "; " if warning else "") + f"{len(active)} constraint(s) NOT applied"
+        return self._send(
+            robot, "pddl", goal_topic(self.planner_ns, p), p["msg_type"],
+            {"robot_id": robot, "pddl_goal": goal},
+            {"via": "planner", "warning": warning, "constraints": active, "plugin": p["name"]},
+        )  # fmt: skip
 
     def take_lease(self, robot: str) -> dict:
         """Ask the robot's executor to forcibly take the Spot lease

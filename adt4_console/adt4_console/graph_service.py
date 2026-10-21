@@ -1070,7 +1070,9 @@ class Neo4jSource(Source):
             "MATCH (n)-[:HAS_OBSERVATION]->(ob:Observation) "
             "WHERE n.nodeSymbol IN $syms AND ob.rgb_path IS NOT NULL "
             "RETURN ob.rgb_path AS p, ob.mask_path AS mp, ob.mask_rle AS rle, "
-            "ob.bbox2d AS bb ORDER BY coalesce(ob.kept, false) DESC, "
+            "coalesce(ob.bbox_2d, ob.bbox2d, CASE WHEN ob.bbox_2d_min_x IS NULL THEN null ELSE "
+            "[ob.bbox_2d_min_x, ob.bbox_2d_min_y, ob.bbox_2d_max_x, ob.bbox_2d_max_y] END) AS bb "
+            "ORDER BY coalesce(ob.kept, false) DESC, "
             "coalesce(ob.score, 0) DESC, ob.timestamp_ns DESC LIMIT $n",
             syms=syms,
             n=MAX_IMAGES,
