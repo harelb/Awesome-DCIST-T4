@@ -127,6 +127,8 @@ def interfaces_payload(fleet) -> dict:
         radio, radio_net = default_radio(ifaces, topo, network, name, ips.get(name))
         machines[name] = {
             "status": node.get("status"),
+            # base_station | robot (topology), so the page can total the radio
+            "role": ((topo or {}).get("machines", {}).get(name) or {}).get("role"),
             "interfaces": ifaces,
             "has_totals": any(r.get("since_s") is not None for r in ifaces.values()),
             "radio_default": radio,

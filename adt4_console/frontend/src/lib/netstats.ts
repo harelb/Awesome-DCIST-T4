@@ -31,6 +31,8 @@ export interface IfaceStats {
 }
 export interface MachineIfaces {
   status?: string;
+  /** topology role: base_station | robot */
+  role?: string | null;
   interfaces: Record<string, IfaceStats>;
   has_totals: boolean;
   radio_default: string | null;
@@ -155,4 +157,57 @@ export function fmtDuration(s: number | null | undefined): string {
   if (s < 60) return `${Math.round(s)} s`;
   if (s < 3600) return `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`;
   return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+}
+
+export interface RadioSide {
+  machines: string[];
+  rx_rate_Bps: number;
+  tx_rate_Bps: number;
+  rx_total_B: number;
+  tx_total_B: number;
+  /** shortest counter age among the summed interfaces (s) */
+  since_s: number | null;
+}
+
+export interface RadioTotals {
+  network: string | null;
+  /** the base station's radio interface: what comes in from every robot */
+  base: (RadioSide & {iface: string}) | null;
+  /** the robots' radio interfaces, summed (their TX is what they put on the radio) */
+  robots: RadioSide;
+  /** machines with no radio interface to count (no address on the radio network) */
+  missing: string[];
+}
+
+function side(): RadioSide {
+  return {machines: [], rx_rate_Bps: 0, tx_rate_Bps: 0, rx_total_B: 0, tx_total_B: 0, since_s: null};
+}
+
+function add(t: RadioSide, machine: string, s: IfaceStats): void {
+  t.machines.push(machine);
+  t.rx_rate_Bps += s.rx_rate_Bps ?? 0;
+  t.tx_rate_Bps += s.tx_rate_Bps ?? 0;
+  t.rx_total_B += s.rx_total_B ?? 0;
+  t.tx_total_B += s.tx_total_B ?? 0;
+  if (s.since_s !== null && s.since_s !== undefined) t.since_s = t.since_s === null ? s.since_s : Math.min(t.since_s, s.since_s);
+}
+
+/** Radio traffic of the whole fleet from each machine's radio interface
+ *  (``radioIface``: the operator's pick, else the address on the radio network). */
+export function radioTotals(data: InterfacesResponse | undefined, choices: Record<string, string> = {}): RadioTotals {
+  const out: RadioTotals = {network: null, base: null, robots: side(), missing: []};
+  for (const [name, m] of Object.entries(data?.machines ?? {})) {
+    const iface = radioIface(m, choices[name]);
+    if (!iface) {
+      out.missing.push(name);
+      continue;
+    }
+    out.network = out.network ?? m.radio_network;
+    const s = m.interfaces[iface];
+    if (m.role === "base_station") {
+      if (!out.base) out.base = {...side(), iface};
+      add(out.base, name, s);
+    } else add(out.robots, name, s);
+  }
+  return out;
 }

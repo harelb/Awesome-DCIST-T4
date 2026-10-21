@@ -14,6 +14,7 @@ import {
   linkTotal,
   loadRadioChoices,
   radioIface,
+  radioTotals,
   sampleOf,
   saveRadioChoice,
 } from "../lib/netstats";
@@ -145,9 +146,53 @@ export function BandwidthSection() {
   const pick = (machine: string, iface: string | null) => setChoices(saveRadioChoice(machine, iface));
   return (
     <>
+      <RadioTotalsCard data={ifs.data} links={(live.data?.robots ?? {}) as Record<string, Link>} choices={choices} />
       <InterfaceTotalsCard data={ifs.data} error={ifs.error} choices={choices} onPick={pick} />
       <RadioCompareCard ifs={ifs.data} links={(live.data?.robots ?? {}) as Record<string, Link>} choices={choices} onPick={pick} />
     </>
+  );
+}
+
+/** One figure for the radio: everything coming into the base station over it
+ *  (its radio interface, from all robots), next to what the robots put on it
+ *  and fleetlink's own share. */
+function RadioTotalsCard({data, links, choices}: {data?: InterfacesResponse; links: Record<string, Link>; choices: Record<string, string>}) {
+  const t = radioTotals(data, choices);
+  const fl = fleetTotals(links);
+  if (!data) return null;
+  const net = t.network ?? "radio";
+  return (
+    <Card title={`Radio totals (${net})`}>
+      {!t.base ? (
+        <Empty title="No base-station radio interface">The base station's tx_rx_monitor reports no interface on the {net} network (is its session running?).</Empty>
+      ) : (
+        <div className="bw-radio-totals" data-testid="radio-totals">
+          <div className="stat">
+            <div className="stat-v mono">{fmtRate(t.base.rx_rate_Bps)}</div>
+            <div className="stat-k">into {t.base.machines.join(", ")} from all robots</div>
+            <div className="muted small mono">
+              {fmtBytes(t.base.rx_total_B)} in {t.base.since_s !== null ? `the last ${fmtDuration(t.base.since_s)}` : "total"} · {t.base.iface}
+            </div>
+          </div>
+          <div className="stat">
+            <div className="stat-v mono">{fmtRate(t.base.tx_rate_Bps)}</div>
+            <div className="stat-k">out to the robots</div>
+            <div className="muted small mono">{fmtBytes(t.base.tx_total_B)} sent</div>
+          </div>
+          <div className="stat">
+            <div className="stat-v mono">{t.robots.machines.length ? fmtRate(t.robots.tx_rate_Bps) : "-"}</div>
+            <div className="stat-k">robots sending ({t.robots.machines.join(", ") || "no robot monitors"})</div>
+            <div className="muted small mono">{t.robots.machines.length ? `${fmtBytes(t.robots.tx_total_B)} sent` : ""}</div>
+          </div>
+          <div className="stat" title="fleetlink's own payload bytes after compression; the rest of the radio traffic is ssh, zenoh/TCP overhead, retransmits">
+            <div className="stat-v mono">{fl.robots ? fmtRate(fl.rx_rate_Bps) : "-"}</div>
+            <div className="stat-k">of it fleetlink</div>
+            <div className="muted small mono">{fl.robots ? `${fmtBytes(fl.rx_total_B)} since console start` : ""}</div>
+          </div>
+        </div>
+      )}
+      {t.missing.length > 0 && <div className="muted small">no {net} interface found on: {t.missing.join(", ")}</div>}
+    </Card>
   );
 }
 

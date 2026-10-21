@@ -73,4 +73,5 @@ def test_interfaces_endpoint(client):
     assert set(r["machines"]) == {"hamilton"}
     h = r["machines"]["hamilton"]
     assert h["has_totals"] and h["radio_default"] == "enp118s0"
+    assert h["role"] == "robot"  # from the topology: the page totals the radio by role
     assert h["interfaces"]["enp118s0"]["rx_total_B"] == 654321

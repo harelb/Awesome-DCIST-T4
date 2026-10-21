@@ -91,3 +91,14 @@
 .bw-ifaces th.num {
   white-space: nowrap;
 }
+.bw-radio-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+.bw-radio-totals .stat {
+  min-width: 0;
+}
+.bw-radio-totals .stat-v {
+  font-size: 20px;
+}
