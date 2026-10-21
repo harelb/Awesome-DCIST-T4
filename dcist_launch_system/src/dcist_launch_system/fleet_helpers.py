@@ -516,15 +516,15 @@ def get_remote_status(user, ip, silvus_ips=None, platform_type=None):
     if platform_type == "spot":
         bat_cmd = (
             "echo '---BAT---'; "
-            "(source /opt/ros/humble/setup.bash 2>/dev/null; "
+            "(source /opt/ros/jazzy/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash 2>/dev/null; "
             "source ~/dcist_ws/install/setup.bash 2>/dev/null; "
             "timeout 4 ros2 topic echo /spot/status/battery_states --once "
             "--no-daemon 2>/dev/null | "
-            r"python3 -c \""
+            'python3 -c "'
             r"import sys,re; d=sys.stdin.read(); "
             r"m=re.search(r'charge_percentage: ([0-9.]+)', d); "
             r"print(str(int(float(m.group(1))*100))+'%' if m else 'N/A')"
-            r"\" 2>/dev/null) || echo 'N/A'"
+            '" 2>/dev/null) || echo \'N/A\''
         )
     else:
         bat_cmd = (
