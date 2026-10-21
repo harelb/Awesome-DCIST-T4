@@ -53,6 +53,7 @@ STREAM_CLASS = {
     "dsg/delta": "C2",
     "mesh/tile": "C3",
     "mesh/manifest": "C3",
+    "mesh/values": "C3",
     "grid/occupancy": "C3",
     "paths": "C1",
     "store/frame": "C6",
@@ -107,6 +108,8 @@ class _Robot:
         self.graph = GraphState()
         self.tiles: dict[str, dict] = {}
         self.manifest: dict[str, str] = {}
+        # odometric mesh mode: deforms the odometric tiles with mesh/values
+        self.deform = None
         self.state: dict = {}
         self.last_seen: float | None = None
         self.last_state_rx: float | None = None
@@ -266,6 +269,15 @@ class Receiver:
             return self._robot(robot).graph
 
     def tiles(self, robot: str) -> dict[str, dict]:
+        """The robot's mesh tiles for display: as received, or (odometric mesh
+        mode) deformed with the latest control-point poses."""
+        with self._lock:
+            r = self._robot(robot)
+            tiles, view = dict(r.tiles), r.deform
+        return view.view(tiles) if view is not None else tiles
+
+    def raw_tiles(self, robot: str) -> dict[str, dict]:
+        """Tiles exactly as received (odometric ones undeformed)."""
         with self._lock:
             return dict(self._robot(robot).tiles)
 
@@ -595,7 +607,19 @@ class Receiver:
         elif stream == "mesh/tile":
             r.tiles[p["key"]] = p
             r.tile_req_t.pop(p["key"], None)
+            if p.get("odom") and r.deform is None:
+                from fleetlink.mesh_deform_link import DeformView
+
+                r.deform = DeformView()
             events.append(("tiles", {"changed": [p["key"]], "removed": []}))
+        elif stream == "mesh/values":
+            if r.deform is None:
+                from fleetlink.mesh_deform_link import DeformView
+
+                r.deform = DeformView()
+            if r.deform.set_values(p) and r.tiles:
+                # every vertex may move: all tiles change for the viewer
+                events.append(("tiles", {"changed": sorted(r.tiles), "removed": []}))
         elif stream == "mesh/manifest":
             events.extend(self._on_manifest(r, p, now))
         elif stream == "ctl/ack":

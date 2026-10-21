@@ -184,6 +184,7 @@ for 20 ms instead of waiting for the next AUD) and about 10 ms for vp8.
 | `c2_hz` | 1.0 | graph tick |
 | `mesh_period_s`, `manifest_period_s` | 5.0, 5.0 | |
 | `tile_size` | 8.0 | m |
+| `mesh_source` | `dsg` | `odometric`: tile Hydra's odometric mesh deltas and send the deformation graph's optimized poses; the base deforms the mesh, so a loop closure costs ~10 kB instead of re-sending most tiles (`docs/MESH_DEFORMATION_DESIGN.md`). Default from `ADT4_FLEETLINK_MESH_SOURCE`. Topics: `mesh_delta_topic`, `mesh_graph_incremental_topic`, `mesh_graph_topic` (Hydra's `hydra/frontend/full_mesh_update`, `hydra/frontend/mesh_graph_incremental`, `hydra/backend/mesh_graph`) |
 | `max_msg_bytes` | 65536 | largest C2 message |
 | `burst_s` | 1.0 | token-bucket depth, in seconds of budget |
 | `grid_period_s` | 5.0 | occupancy grid check period |

@@ -62,6 +62,11 @@ DEFAULT_CONFIG = {
     "state_hz": 4.0,  # 2 Hz cannot keep C1 staleness < 1 s at 3 % loss (see API.md Deviations)
     "c2_hz": 1.0,
     "mesh_period_s": 5.0,
+    # "dsg": tile the deformed mesh from the DSG (a loop closure re-sends the
+    # tiles it moves); "odometric": tile Hydra's odometric mesh deltas and send
+    # the deformation graph's optimized poses, so the base deforms the mesh
+    # itself (fleetlink.mesh_deform_link)
+    "mesh_source": "dsg",
     "manifest_period_s": 5.0,
     "tile_size": codec.DEFAULT_TILE_SIZE,
     "max_msg_bytes": 64 * 1024,
@@ -209,6 +214,7 @@ class AgentCore:
         "dsg/delta": "C2",
         "mesh/tile": "C3",
         "mesh/manifest": "C3",
+        "mesh/values": "C3",
         "grid/occupancy": "C3",
         "paths": "C1",
         "store/frame": "C6",
@@ -260,6 +266,14 @@ class AgentCore:
         self.tiles: dict[str, dict] = {}
         self.sent_manifest: dict[str, str] = {}
         self._tiles_dirty = False
+        self.odom = None
+        self.mesh_fallback = None  # why odometric mode was given up, if it was
+        self._tile = lambda m: codec.tile_mesh(m[0], m[1], m[2], self.cfg["tile_size"])
+        if self.cfg["mesh_source"] == "odometric":
+            from .mesh_deform_link import OdomMeshAgent, tile_odom
+
+            self.odom = OdomMeshAgent()
+            self._tile = lambda m: tile_odom(m, self.cfg["tile_size"])
         # state
         self.pose: dict | None = None
         # global frame -> scene-graph frame (``frame_align``), None until looked up
@@ -343,9 +357,53 @@ class AgentCore:
     def on_records(self, records, edges, labelspaces=None, mesh_arrays=None) -> None:
         with self._lock:
             self._target = (dict(records), set(edges), labelspaces or {})
-            if mesh_arrays is not None:
+            if mesh_arrays is not None and self.odom is None:
                 self._mesh = mesh_arrays
                 self._mesh_version += 1
+
+    # odometric mesh mode (mesh_source: odometric)
+    def on_mesh_delta(self, delta: dict) -> None:
+        """Hydra frontend ``full_mesh_update`` (see mesh_deform_link.delta_from_msg)."""
+        with self._lock:
+            self.odom.on_delta(delta)
+            self._refresh_odom_mesh()
+
+    def on_mesh_graph_incremental(self, nodes) -> None:
+        """New control points: [(index, stamp_ns, pose7 at the original position)]."""
+        with self._lock:
+            before = self.odom.version
+            self.odom.on_ctrl_incremental(nodes)
+            if self.odom.version != before:
+                self._refresh_odom_mesh()
+
+    def on_mesh_graph(self, nodes) -> None:
+        """Backend ``mesh_graph``: optimized control-point poses."""
+        with self._lock:
+            self.odom.on_values(nodes)
+
+    def reset_odom_mesh(self) -> None:
+        with self._lock:
+            if self.odom is not None:
+                from .mesh_deform_link import OdomMeshAgent
+
+                self.odom = OdomMeshAgent()
+
+    def fallback_to_dsg_mesh(self, reason: str) -> None:
+        """Odometric mode cannot continue (missed deltas, no messages): tile the
+        DSG's deformed mesh again, like ``mesh_source: dsg``."""
+        with self._lock:
+            if self.odom is None:
+                return
+            self.odom = None
+            self.mesh_fallback = reason
+            self._tile = lambda m: codec.tile_mesh(m[0], m[1], m[2], self.cfg["tile_size"])
+            self._mesh = None  # the next DSG brings the deformed mesh
+
+    def _refresh_odom_mesh(self) -> None:
+        m = self.odom.mesh_input()
+        if m is not None:
+            self._mesh = m
+            self._mesh_version += 1
 
     def on_pose(self, pose: dict) -> None:
         """``{x, y, z, qw, qx, qy, qz, frame, t}``."""
@@ -523,6 +581,8 @@ class AgentCore:
     def _execute(self, op: str, args: dict, now: float):
         if op == "resync":
             self.start_snapshot()
+            if self.odom is not None:
+                self.odom.force_values()
             return {"epoch": self.epoch}
         if op == "budget":
             for cls, bps in args.items():
@@ -679,8 +739,7 @@ class AgentCore:
 
     def _c3_tick(self) -> None:
         if self._mesh is not None and self._tiled_version != self._mesh_version:
-            pos, col, faces = self._mesh
-            self.tiles = codec.tile_mesh(pos, col, faces, self.cfg["tile_size"])
+            self.tiles = self._tile(self._mesh)
             self._tiled_version = self._mesh_version
             for k in [k for k in self.sent_manifest if k not in self.tiles]:
                 del self.sent_manifest[k]
@@ -700,7 +759,7 @@ class AgentCore:
                 )
             )
         # re-queue tiles only; the manifest and a pending occupancy grid stay
-        self.sched.clear("C3", lambda it: it.tag not in ("manifest", "grid"))
+        self.sched.clear("C3", lambda it: it.tag not in ("manifest", "grid", "values"))
         for k in changed:
             tile = self.tiles[k]
 
@@ -871,6 +930,8 @@ class AgentCore:
             "auto": s.auto,
             "nodes": len(self._target[0]) if self._target else 0,
             "tiles": len(self.tiles),
+            "mesh": {"source": "odometric" if self.odom is not None else "dsg",
+                     "configured": self.cfg["mesh_source"], "fallback": self.mesh_fallback},  # fmt: skip
             "c2_resent": self.c2_resent,
             "dsg": {k: v for k, v in dict(self.dsg_diag).items() if k[0] != "_"},
         }
@@ -948,6 +1009,10 @@ class AgentCore:
             ):
                 self._t_mesh = now
                 self._c3_tick()
+            if self.odom is not None and self.odom.values_due(now):
+                payload = self.odom.values_payload(now)
+                self._queue("mesh/values", f"{self.prefix}/mesh/values", lambda p=payload: p,
+                            len(payload["data"]) + 32, tag="values", front=True)  # fmt: skip
             if now - self._t_manifest >= self.cfg["manifest_period_s"] and self.tiles:
                 self._t_manifest = now
                 self._queue_manifest()
@@ -1205,6 +1270,11 @@ class AgentNode:
         tick_hz = p("tick_hz", 20.0)
         cfg["mesh_period_s"] = p("mesh_period_s", float(cfg["mesh_period_s"]))
         cfg["tile_size"] = p("tile_size", float(cfg["tile_size"]))
+        # "dsg" | "odometric"; ADT4_FLEETLINK_MESH_SOURCE sets the default per robot
+        cfg["mesh_source"] = p("mesh_source", os.environ.get("ADT4_FLEETLINK_MESH_SOURCE") or str(cfg["mesh_source"]))
+        mesh_delta_topic = p("mesh_delta_topic", "hydra/frontend/full_mesh_update")
+        mesh_graph_inc_topic = p("mesh_graph_incremental_topic", "hydra/frontend/mesh_graph_incremental")
+        mesh_graph_topic = p("mesh_graph_topic", "hydra/backend/mesh_graph")
         # one endpoint or a comma-separated list (zenoh keeps retrying them all)
         connect = split_endpoints(p("zenoh_connect", "tcp/127.0.0.1:7447"))
         cfg["c2_ring"] = p("c2_ring", int(cfg["c2_ring"]))
@@ -1276,6 +1346,8 @@ class AgentNode:
         from hydra_msgs.msg import DsgUpdate
 
         nd.create_subscription(DsgUpdate, dsg_topic, self._on_dsg, QoSProfile(depth=1))
+        if self.core.odom is not None:
+            self._subscribe_odom_mesh(mesh_delta_topic, mesh_graph_inc_topic, mesh_graph_topic)
         # best-effort subscribers match both reliable and best-effort publishers
         from rclpy.qos import qos_profile_sensor_data
 
@@ -1429,6 +1501,47 @@ class AgentNode:
                 self.node.destroy_subscription(sub)
                 del self._camera_subs[name]
                 self.core.drop_frame(name)
+
+    def _subscribe_odom_mesh(self, delta_topic, inc_topic, graph_topic) -> None:
+        """Odometric mesh mode: Hydra's mesh deltas + deformation graph."""
+        from rclpy.qos import DurabilityPolicy, QoSProfile
+
+        from .mesh_deform_link import delta_from_msg, nodes_from_pose_graph
+
+        try:
+            from kimera_pgmo_msgs.msg import MeshDelta
+            from pose_graph_tools_msgs.msg import PoseGraph
+        except ImportError as exc:
+            self.log.warn(f"odometric mesh unavailable ({exc}); tiling the DSG mesh")
+            self.core.fallback_to_dsg_mesh(str(exc))
+            return
+        # Hydra publishes both with QoS(100).transient_local(): match it to get the
+        # last 100 on (re)connect
+        latched = QoSProfile(depth=100, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self._delta_seq = None
+
+        def on_delta(msg):
+            seq = int(msg.seq_number)
+            if self._delta_seq is not None and seq != (self._delta_seq + 1) % 65536:
+                if seq <= 1 and int(msg.prev_active_vertices) == 0:
+                    self.core.reset_odom_mesh()  # Hydra restarted
+                else:
+                    self.core.fallback_to_dsg_mesh(f"mesh delta gap {self._delta_seq} -> {seq}")
+                    return
+            self._delta_seq = seq
+            try:
+                self.core.on_mesh_delta(delta_from_msg(msg))
+            except ValueError as exc:  # a delta that does not fit: started too late
+                self.core.fallback_to_dsg_mesh(str(exc))
+
+        self.node.create_subscription(MeshDelta, delta_topic, on_delta, latched)
+        self.node.create_subscription(
+            PoseGraph, inc_topic, lambda m: self.core.on_mesh_graph_incremental(nodes_from_pose_graph(m)), latched
+        )
+        self.node.create_subscription(
+            PoseGraph, graph_topic, lambda m: self.core.on_mesh_graph(nodes_from_pose_graph(m)), QoSProfile(depth=1)
+        )
+        self.log.info(f"mesh: odometric ({delta_topic}, {inc_topic}, {graph_topic})")
 
     def _on_dsg(self, msg) -> None:
         self._dsg_frame = msg.header.frame_id or self._dsg_frame
