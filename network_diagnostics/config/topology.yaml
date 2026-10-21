@@ -14,14 +14,14 @@ machines:
     platform_type: spot
     desc: Smaug Jockey
     addresses:
-      mit_wifi: 10.29.141.193
+      mit_wifi: 10.29.152.15
       penn_wifi: 192.168.129.234
       silvus: 192.168.100.3
   hamilton:
     role: robot
     color: "#42d4f4"
     addresses:
-      mit_wifi: 10.31.144.106
+      mit_wifi: 10.29.236.1
       silvus: 192.168.100.2
       penn_wifi: 192.168.129.210
     platform_id: topaz
@@ -68,7 +68,7 @@ machines:
   willow:
     role: base_station
     addresses:
-      mit_wifi: 10.29.227.98
+      mit_wifi: 10.31.132.194
       silvus: 192.168.100.100
     desc: RRG base station
   sequia:
@@ -110,5 +110,5 @@ fleet_defaults:
       phoenix: phoenix_relocalize-relocalize
   base_station_session: base_station_heracles-default
   output_root: ~/adt4_output
-  fleet_link: router  # router: rmw_zenohd router-to-router | fleetlink: only fleetlink crosses the radio
+  fleet_link: fleetlink  # router: rmw_zenohd router-to-router | fleetlink: only fleetlink crosses the radio
   fleetlink_base: willow  # base station that runs the fleetlink router
