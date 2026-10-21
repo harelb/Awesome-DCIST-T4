@@ -158,7 +158,7 @@ def test_plugins_and_topics_from_config():
 def test_plan_routes_without_ros(client):
     robots = client.get("/api/plan/robots").json()
     euclid = next(r for r in robots if r["robot"] == "euclid")
-    assert {p["kind"] for p in euclid["plugins"]} == {"goto", "language", "tsp", "pddl"}
+    assert {p["kind"] for p in euclid["plugins"]} == {"goto", "language", "tsp", "pddl", "pddl_constrained"}
     r = client.post(
         "/api/robots/euclid/goal/language", json={"command": "go to the car"}
     )
@@ -166,7 +166,7 @@ def test_plan_routes_without_ros(client):
     assert client.post("/api/robots/euclid/save_dsg", json={}).status_code == 503
     assert client.get("/api/robots/euclid/plan").json() == {
         "goals": [], "plan": None, "results": [], "llm": [], "status": [],
-        "lease": None,
+        "repair_alerts": [], "constraints": [], "lease": None,
     }  # fmt: skip
     # natural language defaults to the planner's configured (LLM) domain, and
     # unknown domain types are rejected before anything is published

@@ -3117,3 +3117,37 @@ input[type="checkbox"] {
   cursor: pointer;
   margin-bottom: 8px;
 }
+
+/* ---------- plan repair v3 (Plan panel) ---------- */
+.repair-constraints {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.constraint-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.constraint-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--warn);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  min-width: 0;
+}
+.repair-alerts li.tone-warn {
+  color: var(--warn);
+}
+.repair-alerts li.tone-err {
+  color: var(--err);
+}

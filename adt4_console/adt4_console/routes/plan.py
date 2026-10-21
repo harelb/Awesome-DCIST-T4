@@ -53,6 +53,17 @@ class PointsGoal(BaseModel):
 class PddlGoal(BaseModel):
     plugin: str | None = None
     goal: str
+    # plan repair v3 constraints to ADD to the robot's persistent set, e.g.
+    # [["forbidden-poi", "o14"], ["forbidden-edge", "p1", "p2"]] or
+    # [{"predicate": "forbidden-poi", "symbols": ["o14"]}]
+    constraints: list | None = None
+    # "auto": goal_manager when it runs, else the plugin + a warning;
+    # "planner": straight to the plugin; "goal_manager": 409 when it is down
+    route: Literal["auto", "planner", "goal_manager"] = "auto"
+
+
+class ConstraintsBody(BaseModel):
+    constraints: list
 
 
 def _plugin(ros, kind: str, name: str | None) -> dict:
@@ -114,9 +125,55 @@ def goal_tsp(robot: str, body: PointsGoal, request: Request):
 
 @router.post("/robots/{robot}/goal/pddl")
 def goal_pddl(robot: str, body: PddlGoal, request: Request):
+    """Through plan repair v3's goal_manager when it runs (API.md §9)."""
     ros = _ros(request)
-    fields = {"robot_id": robot, "pddl_goal": body.goal}
-    return ros.send_goal(robot, _plugin(ros, "pddl", body.plugin), fields)
+    try:
+        return ros.send_pddl_goal(
+            robot, body.goal, body.plugin, body.constraints, body.route
+        )
+    except ValueError as e:  # bad constraint
+        raise HTTPException(400, str(e)) from None
+    except LookupError as e:  # no plugin / goal_manager required but down
+        raise HTTPException(409 if body.route == "goal_manager" else 400, str(e)) from None
+
+
+@router.get("/robots/{robot}/constraints")
+def get_constraints(robot: str, request: Request):
+    ros = services(request).ros
+    return {"robot": robot, "constraints": ros.constraints(robot)}
+
+
+@router.post("/robots/{robot}/constraints")
+def add_constraints(robot: str, body: ConstraintsBody, request: Request):
+    """Add to the persistent set (sent with every goal_manager goal)."""
+    ros = services(request).ros
+    try:
+        return {"robot": robot, "constraints": ros.add_constraints(robot, body.constraints)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.delete("/robots/{robot}/constraints")
+def clear_constraints(robot: str, request: Request, body: ConstraintsBody | None = None):
+    """Clear all (no body) or only the given constraints."""
+    ros = services(request).ros
+    try:
+        facts = body.constraints if body is not None else None
+        return {"robot": robot, "constraints": ros.clear_constraints(robot, facts)}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.get("/plan/repair")
+def plan_repair_status(request: Request):
+    """Is plan repair v3's goal_manager running (subscribers on commanded_goal)?"""
+    ros = services(request).ros
+    if not ros.available:
+        return {"available": False, "goal_manager": False, "subscribers": 0,
+                "topic": None, "error": ros.error}  # fmt: skip
+    subs = ros.goal_manager_subscribers()
+    return {"available": True, "goal_manager": subs > 0, "subscribers": subs,
+            "topic": ros.commanded_goal_topic()}  # fmt: skip
 
 
 @router.post("/robots/{robot}/executor/{cmd}")

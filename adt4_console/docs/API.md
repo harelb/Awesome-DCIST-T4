@@ -256,13 +256,14 @@ Omniplanner runs in the **base station's** namespace (`--planner-ns`, default
 `/<planner_ns>/omniplanner_node/<plugin>/<suffix>` and the goal's `robot_id` picks the
 robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.yaml`).
 
-* `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg)
+* `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg), `pddl_constrained` (plan repair v3's `MultiRobotPddlConstrained`; listed only, never addressed directly — see 9b)
 * `POST /api/robots/{r}/goal/language` `{command, domain_type?: "default"|"Pddl"|"goto_points"}` —
   `default` (the default) uses the planner's configured LLM→PDDL domain; `goto_points` takes node
   symbols ("O(12) P(850)") without an LLM and fails with a clear error on prose
 * `POST /api/robots/{r}/goal/goto` `{points: ["O(12)", "P(850)"]}` — symbols are converted to omniplanner point names (`str(NodeSymbol)` without parens if that is what omniplanner expects — check `goto_points_ros.py`)
 * `POST /api/robots/{r}/goal/tsp` same body
-* `POST /api/robots/{r}/goal/pddl` `{plugin, goal}`
+* `POST /api/robots/{r}/goal/pddl` `{goal, plugin?, constraints?, route?}` — through plan repair v3 when
+  its goal_manager runs, else straight to `plugin` (default: the first `pddl` plugin); see 9b
 * `POST /api/robots/{r}/executor/pause|resume` (goal_manager Bool topics if present)
 * every goal endpoint returns `{ok, topic, msg, subscribers}` (`subscribers == 0` after the
   discovery wait = no planner listening); also appended to the robot's plan history
@@ -270,7 +271,46 @@ robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.ya
   from `/<r>/omniplanner_node/compiled_plan_out` (ActionSequenceMsg), `~/llm_response`,
   `/<r>/spot_executor_node/action_result`, and `status` from omniplanner's
   `/<planner_ns>/omniplanner_node/plan_status` (one JSON String per handled goal — the only
-  place planning failures are reported).
+  place planning failures are reported). Plan repair v3 adds `repair_alerts` and `constraints`
+  (9b); a goal entry may carry `via` and `warning`.
+
+### 9b. Plan repair v3 (`goal_manager`, `launch_omniplanner_repair:=true`)
+
+goal_manager runs on the base station with `robot_name` = the planner namespace and takes
+operator goals on `/<planner_ns>/commanded_goal` (`omniplanner_msgs/ConstrainedPddlGoalMsg`
+= `{goal: PddlGoalMsg{robot_id, pddl_goal}, constraints: ConstraintFact[{predicate, symbols}]}`).
+It pauses the running plan, skips replanning when that plan already satisfies the goal, and
+otherwise forwards it to `multi_robot_pddl_constrained`. The topic is base-local (fleetlink
+never relays it).
+
+* `GET /api/plan/repair` → `{available, goal_manager, subscribers, topic, error?}`;
+  `goal_manager` = something subscribes to `commanded_goal` (ROS graph query).
+* `POST /api/robots/{r}/goal/pddl` body:
+  * `goal` — PDDL string, e.g. `(visited-object o7)`
+  * `plugin` — Pddl plugin for the fallback (optional)
+  * `constraints` — added to the robot's persistent set first: `[["forbidden-poi", "o14"],
+    ["forbidden-edge", "p1", "p2"]]` or `[{predicate, symbols}]`; symbols are lower-cased and
+    lose parens (`O(14)` → `o14`). Other predicates / arities → 400.
+  * `route` — `"auto"` (default): goal_manager when it runs, else the plugin;
+    `"planner"`: the plugin, no warning; `"goal_manager"`: 409 when it is down.
+
+  → `{ok, topic, msg, subscribers, via: "goal_manager"|"planner", constraints, warning?, plugin?}`.
+  `via: "goal_manager"` sends the robot's whole constraint set with the goal. `via: "planner"`
+  (auto) carries `warning: "plan repair goal_manager is not running; sent straight to
+  omniplanner — no constraints / replanning"` plus `"; N constraint(s) NOT applied"` when the
+  set is not empty; the UI must show it.
+* `GET /api/robots/{r}/constraints` → `{robot, constraints: [{predicate, symbols}]}`
+* `POST /api/robots/{r}/constraints` `{constraints}` → the new set (accumulates, de-duplicated)
+* `DELETE /api/robots/{r}/constraints` (no body: clear all; `{constraints}`: remove those) → the new set
+* Plan state (`GET /api/robots/{r}/plan`, WS `robot/{r}/plan`) adds
+  `repair_alerts: [{t, kind: "alert"|"plan_failed", text, seq}]` from
+  `/<planner_ns>/plan_repair/alert` (goal_manager's operator text) and
+  `/<planner_ns>/omniplanner_node/plan_failed`, attributed to the robot of the latest goal, and
+  `constraints`. goal_manager's `~/operator_display` arrives in `llm` (it is remapped to
+  `rviz2_node/llm_response`).
+* Constraints live in the console (lost on restart) and ride on each goal as per-goal
+  constraints, like heracles_agents' `send_pddl_goal_with_constraints`; the console does not
+  publish the planner's persistent `~/constraints` list.
 
 ### 9a. Teleop (Teleop tab; `routes/teleop.py`, `teleop_service.py`)
 
