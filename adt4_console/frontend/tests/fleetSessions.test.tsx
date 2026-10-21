@@ -63,14 +63,22 @@ describe("Fleet tmux sessions", () => {
     expect(post[0]).toBe("api/fleet/hamilton/tmux/adt4_system/kill");
   });
 
-  it("stop sends Ctrl-C without the adt4_system warning for other sessions", async () => {
+  it("stop (Ctrl-C, then kill) runs as a tracked job, without the adt4_system warning for other sessions", async () => {
     const fetchMock = mount(false);
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "api/config") return json({terminal: false});
+      if (init?.method === "POST") return json({ok: true, job_id: "j42"});
+      return json({});
+    });
+    const {useJobs} = await import("../src/stores/jobs");
     await flush();
-    act(() => buttons("Ctrl-C every pane of nstf_build")[0].click());
+    act(() => buttons("stop nstf_build")[0].click());
     expect(document.body.textContent).not.toContain("Stop & Save first");
-    await act(async () => buttons("Send Ctrl-C")[0].click());
+    expect(document.body.textContent).toContain("then kills the session");
+    await act(async () => buttons("Stop session")[0].click());
     await flush();
     expect(fetchMock.mock.calls.find(c => (c[1] as RequestInit | undefined)?.method === "POST")![0]).toBe("api/fleet/hamilton/tmux/nstf_build/stop");
+    expect(JSON.stringify(useJobs.getState())).toContain("j42");
   });
 
   it("offers terminals only on reachable machines when enabled", async () => {
