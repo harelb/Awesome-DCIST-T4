@@ -98,7 +98,12 @@ def test_launch_validation_and_dry_run(client):
     # robot links: any topology network, chosen per launch; unknown names refused
     assert "silvus" in d["link_networks"] and d["link_network"] in d["link_networks"]
     lines = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "silvus"}).json()["lines"]
-    assert lines[0].startswith("Robot links: silvus ")
+    assert lines[0].startswith("Robot links: silvus, router mode ")
+    lines = client.post("/api/launch/dry_run", json={**PLAN, "link_mode": "fleetlink"}).json()["lines"]
+    assert "fleetlink mode" in lines[0] and "ADT4_FLEET_LINK=fleetlink" in lines[1]
+    r = client.post("/api/launch/dry_run", json={**PLAN, "link_mode": "smoke-signals"})
+    assert r.status_code == 400 and "link mode" in r.json()["detail"]
+    assert d["link_modes"] == ["router", "fleetlink"]
     r = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "carrier_pigeon"})
     assert r.status_code == 400 and "link network" in r.json()["detail"]
 
