@@ -7,8 +7,11 @@ import {bindFleet, useFleet} from "./stores/fleet";
 import {bindJobs, useJobs} from "./stores/jobs";
 import {bindRobots} from "./stores/robots";
 import {bindRobotColors} from "./stores/robotColors";
+import {bindTheme} from "./stores/theme";
 import "./styles.css";
+import "./theme.css";
 
+bindTheme();
 initToken();
 bindFleet();
 bindJobs();

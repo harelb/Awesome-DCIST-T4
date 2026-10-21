@@ -360,8 +360,8 @@ code,
 }
 @media (hover: hover) {
   .btn:hover:not(:disabled) {
-    border-color: #4a5e78;
-    background: #243140;
+    border-color: var(--btn-hover-line, #4a5e78);
+    background: var(--btn-hover-bg, #243140);
   }
 }
 .btn:disabled {
@@ -377,24 +377,24 @@ code,
 .btn-primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #00131c;
+  color: var(--on-accent, #00131c);
   font-weight: 600;
 }
 @media (hover: hover) {
   .btn-primary:hover:not(:disabled) {
-    background: #7fd5fa;
-    border-color: #7fd5fa;
+    background: var(--accent-hover, #7fd5fa);
+    border-color: var(--accent-hover, #7fd5fa);
   }
 }
 .btn-danger {
   background: var(--err);
   border-color: var(--err);
-  color: #1d0002;
+  color: var(--on-err, #1d0002);
   font-weight: 600;
 }
 @media (hover: hover) {
   .btn-danger:hover:not(:disabled) {
-    background: #ff7d81;
+    background: var(--err-hover, #ff7d81);
   }
 }
 .btn-danger-outline {
@@ -3144,6 +3144,7 @@ input[type="checkbox"] {
     width: 36px;
     height: 36px;
   }
+}
 /* ---------- plan repair v3 (Plan panel) ---------- */
 .repair-constraints {
   margin-top: 10px;
@@ -3309,6 +3310,7 @@ input[type="checkbox"] {
 }
 .traffic-table td {
   white-space: nowrap;
+}
 .mesh-lod {
   display: flex;
   flex-wrap: wrap;

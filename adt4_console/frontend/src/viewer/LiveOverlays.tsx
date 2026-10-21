@@ -11,9 +11,16 @@ import {lift, type DecodedGrid} from "../lib/overlays";
 import {shade, useRobotColorOf} from "../lib/palette";
 import {AlignedGroup} from "./AlignedGroup";
 import {DimGroup} from "./DimGroup";
+import {useBackground} from "./background";
+import {contrastFor, readableOn} from "./style";
 
-/** Executor overlay colours derived from a robot's colour. */
-export function pathColors(robotHex: string) {
+/** Executor overlay colours derived from a robot's colour. On a light 3D
+ *  background (`bg`) the shades are darkened just enough to stay visible. */
+export function pathColors(robotHex: string, bg?: string) {
+  if (bg && contrastFor(bg).light) {
+    const mlp = readableOn(robotHex, bg, 3);
+    return {smooth: readableOn(shade(robotHex, 1.25), bg, 2), mlp, target: shade(mlp, 0.6)};
+  }
   return {smooth: shade(robotHex, 1.45), mlp: robotHex, target: shade(robotHex, 0.6)};
 }
 
@@ -57,7 +64,7 @@ function GridLayer({robot}: {robot: string}) {
 function PathLayer({robot}: {robot: string}) {
   const paths = useRobots(s => s.paths[robot]);
   const {showSmooth, showMlp, showTarget} = useOverlays();
-  const c = pathColors(useRobotColorOf()(robot));
+  const c = pathColors(useRobotColorOf()(robot), useBackground());
   if (!paths) return null;
   const smooth = lift(paths.smooth, 0.15);
   const mlp = lift(paths.mlp, 0.2);
@@ -103,9 +110,10 @@ export function LiveOverlaysPanel() {
   const st = useOverlays();
   const paths = useRobots(s => s.paths);
   const colorOf = useRobotColorOf();
+  const bg = useBackground();
   if (!robots.length) return null;
   // legend swatches: first live robot's shades (each robot draws in its own colour)
-  const legend = pathColors(colorOf(robots[0]));
+  const legend = pathColors(colorOf(robots[0]), bg);
   return (
     <section className="vsec">
       <header className="vsec-head">
