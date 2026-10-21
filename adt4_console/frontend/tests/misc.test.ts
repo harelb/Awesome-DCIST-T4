@@ -80,3 +80,12 @@ describe("misc", () => {
     expect(labelColor(-1)).toEqual([200, 200, 200]);
   });
 });
+
+import {meshLodText} from "../src/viewer/panels";
+describe("mesh LOD status", () => {
+  it("says the robot's LOD, tiles to go and bytes", () => {
+    expect(meshLodText({lod: "decimated", wanted: "decimated", pending: 0, bytes: 1_770_000})).toMatch(/^decimated · 1\.\d MB$/);
+    expect(meshLodText({lod: "full", wanted: "full", pending: 12, bytes: 2048})).toMatch(/^full · 12 tiles to go · /);
+    expect(meshLodText({lod: null, wanted: "decimated", pending: 0, bytes: 0})).toContain("no LOD support");
+  });
+});

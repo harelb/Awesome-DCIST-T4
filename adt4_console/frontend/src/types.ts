@@ -416,6 +416,18 @@ export interface LinkInfo {
   gaps?: number;
   resyncs?: number;
   auto?: boolean;
+  /** mesh level of detail: the robot's (``lod`` null: an older robot sending
+   *  full tiles), the one this console asks for, tiles still to arrive, bytes held */
+  mesh?: MeshLodStatus;
+}
+
+export interface MeshLodStatus {
+  lod: "full" | "decimated" | null;
+  lod_tiles?: Record<string, "full" | "decimated">;
+  wanted: "full" | "decimated" | null;
+  tiles: number;
+  pending: number;
+  bytes: number;
 }
 
 export interface LiveResponse {

@@ -75,6 +75,23 @@ def resync(robot: str, request: Request):
     return {"ok": True, "request": _rx(request).request_resync(robot)}
 
 
+class MeshLodBody(BaseModel):
+    level: Literal["full", "decimated"]
+    # just these tiles (keys as in the mesh manifest); omitted: the whole mesh
+    tiles: list[str] | None = None
+
+
+@router.post("/{robot}/mesh_lod")
+def mesh_lod(robot: str, body: MeshLodBody, request: Request):
+    """Mesh level of detail the robot sends: "decimated" (default, ~8x fewer
+    faces) or "full" (Hydra's mesh as is). The receiver remembers it and asks
+    again when the robot restarts; the link status ``mesh`` block shows the
+    robot's LOD, tiles still to arrive and bytes held."""
+    rx = _rx(request)
+    req = rx.set_mesh_lod(robot, body.level, body.tiles)
+    return {"ok": True, "request": req, "wanted": rx.mesh_lod_wanted(robot)}
+
+
 class AutoBody(BaseModel):
     enabled: bool
 

@@ -3291,3 +3291,12 @@ input[type="checkbox"] {
   white-space: pre;
   overflow-x: auto;
 }
+
+.mesh-lod {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  margin-top: 2px;
+  min-width: 0;
+}
