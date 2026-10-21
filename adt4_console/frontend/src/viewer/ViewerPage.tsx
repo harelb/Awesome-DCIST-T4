@@ -411,7 +411,22 @@ export default function ViewerPage() {
       className={`btn btn-sm panel-btn drive-btn ${drive ? "on" : ""}`}
       aria-pressed={drive}
       data-testid="drive-layout"
-      onClick={() => setLayout(l => toggleDrive(l, focused))}
+      onClick={() => {
+        // teleop / full screen need one robot in focus: with "all robots", take
+        // the only robot that is streaming (else the only one in the roster);
+        // with several, the drive layout shows them all and says how to pick
+        if (!focused && !drive) {
+          const live = Object.keys(robotStates);
+          const only = live.length === 1 ? live[0] : roster.length === 1 ? roster[0] : null;
+          if (only) {
+            useViewer.getState().setFocus(only);
+            setLayout(l => ({...l, drive: true}));
+            return;
+          }
+          setToast(`To drive (and for full screen), pick one robot in the robot focus menu: ${live.join(", ") || roster.join(", ")}`);
+        }
+        setLayout(l => toggleDrive(l, focused));
+      }}
       title={drive ? "Drive layout on: camera pinned over Teleop · click for the standard layout" : "Drive layout: map, the focused robot's camera and Teleop side by side"}
     >
       {isPhone ? "Drive" : "Drive layout"}
