@@ -10,8 +10,9 @@ def _rx():
     tr = RecordingTransport()
     clock = VirtualClock(100.0)
     events = []
+    # mesh LOD requests at each epoch are covered in test_mesh_lod.py
     rx = Receiver(
-        tr, lambda r, k, d: events.append((r, k, d)), clock=clock, threaded=False
+        tr, lambda r, k, d: events.append((r, k, d)), clock=clock, threaded=False, mesh_lod=None
     )
     rx.start()
     return tr, clock, rx, events
