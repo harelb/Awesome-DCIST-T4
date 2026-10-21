@@ -319,7 +319,8 @@ def test_base_command_carries_fleet_link():
 
 def test_dry_run_lines_show_env():
     plan = LaunchPlan(robots=["alpha"], session="spot-default", experiment="e1")
-    [line] = dry_run_lines(plan, RUNTIME, OUT, topo("fleetlink"))
+    links, line = dry_run_lines(plan, RUNTIME, OUT, topo("fleetlink"))
+    assert links.startswith("Robot links: ") and "robots dial the fleetlink base" in links
     assert "ADT4_FLEET_LINK=fleetlink" in line
 
 

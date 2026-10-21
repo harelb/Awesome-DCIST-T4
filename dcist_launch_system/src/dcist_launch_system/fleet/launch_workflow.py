@@ -34,6 +34,7 @@ from dcist_launch_system.fleet_helpers import (
     generate_namespaced_rviz,
     generate_zenoh_endpoints,
     get_local_ips,
+    link_network,
     rsync_transfer,
     run_parallel,
     ssh_cmd,
@@ -65,6 +66,9 @@ class LaunchPlan:
     record: bool = False
     base_station: str | None = None
     bs_session: str | None = None
+    # network the robot <-> base links use (None: zenoh.connect_network, else the
+    # active network); see fleet_helpers.link_network
+    link_network: str | None = None
 
 
 @dataclass
@@ -145,16 +149,17 @@ def prior_dest_path(prior_path: str, output_root: str) -> str:
     return f"{output_root}/prior_{pathlib.Path(prior_path).name}"
 
 
-def fleet_env_prefix(machine_name: str, topo: dict | None) -> str:
+def fleet_env_prefix(machine_name: str, topo: dict | None, network: str | None = None) -> str:
     """``VAR=value ...`` assignments carrying the fleet link mode to ``run-adt4``.
 
+    ``network``: a fleetlink robot dials the base on that network only (no failover).
     Empty without a topology (run-adt4 then derives them from its own copy).
     """
     if topo is None:
         return ""
     from dcist_launch_system.fleet_env import fleet_env
 
-    env = fleet_env(machine_name, topo)
+    env = fleet_env(machine_name, topo, network)
     keys = ["ADT4_FLEET_LINK", "ADT4_FLEETLINK_CONNECT"]
     if env.get("ADT4_FLEET_LINK") == "fleetlink":
         keys.append("ADT4_FLEETLINK_PORT")
@@ -204,7 +209,7 @@ def build_robot_commands(
             rprior = prior_overrides[rname]
         prior_flag = f" -p {_quote_path(rprior)}" if rprior else ""
         cmd = (
-            f"{_WS_PREFIX}{fleet_env_prefix(m['name'], topo)}{RUN_ADT4} "
+            f"{_WS_PREFIX}{fleet_env_prefix(m['name'], topo, plan.link_network)}{RUN_ADT4} "
             f"{shlex.quote(plan.session)} -n {shlex.quote(m['name'])} "
             f"-c {shlex.quote(m['platform_id'])} "
             f"-o {_quote_path(out_dir)} -y{prior_flag}{record_flag} "
@@ -241,10 +246,18 @@ def build_base_station_command(
 
 
 def dry_run_lines(
-    plan: LaunchPlan, runtime_config: dict, output_root: str, topo: dict | None = None
+    plan: LaunchPlan,
+    runtime_config: dict,
+    output_root: str,
+    topo: dict | None = None,
+    active_network: str | None = None,
 ):
     cmds = build_robot_commands(plan, runtime_config, output_root, topo)
     lines = []
+    if topo is not None:
+        net = link_network(topo, plan.link_network, active_network)
+        how = "robots dial the fleetlink base" if fleet_link_mode(topo) == "fleetlink" else "base dials the robots"
+        lines.append(f"Robot links: {net or '?'} ({how}); console/ssh: {active_network or '?'}")
     if plan.prior_path and plan.prior_source:
         exp_name = pathlib.Path(plan.prior_path).name
         for m, _ in cmds:
@@ -651,9 +664,20 @@ def run_launch(
                 + fleetlink_summary(topo),
             )
         try:
+            net = link_network(topo, plan.link_network, active_network)
             endpoints = deps.zenoh_endpoints(
-                topo, active_network, bs_machine["name"], robot_filter=plan.robots
+                topo, net, bs_machine["name"], robot_filter=plan.robots
             )
+            if fleet_link_mode(topo) != "fleetlink":
+                cb.log("info", f"robot links over {net}: {', '.join(endpoints) or 'none'}")
+                addrs = {r: (topo.get("machines", {}).get(r) or {}).get("addresses") or {} for r in plan.robots}
+                missing = [r for r in plan.robots if net not in addrs[r]]
+                if missing and net != active_network:
+                    # no address on the link network: keep them reachable as before
+                    endpoints += deps.zenoh_endpoints(
+                        topo, active_network, bs_machine["name"], robot_filter=missing
+                    )
+                    cb.log("warn", f"{', '.join(missing)}: no {net} address in topology; linking over {active_network}")
             ok, msg = deps.deploy_zenoh(bs_machine["user"], bs_machine["ip"], endpoints)
             cb.log(
                 "ok" if ok else "error",

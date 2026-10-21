@@ -401,6 +401,8 @@ export interface LaunchPlan {
   record: boolean;
   base_station: string | null;
   bs_session: string | null;
+  /** network the robot <-> base links use; null = the topology default */
+  link_network?: string | null;
 }
 
 export interface LaunchDefaults {
@@ -409,5 +411,11 @@ export interface LaunchDefaults {
   base_station?: string | null;
   bs_session?: string;
   sessions?: string[];
+  /** topology networks a launch can put the robot links on */
+  link_networks?: string[];
+  /** default link network (zenoh.connect_network, else the console's network) */
+  link_network?: string | null;
+  /** the network this console reaches the machines on */
+  active_network?: string | null;
   [k: string]: unknown;
 }

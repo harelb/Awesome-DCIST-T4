@@ -25,12 +25,27 @@ class LaunchPlanBody(BaseModel):
     record: bool = False
     base_station: str | None = None
     bs_session: str | None = None
+    # robot <-> base link network (a topology network name); None = topology default
+    link_network: str | None = None
 
 
-def _plan(body: LaunchPlanBody):
+def _plan(body: LaunchPlanBody, topo: dict | None = None):
     from dcist_launch_system.fleet.launch_workflow import LaunchPlan
 
+    if body.link_network and body.link_network not in ((topo or {}).get("networks") or {}):
+        raise HTTPException(400, f"unknown link network {body.link_network!r}")
     return LaunchPlan(**body.model_dump())
+
+
+def link_choices(topo: dict | None, active: str | None) -> dict:
+    """Networks a launch can put the robot links on, and the default one."""
+    from dcist_launch_system.fleet_helpers import link_network
+
+    return {
+        "link_networks": list(((topo or {}).get("networks") or {}).keys()),
+        "link_network": link_network(topo or {}, None, active),
+        "active_network": active,
+    }
 
 
 @router.get("/launch/defaults")
@@ -45,7 +60,8 @@ def launch_defaults(request: Request, mode: str = "mapping"):
         sel = default_selection(
             fleet.topo, fleet.runtime_config, mode, None, fleet.local_ips
         )
-    return {**sel, "mode": mode, "sessions": list_sessions()}
+        links = link_choices(fleet.topo, fleet.network)
+    return {**sel, **links, "mode": mode, "sessions": list_sessions()}
 
 
 @router.post("/launch/dry_run")
@@ -56,10 +72,11 @@ def launch_dry_run(body: LaunchPlanBody, request: Request):
     try:
         with svc.fleet.lock:
             lines = dry_run_lines(
-                _plan(body),
+                _plan(body, svc.fleet.topo),
                 svc.fleet.runtime_config,
                 svc.settings.output_root,
                 svc.fleet.topo,
+                svc.fleet.network,
             )
     except LaunchError as e:
         raise HTTPException(400, str(e)) from None
@@ -76,7 +93,7 @@ def launch(body: LaunchPlanBody, request: Request):
 
     svc = services(request)
     fleet = svc.fleet
-    plan = _plan(body)
+    plan = _plan(body, fleet.topo)
     try:  # validate up front so the UI gets a 400, not a failed job
         build_robot_commands(plan, fleet.runtime_config, svc.settings.output_root)
     except LaunchError as e:

@@ -91,11 +91,16 @@ def test_launch_validation_and_dry_run(client):
     r = client.post("/api/launch/dry_run", json={**PLAN, "robots": ["ghost"]})
     assert r.status_code == 400
     lines = client.post("/api/launch/dry_run", json=PLAN).json()["lines"]
-    assert (
-        len(lines) == 1 and lines[0].startswith("ssh swarm@") and "run-adt4" in lines[0]
-    )
+    assert len(lines) == 2 and lines[0].startswith("Robot links: ")
+    assert lines[1].startswith("ssh swarm@") and "run-adt4" in lines[1]
     d = client.get("/api/launch/defaults", params={"mode": "mapping"}).json()
     assert "spot-default" in d["sessions"] and "euclid" in d["robots"]
+    # robot links: any topology network, chosen per launch; unknown names refused
+    assert "silvus" in d["link_networks"] and d["link_network"] in d["link_networks"]
+    lines = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "silvus"}).json()["lines"]
+    assert lines[0].startswith("Robot links: silvus ")
+    r = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "carrier_pigeon"})
+    assert r.status_code == 400 and "link network" in r.json()["detail"]
 
 
 def test_topology_edit_delete_save_preserves_file(client, topology_copy):

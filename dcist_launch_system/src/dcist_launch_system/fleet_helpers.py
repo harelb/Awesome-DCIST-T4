@@ -701,6 +701,22 @@ def generate_zenoh_endpoints(topology, network, machine_name, robot_filter=None)
 DEFAULT_FLEETLINK_PORT = 7450
 
 
+def link_network(topology, override=None, active=None):
+    """The network robot <-> base links use.
+
+    The launch's choice (``override``), else ``zenoh.connect_network``, else the
+    network the launching machine is on (``active``; router mode's old behaviour).
+    Names not in ``networks`` are skipped. SSH and the console keep using the
+    active network: only the robot links follow this.
+    """
+    nets = (topology or {}).get("networks") or {}
+    zconf = (topology or {}).get("zenoh") or {}
+    for cand in (override, zconf.get("connect_network")):
+        if cand and cand in nets:
+            return cand
+    return active
+
+
 def fleet_link_mode(topology):
     """``fleet_defaults.fleet_link`` ("router" | "fleetlink"); unknown/missing -> "router"."""
     mode = ((topology or {}).get("fleet_defaults") or {}).get("fleet_link") or "router"

@@ -38,6 +38,7 @@ export function LaunchPage() {
   const [bsSession, setBsSession] = useState("");
   const [experiment, setExperiment] = useState(defaultExperiment("mapping"));
   const [record, setRecord] = useState(false);
+  const [linkNet, setLinkNet] = useState(""); // "" = topology default
   const [prior, setPrior] = useState<string>(preset ? `${preset.source}\u0000${preset.prior}` : ""); // "machine\u0000path"
   const [dry, setDry] = useState<{lines: string[]} | null>(null);
   const [busy, setBusy] = useState<"dry" | "launch" | null>(null);
@@ -99,6 +100,7 @@ export function LaunchPage() {
       record,
       base_station: baseStation || null,
       bs_session: baseStation ? bsSession || null : null,
+      link_network: linkNet || null,
     };
   };
 
@@ -196,6 +198,19 @@ export function LaunchPage() {
             <input className="input mono" value={experiment} onChange={e => setExperiment(e.target.value)} aria-label="Experiment name" />
           </Field>
           <Toggle checked={record} onChange={setRecord} label="Record rosbag" />
+          <Field
+            label="Robot link network"
+            hint={`Robot <-> base traffic only; the console and SSH stay on ${defaults.data?.active_network ?? "this machine's network"}.`}
+          >
+            <select className="input" value={linkNet} onChange={e => setLinkNet(e.target.value)} aria-label="Robot link network">
+              <option value="">topology default ({defaults.data?.link_network ?? "?"})</option>
+              {(defaults.data?.link_networks ?? []).map(n => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
           <Field label={mode === "relocalize" ? "Prior map (required)" : "Prior map (optional)"}>
             {maps.error ? (
               <ErrorBox error={maps.error} compact onRetry={maps.reload} />

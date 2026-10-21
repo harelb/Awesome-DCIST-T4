@@ -81,19 +81,21 @@ silvus_radios:
   mgmt_subnet: 172.20.0.0/16
   api_endpoint: /cgi-bin/streamscape_api
   radios:
-    radio_310061:
-      mgmt_ip: 172.20.187.45
-      node_id: 310061
-    radio_310226:
-      mgmt_ip: 172.20.187.210
-      node_id: 310226
+    # SC4200H pair added 2026-10-20 (hamilton / willow). 65631's mgmt IP is in
+    # 172.17.0.0/16, which docker0 also uses on both machines
+    radio_65631:
+      mgmt_ip: 172.17.0.95
+      node_id: 65631
+    radio_310308:
+      mgmt_ip: 172.20.188.36
+      node_id: 310308
   udp_telemetry:
     listen_port: 5100
 zenoh:
   port: 7447
-  connect_network: silvus
+  connect_network: silvus  # robot <-> base links (a launch can pick another network)
   fleetlink_port: 7450  # dedicated fleetlink router on the base (fleet_link: fleetlink)
-  fleetlink_networks: [silvus, mit_wifi]  # robot agents try these in order (failover)
+  fleetlink_networks: [silvus]  # robot agents try these in order (failover); radio only
 ssh:
   base_station_user: rrg
   robot_user: swarm
