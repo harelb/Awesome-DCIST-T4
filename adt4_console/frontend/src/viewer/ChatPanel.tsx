@@ -10,7 +10,7 @@ import {Badge, Spinner} from "../components/ui";
 import {sendGoal} from "./PlanPanel";
 import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
-import {candidateNote, cellText, fmtLeft, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
+import {candidateNote, cellText, fmtLeft, mergeTargetsAfterCommit, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
 
 export type ChatItem =
   | {type: "user"; text: string; note?: boolean}
@@ -304,7 +304,15 @@ export function ChatPanel() {
           src: it.src ?? undefined,
         });
         const how = r.merged ? `merged into ${r.symbol ?? "an existing object"}` : `added as ${r.symbol ?? "a new object"}`;
-        patch(idx, c => ({...(c as ObjectCandidate), status: {state: "added", text: how}}));
+        setItems(cur => {
+          const next = cur.map((c, i) => (i === idx ? {...(c as ObjectCandidate), status: {state: "added" as const, text: how}} : c));
+          if (!r.symbol) return next;
+          // the other undecided cards now merge into it when close enough
+          const cands = next.filter((c): c is ObjectCandidate => c.type === "object_candidate");
+          const targets = mergeTargetsAfterCommit(cands, it.label, it.centroid, r.symbol);
+          let k = 0;
+          return next.map(c => (c.type === "object_candidate" ? {...c, would_merge_into: targets[k++]} : c));
+        });
         void ask(candidateNote(it.label, r), true);
       } else {
         await postJSON("api/sam3/discard", {pending_id: it.pending_id});

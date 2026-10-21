@@ -131,6 +131,12 @@ operator sees each candidate's image and approves or discards it.
 - To send a robot somewhere, call propose_goal; the operator approves goals in \
 the UI. Never claim a robot is moving. Prefer kind='pddl' with object/place \
 symbols in lower case without parentheses, e.g. (visited-object o12).
+- Messages starting with [operator] report the operator's decisions in the UI (an \
+approved or rejected write, an approved or discarded image candidate). Acknowledge \
+them in one line and continue only what the operator asked for before (e.g. \
+propose the goal to the object just added). Do NOT search the images again or \
+repeat earlier tool calls because of such a note; the remaining candidates are \
+still on screen and the operator may approve more of them.
 - Keep answers short. When a count or distribution fits, an ASCII bar chart is welcome.
 """
 

@@ -64,3 +64,28 @@ export function cellText(v: unknown): string {
   }
   return String(v);
 }
+
+/** The SAM3 query server's merge radius: a committed candidate merges into a
+ *  mapped object with the same label within this distance
+ *  (``sam3_frontend/config.py`` ``dedup_centroid_dist_m``). */
+export const SAM3_MERGE_RADIUS_M = 0.75;
+
+interface CandLike {
+  label: string;
+  centroid: number[] | null;
+  would_merge_into?: {symbol: string; distance_m: number | null} | null;
+  status?: {state: string} | undefined;
+}
+
+/** After one candidate was committed as ``symbol`` at ``at``, what each other
+ *  undecided candidate with the same label would now merge into (or its old
+ *  value). Same indices as ``cands``. */
+export function mergeTargetsAfterCommit<T extends CandLike>(cands: T[], label: string, at: number[] | null, symbol: string, radius = SAM3_MERGE_RADIUS_M): T["would_merge_into"][] {
+  return cands.map(c => {
+    if (c.status || !at || !c.centroid || c.label !== label) return c.would_merge_into ?? null;
+    const d = Math.hypot(...c.centroid.map((v, k) => v - (at[k] ?? 0)));
+    if (d > radius) return c.would_merge_into ?? null;
+    const cur = c.would_merge_into;
+    return cur && cur.distance_m !== null && cur.distance_m <= d ? cur : {symbol, distance_m: Math.round(d * 100) / 100};
+  });
+}

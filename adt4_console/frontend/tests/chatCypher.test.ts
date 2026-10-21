@@ -52,3 +52,25 @@ describe("tabular replies", () => {
     expect(looksTabular("O(7) is a vehicle | parked.")).toBe(false);
   });
 });
+
+import {mergeTargetsAfterCommit} from "../src/lib/chatTranscript";
+describe("candidates after a commit", () => {
+  const c = (label: string, centroid: number[], extra = {}) => ({label, centroid, would_merge_into: null, ...extra});
+  it("undecided cards of the same label within the merge radius now merge into the new object", () => {
+    const cands = [
+      c("blue trash can", [0, 0, 0], {status: {state: "added"}}), // the committed one
+      c("blue trash can", [0.4, 0.3, 0]), // 0.5 m: same can
+      c("blue trash can", [3, 0, 0]), // another can
+      c("chair", [0.1, 0, 0]), // other label: never merges
+    ];
+    const t = mergeTargetsAfterCommit(cands, "blue trash can", [0, 0, 0], "O18");
+    expect(t[1]).toEqual({symbol: "O18", distance_m: 0.5});
+    expect(t[2]).toBeNull();
+    expect(t[3]).toBeNull();
+    expect(t[0]).toBeNull(); // decided cards keep what they had
+  });
+  it("keeps a closer existing merge target", () => {
+    const cands = [c("mug", [0.5, 0, 0], {would_merge_into: {symbol: "O3", distance_m: 0.1}})];
+    expect(mergeTargetsAfterCommit(cands, "mug", [0, 0, 0], "O9")[0]).toEqual({symbol: "O3", distance_m: 0.1});
+  });
+});
