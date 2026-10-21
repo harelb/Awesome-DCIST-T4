@@ -2,7 +2,9 @@
 
 State when written: `integrate/features-20261020` @ 72b4630 (harelb), deployed to willow + hamilton.
 
-## Console chat (Cypher-first, deployed 72b4630)
+## Console chat (Cypher-first; was deployed 72b4630, robots since reverted to start-of-day)
+- DONE locally on `feature/chat-sam3-followups` @4f06950 (not merged/deployed): no re-search after an
+  [operator] note; sibling SAM3 cards re-checked after an approval (merge radius 0.75 m).
 - **SAM3 approvals**: after approving a candidate the assistant's automatic follow-up re-ran the
   same search ("blue trash can" -> 4 new cards); approving #3 of the new set merged into the
   just-created O18. Fix: after an approval note the assistant only acknowledges (no new search
