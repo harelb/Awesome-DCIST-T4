@@ -103,6 +103,13 @@ if [ "$install_spark" = true ]; then
         pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
     fi
     pip install -r install/spark_requirements.txt
+    # fleetlink's agent/bridge/console receiver import zenoh from spark_env; it
+    # must match rmw_zenoh's zenoh-c (1.8). Fail loudly: a robot without it has
+    # no link to the base in fleetlink mode ("No module named 'zenoh'").
+    if ! python -c "import importlib.metadata as m, sys; sys.exit(m.version('eclipse-zenoh') != '1.8.0')"; then
+        echo "eclipse-zenoh 1.8.0 is not installed in $ADT4_ENV/spark_env (see install/spark_requirements.txt)"
+        exit 1
+    fi
     pip install -e ./semantic_inference/semantic_inference
     # reader/writer for hydra's image store (console, heracles, agentic_navigation)
     pip install -e "./hydra/hydra_image_store[images]"
