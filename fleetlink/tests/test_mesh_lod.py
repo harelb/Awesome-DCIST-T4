@@ -159,3 +159,16 @@ def test_receiver_mesh_status_and_old_base_mode():
     rx2._on_msg("k", env_bytes("r", "mesh/manifest", 0, "E1", {"tiles": {}}))
     rx2.tick(clock2.advance(0.1))
     assert not _reqs(tr2, "mesh_lod") and rx2.link("r")["mesh"]["wanted"] is None
+
+
+def test_odometric_mode_keeps_full_tiles_and_says_so():
+    """Deformation needs every vertex's stamp: in odometric mode a decimated
+    request is acknowledged, but the robot keeps sending full tiles and the
+    manifest reports that (integrate/features-20261021 merge rule)."""
+    tr, clock = RecordingTransport(), VirtualClock()
+    core = AgentCore("r", tr, {"mesh_source": "odometric"}, clock)
+    _req(tr, "d", "mesh_lod", {"level": "decimated"})
+    _run(clock, core, 5.0)
+    assert _acks(tr)[-1]["ok"]
+    lod = core._manifest_payload()["lod"]
+    assert lod["level"] == "full" and lod["odometric"] is True
