@@ -10,6 +10,7 @@ import {Badge, Spinner} from "../components/ui";
 import {sendGoal} from "./PlanPanel";
 import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
+import {chatAbort, clearChat, useChat} from "../stores/chat";
 import {candidateNote, candidateOrdinals, cellText, fmtLeft, mergeTargetsAfterCommit, scrollAnchor, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
 
 export type ChatItem =
@@ -144,20 +145,47 @@ const loadModel = () => {
   }
 };
 
+const setItems = (f: ChatItem[] | ((cur: ChatItem[]) => ChatItem[])) =>
+  useChat.setState(s => ({items: typeof f === "function" ? f(s.items) : f}));
+const setBusy = (busy: boolean) => useChat.setState({busy});
+const transcript = {
+  get current(): TranscriptItem[] {
+    return useChat.getState().transcript;
+  },
+  set current(v: TranscriptItem[]) {
+    useChat.setState({transcript: v});
+  },
+};
+const busyRef = {
+  get current() {
+    return useChat.getState().busy;
+  },
+  set current(_v: boolean) {
+    /* setBusy() writes the store */
+  },
+};
+const turnStart = {
+  get current() {
+    return useChat.getState().turnStart;
+  },
+  set current(v: number) {
+    useChat.setState({turnStart: v});
+  },
+};
+const abort = chatAbort;
+
 export function ChatPanel() {
   const {planRobot, order, sources} = useViewer();
-  const [items, setItems] = useState<ChatItem[]>([]);
+  // the conversation lives in the chat store: it outlives this panel (page
+  // switches, reloads) and a turn keeps streaming into it while unmounted
+  const items = useChat(s => s.items);
+  const busy = useChat(s => s.busy);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [model, setModelRaw] = useState(loadModel);
-  const transcript = useRef<TranscriptItem[]>([]);
   const scroller = useRef<HTMLDivElement>(null);
-  const abort = useRef<AbortController | null>(null);
-  const busyRef = useRef(false);
-  // items before the current turn, and how many items the log last scrolled for
-  const turnStart = useRef(0);
+  // how many items the log last scrolled for (0: scroll to the end on mount)
   const shown = useRef(0);
   // Cypher runs on the planner's Neo4j map; else the first shown source
   const src = order.find(id => sources[id]?.kind === "neo4j") ?? order.find(id => sources[id]?.enabled) ?? undefined;
@@ -173,7 +201,6 @@ export function ChatPanel() {
     const card = a === null ? null : el.querySelector<HTMLElement>(`[data-item="${a}"]`);
     el.scrollTop = card ? el.scrollTop + card.getBoundingClientRect().top - el.getBoundingClientRect().top : el.scrollHeight;
   }, [items]);
-  useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => {
     getJSON<{models?: string[]; model?: string | null}>("api/chat/usage")
       .then(u => {
@@ -274,12 +301,7 @@ export function ChatPanel() {
     void ask(message);
   };
 
-  const newChat = () => {
-    abort.current?.abort();
-    transcript.current = [];
-    turnStart.current = 0;
-    setItems([]);
-  };
+  const newChat = clearChat;
 
   const patch = (idx: number, f: (it: ChatItem) => ChatItem) => setItems(cur => cur.map((c, i) => (i === idx ? f(c) : c)));
 

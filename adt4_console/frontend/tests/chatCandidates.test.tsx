@@ -3,6 +3,7 @@ import {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
 import {candidateOrdinals, scrollAnchor} from "../src/lib/chatTranscript";
 import {ChatPanel} from "../src/viewer/ChatPanel";
+import {clearChat} from "../src/stores/chat";
 
 (globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -31,6 +32,7 @@ describe("ChatPanel with a 9-candidate search", () => {
     act(() => root?.unmount());
     host?.remove();
     vi.restoreAllMocks();
+    clearChat();
   });
 
   it("shows every card and scrolls to the first one, not just the last", async () => {
