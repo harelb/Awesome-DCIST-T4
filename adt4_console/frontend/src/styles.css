@@ -2734,6 +2734,53 @@ input[type="checkbox"] {
   font-size: 13px;
   font-weight: 600;
 }
+/* change detection (ChangeOverlays.tsx): box labels and the panel list */
+.change-label {
+  font-weight: 600;
+}
+.change-label .change-cc {
+  font-weight: 400;
+  opacity: 0.8;
+}
+.change-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.change-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.change-row:hover:not(:disabled) {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+.change-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.change-kind {
+  font-weight: 700;
+  width: 1ch;
+}
+.change-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---- Maps page: fuzzy search, image store / file badges ---- */
 .maps-search {

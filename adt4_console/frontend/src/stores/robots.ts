@@ -3,7 +3,7 @@ import {create} from "zustand";
 import type * as THREE from "three";
 import type {Cls, FrameAlign, LinkInfo, RobotPlan, RobotState, TeleopView} from "../types";
 import {alignMatrix, layerMatrix, robotOfSource} from "../lib/frameAlign";
-import {parsePaths, type RobotPaths} from "../lib/overlays";
+import {parseChanges, parsePaths, type RobotChanges, type RobotPaths} from "../lib/overlays";
 import {ws} from "../ws";
 
 export const HISTORY = 60;
@@ -14,6 +14,8 @@ interface RobotsStore {
   plan: Record<string, RobotPlan>;
   teleop: Record<string, TeleopView>;
   paths: Record<string, RobotPaths>;
+  /** latest change-detection report per robot (added / removed objects) */
+  changes: Record<string, RobotChanges>;
   link: Record<string, LinkInfo>;
   rateHistory: Record<string, Record<Cls, number[]>>;
   setLink: (r: string, l: LinkInfo) => void;
@@ -25,6 +27,7 @@ export const useRobots = create<RobotsStore>(set => ({
   plan: {},
   teleop: {},
   paths: {},
+  changes: {},
   link: {},
   rateHistory: {},
   setLink: (r, l) =>
@@ -41,7 +44,7 @@ export const useRobots = create<RobotsStore>(set => ({
 
 export function bindRobots() {
   ws.on("robot/", (d, f) => {
-    const m = /^robot\/([^/]+)\/(state|plan|paths|teleop)$/.exec(f.topic);
+    const m = /^robot\/([^/]+)\/(state|plan|paths|changes|teleop)$/.exec(f.topic);
     if (!m) return;
     const [, r, kind] = m;
     if (kind === "paths") {
@@ -54,6 +57,15 @@ export function bindRobots() {
           delete paths[r];
           return {paths};
         });
+    } else if (kind === "changes") {
+      const c = d == null ? null : parseChanges(d);
+      useRobots.setState(s => {
+        const changes = {...s.changes};
+        // null: the robot restarted (new epoch) without a report yet
+        if (c) changes[r] = c;
+        else delete changes[r];
+        return {changes};
+      });
     } else if (kind === "teleop") useRobots.setState(s => ({teleop: {...s.teleop, [r]: d as TeleopView}}));
     else if (kind === "state")
       useRobots.setState(s => ({state: {...s.state, [r]: d as RobotState}, stateAt: {...s.stateAt, [r]: Date.now()}}));

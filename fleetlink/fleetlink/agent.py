@@ -12,6 +12,8 @@ health / action results, and on every :meth:`AgentCore.tick` emits
 * C3 ``grid/occupancy`` (latest occupancy grid) every ``grid_period_s`` when
   its content hash changed,
 * C1 ``paths`` (executor smooth / MLP paths + MLP target) only on change,
+* C1 ``changes`` (change-detection added / removed objects, see
+  :mod:`fleetlink.changes`) only on change,
 
 serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
 ``resend``, ``video``) with an ack each (``fb``, the receiver's once-a-second
@@ -77,6 +79,7 @@ DEFAULT_CONFIG = {
     "ack_cache": 256,
     "grid_period_s": 5.0,
     "paths_hz": 2.0,  # how often paths are checked for a change
+    "changes_hz": 1.0,  # how often the change-detection report is checked
     "cameras": ["rgb", "overlay"],
     # cameras subscribed all the time; the others only while wanted (a C4 query
     # or a C5 video request within ``camera_idle_s``), so e.g. six Spot cameras
@@ -223,6 +226,7 @@ class AgentCore:
         "mesh/values": "C3",
         "grid/occupancy": "C3",
         "paths": "C1",
+        "changes": "C1",
         "store/frame": "C6",
     }
 
@@ -312,6 +316,12 @@ class AgentCore:
         self._paths_dirty = False
         self.sent_paths_hash: str | None = None
         self._t_paths = -1e9
+        # change detection (C1): latest report + the prior boxes for removed objects
+        self._changes: dict | None = None
+        self.changes_prior = None  # changes.PriorBoxes, see enable_changes
+        self._changes_dirty = False
+        self.sent_changes_hash: str | None = None
+        self._t_changes = -1e9
         # cameras (C4 request/reply)
         self.camera_names: list[str] = list(self.cfg["cameras"])
         self.eager_cameras: set[str] = set(self.cfg.get("eager_cameras") or [])
@@ -484,6 +494,25 @@ class AgentCore:
             if t is not None:
                 self._paths_t = t
             self._paths_dirty = True
+
+    def enable_changes(self, prior_path: str | None, background: bool = True) -> None:
+        """Report change detection; removed objects get their box from the prior
+        DSG at ``prior_path`` (loaded in the background)."""
+        from .changes import PriorBoxes
+
+        def ready():
+            with self._lock:
+                self._changes_dirty = self._changes is not None
+
+        with self._lock:
+            self.changes_prior = PriorBoxes(prior_path, on_ready=ready)
+        self.changes_prior.start(background)
+
+    def on_changes(self, report: dict) -> None:
+        """A :func:`changes.awcd_to_dict` report; replaces the previous one."""
+        with self._lock:
+            self._changes = report
+            self._changes_dirty = True
 
     def set_cameras(self, names) -> None:
         with self._media_lock:
@@ -658,6 +687,9 @@ class AgentCore:
             if "paths" in streams:
                 self.sent_paths_hash = None
                 self._paths_dirty = True
+            if "changes" in streams:
+                self.sent_changes_hash = None
+                self._changes_dirty = self._changes is not None
             return {"resend": streams, **out}
         if op == "mesh_lod":
             level = str(args.get("level") or "")
@@ -932,6 +964,28 @@ class AgentCore:
             tag="paths",
         )
 
+    def _changes_tick(self) -> None:
+        if not self._changes_dirty:
+            return
+        self._changes_dirty = False
+        from .changes import changes_payload
+
+        payload = changes_payload(self._changes, self.changes_prior)
+        if payload["hash"] == self.sent_changes_hash:
+            return
+
+        def mark(_n, h=payload["hash"]):
+            self.sent_changes_hash = h
+
+        self._queue(
+            "changes",
+            f"{self.prefix}/changes",
+            lambda: payload,
+            96 + 120 * len(payload["objects"]),
+            on_sent=mark,
+            tag="changes",
+        )
+
     # --------------------------------------------------------- C4 media
 
     def _c4_cap(self) -> float:
@@ -999,7 +1053,11 @@ class AgentCore:
                 "results": list(self.results),
                 "stats": self.stats(),
                 "cameras": list(self.camera_names),
-                "hashes": {"grid": self.sent_grid_hash, "paths": self.sent_paths_hash},
+                "hashes": {
+                    "grid": self.sent_grid_hash,
+                    "paths": self.sent_paths_hash,
+                    "changes": self.sent_changes_hash,
+                },
                 # last C2 seq handed to the transport: lets the base detect a
                 # lost *last* message, which no later seq gap would reveal
                 "seqs": {"dsg": self.seq["dsg/delta"] - 1},
@@ -1136,6 +1194,9 @@ class AgentCore:
             if self._paths_dirty and now - self._t_paths >= 1.0 / self.cfg["paths_hz"]:
                 self._t_paths = now
                 self._paths_tick()
+            if self._changes_dirty and now - self._t_changes >= 1.0 / self.cfg["changes_hz"]:
+                self._t_changes = now
+                self._changes_tick()
             if self.store is not None and now - self._t_store >= self.cfg["store_poll_s"]:
                 self._t_store = now
                 try:
@@ -1380,6 +1441,10 @@ class AgentNode:
         # ROMAN loop closures (prior-map matches) for the ``reloc`` state; "" = off
         roman_lc_topic = p("roman_lc_topic", "roman/roman_lc/loop_closure")
         roman_live_id = p("roman_live_robot_id", 0)
+        # change detection reports (khronos AwcdChanges, one global topic for the
+        # fleet); removed objects are boxed from the prior map; "" = off
+        awcd_topic = p("awcd_topic", "/awcd_changes")
+        awcd_prior = p("awcd_prior_map", os.environ.get("ADT4_PRIOR_MAP", ""))
         self.health_monitor = p("health_monitor_name", robot)
         for cls in ("C1", "C2", "C3"):
             cfg["budgets"][cls] = p(f"budget_{cls}", int(cfg["budgets"][cls]))
@@ -1544,6 +1609,8 @@ class AgentNode:
                 )
             except ImportError:
                 self.log.warn("roman_msgs unavailable: no relocalization evidence")
+        if awcd_topic:
+            self._subscribe_changes(nd, awcd_topic, awcd_prior)
 
         self._tf_buffer = None
         try:
@@ -1765,6 +1832,31 @@ class AgentNode:
         except Exception:
             return pts, frame
         return transform_points(pts, tf), target
+
+    def _subscribe_changes(self, nd, topic: str, prior_map: str) -> None:
+        try:
+            from khronos_msgs.msg import AwcdChanges
+        except ImportError:
+            self.log.warn("khronos_msgs unavailable: no change detection")
+            return
+        from .changes import awcd_to_dict, prior_dsg_file
+
+        robot = self.core.robot
+        enabled = False
+
+        def on_msg(msg) -> None:
+            nonlocal enabled
+            if msg.robot_name and msg.robot_name != robot:
+                return  # another robot's report on the shared topic
+            if not enabled:
+                # the prior is only loaded once this robot reports changes
+                enabled = True
+                path = prior_dsg_file(prior_map)
+                self.log.info(f"change detection: prior boxes from {path or 'none'}")
+                self.core.enable_changes(path)
+            self.core.on_changes(awcd_to_dict(msg))
+
+        nd.create_subscription(AwcdChanges, topic, on_msg, 10)
 
     def _on_path(self, which: str, msg) -> None:
         pts, frame = self._to_map(path_points(msg), msg.header.frame_id)

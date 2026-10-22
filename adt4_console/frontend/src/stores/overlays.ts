@@ -16,6 +16,10 @@ interface OverlayStore {
   showSmooth: boolean;
   showMlp: boolean;
   showTarget: boolean;
+  /** change detection: added (green) / removed (red) boxes, their labels */
+  showAdded: boolean;
+  showRemoved: boolean;
+  showChangeLabels: boolean;
   set: (patch: Partial<OverlayStore>) => void;
 }
 
@@ -27,6 +31,9 @@ export const useOverlays = create<OverlayStore>(set => ({
   showSmooth: true,
   showMlp: true,
   showTarget: true,
+  showAdded: true,
+  showRemoved: true,
+  showChangeLabels: true,
   set: patch => set(patch as Partial<OverlayStore>),
 }));
 

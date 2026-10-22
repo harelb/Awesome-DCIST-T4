@@ -173,17 +173,21 @@ class LiveService:
                 self.hub.publish(f"grid/{robot}", data)
             elif kind == "paths" and self.hub is not None:
                 self.hub.publish(f"robot/{robot}/paths", data)
+            elif kind == "changes" and self.hub is not None:
+                self.hub.publish(f"robot/{robot}/changes", data)
         except Exception:  # noqa: BLE001
             log.exception("live update %s/%s failed", robot, kind)
 
     def _clear_stale_overlays(self, robot: str) -> None:
         """After a (re)sync — e.g. the robot's agent restarted with a new epoch —
-        the hub still caches the previous incarnation's latest paths/grid and
+        the hub still caches the previous incarnation's latest paths/grid/changes and
         would replay them to every new browser; overwrite them with "none"."""
         if self.hub is None or self.receiver is None:
             return
         if self.receiver.paths(robot) is None:
             self.hub.publish(f"robot/{robot}/paths", None)
+        if self._call("changes", robot) is None:
+            self.hub.publish(f"robot/{robot}/changes", None)
         if self.receiver.grid(robot) is None:
             self.hub.publish(f"grid/{robot}", {"hash": None})
 
@@ -228,6 +232,10 @@ class LiveService:
 
     def paths(self, robot: str) -> dict | None:
         return self._call("paths", robot)
+
+    def changes(self, robot: str) -> dict | None:
+        """Latest change-detection snapshot (see fleetlink.changes)."""
+        return self._call("changes", robot)
 
     def cameras(self, robot: str) -> list[str]:
         return list(self._call("cameras", robot) or [])

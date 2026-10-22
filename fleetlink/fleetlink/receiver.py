@@ -18,6 +18,8 @@ while the receiver's lock is held: they go to an outbox flushed afterwards.
 * ``link``     - same as :meth:`Receiver.link` (once per second per robot)
 * ``grid``     - ``{hash, frame, width, height, resolution, t}`` (data via :meth:`Receiver.grid`)
 * ``paths``    - the paths dict ``{smooth, mlp, target, frame, t, hash}``
+* ``changes``  - the change-detection snapshot ``{frame, objects, added, removed,
+  prior, t, hash}`` (:mod:`fleetlink.changes`)
 * ``video``    - one C5 video frame ``{camera, codec, seq, t, key, width, height,
   fps, data, ...}`` plus ``gap`` (True when frames of that stream were lost
   in between; a delta after a gap cannot be decoded)
@@ -56,9 +58,10 @@ STREAM_CLASS = {
     "mesh/values": "C3",
     "grid/occupancy": "C3",
     "paths": "C1",
+    "changes": "C1",
     "store/frame": "C6",
 }
-RESEND_STREAMS = ("grid", "paths")
+RESEND_STREAMS = ("grid", "paths", "changes")
 # classes whose budget / rate the base reports and may set (C0 is unmetered)
 REPORTED_CLASSES = ("C1", "C2", "C3", "C4", "C5", "C6")
 VIDEO_PREFIX = "video/"
@@ -148,6 +151,7 @@ class _Robot:
         self.t_ping = -1e9
         self.grid: dict | None = None
         self.paths: dict | None = None
+        self.changes: dict | None = None
         self.mismatch_since: dict[str, float] = {}
         self.resend_req_t: dict[str, float] = {}
         self.video: dict[str, _VideoRx] = {}
@@ -305,6 +309,12 @@ class Receiver:
         with self._lock:
             r = self._robots.get(robot)
             return dict(r.paths) if r is not None and r.paths is not None else None
+
+    def changes(self, robot: str) -> dict | None:
+        """Latest change-detection snapshot, or None (no report / older agent)."""
+        with self._lock:
+            r = self._robots.get(robot)
+            return dict(r.changes) if r is not None and r.changes is not None else None
 
     def cameras(self, robot: str) -> list[str]:
         """Camera names the robot advertises in its C1 state."""
@@ -683,6 +693,9 @@ class Receiver:
         elif stream == "paths":
             r.paths = p
             events.append(("paths", p))
+        elif stream == "changes":
+            r.changes = p
+            events.append(("changes", p))
         elif stream == "mesh/tile":
             r.tiles[p["key"]] = p
             r.tile_req_t.pop(p["key"], None)
@@ -921,6 +934,7 @@ class Receiver:
         r.tile_req_t.clear()
         r.grid = None
         r.paths = None
+        r.changes = None
         r.mismatch_since.clear()
         r.resend_req_t.clear()
         r.video.clear()
@@ -970,7 +984,7 @@ class Receiver:
         return []
 
     def _check_hashes(self, r: _Robot, p: dict, now: float) -> None:
-        """The state lists the hash of the last grid / paths the robot sent.  If ours
+        """The state lists the hash of the last grid / paths / changes the robot sent.  If ours
         differs for longer than ``resend_grace_s`` (the C3 / C1 message was dropped),
         ask the robot to send it again (C0 ``resend``)."""
         hashes = p.get("hashes") or {}

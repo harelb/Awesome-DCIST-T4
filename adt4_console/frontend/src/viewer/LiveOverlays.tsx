@@ -10,6 +10,7 @@ import {Toggle} from "../components/ui";
 import {lift, type DecodedGrid} from "../lib/overlays";
 import {shade, useRobotColorOf} from "../lib/palette";
 import {AlignedGroup} from "./AlignedGroup";
+import {ChangeLayer} from "./ChangeOverlays";
 import {DimGroup} from "./DimGroup";
 import {useBackground} from "./background";
 import {contrastFor, readableOn} from "./style";
@@ -98,6 +99,7 @@ export function LiveOverlays() {
         <DimGroup key={r} robot={r}>
           {(gridOn[r] ?? true) && <GridLayer robot={r} />}
           <PathLayer robot={r} />
+          <ChangeLayer robot={r} />
         </DimGroup>
       ))}
     </>

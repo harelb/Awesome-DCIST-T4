@@ -41,6 +41,17 @@ def state(robot: str, request: Request):
     return st
 
 
+@router.get("/{robot}/changes")
+def changes(robot: str, request: Request):
+    """Latest change-detection snapshot (``robot/<r>/changes`` on the WebSocket):
+    ``{frame, objects: [{id, kind: added|removed, box, center, dims, quat, label,
+    name, cc, n, conf}], added, removed, prior, t, hash}``."""
+    ch = services(request).live.changes(robot)
+    if ch is None:
+        raise HTTPException(404, f"no change detection report from {robot}")
+    return ch
+
+
 @router.get("/{robot}/grid")
 def grid(robot: str, request: Request):
     """Latest occupancy grid as msgpack ``{frame, resolution, origin: [x, y, z, yaw],

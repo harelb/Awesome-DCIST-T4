@@ -1,5 +1,6 @@
 // Decoders for the live RViz-replacement overlays (API.md §11): occupancy grid
-// (msgpack dict with a zlib int8 payload) and executor paths.
+// (msgpack dict with a zlib int8 payload), executor paths and change-detection
+// reports (added / removed objects).
 
 export type Vec3 = [number, number, number];
 
@@ -24,6 +25,38 @@ export interface RobotPaths {
   mlp: Vec3[];
   target: Vec3 | null;
   frame: string;
+  t: number | null;
+  hash?: string;
+}
+
+export type ChangeKind = "added" | "removed";
+
+/** One object of a robot's change-detection report (fleetlink `changes`). */
+export interface ChangedObject {
+  id: number;
+  kind: ChangeKind;
+  /** false: a removed object the robot found no prior box for (listed, not drawn) */
+  box: boolean;
+  center: Vec3;
+  dims: Vec3;
+  /** x, y, z, w */
+  quat: [number, number, number, number];
+  label: number;
+  name: string;
+  /** change confidence (the EMA that decides added / removed) */
+  cc: number;
+  /** frames that fed `cc` */
+  n: number;
+  /** tracking confidence (added only) */
+  conf: number | null;
+}
+
+export interface RobotChanges {
+  frame: string;
+  objects: ChangedObject[];
+  added: number;
+  removed: number;
+  prior: {ready: boolean; boxes: number; error: string | null} | null;
   t: number | null;
   hash?: string;
 }
@@ -106,3 +139,56 @@ export function parsePaths(raw: unknown): RobotPaths | null {
 
 /** Lift points slightly above the floor so they are not hidden by the mesh. */
 export const lift = (pts: Vec3[], dz = 0.12): Vec3[] => pts.map(p => [p[0], p[1], p[2] + dz]);
+
+const num = (v: unknown, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+
+/** Validate a `robot/<r>/changes` payload; malformed objects are dropped. */
+export function parseChanges(raw: unknown): RobotChanges | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const objects: ChangedObject[] = [];
+  for (const o of Array.isArray(r.objects) ? r.objects : []) {
+    if (!o || typeof o !== "object") continue;
+    const x = o as Record<string, unknown>;
+    if (x.kind !== "added" && x.kind !== "removed") continue;
+    const q = Array.isArray(x.quat) && x.quat.length === 4 ? x.quat.map(v => num(v)) : [0, 0, 0, 1];
+    const box = x.box !== false && isVec3(x.center) && isVec3(x.dims);
+    objects.push({
+      id: num(x.id),
+      kind: x.kind,
+      box,
+      center: box ? vec3(x.center as number[]) : [0, 0, 0],
+      dims: box ? vec3(x.dims as number[]) : [0, 0, 0],
+      quat: [q[0], q[1], q[2], q[3]],
+      label: num(x.label, -1),
+      name: String(x.name ?? ""),
+      cc: num(x.cc),
+      n: num(x.n),
+      conf: x.conf == null ? null : num(x.conf),
+    });
+  }
+  const p = r.prior as Record<string, unknown> | null | undefined;
+  return {
+    frame: String(r.frame ?? ""),
+    objects,
+    added: objects.filter(o => o.kind === "added").length,
+    removed: objects.filter(o => o.kind === "removed").length,
+    prior: p && typeof p === "object" ? {ready: !!p.ready, boxes: num(p.boxes), error: p.error ? String(p.error) : null} : null,
+    t: typeof r.t === "number" ? r.t : null,
+    hash: typeof r.hash === "string" ? r.hash : undefined,
+  };
+}
+
+/** Display name of a changed object ("chair", else "label 12", else "object"). */
+export const changeName = (o: ChangedObject) => o.name || (o.label >= 0 ? `label ${o.label}` : "object");
+
+/** The 12 edges of a box centred on the origin (24 points, for a LineSegments). */
+export function boxEdges(dims: Vec3): Vec3[] {
+  const [hx, hy, hz] = dims.map(v => Math.max(v, 0.02) / 2);
+  const c: Vec3[] = [];
+  for (const z of [-hz, hz]) for (const y of [-hy, hy]) for (const x of [-hx, hx]) c.push([x, y, z]);
+  // corner i: bit0 = +x, bit1 = +y, bit2 = +z; edges join corners differing in one bit
+  const out: Vec3[] = [];
+  for (let i = 0; i < 8; i++) for (const b of [1, 2, 4]) if (!(i & b)) out.push(c[i], c[i | b]);
+  return out;
+}

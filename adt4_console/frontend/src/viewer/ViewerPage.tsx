@@ -16,6 +16,7 @@ import {PlanPanel, visitGoal} from "./PlanPanel";
 import {ChatPanel} from "./ChatPanel";
 import {LivePanel} from "./LivePanel";
 import {LiveOverlaysPanel} from "./LiveOverlays";
+import {ChangesPanel} from "./ChangeOverlays";
 import {RobotLegend} from "./RobotLegend";
 import {CameraPanel} from "./CameraPanel";
 import {DriveFullscreen, requestPageFullscreen} from "./DriveFullscreen";
@@ -280,6 +281,7 @@ export default function ViewerPage() {
       <SourcesPanel stats={stats} />
       <LayersPanel />
       <LiveOverlaysPanel />
+      <ChangesPanel />
       <DisplayPanel />
       <ColorsPanel />
       {!isPhone && (
