@@ -1,4 +1,7 @@
-// Teleop tab: drive a Spot through its executor (which holds the lease).
+// Teleop tab: drive a robot. A Spot is driven through its executor (which
+// holds the lease); a phoenix Husky through its twist_marker_server input
+// (twist_mux: the joystick and RC remote override it). Spot-only controls
+// (lease, Stand / Sit, Pause, strafing) are hidden for other platforms.
 // Keys drive only while this panel has focus AND Drive is armed; arming asks
 // for confirmation once per browser session and shows a red ARMED banner.
 // Losing focus, hiding the page or changing the robot focus disarms. The
@@ -12,10 +15,10 @@ import {useViewer} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {
-  CAPS,
   TeleopDriver,
   ZERO,
   armConfirmed,
+  capsFor,
   captureTouches,
   isDriveKey,
   joystickToTwist,
@@ -32,6 +35,8 @@ import {Badge, Empty, ErrorBox, Loading, Modal, Spinner} from "../components/ui"
 import {LeaseControl} from "./LeaseControl";
 import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
+import {usePhoenixGuards, usePlatform} from "./usePlatform";
+import {PhoenixChips} from "./PhoenixStatus";
 import "./teleop.css";
 
 const POLL_MS = 3000;
@@ -123,6 +128,14 @@ export function TeleopPanel() {
   // only ever the robot the operator focused; never a default pick
   const robot = focused && list.some(r => r.robot === focused) ? focused : null;
   const teleopViews = useRobots(s => s.teleop);
+  const entry = list.find(r => r.robot === robot);
+  const platform = usePlatform(robot, entry?.platform);
+  const spot = platform === "spot";
+  const caps = capsFor(platform, entry?.caps);
+  const capsRef = useRef(caps);
+  capsRef.current = caps;
+  const phx = usePhoenixGuards(robot);
+  const estop = !spot && phx.estop === true;
 
   const view = useRobots(s => (robot ? s.teleop[robot] : undefined));
   // initial fetch + slow poll (the hub pushes the executor's state as it comes)
@@ -146,7 +159,7 @@ export function TeleopPanel() {
   const [drv, setDrv] = useState<DriverStatus>({connected: false, rttMs: null, acked: null, error: null, sent: 0});
   const [armed, setArmed] = useState(false);
   const [confirming, setConfirming] = useState(false);
-  // starts at 0.4 m/s forward; the slider goes up to Spot's 1.6 m/s
+  // starts at a quarter of the robot's top speed (Spot 0.4 m/s of 1.6)
   const [speed, setSpeed] = useState(0.25);
   const [strafe, setStrafe] = useState(false);
   const [cmd, setCmd] = useState<Twist>(ZERO);
@@ -159,7 +172,8 @@ export function TeleopPanel() {
   const speedRef = useRef(speed);
   const strafeRef = useRef(strafe);
   speedRef.current = speed;
-  strafeRef.current = strafe;
+  // only Spot strafes (a Husky's vy cap is 0: a strafing joystick would not turn)
+  strafeRef.current = strafe && spot;
 
   const armedRef = useRef(false);
   armedRef.current = armed;
@@ -170,6 +184,7 @@ export function TeleopPanel() {
   useLayoutEffect(() => {
     if (!robot) return;
     const d = new TeleopDriver(teleopWsUrl(robot), s => setDrv(s));
+    d.caps = capsRef.current;
     driver.current = d;
     return () => {
       const was = armedRef.current || d.isArmed;
@@ -187,13 +202,15 @@ export function TeleopPanel() {
 
   const recompute = useCallback(() => {
     const j = joy.current;
-    const t = j ? joystickToTwist(j.x, j.y, speedRef.current, strafeRef.current) : keysToTwist(held.current, speedRef.current, slow.current);
+    const c = capsRef.current;
+    if (driver.current) driver.current.caps = c;
+    const t = j ? joystickToTwist(j.x, j.y, speedRef.current, strafeRef.current, c) : keysToTwist(held.current, speedRef.current, slow.current, c);
     driver.current?.command(t);
     setCmd(t);
   }, []);
   useEffect(() => {
     if (armed) recompute();
-  }, [speed, strafe, armed, recompute]);
+  }, [speed, strafe, armed, recompute, caps.vx, caps.vy, caps.wz]);
 
   const disarm = useCallback((why?: string) => {
     driver.current?.disarm();
@@ -211,8 +228,13 @@ export function TeleopPanel() {
     if (driveFull && armedRef.current) disarm("full-screen drive opened");
   }, [driveFull, disarm]);
 
+  // a pressed E-stop disarms (Drive stays disabled while it is)
+  useEffect(() => {
+    if (estop && armedRef.current) disarm("E-stop pressed");
+  }, [estop, disarm]);
+
   const doArm = () => {
-    if (!driver.current || useViewer.getState().driveFull) return;
+    if (!driver.current || useViewer.getState().driveFull || estop) return;
     driver.current.arm();
     setArmed(true);
     setNote(null);
@@ -304,7 +326,7 @@ export function TeleopPanel() {
             return (
               <button key={r.robot} className="btn teleop-pick-btn" onClick={() => setFocus(r.robot)} data-testid={`teleop-pick-${r.robot}`}>
                 <span className="teleop-pick-name">{r.robot}</span>
-                <span className="small muted">{st ? (st.allowed ? "executor ready" : `executor: ${st.interlock || "refuses"}`) : "no teleop state yet"}</span>
+                <PickStatus robot={r.robot} hint={r.platform} executor={st ? (st.allowed ? "executor ready" : `executor: ${st.interlock || "refuses"}`) : "no teleop state yet"} />
               </button>
             );
           })}
@@ -326,7 +348,8 @@ export function TeleopPanel() {
   const linkRtt = view?.link?.rtt;
   const standing = st?.standing == null ? "unknown" : st.standing ? "standing" : "sitting";
   const exec = st ? (st.plan_executing ? "plan executing" : st.plan_paused ? "plan paused" : st.executor || "idle") : "–";
-  const blocked = st && !st.allowed ? st.interlock : "";
+  const blocked = spot && st && !st.allowed ? st.interlock : "";
+  const keysHelp = spot ? "W/S A/D Q/E" : "W/S Q/E";
 
   return (
     <div
@@ -342,7 +365,7 @@ export function TeleopPanel() {
     >
       {armed ? (
         <div className="teleop-armed" role="alert">
-          <strong>ARMED</strong> · driving {robot} · W/S A/D Q/E · Shift slow · Space stop · Esc disarm
+          <strong>ARMED</strong> · driving {robot} · {keysHelp} · Shift slow · Space stop · Esc disarm
         </div>
       ) : (
         <div className="teleop-hint muted small">Drive arms the keys and joystick. They work only while this panel has focus (clicking the map or camera disarms); the robot stops within 0.5 s when they stop.</div>
@@ -350,24 +373,38 @@ export function TeleopPanel() {
 
       <div className="row gap between">
         <FocusChip robot={robot} />
-        <LeaseControl robot={robot} />
+        {spot ? <LeaseControl robot={robot} /> : <PhoenixChips robot={robot} long />}
       </div>
 
       <div className="teleop-buttons">
-        <button className="btn teleop-stop" disabled={!robot || busy === "stop"} onClick={() => void post("stop")} title="Halt the robot now: ends teleop and cancels the running plan">
-          {busy === "stop" && <Spinner />} STOP
+        <button
+          className="btn teleop-stop"
+          disabled={!robot || busy === "stop"}
+          onClick={() => void post("stop")}
+          title={spot ? "Halt the robot now: ends teleop and cancels the running plan" : "Halt the robot now: zero velocity, then manual mode (it stops executing plans until Resume (auto))"}
+        >
+          {busy === "stop" && <Spinner />} {spot ? "STOP" : "STOP (manual)"}
         </button>
-        <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("stand")}>
-          {busy === "stand" && <Spinner />} Stand
-        </button>
-        <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("sit")}>
-          {busy === "sit" && <Spinner />} Sit
-        </button>
-        <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("pause")} title="Pause the running plan (teleop is accepted while it is paused)">
-          {busy === "pause" && <Spinner />} Pause
-        </button>
-        <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("resume")} title="Resume the plan; it takes the robot back from teleop">
-          {busy === "resume" && <Spinner />} Resume
+        {spot && (
+          <>
+            <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("stand")}>
+              {busy === "stand" && <Spinner />} Stand
+            </button>
+            <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("sit")}>
+              {busy === "sit" && <Spinner />} Sit
+            </button>
+            <button className="btn teleop-big" disabled={!robot || !!busy} onClick={() => void post("pause")} title="Pause the running plan (teleop is accepted while it is paused)">
+              {busy === "pause" && <Spinner />} Pause
+            </button>
+          </>
+        )}
+        <button
+          className="btn teleop-big"
+          disabled={!robot || !!busy}
+          onClick={() => void post("resume")}
+          title={spot ? "Resume the plan; it takes the robot back from teleop" : "Leave manual mode: the robot executes plans again (auto)"}
+        >
+          {busy === "resume" && <Spinner />} {spot ? "Resume" : "Resume (auto)"}
         </button>
       </div>
       {result && (
@@ -380,16 +417,16 @@ export function TeleopPanel() {
         <button
           className={`btn teleop-drive ${armed ? "btn-danger" : "btn-primary"}`}
           aria-pressed={armed}
-          disabled={!robot || rosDown}
+          disabled={!robot || rosDown || (estop && !armed)}
           onClick={requestArm}
           data-testid="teleop-drive"
-          title={rosDown ? "ROS is not available on the console" : armed ? "Disarm" : "Arm keyboard / joystick driving"}
+          title={rosDown ? "ROS is not available on the console" : estop && !armed ? "E-stop is pressed" : armed ? "Disarm" : "Arm keyboard / joystick driving"}
         >
           {armed ? "Disarm" : "Drive"}
         </button>
         <label className="teleop-speed">
           <span className="small muted">
-            Speed {Math.round(speed * 100)} % · {(CAPS.vx * speed).toFixed(2)} m/s
+            Speed {Math.round(speed * 100)} % · {(caps.vx * speed).toFixed(2)} m/s
           </span>
           <input type="range" min={0.1} max={1} step={0.05} value={speed} onChange={e => setSpeed(Number(e.target.value))} aria-label="Speed" />
         </label>
@@ -397,6 +434,18 @@ export function TeleopPanel() {
       {note && <div className="small muted">{note}</div>}
       {drv.error && armed && <div className="inline-msg tone-err">{drv.error}</div>}
       {blocked && <div className="inline-msg tone-warn">Executor refuses teleop: {blocked}</div>}
+      {estop && <div className="inline-msg tone-err">E-stop is pressed: {robot} will not move. Release it on the robot to drive.</div>}
+      {!spot && !estop && phx.safety && <div className="inline-msg tone-err">Safety stop is active: {robot} will not move.</div>}
+      {!spot && view?.stopped && (
+        <div className="inline-msg tone-err" data-testid="teleop-stopped-note">
+          Stopped — press Resume or re-arm: the console refuses to drive {robot} until Resume (auto) or a fresh Drive arm.
+        </div>
+      )}
+      {!spot && phx.manual && (
+        <div className="inline-msg tone-warn" data-testid="teleop-manual-note">
+          Manual mode: {robot} will not execute plans. Resume (auto) hands it back to the planner.
+        </div>
+      )}
 
       <div className="teleop-joy-row">
         <Joystick
@@ -406,10 +455,12 @@ export function TeleopPanel() {
             recompute();
           }}
         />
-        <label className="row gap-sm small">
-          <input type="checkbox" checked={strafe} onChange={e => setStrafe(e.target.checked)} />
-          Joystick strafes (instead of turning)
-        </label>
+        {spot && (
+          <label className="row gap-sm small">
+            <input type="checkbox" checked={strafe} onChange={e => setStrafe(e.target.checked)} />
+            Joystick strafes (instead of turning)
+          </label>
+        )}
       </div>
 
       <div className="kv-grid teleop-readouts">
@@ -423,32 +474,43 @@ export function TeleopPanel() {
           <span className="kv-k">Console ack</span>
           <span className="kv-v mono">{fmtTwist(drv.acked)}</span>
         </div>
-        <div className="kv">
-          <span className="kv-k">Robot applies</span>
-          <span className="kv-v mono" title="The executor's last accepted command (after its caps)">
-            {st ? fmtTwist(st.commanded) : "–"}
-          </span>
-        </div>
+        {spot && (
+          <div className="kv">
+            <span className="kv-k">Robot applies</span>
+            <span className="kv-v mono" title="The executor's last accepted command (after its caps)">
+              {st ? fmtTwist(st.commanded) : "–"}
+            </span>
+          </div>
+        )}
         <div className="kv">
           <span className="kv-k">Reported</span>
           <span className="kv-v mono" title="From the robot's live pose">
             {reported ? `${f2(reported.v)} m/s, ${f2(reported.wz)} rad/s` : "–"}
           </span>
         </div>
-        <div className="kv">
-          <span className="kv-k">Teleop</span>
-          <span className="kv-v">
-            <Badge tone={st?.active ? "warn" : "off"}>{st ? (st.active ? "active" : "idle") : "no state"}</Badge>
-          </span>
-        </div>
-        <div className="kv">
-          <span className="kv-k">Posture</span>
-          <span className="kv-v">{st?.busy ? `${st.busy}…` : standing}</span>
-        </div>
-        <div className="kv">
-          <span className="kv-k">Executor</span>
-          <span className="kv-v">{exec}</span>
-        </div>
+        {spot ? (
+          <>
+            <div className="kv">
+              <span className="kv-k">Teleop</span>
+              <span className="kv-v">
+                <Badge tone={st?.active ? "warn" : "off"}>{st ? (st.active ? "active" : "idle") : "no state"}</Badge>
+              </span>
+            </div>
+            <div className="kv">
+              <span className="kv-k">Posture</span>
+              <span className="kv-v">{st?.busy ? `${st.busy}…` : standing}</span>
+            </div>
+            <div className="kv">
+              <span className="kv-k">Executor</span>
+              <span className="kv-v">{exec}</span>
+            </div>
+          </>
+        ) : (
+          <div className="kv">
+            <span className="kv-k">Mode</span>
+            <span className="kv-v">{phx.manual == null ? "unknown" : phx.manual ? "manual (RC)" : "auto"}</span>
+          </div>
+        )}
         <div className="kv">
           <span className="kv-k">Link</span>
           <span className="kv-v mono" title="browser↔console round trip · console↔robot (fleetlink) round trip">
@@ -470,7 +532,7 @@ export function TeleopPanel() {
           </div>
         )}
       </div>
-      {!st && robot && <div className="small muted">No teleop state from {robot}'s executor (not running, or built without teleop).</div>}
+      {spot && !st && robot && <div className="small muted">No teleop state from {robot}'s executor (not running, or built without teleop).</div>}
 
       {confirming && (
         <Modal
@@ -497,11 +559,19 @@ export function TeleopPanel() {
           }
         >
           <p className="confirm-msg">
-            Keys W/S A/D Q/E and the joystick will move {robot} (up to {CAPS.vx} m/s). Keep the robot in sight and the E-stop in reach. Driving works only while this panel has focus; clicking elsewhere (the map, the camera) or changing the robot focus disarms.
-            The executor refuses while a plan is executing: pause it first. You are asked once per browser session.
+            Keys {keysHelp} and the joystick will move {robot} (up to {caps.vx} m/s). Keep the robot in sight and the E-stop in reach. Driving works only while this panel has focus; clicking elsewhere (the map, the camera) or changing the robot focus disarms.{" "}
+            {spot ? "The executor refuses while a plan is executing: pause it first." : "The robot's joystick and RC remote override the console."} You are asked once per browser session.
           </p>
         </Modal>
       )}
     </div>
   );
+}
+
+/** Pick-list status line: the executor's on a Spot, the mode on a phoenix. */
+function PickStatus({robot, hint, executor}: {robot: string; hint?: string; executor: string}) {
+  const platform = usePlatform(robot, hint);
+  const g = usePhoenixGuards(robot);
+  if (platform === "spot") return <span className="small muted">{executor}</span>;
+  return <span className="small muted">{g.estop ? "E-stop pressed" : g.manual == null ? "no status yet" : g.manual ? "manual mode" : "auto"}</span>;
 }

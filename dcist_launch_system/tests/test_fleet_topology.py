@@ -122,3 +122,13 @@ def test_zenohd_stop_and_cleanup(tmp_path):
     zenohd.cleanup(state)
     proc.terminate.assert_called_once()
     assert state == {"proc": None, "config": None} and not cfg.exists()
+
+
+def test_real_topology_robot_platforms(topology_path):
+    """hamilton is an explicit spot; gauss is the phoenix Husky on the radio."""
+    from dcist_launch_system.fleet_helpers import platform_of
+
+    machines = load_topology(topology_path)["machines"]
+    assert machines["hamilton"]["platform_type"] == "spot"
+    assert platform_of(machines["gauss"]) == "phoenix"
+    assert machines["gauss"]["addresses"] == {"mit_wifi": "10.31.168.179", "silvus": "192.168.100.4"}

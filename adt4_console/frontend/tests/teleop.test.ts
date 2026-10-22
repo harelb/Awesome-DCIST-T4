@@ -175,6 +175,22 @@ describe("TeleopDriver", () => {
     h.fire(1000 / SEND_HZ);
     expect(h.sockets.length).toBe(2);
   });
+
+  it("each arm sends one arm (clears a STOP latch) before streaming; a reconnect does not", () => {
+    const h = harness();
+    const d = new TeleopDriver("ws://x", undefined, h.deps);
+    d.arm();
+    h.sockets[0].open();
+    expect(h.sockets[0].sent[0]).toMatchObject({type: "arm"});
+    h.sockets[0].onclose?.({} as CloseEvent);
+    h.fire(1000 / SEND_HZ);
+    h.sockets[1].open();
+    expect(h.sockets[1].sent.some(m => m.type === "arm")).toBe(false);
+    d.disarm();
+    d.arm();
+    h.sockets[2].open();
+    expect(h.sockets[2].sent.filter(m => m.type === "arm").length).toBe(1);
+  });
 });
 
 describe("helpers", () => {

@@ -130,12 +130,24 @@ def load_topology(path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+PLATFORM_ALIASES = {"husky": "phoenix"}
+
+
+def platform_of(machine: dict | None) -> str:
+    """A topology machine's platform: ``platform_type``, missing → spot, husky → phoenix.
+
+    The one rule the agent, bridge, console and fleet tooling all use.
+    """
+    p = str((machine or {}).get("platform_type") or DEFAULT_PLATFORM).lower()
+    return PLATFORM_ALIASES.get(p, p)
+
+
 def topology_robots(topology: dict) -> dict[str, str]:
     """``{robot: platform_type}`` for every ``role: robot`` machine."""
     out = {}
     for name, m in ((topology or {}).get("machines") or {}).items():
         if (m or {}).get("role") == "robot":
-            out[name] = str(m.get("platform_type") or DEFAULT_PLATFORM).lower()
+            out[name] = platform_of(m)
     return out
 
 

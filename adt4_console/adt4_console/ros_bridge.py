@@ -205,6 +205,35 @@ def action_sequence_to_dict(msg) -> dict:
     }
 
 
+def path_plan_id(header) -> str:
+    """A phoenix plan's id: its Path header stamp (``f"{sec}.{nanosec:09d}"``,
+    the same id the fleetlink agent's ``phoenix_progress`` reports)."""
+    return f"{int(header.stamp.sec)}.{int(header.stamp.nanosec):09d}"
+
+
+def path_to_dict(msg, robot_name: str) -> dict:
+    """nav_msgs/Path (phoenix: omniplanner's compiled plan) -> the dict
+    :func:`action_sequence_to_dict` makes, with the path as one FOLLOW action
+    (none for an empty path)."""
+    actions = []
+    if msg.poses:
+        actions.append(
+            {
+                "type": "FOLLOW",
+                "path": [_pt(ps.pose.position) for ps in msg.poses],
+                "object_id": "",
+                "object_class": "",
+                "point": None,
+            }
+        )
+    return {
+        "plan_id": path_plan_id(msg.header),
+        "robot_name": robot_name,
+        "t": _stamp(msg.header),
+        "actions": actions,
+    }
+
+
 class RobotPlanState:
     def __init__(self):
         self.goals = collections.deque(maxlen=100)
@@ -219,6 +248,7 @@ class RobotPlanState:
         self.constraints: list[dict] = []
         self.lease: dict | None = None  # from the executor's runtime guards
         self.teleop: dict | None = None  # the executor's ~/teleop_state
+        self.manual_mode: dict | None = None  # phoenix ~/manual_mode {value, t}
 
     def to_dict(self) -> dict:
         return {
@@ -247,6 +277,12 @@ def lease_from_guards(msg) -> dict:
 # re-send an unchanged lease view this often (the UI ages it out without one)
 LEASE_REPUBLISH_S = 5.0
 TAKE_LEASE_TIMEOUT_S = 20.0
+# phoenix Stop / Resume (/<robot>/toggle_manual_mode); the relay times out at 10 s
+TOGGLE_MANUAL_TIMEOUT_S = 10.0
+
+
+class NotSupported(ValueError):
+    """A command the robot's platform does not have (→ 400)."""
 
 
 class RosBridge:
@@ -268,6 +304,9 @@ class RosBridge:
         # robot -> (receive time, fleetlink-bridge link status)
         self._link_status: dict[str, tuple[float, dict]] = {}
         self._link_cv = threading.Condition()
+        # robot -> the console's teleop STOP latch (TeleopService.stopped; the
+        # app binds it) so every teleop view, hub pushes included, carries it
+        self.teleop_latch = None
         self._calls: queue.Queue = queue.Queue()
         self._pubs: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -511,6 +550,23 @@ class RosBridge:
             for k in ("connected", "rtt", "loss", "last_seen", "age_s", "cfg_match")
         }
 
+    def platform(self, robot: str) -> str:
+        """``robot``'s platform by the shared rule (topology ``platform_type``;
+        missing → spot, husky → phoenix); spot without a fleet / topology."""
+        topo = getattr(self.fleet, "topo", None) or {}
+        machine = (topo.get("machines") or {}).get(robot)
+        try:
+            from dcist_launch_system.fleet_helpers import platform_of
+        except ImportError:  # no fleet tooling: treat as the default platform
+            return "spot"
+        return platform_of(machine)
+
+    def require_spot(self, robot: str, cmd: str) -> None:
+        """NotSupported unless ``robot`` is a Spot (stand / sit / lease / pause)."""
+        platform = self.platform(robot)
+        if platform != "spot":
+            raise NotSupported(f"{cmd} is spot only ({robot} is {platform})")
+
     def ensure_robot(self, robot: str) -> None:
         with self._lock:
             if robot in self._subscribed or not self.available:
@@ -519,14 +575,23 @@ class RosBridge:
         self.run(lambda: self._subscribe_robot(robot))
 
     def _subscribe_robot(self, robot: str) -> None:
-        seq = import_type("robot_executor_msgs/msg/ActionSequenceMsg")
-        res = import_type("robot_executor_msgs/msg/ActionResultMsg")
         string = import_type("std_msgs/msg/String")
         n = self.node
-        n.create_subscription(
-            seq, f"/{robot}/omniplanner_node/compiled_plan_out",
-            lambda m: self._on_plan(robot, m), 10,
-        )  # fmt: skip
+        spot = self.platform(robot) == "spot"
+        # omniplanner compiles a Spot plan to an ActionSequenceMsg and a phoenix
+        # plan to a nav_msgs/Path (relay.yaml carries each platform's type)
+        if spot:
+            n.create_subscription(
+                import_type("robot_executor_msgs/msg/ActionSequenceMsg"),
+                f"/{robot}/omniplanner_node/compiled_plan_out",
+                lambda m: self._on_plan(robot, m), 10,
+            )  # fmt: skip
+        else:
+            n.create_subscription(
+                import_type("nav_msgs/msg/Path"),
+                f"/{robot}/omniplanner_node/compiled_plan_out",
+                lambda m: self._on_path_plan(robot, m), 10,
+            )  # fmt: skip
         n.create_subscription(
             string, f"/{robot}/omniplanner_node/llm_response",
             lambda m: self._on_llm(robot, m), 10,
@@ -562,6 +627,17 @@ class RosBridge:
                 lambda m: self._on_repair_alert(robot, "plan_failed", m.data),
                 10,
             )
+        if not spot:
+            # phoenix has no spot_executor_node (no results / guards / teleop
+            # state); its auto / manual mode is relayed up like the guards
+            n.create_subscription(
+                import_type("std_msgs/msg/Bool"),
+                f"/{robot}/manual_mode",
+                lambda m: self._on_manual_mode(robot, m),
+                1,
+            )
+            return
+        res = import_type("robot_executor_msgs/msg/ActionResultMsg")
         # omniplanner's adaptor listens on spot_executor/, the executor node is
         # spot_executor_node — subscribe to both spellings.
         for ex in ("spot_executor_node", "spot_executor"):
@@ -602,9 +678,16 @@ class RosBridge:
         if self.hub is not None:
             self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
 
+    def _on_manual_mode(self, robot, msg) -> None:
+        self._plan[robot].manual_mode = {"value": bool(msg.data), "t": time.time()}
+        if self.hub is not None:
+            self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
+
     def teleop(self, robot: str) -> dict:
         """Teleop panel view: the executor's teleop state (None when stale or
-        never seen), the lease, the fleetlink link (fleetlink mode)."""
+        never seen), the lease, the fleetlink link (fleetlink mode), the
+        platform, the console's STOP latch (``stopped``) and (phoenix) the last
+        ``manual_mode`` seen."""
         from .teleop_service import TELEOP_STATE_FRESH_S
 
         st = self._plan[robot].teleop
@@ -612,15 +695,24 @@ class RosBridge:
         lease = self._plan[robot].lease
         if lease is not None:
             lease = {k: v for k, v in lease.items() if k != "_pub"}
-        return {
+        out = {
             "robot": robot,
+            "platform": self.platform(robot),
             "state": st if fresh else None,
             "lease": lease,
             "link": self.link_summary(self.link_status(robot)),
+            "stopped": self.teleop_latch(robot) if self.teleop_latch is not None else None,
         }
+        if out["platform"] == "phoenix":
+            out["manual_mode"] = self._plan[robot].manual_mode
+        return out
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)
+        self._publish_plan(robot)
+
+    def _on_path_plan(self, robot, msg) -> None:
+        self._plan[robot].plan = path_to_dict(msg, robot)
         self._publish_plan(robot)
 
     def _on_repair_alert(self, default_robot, kind: str, text: str) -> None:
@@ -794,7 +886,8 @@ class RosBridge:
         """Ask the robot's executor to forcibly take the Spot lease
         (``~/take_lease``, std_srvs/Trigger).  In fleetlink mode the bridge
         serves the relayed service; a relay failure comes back as an empty
-        default response, reported as such."""
+        default response, reported as such.  NotSupported off a Spot."""
+        self.require_spot(robot, "take_lease")
         name = f"/{robot}/spot_executor_node/take_lease"
         res = self.call_service(
             name, "std_srvs/srv/Trigger", {}, timeout=TAKE_LEASE_TIMEOUT_S
@@ -806,22 +899,33 @@ class RosBridge:
         return {"ok": ok, "message": message, "service": name}
 
     def executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
-        """Publish Pause/Resume.  Router mode: ``subscribers`` is the ROS match
-        count.  Fleetlink mode (a fresh ``fleetlink/link_status`` for the robot):
-        fleetlink-bridge is always the local subscriber, so that count says
-        nothing; instead wait for the robot's relay ack (``delivered``) and report
-        the *robot-side* subscriber count it carried (None if not acked yet; the
-        relay keeps retrying within the topic's ttl)."""
+        """Stop / Pause / Resume the robot's plan execution, per platform.
+
+        Spot: publish on the executor's ``~/<cmd>``.  Router mode: ``subscribers``
+        is the ROS match count.  Fleetlink mode (a fresh ``fleetlink/link_status``
+        for the robot): fleetlink-bridge is always the local subscriber, so that
+        count says nothing; instead wait for the robot's relay ack (``delivered``)
+        and report the *robot-side* subscriber count it carried (None if not acked
+        yet; the relay keeps retrying within the topic's ttl).  A publish nobody
+        subscribes to (``subscribers == 0``) is ``ok: False`` with an ``error``.
+
+        Phoenix: :meth:`phoenix_mode_cmd` (stop = manual mode, resume = auto);
+        pause raises NotSupported.
+        """
+        if self.platform(robot) != "spot":
+            if cmd == "pause":
+                self.require_spot(robot, cmd)
+            return self.phoenix_mode_cmd(robot, cmd)
         topic = f"/{robot}/spot_executor_node/{cmd}"
         link = self.link_status(robot)
         before = self._acked(robot, topic)
         subs = self.publish(topic, "std_msgs/msg/Bool", {"data": True})
         out = {"ok": True, "topic": topic, "msg": {"data": True}, "subscribers": subs}
         if link is None:
-            return out
+            return _no_subscriber(out, f"nothing subscribes to {topic} (is the executor running?)")
         if topic not in (link.get("topics") or {}):
             # fleetlink mode but relay.yaml does not carry this topic for the robot
-            out.update(via="fleetlink", delivered=False, subscribers=None,
+            out.update(ok=False, via="fleetlink", delivered=False, subscribers=None,
                        error="topic not relayed", link=self.link_summary(link))  # fmt: skip
             return out
         delivered = self.wait_delivered(robot, topic, before, deliver_timeout)
@@ -833,4 +937,41 @@ class RosBridge:
             subscribers=t.get("subs") if delivered else None,
             link=self.link_summary(st),
         )
+        return _no_subscriber(out, f"delivered, but nothing subscribes to {topic} on {robot}")
+
+    def phoenix_mode_cmd(self, robot: str, cmd: str) -> dict:
+        """Phoenix Stop / Resume: ``/<robot>/toggle_manual_mode`` (std_srvs/SetBool),
+        data=true (stop) puts the robot in manual mode, where sequence_controller
+        executes no plan; data=false (resume) returns it to autonomous.  In
+        fleetlink mode the bridge serves the relayed service; a service relay.yaml
+        does not carry fails at once instead of waiting out the timeout."""
+        if cmd not in ("stop", "resume"):
+            raise NotSupported(f"{cmd} is not supported on {self.platform(robot)}")
+        name = f"/{robot}/toggle_manual_mode"
+        data = cmd == "stop"
+        out = {"ok": False, "service": name, "msg": {"data": data}, "manual_mode": data}
+        link = self.link_status(robot)
+        if link is not None:
+            out.update(via="fleetlink", link=self.link_summary(link))
+            if name not in (link.get("services") or {}):
+                out.update(error="service not relayed")
+                return out
+        try:
+            res = self.call_service(
+                name, "std_srvs/srv/SetBool", {"data": data}, timeout=TOGGLE_MANUAL_TIMEOUT_S
+            )
+        except TimeoutError as e:
+            out.update(error=str(e))
+            return out
+        out["ok"] = bool(res.get("success"))
+        out["message"] = str(res.get("message") or "")
+        if not out["ok"] and not out["message"]:
+            out["error"] = "no answer from the robot (relayed call failed or timed out)"
         return out
+
+
+def _no_subscriber(out: dict, error: str) -> dict:
+    """``out`` marked not ok when the publish reached no subscriber."""
+    if out.get("subscribers") == 0:
+        out.update(ok=False, error=error)
+    return out

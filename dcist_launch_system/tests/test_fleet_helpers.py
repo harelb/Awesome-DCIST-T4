@@ -1,6 +1,10 @@
 """Unit tests for fleet_helpers.py — all SSH/subprocess calls are mocked."""
 
+import base64
+import re
+import shlex
 import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,6 +27,7 @@ from dcist_launch_system.fleet_helpers import (
     resolve_machines,
     run_parallel,
     ssh_cmd,
+    status_platform,
 )
 
 # ---------------------------------------------------------------------------
@@ -338,6 +343,65 @@ class TestGetRemoteStatus:
         result = get_remote_status("swarm", "10.29.1.1")
         assert result["tmux_sessions"] == "N/A"
         assert result["ros2_procs"] == "N/A"
+
+
+class TestRobotBattery:
+    """Robot battery over ROS: the BAT section must be two lines (percent, state)."""
+
+    STATUS = "---TMUX---\nnone\n---ROS2---\n0\n---LOAD---\n0.1, 0.1, 0.1\n---BAT---\n"
+
+    @staticmethod
+    def _script(cmd):
+        """The battery reader the remote command pipes ``ros2 topic echo`` into."""
+        b64 = re.search(r'python3 -c "\$\(echo (\S+) \| base64 -d\)" (.*?) 2>/dev/null', cmd)
+        return base64.b64decode(b64.group(1)).decode(), shlex.split(b64.group(2))
+
+    def _bat(self, platform, echo, robot="gauss"):
+        with patch("dcist_launch_system.fleet_helpers.ssh_cmd") as ssh:
+            ssh.return_value = (0, self.STATUS + "N/A", "")
+            get_remote_status("swarm", "10.0.0.4", platform_type=platform, robot=robot)
+            cmd = ssh.call_args[0][2]
+        script, args = self._script(cmd)
+        out = subprocess.run(
+            [sys.executable, "-c", script, *args], input=echo, capture_output=True, text=True
+        ).stdout
+        with patch("dcist_launch_system.fleet_helpers.ssh_cmd") as ssh:
+            ssh.return_value = (0, self.STATUS + out.strip(), "")
+            return cmd, get_remote_status("swarm", "10.0.0.4")["battery"]
+
+    def test_phoenix_bms_percentage(self):
+        echo = "header:\n  frame_id: ''\nvoltage: 25.2\ncharge: .nan\npercentage: 0.468\npower_supply_status: 2\n---\n"
+        cmd, bat = self._bat("phoenix", echo)
+        assert "ros2 topic echo /gauss/platform/bms/state --once" in cmd
+        assert bat == "47% (Discharging)"
+
+    def test_spot_charge_percentage_is_two_lines(self):
+        """The Spot branch used to print one line ("85%"), which the parser
+        always turned into N/A."""
+        echo = "battery_states:\n- header:\n    frame_id: ''\n  charge_percentage: 85.0\n  status: 3\n---\n"
+        cmd, bat = self._bat("spot", echo)
+        assert "/spot/status/battery_states" in cmd
+        assert bat == "85% (Spot)"
+
+    @pytest.mark.parametrize("pct, want", [(1.0, "1%"), (0.5, "0%"), (100.0, "100%")])
+    def test_spot_low_charge_is_not_read_as_a_fraction(self, pct, want):
+        echo = f"battery_states:\n- header:\n    frame_id: ''\n  charge_percentage: {pct}\n  status: 3\n---\n"
+        assert self._bat("spot", echo)[1] == f"{want} (Spot)"
+
+    @pytest.mark.parametrize("frac, want", [(1.0, "100%"), (0.01, "1%"), (0.0, "0%")])
+    def test_phoenix_percentage_is_always_a_fraction(self, frac, want):
+        echo = f"header:\n  frame_id: ''\npercentage: {frac}\npower_supply_status: 4\n---\n"
+        assert self._bat("phoenix", echo)[1] == f"{want} (Full)"
+
+    def test_no_message_is_na(self):
+        assert self._bat("phoenix", "")[1] == "N/A"
+        assert self._bat("spot", "")[1] == "N/A"
+
+    def test_status_platform(self):
+        topo = {"machines": {"gauss": {"role": "robot", "platform_type": "husky"}}}
+        assert status_platform({"name": "gauss", "role": "robot"}, topo) == "phoenix"
+        assert status_platform({"name": "hamilton", "role": "robot"}, topo) == "spot"
+        assert status_platform({"name": "willow", "role": "base_station"}, topo) is None
 
 
 # ---------------------------------------------------------------------------

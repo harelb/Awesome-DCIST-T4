@@ -69,9 +69,15 @@ and drops the *oldest* frame of the same topic when full (status topics are late
 
 * `GET /api/health` → `{ok, version, ros: bool, fleetlink: bool, neo4j: {name: bool}}`
 * `GET /api/config` → `{network, networks:[...], output_root, local_machine, neo4j_targets:[{name, uri, prior}], maps:[{name, path}], sessions:[...], fleet_defaults:{...}, robots:[...]}`
-* `GET /api/fleet` → `{network, machines:[{name, role, ip, user, desc, platform_id, online, ping, ssh, local}]}`
+* `GET /api/fleet` → `{network, machines:[{name, role, ip, user, desc, platform_id, platform_type, platform, online, ping, ssh, local}]}`;
+  `platform_type` is the topology value as written (may be `""`), `platform` the resolved
+  platform of a robot by the shared rule (`fleetlink.relay_ros.platform_of`: missing → `spot`,
+  `husky` → `phoenix`), `""` for other machines
 * `POST /api/fleet/refresh` → same as above after `filter_reachable`
-* `GET /api/fleet/status` → `{updated: epoch_s, machines: {name: <get_remote_status dict>}}`; `POST /api/fleet/status/refresh` triggers a poll (background poll every 10 s over online machines)
+* `GET /api/fleet/status` → `{updated: epoch_s, machines: {name: <get_remote_status dict>}}`; `POST /api/fleet/status/refresh` triggers a poll (background poll every 10 s over online machines).
+  A robot's `battery` (`"85% (Spot)"`, `"47% (Discharging)"`, or `"N/A"`) comes over ROS per
+  platform: Spot `/spot/status/battery_states`, phoenix `/<r>/platform/bms/state`
+  (`percentage` × 100); other machines read sysfs
 * `GET /api/fleet/nodes` → `{updated, robots: {robot: {readiness: <compute_robot_readiness>, nodes: [{nickname, node_name, status: "NOMINAL"|"WARNING"|"ERROR"|"NO_HB"|"STARTUP", notes, required}]}}}` — from `/global/ros_system_monitor/table_in` (StatusTable) via rclpy
 * `GET /api/topology` → the topology dict; `PUT /api/topology/machines/{name}` body `{name, role, platform, desc, mit_wifi, silvus}` (`apply_machine_edit` with original_name={name}); `DELETE /api/topology/machines/{name}`; `POST /api/topology/save` (`save_topology`)
 
@@ -260,7 +266,8 @@ Omniplanner runs in the **base station's** namespace (`--planner-ns`, default
 `/<planner_ns>/omniplanner_node/<plugin>/<suffix>` and the goal's `robot_id` picks the
 robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.yaml`).
 
-* `GET /api/plan/robots` → `[{robot, plugins: [{name, kind, topic}]}]` kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg), `pddl_constrained` (plan repair v3's `MultiRobotPddlConstrained`; listed only, never addressed directly — see 9b)
+* `GET /api/plan/robots` → `[{robot, platform, plugins: [{name, kind, topic}]}]` (`platform`:
+  `spot` | `phoenix` | …, the shared rule) kinds: `language` (LanguageGoalMsg), `goto` / `tsp` (GotoPointsGoalMsg), `pddl` (PddlGoalMsg), `pddl_constrained` (plan repair v3's `MultiRobotPddlConstrained`; listed only, never addressed directly — see 9b)
 * `POST /api/robots/{r}/goal/language` `{command, domain_type?: "default"|"Pddl"|"goto_points"}` —
   `default` (the default) uses the planner's configured LLM→PDDL domain; `goto_points` takes node
   symbols ("O(12) P(850)") without an LLM and fails with a clear error on prose
@@ -268,12 +275,28 @@ robot (plugin list in `dcist_launch_system/config/default/omniplanner_plugins.ya
 * `POST /api/robots/{r}/goal/tsp` same body
 * `POST /api/robots/{r}/goal/pddl` `{goal, plugin?, constraints?, route?}` — through plan repair v3 when
   its goal_manager runs, else straight to `plugin` (default: the first `pddl` plugin); see 9b
-* `POST /api/robots/{r}/executor/pause|resume` (goal_manager Bool topics if present)
+* `POST /api/robots/{r}/executor/pause|resume|stop` — `stop` = `teleop/stop` (§9a); Spot: `std_msgs/Bool` on
+  `/<r>/spot_executor_node/pause|resume` → `{ok, topic, msg, subscribers, via?, delivered?,
+  link?, error?}`. `ok` is `false` with an `error` when nothing subscribes (`subscribers == 0`:
+  router mode, the base graph's match count; fleetlink mode, the robot-side count the relay
+  ack carried) or the topic is not relayed (`error: "topic not relayed"`); not yet acked in
+  fleetlink mode is `delivered: false, subscribers: null` (the relay keeps retrying).
+  Phoenix: no pause (**400** `"pause is spot only (<r> is phoenix)"`); `resume` calls
+  `/<r>/toggle_manual_mode` (`std_srvs/SetBool`, `data: false` = autonomous) →
+  `{ok, service, msg, manual_mode: false, message?, error?, via?, link?}`;
+  `error: "service not relayed"` at once in fleetlink mode when relay.yaml does not carry it;
+  a successful `resume` also clears the console's phoenix STOP latch (§9a)
+* `POST /api/robots/{r}/take_lease` → `{ok, message, service}` (executor `~/take_lease`
+  Trigger, 504 on timeout); Spot only: **400** `"take_lease is spot only (<r> is phoenix)"` at once
 * every goal endpoint returns `{ok, topic, msg, subscribers}` (`subscribers == 0` after the
   discovery wait = no planner listening); also appended to the robot's plan history
 * `GET /api/robots/{r}/plan` → `{goals: [{t, kind, topic, msg}], plan: null | {plan_id, robot_name, t, actions: [{type, path: [[x,y,z]...], object_id, object_class, point}]}, results: [{plan_id, action_index, status, detail, t}], llm: [str], status: [{plugin, robot, ok, error, t}]}`
-  from `/<r>/omniplanner_node/compiled_plan_out` (ActionSequenceMsg), `~/llm_response`,
-  `/<r>/spot_executor_node/action_result`, and `status` from omniplanner's
+  from `/<r>/omniplanner_node/compiled_plan_out` (Spot: ActionSequenceMsg; phoenix:
+  `nav_msgs/Path`, shown as one `FOLLOW` action whose `path` is the poses — none for an empty
+  path — with `plan_id` = the header stamp `"<sec>.<nanosec, 9 digits>"`, the id the agent's
+  `phoenix_progress` uses), `~/llm_response`,
+  `/<r>/spot_executor_node/action_result` (Spot only: phoenix has no executor results, lease
+  or teleop state), and `status` from omniplanner's
   `/<planner_ns>/omniplanner_node/plan_status` (one JSON String per handled goal — the only
   place planning failures are reported). Plan repair v3 adds `repair_alerts` and `constraints`
   (9b); a goal entry may carry `via` and `warning`.
@@ -318,23 +341,46 @@ never relays it).
 
 ### 9a. Teleop (Teleop tab; `routes/teleop.py`, `teleop_service.py`)
 
-Driving goes through `spot_executor_node`, which holds the Spot lease (never
+Spot driving goes through `spot_executor_node`, which holds the Spot lease (never
 `spot_twist_node`). fleetlink relays `cmd_vel` (latest, 10 Hz, strict 0.5 s ttl),
 `stand`/`sit` (C0 services, ttl 5 s) and `teleop_state` (up, 2 Hz).
 
-* `GET /api/robots/{r}/teleop` → `{robot, state, lease, link, session, caps, deadman_s, ros}`;
+Per platform (`teleop_service.TELEOP`):
+
+| platform | velocity topic | type | caps (vx / vy / wz) | stand / sit / pause |
+|---|---|---|---|---|
+| spot (default) | `/<r>/spot_executor_node/cmd_vel` | `geometry_msgs/Twist` | 1.6 / 0.4 / 0.8 | yes |
+| phoenix | `/<r>/twist_marker_server/cmd_vel` (twist_mux, priority 8) | `geometry_msgs/TwistStamped`, stamped now, frame `<r>/base_link` | 1.0 / 0 / 1.2 | **400** `"<cmd> is spot only (<r> is phoenix)"`, at once |
+
+On phoenix `stop` zeroes the twist, then calls `/<r>/toggle_manual_mode` with `data: true`
+(manual mode: sequence_controller executes no plan; the reply is the phoenix shape under
+`executor/resume` above, plus `zeroed` and `stopped`); `resume` returns it to autonomous.
+twist_mux drops the input 0.5 s after its last message, and its e-stop / safety-stop locks
+still apply. Manual mode does not stop twist_mux's teleop input, so a phoenix `stop` (from
+`teleop/stop` or `executor/stop`) first cuts **every** drive session of the robot (all
+clients) and latches it stopped: the console refuses non-zero velocity (`error`
+`"stopped: press Resume or re-arm Drive"`; zeros still pass) until a successful `resume` or a
+fresh explicit arm (WS `{type: "arm"}` / `POST teleop/arm`). Spot needs no latch (its
+executor's stop ends teleop robot-side).
+
+* `GET /api/robots/{r}/teleop` → `{robot, platform, state, lease, link, session, stopped, caps, deadman_s, ros, manual_mode?}`;
+  `stopped` is the STOP latch `{t, reason}` or `null`;
+  `caps` are the robot's platform caps; phoenix adds `manual_mode: null | {value, t}` (last
+  `/<r>/manual_mode` seen; `state` and `lease` stay `null`);
   `state` is the executor's `~/teleop_state` JSON (`active, allowed, interlock, busy, standing,
   commanded, caps, last_reject, last_event, plan_executing, plan_paused, executor, ...`) or
   `null` when older than 5 s. Pushed on the hub as `robot/{r}/teleop`.
 * `POST /api/robots/{r}/teleop/stand|sit` → `{ok, message, service}` (executor `~/stand|sit`
-  Trigger; 504 on timeout). `stop` zeroes `cmd_vel` and publishes `~/stop` (ends teleop,
+  Trigger; 504 on timeout; 400 off a Spot). `stop` zeroes `cmd_vel` and publishes `~/stop` (ends teleop,
   cancels the plan, halts the robot). `pause|resume` = `executor/pause|resume`.
 * `WS /api/robots/{r}/teleop/ws` (JSON text): in `{type: "cmd", vx, vy, wz, seq, t}`,
-  `{type: "ping", seq, t}`, `{type: "release"}`; out `{type: "ack", sent, cmd, seq, t}`,
-  `{type: "pong", seq, t}`, `{type: "error", error}`. One driver per robot (another session
+  `{type: "ping", seq, t}`, `{type: "arm"}` (sent once per Drive arm: clears the STOP latch),
+  `{type: "release"}`; out `{type: "ack", sent, cmd, seq, t}`, `{type: "pong", seq, t}`,
+  `{type: "armed", seq, t}`, `{type: "error", error}`. One driver per robot (another session
   gets `error` until the first closes or idles 3 s). Server-side deadman: a moving robot
   whose driver sends nothing for 0.3 s, or whose socket closes, gets one zero command.
-  Idle zeros are not forwarded. Velocities are clamped to vx 1.6 (Spot top speed), vy 0.4, wz 0.8.
+  Idle zeros are not forwarded. Velocities are clamped to the platform caps (Spot: vx 1.6,
+  Spot top speed, vy 0.4, wz 0.8).
 * `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
   clients without the socket (409 when another session drives).
 
@@ -512,6 +558,27 @@ edge toggles (`agents-agents` is the trajectory). Layer names match the viewer (
 
 Not bridged: `hydra/traversability/layer` (visualization_msgs/Marker). It would need its
 own stream, and the traversability places already show as the `3/2` layer.
+
+### 11.6 Lidar points (phoenix; off by default)
+
+* **Robot:** phoenix agents have a lidar topic (param `lidar_topic`, default
+  `/{robot}/ouster/points`; spot: none). It is subscribed only while enabled. Each cloud is
+  cropped to a 0.3–30 m range with z in [-1, 4] m in the sensor frame, reduced to 0.15 m
+  voxel centroids and quantized to int16 cm (`fleetlink/fleetlink/pointcloud_codec.py`).
+  Sending runs at about `lidar_hz` (1 Hz), capped by `lidar_bps` (50 KB/s).
+* **Key** stream `lidar/points`, class **C3** (DATA_LOW, best effort), newest frame only.
+* **Toggle:** `POST /api/live/{r}/lidar {"enabled": bool}` sends a C0 `lidar {enable}`
+  request, retried until acked. It returns `{ok, enabled, lidar}`, 400 for a robot without
+  lidar and 503 without fleetlink.
+* **Auto-off:** every `GET` is a keepalive. After 15 s with no GET the receiver turns the
+  stream off. While it is on, the receiver refreshes the robot every 20 s, and the agent
+  stops by itself after `lidar_ttl_s` (60 s) with no request.
+* **Console:** `GET /api/live/{r}/lidar` returns msgpack
+  `{frame, sensor_frame, origin: [x, y, z, qx, qy, qz, qw], scale, voxel, n, xyz, intensity, stamp, seq}`.
+  `xyz` is int16 little-endian interleaved x, y, z in the sensor frame, in units of `scale` m.
+  `origin` is the sensor pose in the pose's frame. `ETag` = seq, and `If-None-Match` gives 304.
+  It returns 404 before the first frame.
+* **C1 state (phoenix):** `lidar: {available, enabled, age_s, bytes, error}`.
 
 ## 12. Live camera video (C5)
 

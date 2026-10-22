@@ -12,6 +12,7 @@ import {nearestPlace} from "../lib/graphModel";
 import {useViewer} from "../stores/viewer";
 import {useFocusedRobot} from "./useRobotFocus";
 import {PlanExecStatus} from "./PlanExecStatus";
+import {PhoenixChips} from "./PhoenixStatus";
 import type {FrameAlign, Pose} from "../types";
 
 /** Metres from the robot (global frame) to the nearest place of a shown prior
@@ -81,6 +82,7 @@ export function RobotLegend() {
         >
           <span className="swatch" style={{background: colorOf(r)}} />
           {r}
+          <PhoenixChips robot={r} />
           <AlignStatus robot={r} />
           <PlanExecStatus robot={r} />
         </span>

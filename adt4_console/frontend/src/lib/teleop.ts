@@ -1,15 +1,31 @@
-// Spot teleop (Teleop tab): key / joystick -> body velocity, and the 10 Hz
+// Robot teleop (Teleop tab): key / joystick -> body velocity, and the 10 Hz
 // velocity stream to the console (/api/robots/<r>/teleop/ws). Pure logic, no
 // React, so the safety rules are unit tested:
-//  * velocities never exceed CAPS (the console and the robot clamp again);
+//  * velocities never exceed the platform's caps (CAPS on Spot, PHOENIX_CAPS on
+//    a Husky; the console and the robot clamp again);
 //  * the stream runs only while armed; disarming sends a release (the console
 //    zeros a moving robot) and closes the socket;
+//  * each arm() sends one ``arm`` on its first connection: the explicit re-arm
+//    that clears the console's phoenix STOP latch (a reconnect does not);
 //  * the console zeros the robot itself when the stream stops (its deadman).
 import {withToken} from "./auth";
 
-/** Robot hard caps (spot_executor.teleop.HARD_MAX); body frame: +x forward,
+/** Spot hard caps (spot_executor.teleop.HARD_MAX); body frame: +x forward,
  *  +y left, +wz counter-clockwise (turn left). */
 export const CAPS = {vx: 1.6, vy: 0.4, wz: 0.8};
+/** Husky (phoenix) caps: no sideways motion. */
+export const PHOENIX_CAPS = {vx: 1.0, vy: 0, wz: 1.2};
+export type Caps = {vx: number; vy: number; wz: number};
+
+const validCaps = (c: unknown): c is Caps =>
+  !!c && typeof c === "object" && (["vx", "vy", "wz"] as const).every(k => typeof (c as Caps)[k] === "number" && Number.isFinite((c as Caps)[k]) && (c as Caps)[k] >= 0);
+
+/** Caps for a platform: Spot's are fixed (CAPS); others take the backend's
+ *  per-robot caps when it reports them, else the Husky's. */
+export function capsFor(platform: string, backend?: unknown): Caps {
+  if (platform === "spot") return CAPS;
+  return validCaps(backend) ? {vx: backend.vx, vy: backend.vy, wz: backend.wz} : PHOENIX_CAPS;
+}
 export const SEND_HZ = 10;
 export const PING_MS = 1000;
 /** Shift = slow: this fraction of the slider speed. */
@@ -28,8 +44,9 @@ export const ZERO: Twist = {vx: 0, vy: 0, wz: 0};
 export const isZero = (t: Twist) => Math.abs(t.vx) < 1e-3 && Math.abs(t.vy) < 1e-3 && Math.abs(t.wz) < 1e-3;
 const clamp = (v: number, cap: number) => Math.max(-cap, Math.min(cap, Number.isFinite(v) ? v : 0));
 
-export function clampTwist(t: Twist): Twist {
-  return {vx: clamp(t.vx, CAPS.vx), vy: clamp(t.vy, CAPS.vy), wz: clamp(t.wz, CAPS.wz)};
+export function clampTwist(t: Twist, caps: Caps = CAPS): Twist {
+  // + 0: no -0 from a zero cap
+  return {vx: clamp(t.vx, caps.vx) + 0, vy: clamp(t.vy, caps.vy) + 0, wz: clamp(t.wz, caps.wz) + 0};
 }
 
 /** Drive keys (KeyboardEvent.code) -> axis contributions. */
@@ -45,7 +62,7 @@ export const isDriveKey = (code: string) => code in DRIVE_KEYS || code === "Spac
 
 /** Held keys -> velocity. ``speed`` is the slider fraction (0..1] of CAPS;
  *  ``slow`` (Shift) scales it by SLOW. Opposite keys cancel. */
-export function keysToTwist(held: Iterable<string>, speed: number, slow = false): Twist {
+export function keysToTwist(held: Iterable<string>, speed: number, slow = false, caps: Caps = CAPS): Twist {
   const s = Math.max(0, Math.min(1, speed)) * (slow ? SLOW : 1);
   const axis = {vx: 0, vy: 0, wz: 0};
   for (const code of held) {
@@ -53,28 +70,34 @@ export function keysToTwist(held: Iterable<string>, speed: number, slow = false)
     if (!d) continue;
     for (const k of Object.keys(d) as (keyof Twist)[]) axis[k] += d[k] ?? 0;
   }
-  return clampTwist({
-    vx: Math.sign(axis.vx) * CAPS.vx * s,
-    vy: Math.sign(axis.vy) * CAPS.vy * s,
-    wz: Math.sign(axis.wz) * CAPS.wz * s,
-  });
+  return clampTwist(
+    {
+      vx: Math.sign(axis.vx) * caps.vx * s,
+      vy: Math.sign(axis.vy) * caps.vy * s,
+      wz: Math.sign(axis.wz) * caps.wz * s,
+    },
+    caps,
+  );
 }
 
 /** On-screen joystick: ``x``/``y`` in [-1, 1] (right / up positive). Up drives
  *  forward; left/right turns, or strafes in ``strafe`` mode. Dead zone, then
  *  linear to the slider speed. */
-export function joystickToTwist(x: number, y: number, speed: number, strafe = false): Twist {
+export function joystickToTwist(x: number, y: number, speed: number, strafe = false, caps: Caps = CAPS): Twist {
   const r = Math.hypot(x, y);
   if (!(r > DEAD_ZONE)) return {...ZERO};
   const k = Math.min(1, (r - DEAD_ZONE) / (1 - DEAD_ZONE)) / r; // rescale past the dead zone
   const s = Math.max(0, Math.min(1, speed));
   const fx = x * k;
   const fy = y * k;
-  return clampTwist({
-    vx: fy * CAPS.vx * s,
-    vy: strafe ? -fx * CAPS.vy * s : 0,
-    wz: strafe ? 0 : -fx * CAPS.wz * s,
-  });
+  return clampTwist(
+    {
+      vx: fy * caps.vx * s,
+      vy: strafe ? -fx * caps.vy * s : 0,
+      wz: strafe ? 0 : -fx * caps.wz * s,
+    },
+    caps,
+  );
 }
 
 /** A stick deflection: ``x``/``y`` in [-1, 1] (right / up positive). */
@@ -107,12 +130,12 @@ const deadZone = (v: number) => {
 /** Two sticks like Spot's tablet app: ``move`` drives forward/back (up/down)
  *  and strafes (sideways); ``turn`` yaws (sideways; right turns right). Axis
  *  dead zones, so a slightly crooked push forward does not also strafe. */
-export function sticksToTwist(move: Stick | null, turn: Stick | null, speed: number): Twist {
+export function sticksToTwist(move: Stick | null, turn: Stick | null, speed: number, caps: Caps = CAPS): Twist {
   const s = Math.max(0, Math.min(1, speed));
-  const vx = move ? deadZone(move.y) * CAPS.vx * s : 0;
-  const vy = move ? -deadZone(move.x) * CAPS.vy * s : 0;
-  const wz = turn ? -deadZone(turn.x) * CAPS.wz * s : 0;
-  return clampTwist({vx: vx || 0, vy: vy || 0, wz: wz || 0});
+  const vx = move ? deadZone(move.y) * caps.vx * s : 0;
+  const vy = move ? -deadZone(move.x) * caps.vy * s : 0;
+  const wz = turn ? -deadZone(turn.x) * caps.wz * s : 0;
+  return clampTwist({vx: vx || 0, vy: vy || 0, wz: wz || 0}, caps);
 }
 
 export type StickId = "move" | "turn";
@@ -169,8 +192,8 @@ export class StickTracker {
     return null;
   }
 
-  twist(speed: number): Twist {
-    return sticksToTwist(this.get("move")?.value ?? null, this.get("turn")?.value ?? null, speed);
+  twist(speed: number, caps: Caps = CAPS): Twist {
+    return sticksToTwist(this.get("move")?.value ?? null, this.get("turn")?.value ?? null, speed, caps);
   }
 }
 
@@ -265,6 +288,10 @@ export class TeleopDriver {
   private seq = 0;
   private cmd: Twist = {...ZERO};
   private armed = false;
+  /** this arm() has not told the console yet (``arm``: clears a STOP latch) */
+  private armPending = false;
+  /** the robot's caps (capsFor); every command is clamped to them */
+  caps: Caps = CAPS;
   status: DriverStatus = {connected: false, rttMs: null, acked: null, error: null, sent: 0};
 
   constructor(
@@ -280,7 +307,7 @@ export class TeleopDriver {
   /** The velocity to stream (clamped); sent on the next tick, or at once when
    *  it changes to or from zero so starts and stops are not delayed. */
   command(t: Twist) {
-    const next = clampTwist(t);
+    const next = clampTwist(t, this.caps);
     const edge = isZero(next) !== isZero(this.cmd);
     this.cmd = next;
     if (this.armed && edge) this.sendCmd();
@@ -289,6 +316,7 @@ export class TeleopDriver {
   arm() {
     if (this.armed) return;
     this.armed = true;
+    this.armPending = true;
     this.cmd = {...ZERO};
     this.connect();
     this.tick = this.deps.setInterval(() => this.sendCmd(), 1000 / SEND_HZ);
@@ -298,6 +326,7 @@ export class TeleopDriver {
   disarm() {
     if (!this.armed) return;
     this.armed = false;
+    this.armPending = false;
     this.cmd = {...ZERO};
     if (this.tick != null) this.deps.clearInterval(this.tick);
     if (this.ping != null) this.deps.clearInterval(this.ping);
@@ -325,6 +354,7 @@ export class TeleopDriver {
     this.ws = ws;
     ws.onopen = () => {
       this.update({connected: true, error: null});
+      if (this.armPending && this.send({type: "arm"})) this.armPending = false;
       this.send({type: "ping"});
     };
     ws.onmessage = ev => this.onMessage(ev.data);

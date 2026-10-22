@@ -301,7 +301,32 @@ export interface Reloc {
   total: {dxy: number; dyaw: number} | null;
 }
 
+/** fleetlink C1 ``phoenix_progress`` (phoenix only): distance from the pose
+ *  to the end of the latest omniplanner Path; ``done`` within 1 m, once the
+ *  robot has been farther than that from it since the plan arrived. */
+export interface PhoenixProgress {
+  plan_id: string;
+  stamp?: number;
+  dist_to_goal_m: number | null;
+  done: boolean;
+}
+
+/** fleetlink C1 ``lidar``: an on-demand point cloud stream (off by default). */
+export interface LidarState {
+  /** the robot has a lidar (stays true when a cloud failed: see ``error``) */
+  available: boolean;
+  enabled: boolean;
+  /** the agent's last lidar problem (bad cloud, no TF...), null when fine */
+  error?: string | null;
+  age_s?: number | null;
+  bytes?: number;
+}
+
 export interface RobotState {
+  /** "spot" | "phoenix" (agents before phoenix support: absent = spot) */
+  platform?: string;
+  phoenix_progress?: PhoenixProgress | null;
+  lidar?: LidarState | null;
   pose?: Pose;
   frame_align?: FrameAlign;
   reloc?: Reloc;
@@ -370,6 +395,8 @@ export interface TeleopView {
   lease?: LeaseInfo | null;
   link?: {connected?: boolean; rtt?: number | null; loss?: number | null; age_s?: number | null} | null;
   session?: {owner: string; moving: boolean; age_s: number; sent: number; deadman_stops: number} | null;
+  /** phoenix STOP latch: the console refuses motion until Resume or a fresh arm */
+  stopped?: {t: number; reason: string} | null;
   caps?: {vx: number; vy: number; wz: number};
   deadman_s?: number;
   ros?: boolean;
@@ -426,6 +453,10 @@ export interface RepairStatus {
 
 export interface PlanRobot {
   robot: string;
+  /** "spot" | "phoenix" (older consoles: absent = spot) */
+  platform?: string;
+  /** teleop hard caps for this robot's platform, when the backend reports them */
+  caps?: {vx: number; vy: number; wz: number};
   plugins: {name: string; kind: "language" | "goto" | "tsp" | "pddl" | string; topic: string}[];
 }
 

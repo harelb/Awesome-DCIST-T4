@@ -57,4 +57,37 @@ describe("plan execution status", () => {
     // just between two steps: not idle yet
     expect(planExecStatus("euclid", plan({results: [ok(0, NOW - 2)]}), {now: NOW, teleop: teleop({plan_executing: false})}).state).toBe("executing");
   });
+
+  describe("phoenix", () => {
+    const phx = {platform: "phoenix", now: NOW, connected: true};
+    const prog = (over = {}) => ({plan_id: "P", stamp: NOW - 1, dist_to_goal_m: 12.34, done: false, ...over});
+    it("executing with the distance to the goal", () => {
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, manual: false, progress: prog()})).toMatchObject({tone: "ok", state: "executing", text: "executing (12 m to goal)"});
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, progress: prog({dist_to_goal_m: 3.21})}).text).toBe("executing (3.2 m to goal)");
+      // no report yet, or one for an older plan: executing without a distance
+      expect(planExecStatus("gauss", plan({}, 1), phx).text).toBe("executing");
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, progress: prog({plan_id: "OLD"})}).text).toBe("executing");
+    });
+    it("done when the agent reports the goal reached for this plan", () => {
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, progress: prog({done: true, dist_to_goal_m: 0.4})})).toMatchObject({tone: "ok", state: "done", text: "plan done"});
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, progress: prog({done: true, plan_id: "OLD"})}).state).toBe("executing");
+      // the same stamp written differently still matches
+      const p = plan({}, 1);
+      p.plan!.plan_id = "1729000000.500000000";
+      expect(planExecStatus("gauss", p, {...phx, progress: prog({done: true, plan_id: "1729000000.5"})}).state).toBe("done");
+    });
+    it("manual mode wins over progress", () => {
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, manual: true, progress: prog()})).toMatchObject({tone: "warn", state: "manual", text: "manual mode — not executing"});
+    });
+    it("never the Spot stuck / retry text, ignores Spot teleop state and lease", () => {
+      const s = planExecStatus("gauss", plan({}, 1, NOW - 600), {...phx, teleop: teleop({plan_executing: false, plan_paused: true}), lease: {known: true, owned: false, owner: "tablet"}});
+      expect(s.state).toBe("executing");
+      expect(`${s.text} ${s.title}`).not.toMatch(/still trying|attempts|lease|paused/);
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, connected: false}).state).toBe("offline");
+    });
+    it("husky is phoenix; a missing platform is spot", () => {
+      expect(planExecStatus("gauss", plan({}, 1), {...phx, platform: "husky", manual: true}).state).toBe("manual");
+      expect(planExecStatus("euclid", plan({}, 3, NOW - 200), {now: NOW, connected: true, teleop: teleop(), platform: undefined}).state).toBe("stuck");
+    });
+  });
 });

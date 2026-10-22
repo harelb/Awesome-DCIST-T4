@@ -12,6 +12,13 @@ Live image-store mirror (fleetlink class C6, API.md §13): the receiver writes
 the robots' store frames into ``<live_store_root>/<robot>/<store_id>/image_store``
 (default ``<output_root>/live``; an empty ``live_store_root`` disables it), a
 valid hydra image store that SAM3 search can load while the run goes on.
+
+Lidar (fleetlink C3 ``lidar/points``, off by default): :meth:`LiveService.set_lidar`
+asks a robot to stream it, :meth:`LiveService.lidar` is the latest frame.  Each
+read (the console polls ``GET .../lidar`` ~1 Hz while the toggle is on) is the
+keepalive: unread for ``LIDAR_IDLE_S`` the receiver sends ``enabled: false``
+itself, so a closed page does not leave the robot streaming.  The agent also
+stops on its own when the base's refreshes stop (``lidar_ttl_s``, 60 s).
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ import threading
 from .video_service import VideoRelay
 
 log = logging.getLogger(__name__)
+LIDAR_IDLE_S = 15.0  # no lidar GET for this long after an enable: turn it off
 
 
 class LiveService:
@@ -53,7 +61,10 @@ class LiveService:
                 connect=self.settings.zenoh_connect or "tcp/127.0.0.1:7447"
             )
             receiver = Receiver(
-                transport, self.on_update, store_root=self.store_root
+                transport,
+                self.on_update,
+                store_root=self.store_root,
+                lidar_idle_s=LIDAR_IDLE_S,
             )
             receiver.start()
         except Exception as e:  # noqa: BLE001  (e.g. zenoh / fleetlink missing)
@@ -228,6 +239,15 @@ class LiveService:
 
     def paths(self, robot: str) -> dict | None:
         return self._call("paths", robot)
+
+    def lidar(self, robot: str) -> dict | None:
+        """Latest lidar frame (``Receiver.lidar``), or None."""
+        return self._call("lidar", robot)
+
+    def set_lidar(self, robot: str, enabled: bool) -> dict:
+        """Turn the robot's lidar stream on / off; ``{request, status}``."""
+        req = self.receiver.set_lidar(robot, bool(enabled))
+        return {"request": req, "status": self.receiver.lidar_status(robot)}
 
     def cameras(self, robot: str) -> list[str]:
         return list(self._call("cameras", robot) or [])

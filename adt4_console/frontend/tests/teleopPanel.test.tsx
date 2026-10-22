@@ -58,7 +58,7 @@ describe("TeleopPanel", () => {
           posts.push(u);
           return json({ok: true, message: `${u.split("/").pop()} done`});
         }
-        if (u.startsWith("api/plan/robots")) return json([{robot: "hamilton", plugins: []}, {robot: "euclid", plugins: []}]);
+        if (u.startsWith("api/plan/robots")) return json([{robot: "hamilton", plugins: []}, {robot: "euclid", plugins: []}, {robot: "gauss", platform: "phoenix", plugins: []}]);
         if (u.includes("/teleop"))
           return json({robot: "hamilton", state: {active: false, allowed: true, interlock: "", busy: "", standing: true, commanded: {vx: 0, vy: 0, wz: 0}, caps: {vx: 1.6, vy: 0.4, wz: 0.8}, deadman_s: 0.5, cmd_age_s: null, last_reject: "", last_event: "", commands: 0, rejected: 0, plan_executing: false, plan_paused: false, executor: "Idle"}, lease: null, link: null, ros: true});
         if (u.startsWith("api/time")) return json({t: Date.now() / 1000});
@@ -199,6 +199,48 @@ describe("TeleopPanel", () => {
     expect(sockets[0].sent.at(-1)).toMatchObject({type: "release"});
     expect(sockets[0].closed).toBe(true);
     expect(document.body.textContent).toContain("Pick a robot to drive");
+  });
+
+  it("phoenix: no Spot controls, Husky caps, manual-mode notice, E-stop disarms", async () => {
+    sessionStorage.setItem(ARM_CONFIRMED_KEY, "1");
+    const guards = (over: Record<string, unknown> = {}) => ({battery_percent: 46.8, estop_pressed: false, safety_stop: false, manual_mode: true, source: "phoenix", ...over});
+    act(() => useRobots.setState({state: {gauss: {platform: "phoenix", guards: guards()}}}));
+    act(() => useViewer.getState().setFocus("gauss"));
+    await act(async () => new Promise(r => setTimeout(r, 0)));
+    const labels = [...document.querySelectorAll("button")].map(b => b.textContent?.trim());
+    for (const spotOnly of ["Stand", "Sit", "Pause", "Take lease"]) expect(labels).not.toContain(spotOnly);
+    expect(labels).toContain("STOP (manual)");
+    expect(labels).toContain("Resume (auto)");
+    expect(document.body.textContent).not.toContain("strafes");
+    expect(document.body.textContent).not.toContain("lease");
+    expect(document.querySelector('[data-testid="phx-chips-gauss"]')?.textContent).toContain("MANUAL · will not execute plans");
+    expect(document.body.textContent).toContain("47 %");
+    expect(document.querySelector('[data-testid="teleop-manual-note"]')).not.toBeNull();
+    act(() => drive().click());
+    await act(async () => new Promise(r => setTimeout(r, 0)));
+    key("keydown", "KeyW");
+    expect(cmds().at(-1)).toMatchObject({vx: 0.25, vy: 0, wz: 0}); // 25 % of the Husky's 1.0 m/s
+    key("keyup", "KeyW");
+    key("keydown", "KeyD"); // no strafing
+    expect(cmds().at(-1)).toMatchObject({vx: 0, vy: 0, wz: 0});
+    key("keyup", "KeyD");
+    key("keydown", "KeyQ");
+    expect(cmds().at(-1)?.wz).toBeCloseTo(0.3);
+    // E-stop pressed: disarmed and Drive disabled
+    act(() => useRobots.setState({state: {gauss: {platform: "phoenix", guards: guards({estop_pressed: true})}}}));
+    expect(document.querySelector(".teleop-armed")).toBeNull();
+    expect(drive().disabled).toBe(true);
+    expect(document.body.textContent).toContain("E-STOP");
+    await act(async () => [...document.querySelectorAll("button")].find(b => b.textContent?.trim() === "Resume (auto)")!.click());
+    expect(posts.at(-1)).toBe("api/robots/gauss/teleop/resume");
+  });
+
+  it("phoenix: the console's STOP latch is shown", async () => {
+    act(() => useViewer.getState().setFocus("gauss"));
+    await act(async () => new Promise(r => setTimeout(r, 0)));
+    expect(document.querySelector('[data-testid="teleop-stopped-note"]')).toBeNull();
+    act(() => useRobots.setState(s => ({teleop: {...s.teleop, gauss: {...s.teleop.gauss, robot: "gauss", state: null, stopped: {t: 1, reason: "STOP"}}}})));
+    expect(document.querySelector('[data-testid="teleop-stopped-note"]')?.textContent).toContain("press Resume or re-arm");
   });
 
   it("a focused robot without an executor here drives nothing", async () => {

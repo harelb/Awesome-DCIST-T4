@@ -37,6 +37,7 @@ from dcist_launch_system.fleet_helpers import (
     generate_zenoh_endpoints,
     get_local_ips,
     link_network,
+    platform_of,
     rsync_transfer,
     run_parallel,
     ssh_cmd,
@@ -118,14 +119,41 @@ def list_sessions(tmux_dir: pathlib.Path = TMUX_DIR) -> list[str]:
     return sorted(f.stem for f in tmux_dir.glob("*.yaml")) if tmux_dir.exists() else []
 
 
+def robot_platform(topo: dict | None, machine: dict) -> str:
+    """``machine``'s platform by the shared rule (``platform_type`` from its
+    topology entry, else from ``machine``; missing → spot, husky → phoenix).
+    ``fleet_defaults.spot_platforms`` (platform ids) is no longer consulted."""
+    entry = ((topo or {}).get("machines") or {}).get(machine.get("name"))
+    return platform_of(entry or machine)
+
+
+def robot_session(plan: LaunchPlan, machine: dict, topo: dict | None) -> str:
+    """The session ``machine`` runs for ``plan``.
+
+    ``plan.session`` is one session for the whole launch; when it is one of the
+    per-platform presets in ``fleet_defaults.sessions`` (the launch mode's first),
+    each robot gets that preset for *its* platform instead, so a hamilton + gauss
+    launch runs spot-default on hamilton and phoenix-default on gauss.  Any other
+    session (picked by hand) runs on every robot as given.
+    """
+    sessions = ((topo or {}).get("fleet_defaults") or {}).get("sessions") or {}
+    modes = sorted(sessions, key=lambda m: m != plan.mode)
+    for mode in modes:
+        by_platform = sessions.get(mode) or {}
+        if plan.session in by_platform.values():
+            return by_platform.get(robot_platform(topo, machine)) or plan.session
+    return plan.session
+
+
 def default_selection(topo: dict, runtime_config: dict, mode: str, robots, local_ips):
     """Preset selections for ``mode`` from ``fleet_defaults`` in the topology.
 
-    Returns dict(robots, session, base_station, bs_session).  ``robots`` is
-    the given list, or all online robots when it is None.
+    Returns dict(robots, session, sessions, base_station, bs_session).
+    ``robots`` is the given list, or all online robots when it is None;
+    ``session`` is the first robot's platform preset and ``sessions`` maps each
+    robot to its own (what :func:`robot_session` launches).
     """
     defaults = topo.get("fleet_defaults", {})
-    spot_platforms = set(defaults.get("spot_platforms", ["smaug", "topaz"]))
     mode_sessions = defaults.get("sessions", {}).get(mode, {})
 
     if robots is None:
@@ -146,8 +174,12 @@ def default_selection(topo: dict, runtime_config: dict, mode: str, robots, local
         )
     session = ""
     if first:
-        key = "spot" if first.get("platform_id") in spot_platforms else "phoenix"
-        session = mode_sessions.get(key, "")
+        session = mode_sessions.get(robot_platform(topo, first), "")
+    sessions = {
+        n: mode_sessions.get(robot_platform(topo, runtime_config[n]), "")
+        for n in robots
+        if n in runtime_config
+    }
 
     base_station = next(
         (
@@ -160,6 +192,7 @@ def default_selection(topo: dict, runtime_config: dict, mode: str, robots, local
     return {
         "robots": list(robots),
         "session": session,
+        "sessions": sessions,
         "base_station": base_station,
         "bs_session": defaults.get("base_station_session", "") or None,
     }
@@ -230,7 +263,7 @@ def build_robot_commands(
         prior_flag = f" -p {_quote_path(rprior)}" if rprior else ""
         cmd = (
             f"{_WS_PREFIX}{fleet_env_prefix(m['name'], topo, plan.link_network)}{RUN_ADT4} "
-            f"{shlex.quote(plan.session)} -n {shlex.quote(m['name'])} "
+            f"{shlex.quote(robot_session(plan, m, topo))} -n {shlex.quote(m['name'])} "
             f"-c {shlex.quote(m['platform_id'])} "
             f"-o {_quote_path(out_dir)} -y{prior_flag}{record_flag} "
             f'--tmuxp-args "-d"'

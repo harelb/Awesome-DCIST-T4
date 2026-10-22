@@ -123,6 +123,34 @@ def test_real_relay_yaml_loads_and_filters_platforms():
     assert len(cfg.hash) == 12
 
 
+def test_real_relay_yaml_phoenix_rows():
+    cfg = RelayConfig.load(RELAY_YAML)
+    spot = cfg.resolve("euclid", "spot", base="willow")
+    for platform in ("phoenix", "husky"):  # husky: the topology alias
+        phx = cfg.resolve("gauss", platform, base="willow")
+        # Stop / Resume: toggle_manual_mode, a C0 down service like take_lease
+        mode = phx.services["/gauss/toggle_manual_mode"]
+        assert mode.dir == "down" and mode.type == "std_srvs/srv/SetBool"
+        assert mode.cls == "C0" and mode.ttl_s <= 10
+        # teleop into twist_mux: same strict 0.5 s ttl as the Spot cmd_vel row
+        tw = phx.topics["/gauss/twist_marker_server/cmd_vel"]
+        spot_tw = spot.topics["/euclid/spot_executor_node/cmd_vel"]
+        assert tw.type == "geometry_msgs/msg/TwistStamped" and tw.dir == "down"
+        assert (tw.mode, tw.cls, tw.ttl_s, tw.ttl_strict, tw.replay_on_resync) == (
+            spot_tw.mode, spot_tw.cls, 0.5, True, False
+        )
+        mm = phx.topics["/gauss/manual_mode"]
+        assert mm.dir == "up" and mm.type == "std_msgs/msg/Bool" and mm.mode == "latest"
+        assert "/gauss/spot_executor_node/cmd_vel" not in phx.topics
+        assert "/gauss/spot_executor_node/runtime_guards" not in phx.topics
+        assert "/gauss/spot_executor_node/stand" not in phx.services
+        assert "/_tf/map/gauss/base_link" in phx.topics
+    # and none of it on a Spot
+    assert "/euclid/toggle_manual_mode" not in spot.services
+    assert "/euclid/twist_marker_server/cmd_vel" not in spot.topics
+    assert "/euclid/manual_mode" not in spot.topics
+
+
 @pytest.mark.parametrize(
     "bad, msg",
     [

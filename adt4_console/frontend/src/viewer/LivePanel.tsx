@@ -11,6 +11,7 @@ import {FleetTotalsRow, LinkTotalsTable} from "../components/Bandwidth";
 import type {Link} from "../lib/netstats";
 import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
+import {requestLidar, useOverlays} from "../stores/overlays";
 
 const CLASSES: {cls: Cls; name: string; color: string}[] = [
   {cls: "C1", name: "state", color: "#35d07f"},
@@ -206,6 +207,7 @@ export function LivePanel() {
                 label="Auto budget"
                 title="Let the robot adapt budgets to measured link capacity"
               />
+              <LidarToggle robot={r} />
               {l.store_send && l.store_send.robot !== null && (
                 <Toggle
                   checked={Boolean(l.store_send.wanted ?? l.store_send.robot)}
@@ -222,5 +224,30 @@ export function LivePanel() {
         );
       })}
     </div>
+  );
+}
+
+/** Per-robot lidar stream switch (off by default); only for a robot whose
+ *  agent has a lidar. On: the robot streams ~1 Hz and the map draws it. */
+export function LidarToggle({robot}: {robot: string}) {
+  const lidar = useRobots(s => s.state[robot]?.lidar);
+  const on = useOverlays(s => Boolean(s.lidarOn[robot]));
+  const err = useOverlays(s => s.lidarError[robot]);
+  if (!lidar?.available) return null;
+  return (
+    <span className="row gap-sm">
+      <Toggle
+        checked={on}
+        onChange={v => void requestLidar(robot, v)}
+        label={on && !lidar.enabled ? "Lidar (starting…)" : "Lidar"}
+        title="Stream this robot's lidar (cropped, downsampled, ~1 Hz, lowest priority) and draw it on the map. Off by default."
+      />
+      {err && <span className="small tone-err" title={err}>lidar: {err}</span>}
+      {lidar.error && lidar.error !== err && (
+        <span className="small tone-err" title={lidar.error} data-testid={`lidar-error-${robot}`}>
+          lidar ({robot}): {lidar.error}
+        </span>
+      )}
+    </span>
   );
 }

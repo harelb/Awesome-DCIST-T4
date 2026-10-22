@@ -135,6 +135,7 @@ class FleetService:
             )
 
     def machines_payload(self) -> dict:
+        status_platform = _helpers().status_platform
         with self.lock:
             machines = [
                 {
@@ -145,6 +146,8 @@ class FleetService:
                     "desc": m.get("desc", ""),
                     "platform_id": m.get("platform_id", ""),
                     "platform_type": m.get("platform_type", ""),
+                    # robots: the shared rule (missing → spot, husky → phoenix)
+                    "platform": status_platform(m, self.topo) or "",
                     "online": m.get("online"),
                     "ping": m.get("ping"),
                     "ssh": m.get("ssh"),
@@ -179,14 +182,18 @@ class FleetService:
                 dict(m) for m in self.runtime_config.values() if m.get("online")
             ]
             radios = self.topo.get("silvus_radios", {}).get("radios", {})
+            topo = self.topo
         silvus_ips = [r["mgmt_ip"] for r in radios.values() if "mgmt_ip" in r]
+        status_platform = _helpers().status_platform
 
         def fetch(m):
             return self.deps.get_remote_status(
                 m["user"],
                 m["ip"],
                 silvus_ips=silvus_ips or None,
-                platform_type=m.get("platform_type"),
+                # robots: battery over ROS by platform (missing platform_type = spot)
+                platform_type=status_platform(m, topo),
+                robot=m["name"],
             )
 
         results = self.deps.run_parallel(fetch, machines) if machines else []

@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..graph_service import canonical_symbol
-from ..ros_bridge import RosUnavailable
+from ..ros_bridge import NotSupported, RosUnavailable
 from . import services
 
 router = APIRouter(prefix="/api")
@@ -29,7 +29,10 @@ def _robots(request: Request) -> list[str]:
 @router.get("/plan/robots")
 def plan_robots(request: Request):
     ros = services(request).ros
-    return [{"robot": r, "plugins": ros.plugins_for(r)} for r in _robots(request)]
+    return [
+        {"robot": r, "platform": ros.platform(r), "plugins": ros.plugins_for(r)}
+        for r in _robots(request)
+    ]
 
 
 @router.get("/robots/{robot}/plan")
@@ -178,15 +181,35 @@ def plan_repair_status(request: Request):
 
 @router.post("/robots/{robot}/executor/{cmd}")
 def executor(robot: str, cmd: str, request: Request):
-    if cmd not in ("pause", "resume"):
+    """Plan execution: pause / resume / stop.  Stop and resume share the teleop
+    routes' handling (phoenix STOP also cuts and latches console teleop; a
+    Resume clears that latch)."""
+    from . import teleop as teleop_routes
+
+    if cmd not in ("pause", "resume", "stop"):
         raise HTTPException(404, f"unknown executor command {cmd}")
-    return _ros(request).executor_cmd(robot, cmd)
+    svc = services(request)
+    ros = svc.ros
+    try:
+        if cmd == "stop":
+            return teleop_routes.stop(svc, request, robot)
+        if cmd == "pause":
+            ros.require_spot(robot, cmd)  # phoenix: no pause, only stop / resume
+            return _ros(request).executor_cmd(robot, cmd)
+        return teleop_routes.resume(svc, _ros(request), robot)
+    except NotSupported as e:
+        raise HTTPException(400, str(e)) from None
 
 
 @router.post("/robots/{robot}/take_lease")
 def take_lease(robot: str, request: Request):
     """Forcibly take robot's Spot lease (e.g. from the tablet).  The planner may
-    then command the robot; the UI asks for an explicit confirmation first."""
+    then command the robot; the UI asks for an explicit confirmation first.
+    Spot only: 400 at once for any other platform."""
+    try:
+        services(request).ros.require_spot(robot, "take_lease")
+    except NotSupported as e:
+        raise HTTPException(400, str(e)) from None
     ros = _ros(request)
     try:
         return ros.take_lease(robot)

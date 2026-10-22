@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {PlanExecStatus} from "./PlanExecStatus";
+import {PlanExecStatus, usePlanExec} from "./PlanExecStatus";
 import {useViewer} from "../stores/viewer";
 import {useRobots} from "../stores/robots";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
@@ -12,6 +12,8 @@ import {LeaseControl, LeaseRefusalNotice} from "./LeaseControl";
 import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
 import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, type SendTone} from "./PlanRepair";
+import {usePlatform} from "./usePlatform";
+import {PhoenixChips} from "./PhoenixStatus";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
 export function pddlSymbol(sym: string): string {
@@ -25,6 +27,16 @@ export function visitGoal(syms: string[]): string {
 }
 
 type Tool = "goto" | "pddl" | "language";
+
+/** Pause / Stop / Resume answer -> message. The robot's own reason when it
+ *  refuses (e.g. "pause is not supported on phoenix"). */
+export function executorMessage(label: string, r: unknown): {tone: SendTone; text: string} {
+  const o = (r ?? {}) as {ok?: boolean; message?: string; error?: string; detail?: string; subscribers?: number; topic?: string};
+  const why = o.message || o.error || o.detail || "";
+  if (o.ok === false) return {tone: "err", text: `${label}: ${why || "failed"}`};
+  if (o.subscribers === 0) return {tone: "err", text: `${label}: nothing is listening${o.topic ? ` on ${o.topic}` : ""}`};
+  return {tone: "ok", text: `${label}: ${why || "sent"}`};
+}
 
 /** POST a goal; PDDL goals go through plan repair v3's goal_manager when it
  *  runs (``via``), else straight to omniplanner with a ``warning`` (API.md §9). */
@@ -53,6 +65,8 @@ export function PlanPanel() {
     else if (focused && chosen !== focused) set({planRobot: focused});
   }, [list, planRobot, focused, chosen, set]);
   const current = list.find(r => r.robot === planRobot);
+  // Spot: lease + Pause / Resume; phoenix: mode chips + Stop (manual) / Resume (auto)
+  const spot = usePlatform(planRobot, current?.platform) === "spot";
   const kinds = new Set(current?.plugins.map(p => p.kind) ?? []);
   const pddlPlugins = current?.plugins.filter(p => p.kind === "pddl") ?? [];
   useEffect(() => {
@@ -70,11 +84,12 @@ export function PlanPanel() {
       .catch(() => undefined);
   }, [planRobot]);
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
+  const run = async (label: string, fn: () => Promise<unknown>, exec = false) => {
     setBusy(label);
     setMsg(null);
     try {
-      setMsg(goalSendMessage(label, (await fn()) as Partial<GoalSendResult> | undefined));
+      const r = await fn();
+      setMsg(exec ? executorMessage(label, r) : goalSendMessage(label, r as Partial<GoalSendResult> | undefined));
     } catch (e) {
       setMsg({tone: "err", text: errorText(e)});
     } finally {
@@ -111,15 +126,33 @@ export function PlanPanel() {
         )}
         <div className="row gap-sm">
           <RepairBadge />
-          {planRobot && <LeaseControl robot={planRobot} />}
-          <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Pause", () => postJSON(`api/robots/${planRobot}/executor/pause`))}>
-            Pause
-          </button>
-          <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Resume", () => postJSON(`api/robots/${planRobot}/executor/resume`))}>
-            Resume
+          {planRobot && spot && <LeaseControl robot={planRobot} />}
+          {spot ? (
+            <button className="btn btn-sm" disabled={!!busy} onClick={() => run("Pause", () => postJSON(`api/robots/${planRobot}/executor/pause`), true)}>
+              Pause
+            </button>
+          ) : (
+            <button
+              className="btn btn-sm"
+              disabled={!!busy}
+              onClick={() => run("Stop", () => postJSON(`api/robots/${planRobot}/teleop/stop`), true)}
+              title="Stop the robot: zero velocity, then manual mode (it will not execute plans until Resume (auto))"
+            >
+              Stop (manual)
+            </button>
+          )}
+          <button
+            className="btn btn-sm"
+            disabled={!!busy}
+            onClick={() => run("Resume", () => postJSON(`api/robots/${planRobot}/executor/resume`), true)}
+            title={spot ? undefined : "Leave manual mode: the robot executes plans again"}
+          >
+            {spot ? "Resume" : "Resume (auto)"}
           </button>
         </div>
       </div>
+
+      {planRobot && !spot && <PhoenixChips robot={planRobot} long className="plan-phx-chips" />}
 
       <Segmented<Tool>
         ariaLabel="Goal tool"
@@ -241,8 +274,11 @@ export function PlanPanel() {
 
 function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | undefined}) {
   const colorOf = useRobotColorOf();
+  const exec = usePlanExec(robot ?? "");
+  const spot = usePlatform(robot) === "spot";
   if (!robot) return null;
-  const cur = currentActionIndex(plan);
+  // phoenix has no per-step results: "done" (goal reached) marks every step done
+  const cur = !spot && exec.state === "done" ? (plan?.plan?.actions.length ?? 0) : currentActionIndex(plan);
   const color = colorOf(robot);
   return (
     <div className="current-plan">

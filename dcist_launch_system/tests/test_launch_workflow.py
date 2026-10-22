@@ -380,3 +380,63 @@ def test_failed_robot_launch_returns_false():
     plan = LaunchPlan(robots=["smaug", "topaz"], session="s", experiment="e")
     assert run(plan, ssh, rec) is False
     assert "smaug: launched" in rec.text() and "topaz: FAILED (rc=2) nope" in rec.text()
+
+
+# --- per-robot platform sessions ---------------------------------------------
+
+MIXED_RUNTIME = {
+    "hamilton": {
+        "name": "hamilton", "role": "robot", "ip": "10.0.0.3", "user": "swarm",
+        "platform_id": "topaz", "online": True,
+    },
+    "gauss": {
+        "name": "gauss", "role": "robot", "ip": "10.0.0.4", "user": "swarm",
+        "platform_id": "samoyed", "online": True,
+    },
+}  # fmt: skip
+MIXED_TOPO = {
+    **TOPO,
+    "machines": {
+        "hamilton": {"role": "robot", "platform_id": "topaz"},  # no platform_type: spot
+        "gauss": {"role": "robot", "platform_id": "samoyed", "platform_type": "husky"},
+    },
+}
+
+
+def _sessions(plan, topo=MIXED_TOPO):
+    return {
+        m["name"]: c.split("run-adt4 ", 1)[1].split()[0]
+        for m, c in build_robot_commands(plan, MIXED_RUNTIME, OUT, topo)
+    }
+
+
+def test_mixed_fleet_launch_runs_each_robots_platform_preset():
+    plan = LaunchPlan(robots=["hamilton", "gauss"], session="spot-default", experiment="e", mode="mapping")
+    assert _sessions(plan) == {"hamilton": "spot-default", "gauss": "phoenix-default"}
+    # whichever preset the UI showed (the first robot's), and without a mode
+    plan.session, plan.mode = "phoenix-default", None
+    assert _sessions(plan) == {"hamilton": "spot-default", "gauss": "phoenix-default"}
+    plan.session, plan.mode, plan.prior_path = "spot-relocalize", "relocalize", "~/p"
+    assert _sessions(plan) == {"hamilton": "spot-relocalize", "gauss": "phoenix-reloc"}
+
+
+def test_hand_picked_session_runs_on_every_robot():
+    plan = LaunchPlan(robots=["hamilton", "gauss"], session="spot_bag-default", experiment="e")
+    assert _sessions(plan) == {"hamilton": "spot_bag-default", "gauss": "spot_bag-default"}
+    # no topology (the routes' up-front validation): the plan's session as given
+    plan.session = "spot-default"
+    cmds = build_robot_commands(plan, MIXED_RUNTIME, OUT)
+    assert all("run-adt4 spot-default " in c for _, c in cmds)
+
+
+def test_default_selection_per_robot_platform():
+    sel = default_selection(MIXED_TOPO, MIXED_RUNTIME, "mapping", ["gauss", "hamilton"], set())
+    assert sel["session"] == "phoenix-default"  # the first robot's
+    assert sel["sessions"] == {"gauss": "phoenix-default", "hamilton": "spot-default"}
+    # platform_type wins over fleet_defaults.spot_platforms (platform ids)
+    topo = {**MIXED_TOPO, "fleet_defaults": {**TOPO["fleet_defaults"], "spot_platforms": ["samoyed"]}}
+    sel = default_selection(topo, MIXED_RUNTIME, "mapping", ["gauss"], set())
+    assert sel["session"] == "phoenix-default"
+    # a robot missing from the topology's machines: its runtime entry, else spot
+    sel = default_selection(TOPO, RUNTIME, "mapping", None, set())
+    assert sel["sessions"] == {"smaug": "spot-default", "topaz": "spot-default"}

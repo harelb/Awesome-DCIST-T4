@@ -12,15 +12,23 @@ health / action results, and on every :meth:`AgentCore.tick` emits
 * C3 ``grid/occupancy`` (latest occupancy grid) every ``grid_period_s`` when
   its content hash changed,
 * C1 ``paths`` (executor smooth / MLP paths + MLP target) only on change,
+* C3 ``lidar/points`` (:mod:`fleetlink.pointcloud_codec`) at ``lidar_hz``, only
+  while the base asked for it (C0 ``lidar``; off by default),
 
 serves C0 requests (``resync``, ``budget``, ``auto``, ``ping``, ``tiles``,
-``resend``, ``video``) with an ack each (``fb``, the receiver's once-a-second
+``resend``, ``video``, ``lidar``) with an ack each (``fb``, the receiver's once-a-second
 feedback for auto mode, is fire-and-forget), re-sends lost C2 messages from a
 ring buffer of the last ``c2_ring`` ones (``resend {stream: "dsg", from_seq,
 to_seq}``), answers C4 camera queries on
 ``adt4/<r>/media/camera/<name>`` and streams C5 live video on
 ``adt4/<r>/video/<name>`` while the base keeps a ``video`` request alive
 (:mod:`fleetlink.video`).  :class:`AgentNode` wraps it in rclpy.
+
+The C1 state names the robot's ``platform`` ("spot" | "phoenix", see
+:func:`fleetlink.relay_ros.platform_of`).  A phoenix robot (Clearpath Husky on
+ARL's stack) has no spot_executor_node: its ``guards`` come from the platform
+topics (:class:`PhoenixGuards`) and ``phoenix_progress`` reports how far the
+robot is from the end of the latest omniplanner Path.
 """
 
 from __future__ import annotations
@@ -95,7 +103,24 @@ DEFAULT_CONFIG = {
     "store_compression": "fast",  # none | lossless | fast
     "store_poll_s": 1.0,  # how often new store frames are looked for
     "store_queue_s": 2.0,  # C6 frames queued at most (seconds of C6 budget)
+    "platform": "spot",  # spot | phoenix (relay_ros.platform_of)
+    # C3 lidar stream: None = no lidar (no ``lidar`` state key); frames go out only
+    # while ``lidar`` is on (off by default, the console turns it on per robot)
+    "lidar_topic": None,
+    "lidar": False,
+    "lidar_hz": 1.0,
+    "lidar_bps": 50_000,  # cap on top of C3: fewer frames when they are big
+    "lidar_intensity": False,  # + uint8 intensity (~1 B per point more)
+    # safety: stop streaming when no ``lidar`` request (enable / base refresh)
+    # came for this long, e.g. the base went away while it was on
+    "lidar_ttl_s": 60.0,
 }
+
+PHOENIX = "phoenix"
+# phoenix_progress: the plan is done within this xy distance of the Path's end,
+# once the robot has been farther than that from it since the plan arrived (a
+# round trip ends where it starts: not done at dispatch)
+PHOENIX_DONE_M = 1.0
 
 
 def zenoh_version() -> str | None:
@@ -224,6 +249,8 @@ class AgentCore:
         "grid/occupancy": "C3",
         "paths": "C1",
         "store/frame": "C6",
+        # bulk, best effort, below graph (C2) and pose (C1); latest frame only
+        "lidar/points": "C3",
     }
 
     def __init__(
@@ -294,6 +321,9 @@ class AgentCore:
         # the node subscribes to ROMAN (see :meth:`enable_reloc`)
         self.reloc = None
         self.guards: dict = {}
+        self.platform = str(self.cfg.get("platform") or "spot")
+        # phoenix: latest omniplanner Path (points in ``frame``) for phoenix_progress
+        self._plan: dict | None = None
         self.health: dict = {}
         self.results: deque = deque(maxlen=10)
         self._t_state = -1e9
@@ -353,6 +383,16 @@ class AgentCore:
                 )
             except Exception as exc:  # noqa: BLE001  (bad params / no hydra_image_store)
                 self.store_error = f"{type(exc).__name__}: {exc}"
+        # C3 lidar (fleetlink.pointcloud_codec frames from AgentNode)
+        self.lidar_topic = self.cfg.get("lidar_topic") or None
+        self.lidar_enabled = bool(self.cfg.get("lidar")) and self.lidar_topic is not None
+        self.lidar_error: str | None = None
+        self._lidar: dict | None = None  # newest encoded frame (+ frame, origin, stamp)
+        self._lidar_rx_t: float | None = None
+        self._lidar_dirty = False
+        self._t_lidar = -1e9
+        self._lidar_req_t = clock()  # last ``lidar`` request (lidar_ttl_s)
+        self.lidar_sent_bytes = 0  # size of the last frame put on the link
         # DsgUpdate decoding diagnostics (filled by AgentNode, reported in stats)
         self.dsg_diag: dict = {}
 
@@ -425,6 +465,7 @@ class AgentCore:
         """``{x, y, z, qw, qx, qy, qz, frame, t}``."""
         with self._lock:
             self.pose = dict(pose)
+            _plan_mark_left(self._plan, self.pose)
 
     def on_frame_align(self, align: dict | None) -> None:
         """``{parent, child, T: [x, y, z, qw, qx, qy, qz], stamp, ok, reason}``
@@ -450,6 +491,37 @@ class AgentCore:
     def on_guards(self, guards: dict) -> None:
         with self._lock:
             self.guards = dict(guards)
+
+    def on_plan_path(self, points, frame: str, sec: int, nanosec: int) -> None:
+        """Phoenix: the latest omniplanner Path (``points`` (N, 3) in ``frame``,
+        ideally the pose frame) and its header stamp, which names the plan."""
+        pts = np.asarray(points, dtype=float).reshape(-1, 3)
+        length = float(np.hypot(*np.diff(pts[:, :2], axis=0).T).sum()) if len(pts) > 1 else 0.0
+        with self._lock:
+            plan_id = f"{int(sec)}.{int(nanosec):09d}"
+            if self._plan is not None and self._plan["plan_id"] == plan_id:
+                left = self._plan["left"]  # the same plan again: keep its history
+            else:
+                # a (near) zero-length path is done once the robot is at its end
+                left = len(pts) <= 1 or length < PHOENIX_DONE_M
+            self._plan = {
+                "plan_id": plan_id,
+                "stamp": int(sec) + int(nanosec) * 1e-9,
+                "frame": frame,
+                "end": [float(v) for v in pts[-1]] if len(pts) else None,
+                "left": left,
+            }
+            _plan_mark_left(self._plan, self.pose)
+
+    def on_lidar(self, frame: dict) -> None:
+        """Newest lidar frame: :func:`pointcloud_codec.encode_cloud` output plus
+        ``frame`` (the pose frame), ``sensor_frame``, ``origin`` [x, y, z, qx,
+        qy, qz, qw] (sensor pose in ``frame``) and ``stamp``."""
+        with self._lock:
+            self._lidar = dict(frame)
+            self._lidar_rx_t = self.clock()
+            self._lidar_dirty = True
+            self.lidar_error = None  # a good frame clears an earlier bad one
 
     def on_health(self, health: dict) -> None:
         with self._lock:
@@ -706,6 +778,12 @@ class AgentCore:
             self.store_send = enable
             self._t_store = -1e9
             return {"send": self.store_send}
+        if op == "lidar":
+            if self.lidar_topic is None:
+                raise ValueError("no lidar on this robot")
+            self._lidar_req_t = now
+            self._set_lidar(bool(args.get("enable", True)))
+            return self._lidar_state()
         if op == "video_keyframe":
             cam = str(args.get("camera") or "")
             return {"camera": cam, "forced": self.video.force_keyframe(cam, now)}
@@ -864,7 +942,7 @@ class AgentCore:
                 )
             )
         # re-queue tiles only; the manifest and a pending occupancy grid stay
-        self.sched.clear("C3", lambda it: it.tag not in ("manifest", "grid", "values"))
+        self.sched.clear("C3", lambda it: it.tag not in ("manifest", "grid", "values", "lidar"))
         for k in changed:
             tile = self.tiles[k]
 
@@ -1005,9 +1083,76 @@ class AgentCore:
                 "seqs": {"dsg": self.seq["dsg/delta"] - 1},
                 "video": self.video.state(),
                 "store": self._store_state(),
+                "platform": self.platform,
                 **self._frame_align_state(),
                 **self._reloc_state(),
+                **self._phoenix_state(),
+                **({"lidar": self._lidar_state()} if self.lidar_topic else {}),
             }
+
+    def _phoenix_state(self) -> dict:
+        """``phoenix_progress`` (phoenix only; None before any plan)."""
+        if self.platform != PHOENIX:
+            return {}
+        return {"phoenix_progress": phoenix_progress(self._plan, self.pose)}
+
+    def _lidar_state(self) -> dict:
+        age = None
+        if self._lidar_rx_t is not None:
+            age = round(max(0.0, self.clock() - self._lidar_rx_t), 2)
+        # ``available``: the robot has a lidar (the console keeps its toggle and
+        # the receiver keeps reconciling); a bad cloud is only ``error``
+        return {
+            "available": self.lidar_topic is not None,
+            "enabled": self.lidar_enabled,
+            "age_s": age,  # since the newest frame reached the agent
+            "bytes": self.lidar_sent_bytes,
+            "error": self.lidar_error,
+        }
+
+    def _set_lidar(self, enable: bool) -> None:
+        if not enable:
+            self.sched.clear("C3", lambda it: it.tag == "lidar")
+            self._lidar = None  # a frame from before must not go out later
+        else:
+            self.lidar_error = None  # a fresh start: report only new errors
+            if not self.lidar_enabled:
+                self._t_lidar = -1e9
+        self.lidar_enabled = enable
+
+    def _lidar_tick(self, now: float) -> None:
+        """Queue the newest frame (one at most: tag ``lidar`` replaces a queued
+        one, built at send time) every 1 / ``lidar_hz`` s, slower when frames are
+        big (``lidar_bps``)."""
+        ttl = self.cfg.get("lidar_ttl_s")
+        if self.lidar_enabled and ttl and now - self._lidar_req_t > float(ttl):
+            self._set_lidar(False)  # no base kept it alive
+        if not self.lidar_enabled or not self._lidar_dirty or self._lidar is None:
+            return
+        period = 1.0 / max(1e-3, float(self.cfg["lidar_hz"]))
+        bps = self.cfg.get("lidar_bps")
+        if bps:
+            period = max(period, self.lidar_sent_bytes / float(bps))
+        if now - self._t_lidar < period:
+            return
+        self._t_lidar = now
+        self._lidar_dirty = False
+
+        def payload():
+            return self._lidar  # the newest when it leaves (None: turned off)
+
+        def sent(n):
+            self.lidar_sent_bytes = n
+
+        f = self._lidar
+        self._queue(
+            "lidar/points",
+            f"{self.prefix}/lidar/points",
+            payload,
+            len(f.get("xyz") or b"") + len(f.get("intensity") or b"") + 128,
+            on_sent=sent,
+            tag="lidar",
+        )
 
     def _reloc_state(self) -> dict:
         """Optional ``reloc`` key (absent unless ROMAN is subscribed, so old
@@ -1136,6 +1281,7 @@ class AgentCore:
             if self._paths_dirty and now - self._t_paths >= 1.0 / self.cfg["paths_hz"]:
                 self._t_paths = now
                 self._paths_tick()
+            self._lidar_tick(now)
             if self.store is not None and now - self._t_store >= self.cfg["store_poll_s"]:
                 self._t_store = now
                 try:
@@ -1189,6 +1335,108 @@ def guards_to_dict(msg) -> dict:
         "notes": msg.notes,
         "t": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
     }
+
+
+def phoenix_progress(plan: dict | None, pose: dict | None) -> dict | None:
+    """``{plan_id, stamp, dist_to_goal_m, done}`` from the latest Path (see
+    :meth:`AgentCore.on_plan_path`) and pose.  The distance (xy) needs both in
+    the same frame: null when they differ (no TF between them) or are unknown.
+    ``done``: within PHOENIX_DONE_M of the end *and* the plan's ``left`` mark
+    (the robot was farther than that from the end since the plan arrived, or
+    the path is shorter than that)."""
+    if plan is None:
+        return None
+    dist = _dist_to_end(plan, pose)
+    if dist is not None:
+        dist = round(dist, 3)
+    return {
+        "plan_id": plan["plan_id"],
+        "stamp": plan["stamp"],
+        "dist_to_goal_m": dist,
+        "done": dist is not None and dist < PHOENIX_DONE_M and bool(plan.get("left")),
+    }
+
+
+def _dist_to_end(plan: dict, pose: dict | None) -> float | None:
+    """xy distance from ``pose`` to the end of ``plan`` (None: unknown / other frame)."""
+    end = plan.get("end")
+    if end is None or pose is None or pose.get("frame") != plan.get("frame"):
+        return None
+    return float(np.hypot(pose["x"] - end[0], pose["y"] - end[1]))
+
+
+def _plan_mark_left(plan: dict | None, pose: dict | None) -> None:
+    """Mark ``plan`` ``left`` once ``pose`` is farther than PHOENIX_DONE_M from its end."""
+    if plan is None or plan.get("left"):
+        return
+    dist = _dist_to_end(plan, pose)
+    if dist is not None and dist > PHOENIX_DONE_M:
+        plan["left"] = True
+
+
+class PhoenixGuards:
+    """Phoenix guards from the platform topics, in the Spot ``guards`` keys the
+    console reads (``battery_percent``, ``estop_pressed``) plus ``safety_stop``
+    and ``manual_mode``; None until a topic has been heard."""
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self.clock = clock
+        self.values = {
+            "battery_percent": None,
+            "estop_pressed": None,
+            "safety_stop": None,
+            "manual_mode": None,
+        }
+        self.t = None
+
+    def battery(self, percentage) -> dict:
+        """sensor_msgs/BatteryState ``percentage``: 0-1 (NaN: unknown)."""
+        p = float(percentage)
+        return self._set("battery_percent", round(100.0 * p, 1) if np.isfinite(p) else None)
+
+    def estop(self, pressed) -> dict:
+        return self._set("estop_pressed", bool(pressed))
+
+    def safety_stop(self, stopped) -> dict:
+        return self._set("safety_stop", bool(stopped))
+
+    def manual_mode(self, manual) -> dict:
+        return self._set("manual_mode", bool(manual))
+
+    def _set(self, key, value) -> dict:
+        self.values[key] = value
+        self.t = self.clock()
+        return self.as_dict()
+
+    def as_dict(self) -> dict:
+        return {**self.values, "source": PHOENIX, "t": self.t}
+
+
+def trajectory_points(msg) -> np.ndarray:
+    """phx_nav_msgs/TrajectoryArray → (N, 3) points of its first trajectory.
+
+    Duck-typed (the message definition is not available here): the first list
+    field holds trajectories, each a list (``poses`` / ``points`` / ...) of
+    PoseStamped, Pose or Point-like entries."""
+
+    def lists(m):
+        for name in getattr(m, "get_fields_and_field_types", dict)():
+            v = getattr(m, name, None)
+            if isinstance(v, (list, tuple)) and len(v):
+                yield v
+
+    def xyz(e):
+        e = getattr(e, "pose", e)
+        e = getattr(e, "position", e)
+        return [float(e.x), float(e.y), float(e.z)]
+
+    for trajs in lists(msg):
+        for entries in lists(trajs[0]):
+            try:
+                return np.array([xyz(e) for e in entries], dtype=float).reshape(-1, 3)
+            except AttributeError:
+                continue
+    return np.zeros((0, 3))
 
 
 def result_to_dict(msg) -> dict:
@@ -1315,6 +1563,27 @@ def frame_align_failed(parent: str, child: str, reason: str) -> dict:
     }
 
 
+def default_body_frame(robot: str, platform: str) -> str:
+    """The frame the pose is looked up for: phoenix (Husky URDF) has no body
+    frame, its root link is base_link."""
+    return f"{robot}/base_link" if platform == PHOENIX else f"{robot}/body"
+
+
+def resolve_platform(robot: str, explicit: str = "", topology: str = "") -> str:
+    """``explicit`` (param) or the robot's topology ``platform_type``, by the one
+    rule (:func:`relay_ros.platform_of`: missing → spot, husky → phoenix)."""
+    from fleetlink import relay_ros
+
+    if explicit:
+        return relay_ros.platform_of({"platform_type": explicit})
+    try:
+        topo = relay_ros.load_topology(topology or str(relay_ros.DEFAULT_TOPOLOGY))
+        machine = ((topo or {}).get("machines") or {}).get(robot)
+    except Exception:  # noqa: BLE001  (no topology file on this machine)
+        machine = None
+    return relay_ros.platform_of(machine)
+
+
 def lookup_frame_align(tf_buffer, parent: str, child: str) -> dict:
     """Latest ``parent <- child`` from a tf2 buffer as a ``frame_align`` dict."""
     if not child:
@@ -1336,6 +1605,21 @@ def lookup_frame_align(tf_buffer, parent: str, child: str) -> dict:
             parent, child, f"not relocalized: {type(exc).__name__}: {exc}"
         )
     return frame_align_ok(tf, parent, child)
+
+
+def lidar_qos():
+    """The lidar subscription's QoS: depth 1 (only the newest cloud is wanted,
+    none queue up behind a slow callback), best effort (matches a RELIABLE
+    publisher, e.g. the Ouster driver's KEEP_LAST 10, as well as a best-effort
+    one), volatile."""
+    from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.VOLATILE,
+    )
 
 
 class AgentNode:
@@ -1360,13 +1644,21 @@ class AgentNode:
         cfg = load_config(cfg_file)
         p = lambda name, default: nd.declare_parameter(name, default).value  # noqa: E731
         robot = p("robot_name", nd.get_namespace().strip("/") or "robot")
+        # platform: ``platform`` (or ``relay_platform``) param, else the topology
+        relay_platform = p("relay_platform", "")
+        topology = p("topology", "")
+        self.platform = resolve_platform(
+            robot, p("platform", "") or relay_platform, topology
+        )
+        phoenix = self.platform == PHOENIX
+        cfg["platform"] = self.platform
         # Pose must be expressed in the frame the scene graph lives in, which is
         # the DSG message's header.frame_id (Hydra: <robot>/map).  ``map_frame``
         # overrides that; the global ``map`` frame is a last resort only, since
         # map -> <robot>/map is often a placeholder static transform.
         self.map_frame = p("map_frame", "")
         self._dsg_frame = ""
-        self.body_frame = p("body_frame", f"{robot}/body")
+        self.body_frame = p("body_frame", default_body_frame(robot, self.platform))
         self.fallback_map_frame = p("fallback_map_frame", f"{robot}/map")
         # the global frame prior maps / the planner use; ``global_frame <- DSG
         # frame`` (relocalization: map -> <robot>/odom) goes out as ``frame_align``
@@ -1432,6 +1724,24 @@ class AgentNode:
             "store_compression", str(cfg["store_compression"])
         )
         cfg["budgets"]["C6"] = p("budget_C6", int(cfg["budgets"]["C6"]))
+        # C3 lidar stream (off until the console asks): "" = no lidar
+        cfg["lidar_topic"] = p(
+            "lidar_topic", f"/{robot}/ouster/points" if phoenix else ""
+        ) or None
+        cfg["lidar_hz"] = p("lidar_hz", float(cfg["lidar_hz"]))
+        cfg["lidar_bps"] = p("lidar_bps", int(cfg["lidar_bps"]))
+        cfg["lidar_intensity"] = p("lidar_intensity", bool(cfg["lidar_intensity"]))
+        cfg["lidar_ttl_s"] = p("lidar_ttl_s", float(cfg["lidar_ttl_s"]))
+        # phoenix platform topics (guards, plan progress, executor path)
+        phx_topics = {
+            "battery": p("battery_topic", "platform/bms/state"),
+            "estop": p("estop_topic", "platform/emergency_stop"),
+            "safety_stop": p("safety_stop_topic", "platform/safety_stop"),
+            "manual_mode": p("manual_mode_topic", "manual_mode"),
+            "mcu": p("mcu_status_topic", "platform/mcu/status"),
+            "plan": p("plan_topic", "omniplanner_node/compiled_plan_out"),
+            "trajectories": p("trajectories_topic", "mrp/trajectories"),
+        }
 
         self.log = nd.get_logger()
         warning = zenoh_version_warning()
@@ -1476,22 +1786,24 @@ class AgentNode:
             from nav_msgs.msg import OccupancyGrid, Path
 
             nd.create_subscription(OccupancyGrid, grid_topic, self._on_grid, sensor_qos)
-            nd.create_subscription(
-                Path, smooth_topic, lambda m: self._on_path("smooth", m), sensor_qos
-            )
-            nd.create_subscription(
-                Path, mlp_topic, lambda m: self._on_path("mlp", m), sensor_qos
-            )
+            if not phoenix:  # spot_executor_node paths
+                nd.create_subscription(
+                    Path, smooth_topic, lambda m: self._on_path("smooth", m), sensor_qos
+                )
+                nd.create_subscription(
+                    Path, mlp_topic, lambda m: self._on_path("mlp", m), sensor_qos
+                )
         except ImportError:
             self.log.warn("nav_msgs unavailable: no occupancy grid / paths")
-        try:
-            from visualization_msgs.msg import MarkerArray
+        if not phoenix:
+            try:
+                from visualization_msgs.msg import MarkerArray
 
-            nd.create_subscription(
-                MarkerArray, target_topic, self._on_target, sensor_qos
-            )
-        except ImportError:
-            self.log.warn("visualization_msgs unavailable: no MLP target")
+                nd.create_subscription(
+                    MarkerArray, target_topic, self._on_target, sensor_qos
+                )
+            except ImportError:
+                self.log.warn("visualization_msgs unavailable: no MLP target")
         # cameras: subscribed lazily (eager_cameras always), see _update_cameras
         self._camera_topics = dict(cameras)
         self._camera_subs: dict = {}
@@ -1506,23 +1818,29 @@ class AgentNode:
             self.log.warn("sensor_msgs unavailable: no cameras")
         self._update_cameras()
         nd.create_timer(1.0, self._update_cameras)
-        try:
-            from robot_executor_msgs.msg import ActionResultMsg, RuntimeGuardsMsg
+        # lidar: subscribed only while the base wants the stream (_update_lidar)
+        self._lidar_sub = None
+        self._lidar_t = -1e9
+        self._lidar_warned = ""
+        self._cloud_type = None
+        self._lidar_group = None
+        if self.core.lidar_topic:
+            from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
-            nd.create_subscription(
-                RuntimeGuardsMsg,
-                guards_topic,
-                lambda m: self.core.on_guards(guards_to_dict(m)),
-                10,
-            )
-            nd.create_subscription(
-                ActionResultMsg,
-                result_topic,
-                lambda m: self.core.on_result(result_to_dict(m)),
-                10,
-            )
-        except ImportError:
-            self.log.warn("robot_executor_msgs unavailable: no guards/results")
+            # its own group: a big cloud never holds up pose / graph / C0
+            # callbacks (MultiThreadedExecutor), and one cloud at a time
+            self._lidar_group = MutuallyExclusiveCallbackGroup()
+            try:
+                from sensor_msgs.msg import PointCloud2
+
+                self._cloud_type = PointCloud2
+            except ImportError as exc:
+                self.core.lidar_error = f"sensor_msgs unavailable: {exc}"
+            nd.create_timer(1.0, self._update_lidar)
+        if phoenix:
+            self._subscribe_phoenix(phx_topics, sensor_qos)
+        else:
+            self._subscribe_spot_executor(guards_topic, result_topic)
         try:
             from ros_system_monitor_msgs.msg import StatusTable
 
@@ -1561,11 +1879,9 @@ class AgentNode:
         # router-mode deployments behave exactly as before
         self.relay = None
         relay_config = p("relay_config", "")
-        relay_platform = p("relay_platform", "")
-        topology = p("topology", "")
         if relay_config:
             self.relay = self._start_relay(
-                robot, relay_config, relay_platform, topology
+                robot, relay_config, self.platform, topology
             )
 
         self._decoder = threading.Thread(target=self._decode_loop, daemon=True)
@@ -1578,9 +1894,151 @@ class AgentNode:
         self._video_thread = threading.Thread(target=self._video_loop, daemon=True)
         self._video_thread.start()
         self.log.info(
-            f"fleetlink agent robot={robot} epoch={self.core.epoch} dsg={dsg_topic} "
+            f"fleetlink agent robot={robot} platform={self.platform} "
+            f"body={self.body_frame} epoch={self.core.epoch} dsg={dsg_topic} "
             f"budgets={cfg['budgets']}"
         )
+
+    def _subscribe_spot_executor(self, guards_topic: str, result_topic: str) -> None:
+        """Spot: guards and action results from spot_executor_node."""
+        try:
+            from robot_executor_msgs.msg import ActionResultMsg, RuntimeGuardsMsg
+
+            self.node.create_subscription(
+                RuntimeGuardsMsg,
+                guards_topic,
+                lambda m: self.core.on_guards(guards_to_dict(m)),
+                10,
+            )
+            self.node.create_subscription(
+                ActionResultMsg,
+                result_topic,
+                lambda m: self.core.on_result(result_to_dict(m)),
+                10,
+            )
+        except ImportError:
+            self.log.warn("robot_executor_msgs unavailable: no guards/results")
+
+    def _subscribe_phoenix(self, topics: dict, qos) -> None:
+        """Phoenix: guards from the platform topics, plan progress from the
+        omniplanner Path, and (if phx_nav_msgs imports) the MRP trajectory as the
+        executor path overlay."""
+        nd = self.node
+        self._phx_guards = PhoenixGuards()
+        g = self._phx_guards
+        guards = self.core.on_guards
+        guards(g.as_dict())  # every key present (null) before the first message
+        try:
+            from sensor_msgs.msg import BatteryState
+            from std_msgs.msg import Bool
+
+            nd.create_subscription(
+                BatteryState, topics["battery"], lambda m: guards(g.battery(m.percentage)), qos
+            )
+            for key, fn in (("estop", g.estop), ("safety_stop", g.safety_stop),
+                            ("manual_mode", g.manual_mode)):  # fmt: skip
+                nd.create_subscription(
+                    Bool, topics[key], lambda m, fn=fn: guards(fn(m.data)), qos
+                )
+        except ImportError as exc:
+            self.log.warn(f"phoenix guards unavailable: {exc}")
+        try:  # optional: proves the MCU link is alive (its fields are not used)
+            from clearpath_platform_msgs.msg import Status
+
+            def on_mcu(_m):
+                g.values["mcu_t"] = time.time()
+
+            nd.create_subscription(Status, topics["mcu"], on_mcu, qos)
+        except ImportError:
+            pass
+        try:
+            from nav_msgs.msg import Path
+
+            nd.create_subscription(Path, topics["plan"], self._on_plan, qos)
+        except ImportError:
+            self.log.warn("nav_msgs unavailable: no phoenix plan progress")
+        try:
+            from phx_nav_msgs.msg import TrajectoryArray
+
+            nd.create_subscription(
+                TrajectoryArray, topics["trajectories"], self._on_trajectories, qos
+            )
+        except ImportError:
+            self.log.warn("phx_nav_msgs unavailable: no executor path overlay")
+
+    def _on_plan(self, msg) -> None:
+        """Phoenix omniplanner Path → phoenix_progress, in the pose frame when TF
+        allows (else its own frame: the distance is then null)."""
+        target = (self.core.pose or {}).get("frame") or self._map_frame()
+        pts, frame = self._to_frame(path_points(msg), msg.header.frame_id, target)
+        st = msg.header.stamp
+        sec, nsec = int(st.sec), int(st.nanosec)
+        if sec == 0 and nsec == 0:  # unstamped: name the plan by its arrival
+            now = time.time()
+            sec, nsec = int(now), int((now % 1.0) * 1e9)
+        self.core.on_plan_path(pts, frame, sec, nsec)
+
+    def _on_trajectories(self, msg) -> None:
+        pts = trajectory_points(msg)
+        header = getattr(msg, "header", None)
+        frame = getattr(header, "frame_id", "") if header is not None else ""
+        pts, frame = self._to_map(pts, frame)
+        self.core.on_path("smooth", pts, frame, stamp_s(header) if header else None)
+
+    def _update_lidar(self) -> None:
+        """Subscribe the lidar while the base wants it, drop it otherwise (1 Hz)."""
+        if self.core.lidar_enabled and self._cloud_type is None:
+            self.core.lidar_error = "sensor_msgs unavailable: no PointCloud2"
+        want = self.core.lidar_enabled and self._cloud_type is not None
+        if want and self._lidar_sub is None:
+            self._lidar_sub = self.node.create_subscription(
+                self._cloud_type, self.core.lidar_topic, self._on_cloud, lidar_qos(),
+                callback_group=self._lidar_group,
+            )  # fmt: skip
+        elif not want and self._lidar_sub is not None:
+            self.node.destroy_subscription(self._lidar_sub)
+            self._lidar_sub = None
+
+    def _on_cloud(self, msg) -> None:
+        """Sample the lidar at ``lidar_hz``: encode it in the sensor frame, with the
+        sensor's pose in the robot pose's frame as ``origin``.  The time gate
+        comes first: the ~10 Hz clouds in between cost next to nothing."""
+        now = time.time()
+        if not self.core.lidar_enabled or now - self._lidar_t < 0.9 / max(
+            1e-3, float(self.core.cfg["lidar_hz"])
+        ):
+            return
+        from fleetlink import pointcloud_codec
+
+        parent = (self.core.pose or {}).get("frame") or self._map_frame()
+        sensor = msg.header.frame_id
+        try:
+            from rclpy.time import Time
+
+            tf = self._tf_buffer.lookup_transform(parent, sensor, Time())
+        except Exception as exc:  # noqa: BLE001  (no TF yet / tf2 missing)
+            reason = f"no transform {parent} <- {sensor}: {type(exc).__name__}"
+            if reason != self._lidar_warned:
+                self._lidar_warned = reason
+                self.log.warn(f"lidar: {reason}")
+            return
+        self._lidar_t = now
+        try:
+            xyz, intensity = pointcloud_codec.cloud_from_msg(msg)
+            if not self.core.cfg.get("lidar_intensity"):
+                intensity = None  # the console colours by height
+            frame = pointcloud_codec.encode_cloud(xyz, intensity)
+        except Exception as exc:  # noqa: BLE001
+            self.core.lidar_error = f"{type(exc).__name__}: {exc}"
+            return
+        t, q = tf.transform.translation, tf.transform.rotation
+        frame.update(
+            frame=parent,
+            sensor_frame=sensor,
+            origin=[float(v) for v in (t.x, t.y, t.z, q.x, q.y, q.z, q.w)],
+            stamp=stamp_s(msg.header),
+        )
+        self.core.on_lidar(frame)  # clears lidar_error
 
     def _start_relay(self, robot, config_path, platform, topology):
         from fleetlink import relay_ros
@@ -1754,8 +2212,11 @@ class AgentNode:
 
     def _to_map(self, pts: np.ndarray, frame: str):
         """Express points in the scene-graph frame when TF allows (else unchanged)."""
+        return self._to_frame(pts, frame, self._map_frame())
+
+    def _to_frame(self, pts: np.ndarray, frame: str, target: str):
+        """Express points in ``target`` when TF allows (else unchanged)."""
         frame = self._ros_frame(frame)
-        target = self._map_frame()
         if not frame or frame == target or self._tf_buffer is None or not len(pts):
             return pts, frame or target
         from rclpy.time import Time

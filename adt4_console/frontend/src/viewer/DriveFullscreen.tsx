@@ -1,7 +1,8 @@
 // Full-screen drive view for phones (and touch tablets): the robot's camera
 // fills the screen, with two translucent sticks over it like Spot's tablet
 // app. Left half of the screen = move stick (up/down forward/back, sideways
-// strafes), right half = turn stick (sideways yaws); both work at once. A stick
+// strafes on a Spot), right half = turn stick (sideways yaws); both work at
+// once. Stand / Sit are Spot only; a phoenix Husky gets its own caps. A stick
 // centres where the finger lands. The view menu switches cameras, all cameras
 // at once, or the map.
 //
@@ -11,15 +12,16 @@
 // leaving the browser, changing the robot focus or closing the view disarms.
 // While this view is open the Teleop tab stands down (viewer store driveFull).
 import {useCallback, useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent} from "react";
-import {getJSON, postJSON, errorText} from "../lib/api";
-import {CAPS, StickTracker, TeleopDriver, ZERO, armConfirmed, captureTouches, isZero, setArmConfirmed, teleopWsUrl, type DriverStatus, type StickId, type Twist} from "../lib/teleop";
+import {getJSON, postJSON, errorText, useApi} from "../lib/api";
+import {StickTracker, TeleopDriver, ZERO, armConfirmed, capsFor, captureTouches, isZero, setArmConfirmed, teleopWsUrl, type DriverStatus, type StickId, type Twist} from "../lib/teleop";
 import {useRobots} from "../stores/robots";
 import {useViewer} from "../stores/viewer";
-import type {TeleopView} from "../types";
+import type {PlanRobot, TeleopView} from "../types";
 import {Modal, Spinner} from "../components/ui";
 import {useStillFrames} from "./CameraPanel";
 import {VideoView} from "./VideoView";
 import {GridVideo} from "./GridVideo";
+import {usePhoenixGuards, usePlatform} from "./usePlatform";
 import "./driveFullscreen.css";
 
 /** Stick radius as a fraction of the shorter screen side (clamped, px). */
@@ -138,6 +140,17 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
     };
   }, [robot]);
 
+  // platform + caps (Spot fixed; others from the backend's plan-robot entry)
+  const planRobots = useApi<PlanRobot[]>("api/plan/robots");
+  const entry = planRobots.data?.find(r => r.robot === robot);
+  const platform = usePlatform(robot, entry?.platform);
+  const spot = platform === "spot";
+  const caps = capsFor(platform, entry?.caps);
+  const capsRef = useRef(caps);
+  capsRef.current = caps;
+  const phx = usePhoenixGuards(robot);
+  const estop = !spot && phx.estop === true;
+
   // executor state (the hub also pushes it), as the Teleop tab does
   const tv = useRobots(s => s.teleop[robot]);
   useEffect(() => {
@@ -170,6 +183,7 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
 
   useLayoutEffect(() => {
     const d = new TeleopDriver(teleopWsUrl(robot), s => setDrv(s));
+    d.caps = capsRef.current;
     driver.current = d;
     return () => {
       d.disarm();
@@ -186,8 +200,11 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
     setTick(t => t + 1);
     if (why) setNote(`Disarmed: ${why}`);
   }, []);
+  useEffect(() => {
+    if (estop && driver.current?.isArmed) disarm("E-stop pressed");
+  }, [estop, disarm]);
   const doArm = () => {
-    if (!driver.current) return;
+    if (!driver.current || estop) return;
     driver.current.arm();
     setArmed(true);
     setNote(null);
@@ -238,7 +255,8 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
   }, []);
 
   const recompute = () => {
-    const t = armed ? tracker.current.twist(speedRef.current) : ZERO;
+    if (driver.current) driver.current.caps = capsRef.current;
+    const t = armed ? tracker.current.twist(speedRef.current, capsRef.current) : ZERO;
     driver.current?.command(t);
     setCmd(t);
     setTick(n => n + 1);
@@ -303,7 +321,7 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
   };
 
   const st = tv?.state ?? null;
-  const blocked = st && !st.allowed ? st.interlock : "";
+  const blocked = spot ? (st && !st.allowed ? `Executor refuses teleop: ${st.interlock}` : "") : estop ? "E-stop pressed: the robot will not move" : phx.safety ? "Safety stop active: the robot will not move" : tv?.stopped ? "Stopped — press Resume or re-arm" : "";
   const rosDown = tv?.ros === false;
   const stick = (id: StickId) => {
     const g = tracker.current.get(id);
@@ -350,7 +368,12 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
       <div ref={zoneRef} className="dfs-zone" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onLostPointerCapture={onUp} data-testid="drive-full-zone">
         {stick("move")}
         {stick("turn")}
-        {!armed && <div className="dfs-zone-hint">Left: move · Right: turn{rosDown ? " · ROS is down on the console" : ""}</div>}
+        {!armed && (
+          <div className="dfs-zone-hint">
+            Left: move · Right: turn{!spot && phx.manual ? " · manual mode: no plans" : ""}
+            {rosDown ? " · ROS is down on the console" : ""}
+          </div>
+        )}
       </div>
 
       <div className="dfs-top">
@@ -365,13 +388,19 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
         <button
           className={`dfs-btn dfs-arm ${armed ? "on" : ""}`}
           onClick={toggleArm}
-          disabled={rosDown}
+          disabled={rosDown || (estop && !armed)}
           aria-pressed={armed}
           data-testid="drive-full-arm"
         >
           {armed ? "ARMED" : "Drive"}
         </button>
-        <button className="dfs-btn dfs-stop" onClick={() => void post("stop")} disabled={busy === "stop"} title="Halt now: ends teleop and cancels the running plan" data-testid="drive-full-stop">
+        <button
+          className="dfs-btn dfs-stop"
+          onClick={() => void post("stop")}
+          disabled={busy === "stop"}
+          title={spot ? "Halt now: ends teleop and cancels the running plan" : "Halt now: zero velocity, then manual mode (no plans until Resume (auto))"}
+          data-testid="drive-full-stop"
+        >
           {busy === "stop" ? <Spinner /> : "STOP"}
         </button>
       </div>
@@ -418,20 +447,22 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
               </div>
             </div>
           )}
-          <div className="dfs-menu-row">
-            <button className="btn btn-sm" disabled={!!busy} onClick={() => void post("stand")}>
-              {busy === "stand" && <Spinner />} Stand
-            </button>
-            <button className="btn btn-sm" disabled={!!busy} onClick={() => void post("sit")}>
-              {busy === "sit" && <Spinner />} Sit
-            </button>
-          </div>
+          {spot && (
+            <div className="dfs-menu-row">
+              <button className="btn btn-sm" disabled={!!busy} onClick={() => void post("stand")}>
+                {busy === "stand" && <Spinner />} Stand
+              </button>
+              <button className="btn btn-sm" disabled={!!busy} onClick={() => void post("sit")}>
+                {busy === "sit" && <Spinner />} Sit
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       <div className="dfs-bottom">
         <label className="dfs-speed">
-          <span className="mono">{(CAPS.vx * speed).toFixed(1)} m/s</span>
+          <span className="mono">{(caps.vx * speed).toFixed(1)} m/s</span>
           <input type="range" min={0.1} max={1} step={0.05} value={speed} onChange={e => setSpeed(Number(e.target.value))} aria-label="Speed" />
         </label>
         <span className={`dfs-status mono ${moving ? "moving" : ""}`}>
@@ -440,7 +471,7 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
           {armed && !drv.connected ? " · reconnecting" : ""}
         </span>
       </div>
-      {(blocked || (armed && drv.error) || note) && <div className={`dfs-note ${blocked || drv.error ? "err" : ""}`}>{blocked ? `Executor refuses teleop: ${blocked}` : armed && drv.error ? drv.error : note}</div>}
+      {(blocked || (armed && drv.error) || note) && <div className={`dfs-note ${blocked || drv.error ? "err" : ""}`}>{blocked ? blocked : armed && drv.error ? drv.error : note}</div>}
 
       {confirming && (
         <Modal
@@ -467,8 +498,8 @@ export function DriveFullscreen({robot, onExit}: {robot: string; onExit: () => v
           }
         >
           <p className="confirm-msg">
-            The sticks will move {robot} (up to {CAPS.vx} m/s). Left stick: forward/back and strafe; right stick: turn. Lifting your fingers stops it. Keep the robot in sight and the E-stop in reach. Leaving the page or this view disarms. The executor refuses while a plan
-            is executing: pause it first. You are asked once per browser session.
+            The sticks will move {robot} (up to {caps.vx} m/s). Left stick: forward/back{spot ? " and strafe" : ""}; right stick: turn. Lifting your fingers stops it. Keep the robot in sight and the E-stop in reach. Leaving the page or this view disarms.{" "}
+            {spot ? "The executor refuses while a plan is executing: pause it first." : "The robot's joystick and RC remote override the console."} You are asked once per browser session.
           </p>
         </Modal>
       )}

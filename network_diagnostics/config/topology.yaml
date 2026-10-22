@@ -25,6 +25,7 @@ machines:
       silvus: 192.168.100.2
       penn_wifi: 192.168.129.210
     platform_id: topaz
+    platform_type: spot
     desc: Topaz Jockey
   gauss:
     role: robot
@@ -33,7 +34,8 @@ machines:
     platform_type: phoenix
     desc: Husky Jockey
     addresses:
-      mit_wifi: 10.29.170.181
+      mit_wifi: 10.31.168.179
+      silvus: 192.168.100.4
   lewis:
     role: robot
     color: "#3cb44b"

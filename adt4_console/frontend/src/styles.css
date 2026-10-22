@@ -1483,6 +1483,49 @@ input[type="checkbox"] {
 .plan-exec-line {
   margin: 4px 0;
 }
+/* phoenix status chips (PhoenixStatus.tsx): legend and Teleop / Plan panels */
+.phx-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.phx-chip {
+  font: 700 10px var(--sans);
+  letter-spacing: 0.04em;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: help;
+  pointer-events: auto;
+}
+.phx-chip.tone-ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+.phx-chip.tone-warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+}
+.phx-chip.tone-err {
+  color: #ff8a8e;
+  background: var(--err-bg);
+}
+.phx-chip.tone-off {
+  color: var(--text-2);
+  border-color: transparent;
+}
+.robot-chip .phx-chip.tone-ok {
+  color: #9be7b5;
+}
+.robot-chip .phx-chip.tone-warn {
+  color: #ffc861;
+}
+.robot-chip .phx-chip.tone-off {
+  color: #c9d1d9;
+}
 .reloc-details summary {
   cursor: pointer;
   color: var(--text-2);
@@ -3359,4 +3402,7 @@ input[type="checkbox"] {
   gap: 4px 10px;
   margin-top: 2px;
   min-width: 0;
+}
+.plan-phx-chips {
+  margin: -2px 0 2px;
 }

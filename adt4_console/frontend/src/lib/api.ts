@@ -97,6 +97,29 @@ export async function getMsgpack(path: string, signal?: AbortSignal): Promise<un
   return unpack(await res.arrayBuffer());
 }
 
+/** msgpack GET with ``If-None-Match``: ``changed`` false on a 304 (nothing new
+ *  since ``etag``), else the decoded body and the new ETag. */
+export async function getMsgpackIfChanged(
+  path: string,
+  etag: string | null,
+  signal?: AbortSignal,
+): Promise<{changed: false} | {changed: true; data: unknown; etag: string | null}> {
+  let res: Response;
+  try {
+    const h: Record<string, string> = {Accept: "application/x-msgpack"};
+    if (etag) h["If-None-Match"] = etag;
+    res = await fetch(path, {signal, headers: headers(h), cache: "no-store"});
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    const err = new ApiError(0, "Backend unreachable");
+    notify(false, err);
+    throw err;
+  }
+  if (res.status === 304) return {changed: false};
+  if (!res.ok) throw await errorFrom(res);
+  return {changed: true, data: unpack(await res.arrayBuffer()), etag: res.headers.get("ETag")};
+}
+
 export function errorText(e: unknown): string {
   if (e instanceof ApiError) {
     if (e.kind === "down") return "Backend unreachable";

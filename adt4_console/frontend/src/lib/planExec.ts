@@ -2,13 +2,16 @@
 // plan, the executor's per-step results, the planner's dispatch refusals, the
 // executor's teleop state (plan_executing / plan_paused), the lease and the
 // fleetlink link. Shown on the robot's legend chip and in the Plan panel.
-import type {LeaseInfo, RobotPlan, TeleopState} from "../types";
+// Phoenix (Husky) robots have no Spot executor: their status is the agent's
+// manual-mode guard and its distance-to-goal report (phoenix_progress).
+import type {LeaseInfo, PhoenixProgress, RobotPlan, TeleopState} from "../types";
 import {currentActionIndex} from "../viewer/planUtil";
+import {isSpot, progressMatches} from "./platform";
 
 export interface PlanExec {
   /** none: no plan; ok: running or done; warn: needs a look; err: not moving */
   tone: "ok" | "warn" | "err" | "none";
-  state: "none" | "refused" | "done" | "failed" | "offline" | "paused" | "lease_lost" | "idle" | "executing" | "stuck";
+  state: "none" | "refused" | "done" | "failed" | "offline" | "paused" | "lease_lost" | "idle" | "executing" | "stuck" | "manual";
   text: string;
   title: string;
 }
@@ -40,17 +43,30 @@ export function ownerText(owner: string): string {
 export function planExecStatus(
   robot: string,
   plan: RobotPlan | undefined,
-  opts: {connected?: boolean | null; teleop?: TeleopState | null; lease?: LeaseInfo | null; now?: number} = {},
+  opts: {
+    connected?: boolean | null;
+    teleop?: TeleopState | null;
+    lease?: LeaseInfo | null;
+    now?: number;
+    /** robot platform (lib/platform.ts); absent = spot */
+    platform?: string | null;
+    /** phoenix: agent guards' manual_mode and its phoenix_progress */
+    manual?: boolean | null;
+    progress?: PhoenixProgress | null;
+  } = {},
 ): PlanExec {
   const now = opts.now ?? Date.now() / 1000;
   const p = plan?.plan;
+  const spot = isSpot(opts.platform);
   // a goal whose plan the runtime guards refused: the robot never got it
   const refused = [...(plan?.status ?? [])].reverse().find(s => s.refusals && robot in s.refusals);
   if (refused && (!p || refused.t > p.t)) {
     const why = refusalText(refused.refusals![robot]);
-    return {tone: "err", state: "refused", text: `plan not sent — ${why}`, title: `the planner refused to dispatch ${fmtSince(now - refused.t)} ago: ${refused.refusals![robot]}\ntake the lease back on the robot, then send the goal again`};
+    const then = spot ? "take the lease back on the robot, then send the goal again" : "fix the cause, then send the goal again";
+    return {tone: "err", state: "refused", text: `plan not sent — ${why}`, title: `the planner refused to dispatch ${fmtSince(now - refused.t)} ago: ${refused.refusals![robot]}\n${then}`};
   }
   if (!p || !p.actions.length) return {tone: "none", state: "none", text: "", title: ""};
+  if (!spot) return otherPlatformStatus(p, opts);
   const n = p.actions.length;
   const res = (plan!.results ?? []).filter(r => r.plan_id === p.plan_id);
   const last = res[res.length - 1];
@@ -79,4 +95,23 @@ export function planExecStatus(
     return {tone: "warn", state: "stuck", text: `still trying ${step} · ${fmtSince(onStep)}`, title: `no step finished for ${fmtSince(onStep)}: the executor is likely retrying (it gives up after 3 attempts)`};
   }
   return {tone: "ok", state: "executing", text: `executing ${step} · ${fmtSince(onStep)}`, title: `${res.length} of ${n} steps reported; this one started ${fmtSince(onStep)} ago`};
+}
+
+/** Phoenix and other non-Spot platforms: no per-step executor results, so the
+ *  plan is "done" when the agent reports the pose within 1 m of the path end. */
+function otherPlatformStatus(
+  p: NonNullable<RobotPlan["plan"]>,
+  opts: {connected?: boolean | null; manual?: boolean | null; progress?: PhoenixProgress | null},
+): PlanExec {
+  if (opts.connected === false) return {tone: "warn", state: "offline", text: "robot offline", title: "no link to the robot: it may still be driving the plan"};
+  if (opts.manual) {
+    return {tone: "warn", state: "manual", text: "manual mode — not executing", title: "the robot is in manual (RC) mode and will not execute plans: Resume (auto) hands it back to the planner"};
+  }
+  const pr = progressMatches(opts.progress, p.plan_id) ? opts.progress! : null;
+  if (pr?.done) return {tone: "ok", state: "done", text: "plan done", title: "the robot is within 1 m of the end of the plan"};
+  const d = pr?.dist_to_goal_m;
+  if (typeof d === "number" && Number.isFinite(d)) {
+    return {tone: "ok", state: "executing", text: `executing (${d < 10 ? d.toFixed(1) : Math.round(d)} m to goal)`, title: "straight-line distance from the robot to the end of the plan"};
+  }
+  return {tone: "ok", state: "executing", text: "executing", title: "no progress report for this plan yet"};
 }

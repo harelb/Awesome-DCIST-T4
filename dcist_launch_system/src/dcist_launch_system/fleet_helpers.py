@@ -69,6 +69,29 @@ def load_topology(path=None):
         return yaml.safe_load(f)
 
 
+def platform_of(machine):
+    """A topology machine's platform: ``platform_type``, missing → spot, husky → phoenix.
+
+    The shared rule (``fleetlink.relay_ros.platform_of``); the fallback keeps the
+    fleet tooling working where fleetlink is not installed.
+    """
+    try:
+        from fleetlink.relay_ros import platform_of as _platform_of
+    except ImportError:
+        p = str((machine or {}).get("platform_type") or "spot").lower()
+        return {"husky": "phoenix"}.get(p, p)
+    return _platform_of(machine)
+
+
+def status_platform(machine, topology=None):
+    """``platform_type`` for :func:`get_remote_status`: a robot's platform by the
+    shared rule (its topology entry first), None for any other machine."""
+    if (machine or {}).get("role") != "robot":
+        return None
+    entry = ((topology or {}).get("machines") or {}).get(machine.get("name"))
+    return platform_of(entry or machine)
+
+
 FLEET_LINK_MODES = ("router", "fleetlink")
 
 
@@ -506,25 +529,59 @@ def hash_remote_experiment(user, ip, output_root, experiment):
     return hashes
 
 
-def get_remote_status(user, ip, silvus_ips=None, platform_type=None):
+# Reads one ``ros2 topic echo`` on stdin; argv: field, scale, state.  Prints the
+# two lines the BAT parser in get_remote_status needs (percent, state), or N/A.
+# scale "fraction": the field is 0-1 (sensor_msgs/BatteryState.percentage,
+# phoenix); "percent": already 0-100 (Spot's charge_percentage: 1.0 is 1 %,
+# never guessed to be a fraction).  state "bms":
+# from sensor_msgs/BatteryState.power_supply_status, else printed as given.
+_ROS_BATTERY_PY = r"""
+import re, sys
+field, scale, state = sys.argv[1:4]
+d = sys.stdin.read()
+m = re.search(r"^[\s-]*" + field + r":\s*([0-9.eE+-]+)\s*$", d, re.M)
+if not m:
+    print("N/A")
+    sys.exit()
+v = float(m.group(1))
+print(int(round(v * 100 if scale == "fraction" else v)))
+if state == "bms":
+    s = re.search(r"^\s*power_supply_status:\s*(\d+)", d, re.M)
+    names = {1: "Charging", 2: "Discharging", 3: "Not charging", 4: "Full"}
+    state = names.get(int(s.group(1)) if s else 0, "Unknown")
+print(state)
+"""
+
+
+def _ros_battery_cmd(topic, field, scale, state):
+    """Shell snippet: ``---BAT---`` then the battery read from one message of ``topic``."""
+    script = base64.b64encode(_ROS_BATTERY_PY.encode()).decode()
+    return (
+        "echo '---BAT---'; "
+        "(source /opt/ros/jazzy/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash 2>/dev/null; "
+        "source ~/dcist_ws/install/setup.bash 2>/dev/null; "
+        f"timeout 4 ros2 topic echo {shlex.quote(topic)} --once "
+        "--no-daemon 2>/dev/null | "
+        f"python3 -c \"$(echo {script} | base64 -d)\" "
+        f"{shlex.quote(field)} {scale} {shlex.quote(state)} 2>/dev/null) || echo 'N/A'"
+    )
+
+
+def get_remote_status(user, ip, silvus_ips=None, platform_type=None, robot=None):
     """Get system status from a remote machine.
 
     Returns dict with keys: tmux_sessions, ros2_procs, load, disk, radio.
-    platform_type: if "spot", queries Spot robot battery via ROS 2 topic instead of sysfs.
+    platform_type: "spot" / "phoenix" query the robot's battery over ROS 2 instead
+    of sysfs (see :func:`status_platform`); phoenix needs ``robot`` (its namespace).
     """
-    # Spot robots don't expose battery via /sys/class/power_supply; query the ROS 2 topic.
+    # Robots don't expose battery via /sys/class/power_supply; query the ROS 2 topic.
     if platform_type == "spot":
-        bat_cmd = (
-            "echo '---BAT---'; "
-            "(source /opt/ros/jazzy/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash 2>/dev/null; "
-            "source ~/dcist_ws/install/setup.bash 2>/dev/null; "
-            "timeout 4 ros2 topic echo /spot/status/battery_states --once "
-            "--no-daemon 2>/dev/null | "
-            'python3 -c "'
-            r"import sys,re; d=sys.stdin.read(); "
-            r"m=re.search(r'charge_percentage: ([0-9.]+)', d); "
-            r"print(str(int(float(m.group(1))*100))+'%' if m else 'N/A')"
-            '" 2>/dev/null) || echo \'N/A\''
+        bat_cmd = _ros_battery_cmd(
+            "/spot/status/battery_states", "charge_percentage", "percent", "Spot"
+        )
+    elif platform_type == "phoenix" and robot:
+        bat_cmd = _ros_battery_cmd(
+            f"/{robot}/platform/bms/state", "percentage", "fraction", "bms"
         )
     else:
         bat_cmd = (

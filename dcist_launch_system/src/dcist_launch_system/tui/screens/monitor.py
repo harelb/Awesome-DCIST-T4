@@ -35,6 +35,7 @@ from dcist_launch_system.fleet_helpers import (
     get_silvus_link_quality,
     get_silvus_radio_details,
     run_parallel,
+    status_platform,
     stop_save_via_tmux,
 )
 from dcist_launch_system.tui.context import TuiContext
@@ -148,7 +149,8 @@ class MonitorScreen(ModalScreen):
                     m["user"],
                     m["ip"],
                     silvus_ips=silvus_ips,
-                    platform_type=m.get("platform_type"),
+                    platform_type=status_platform(m, self.ctx.topo),
+                    robot=m["name"],
                 )
 
             return run_parallel(fetch, machines)

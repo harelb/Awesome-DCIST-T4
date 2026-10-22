@@ -1,8 +1,9 @@
 // Camera tab: on-demand frames from a robot's fleetlink agent (C4 request/reply).
 // One request at a time; auto-refresh waits for the previous frame to land.
 // "Video" mode switches to the live C5 stream (VideoView, API.md §12).
-// "All" mode tiles every advertised camera (Spot: frontleft ... hand): stills
-// at ~1 Hz, or live video (GridVideo: one mosaic stream by default).
+// "All" mode tiles every advertised camera of a robot (a Spot's frontleft ...
+// hand, any robot with more than two): stills at ~1 Hz, or live video
+// (GridVideo: one mosaic stream by default).
 // The panel follows the viewer's robot focus: one robot's cameras when a robot
 // is focused, else one main camera (its first) per live robot; clicking a
 // robot's tile focuses that robot. `compact` (phone drive layout) keeps only
@@ -15,7 +16,8 @@ import {useLiveRobots} from "../stores/robots";
 import {useViewer} from "../stores/viewer";
 import {useRobotColorOf} from "../lib/palette";
 import {useFocusedRobot} from "./useRobotFocus";
-import {useFleet} from "../stores/fleet";
+import {isSpot} from "../lib/platform";
+import {usePlatform} from "./usePlatform";
 import {VideoView} from "./VideoView";
 import {GridVideo} from "./GridVideo";
 import {FocusChip} from "./RobotFocusPicker";
@@ -89,7 +91,7 @@ async function fetchFrame(robot: string, cam: string, w: number, signal: AbortSi
 
 /** Offer the all-cameras grid: Spot robots, or anything with more than two cameras. */
 export function showGrid(platform: string | undefined, cams: string[]): boolean {
-  return platform === "spot" ? cams.length > 1 : cams.length > 2;
+  return isSpot(platform) ? cams.length > 1 : cams.length > 2;
 }
 
 /** One grid tile: its own fetch loop, one request in flight, ~1 Hz. */
@@ -243,7 +245,7 @@ function RobotCameras({robot: r, live, compact: dense}: {robot: string; live: bo
   const [nonce, setNonce] = useState(0);
   const frameRef = useRef<CameraFrame | null>(null);
 
-  const platform = useFleet(s => s.machines?.machines.find(m => m.name === r)?.platform_type);
+  const platform = usePlatform(r);
   const grid = showGrid(platform, cams);
   const effMode = mode === "grid" && !grid ? "still" : mode;
 

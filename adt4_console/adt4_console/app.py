@@ -109,8 +109,11 @@ def build_services(
     svc = Services(settings, hub, jobs, fleet, graph, ros, live, chat, launch_deps)
     # late-bound so tests can swap svc.ros.publish_now
     svc.teleop = TeleopService(
-        lambda topic, t, fields: svc.ros.publish_now(topic, t, fields), hub
+        lambda topic, t, fields: svc.ros.publish_now(topic, t, fields),
+        hub,
+        platform_of=lambda robot: svc.ros.platform(robot),
     )
+    ros.teleop_latch = svc.teleop.stopped
     if helpers is not None:
         svc.helpers = helpers
     from . import launch_state

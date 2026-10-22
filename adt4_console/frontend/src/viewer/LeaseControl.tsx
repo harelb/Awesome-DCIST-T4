@@ -1,5 +1,6 @@
 // Spot lease indicator + "Take lease" (with a typed confirmation) and the
 // "lease held by tablet — Take lease?" notice after a lease_not_owned refusal.
+// Spot only: both render nothing for other platforms (lib/platform.ts).
 import {useEffect, useState} from "react";
 import {useRobots} from "../stores/robots";
 import {errorText, postJSON} from "../lib/api";
@@ -7,6 +8,7 @@ import {consoleClockOffset} from "../lib/clock";
 import {leaseFromGuards, leaseView, recentLeaseRefusal, shortOwner} from "../lib/lease";
 import type {LeaseInfo} from "../types";
 import {Badge, Modal, Spinner} from "../components/ui";
+import {usePlatform} from "./usePlatform";
 
 function consoleNow(): number {
   return Date.now() / 1000 + (consoleClockOffset() ?? 0);
@@ -29,7 +31,8 @@ const tookAt: Record<string, number> = {};
 export function useLease(robot: string | null): LeaseInfo | null {
   const fromPlan = useRobots(s => (robot ? s.plan[robot]?.lease : undefined));
   const guards = useRobots(s => (robot ? s.state[robot]?.guards : undefined));
-  if (!robot) return null;
+  const platform = usePlatform(robot);
+  if (!robot || platform !== "spot") return null;
   return fromPlan ?? leaseFromGuards(guards);
 }
 
@@ -119,6 +122,7 @@ export function TakeLeaseButton({robot, owner, className = "btn btn-sm", onTaken
 /** Lease badge + Take lease button (button only while the lease is not ours). */
 export function LeaseControl({robot}: {robot: string}) {
   const lease = useLease(robot);
+  if (usePlatform(robot) !== "spot") return null;
   return (
     <span className="row gap-sm lease-control">
       <LeaseBadge robot={robot} />
@@ -133,8 +137,9 @@ export function LeaseRefusalNotice({robot}: {robot: string | null}) {
   useTick();
   const status = useRobots(s => (robot ? s.plan[robot]?.status : undefined));
   const lease = useLease(robot);
+  const platform = usePlatform(robot);
   const [, force] = useState(0);
-  if (!robot) return null;
+  if (!robot || platform !== "spot") return null;
   const refusal = recentLeaseRefusal(status, robot, consoleNow(), {since: tookAt[robot] ?? 0});
   if (!refusal || lease?.owned) return null;
   const owner = refusal.owner || lease?.owner || "";

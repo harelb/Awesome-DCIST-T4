@@ -21,9 +21,20 @@ while the receiver's lock is held: they go to an outbox flushed afterwards.
 * ``video``    - one C5 video frame ``{camera, codec, seq, t, key, width, height,
   fps, data, ...}`` plus ``gap`` (True when frames of that stream were lost
   in between; a delta after a gap cannot be decoded)
+* ``lidar``    - ``{frame, n, stamp, seq}`` of a new C3 lidar frame (the frame
+  itself via :meth:`Receiver.lidar`)
 
 Live video is turned on / kept alive / off with :meth:`Receiver.video`
 (C0 ``video`` op); :meth:`Receiver.video_stats` has per-stream receive rates.
+
+The lidar stream is turned on / off with :meth:`Receiver.set_lidar` (C0
+``lidar`` op).  Like ``store_send`` the wanted state is remembered and re-asked
+whenever the robot's state disagrees (an agent restart starts with it off);
+unlike it, nobody reading the frames (:meth:`Receiver.lidar`, i.e. the console's
+``GET .../lidar`` poll) for ``lidar_idle_s`` turns it off again, so a closed
+browser tab does not leave a robot streaming its lidar over the radio.  While on
+it is refreshed every ``lidar_refresh_s``; the agent turns it off by itself
+after ``lidar_ttl_s`` without a request (a base that went away).
 
 Camera frames are pulled on demand with :meth:`Receiver.camera` (blocking) or
 :meth:`Receiver.query_camera` (callback), over the transport's C4 request/reply.
@@ -57,6 +68,7 @@ STREAM_CLASS = {
     "grid/occupancy": "C3",
     "paths": "C1",
     "store/frame": "C6",
+    "lidar/points": "C3",
 }
 RESEND_STREAMS = ("grid", "paths")
 # classes whose budget / rate the base reports and may set (C0 is unmetered)
@@ -148,6 +160,9 @@ class _Robot:
         self.t_ping = -1e9
         self.grid: dict | None = None
         self.paths: dict | None = None
+        self.lidar: dict | None = None  # latest lidar frame (contract dict)
+        self.lidar_t = -1e9  # last ``lidar`` request sent (reconcile rate limit)
+        self.lidar_read_t = -1e9  # last read of the frames (idle turns it off)
         self.mismatch_since: dict[str, float] = {}
         self.resend_req_t: dict[str, float] = {}
         self.video: dict[str, _VideoRx] = {}
@@ -191,6 +206,8 @@ class Receiver:
         store_root: str | None = None,
         store_mirror=None,
         mesh_lod: str | None = "decimated",
+        lidar_idle_s: float | None = 15.0,
+        lidar_refresh_s: float = 20.0,
     ):
         self.transport = transport
         self.on_update = on_update or (lambda r, k, d: None)
@@ -215,6 +232,13 @@ class Receiver:
         # C6 image-store mirror on/off asked per robot (``set_store_send``);
         # a robot absent here keeps what it was launched with (off by default)
         self._store_send_wanted: dict[str, bool] = {}
+        # lidar stream on/off asked per robot (``set_lidar``); off when unread
+        # for ``lidar_idle_s`` (None: never)
+        self._lidar_wanted: dict[str, bool] = {}
+        self.lidar_idle_s = lidar_idle_s
+        # while on, ``lidar`` is re-sent this often: the agent stops by itself
+        # when no request came for its ``lidar_ttl_s`` (a base that went away)
+        self.lidar_refresh_s = lidar_refresh_s
         self._outbox: list[tuple[str, dict]] = []
         self._robots: dict[str, _Robot] = {}
         self._pending: dict[str, dict] = {}  # req id -> {robot, req, t, tries}
@@ -305,6 +329,17 @@ class Receiver:
         with self._lock:
             r = self._robots.get(robot)
             return dict(r.paths) if r is not None and r.paths is not None else None
+
+    def lidar(self, robot: str) -> dict | None:
+        """Latest lidar frame ``{frame, origin, scale, n, xyz, intensity, stamp,
+        seq, ...}`` (``xyz``: interleaved int16 LE in the sensor frame, units of
+        ``scale`` m), or None.  Counts as a read for the idle turn-off."""
+        with self._lock:
+            r = self._robots.get(robot)
+            if r is None:
+                return None
+            r.lidar_read_t = self.clock()
+            return dict(r.lidar) if r.lidar is not None else None
 
     def cameras(self, robot: str) -> list[str]:
         """Camera names the robot advertises in its C1 state."""
@@ -575,6 +610,63 @@ class Receiver:
         r.store_send_t = now
         self._pending_send(r.name, "store_send", {"enable": want})
 
+    def set_lidar(self, robot: str, enable: bool) -> str:
+        """C0 ``lidar {enable}``: start / stop the robot's C3 lidar stream.
+        Remembered and re-asked when the robot's state disagrees."""
+        with self._lock:
+            self._lidar_wanted[robot] = bool(enable)
+            r = self._robot(robot)
+            r.lidar_t = r.lidar_read_t = self.clock()
+            if not enable:
+                r.lidar = None
+            for rid in [k for k, v in self._pending.items() if v["robot"] == robot and v["req"]["op"] == "lidar"]:
+                del self._pending[rid]
+        return self._send(robot, "lidar", {"enable": bool(enable)})
+
+    def lidar_status(self, robot: str) -> dict:
+        """``{available, robot, wanted}``: the robot has a lidar / streams it (None:
+        unknown or no lidar state) and what this base asked."""
+        with self._lock:
+            r = self._robots.get(robot)
+            st = ((r.state or {}).get("lidar") if r is not None else None) or {}
+            return {
+                "available": st.get("available"),
+                "robot": st.get("enabled"),
+                "wanted": self._lidar_wanted.get(robot),
+            }
+
+    def _lidar_reconcile(self, r: _Robot, st: dict | None, now: float) -> None:
+        """Lock held: re-ask ``lidar`` when the robot's state disagrees."""
+        want = self._lidar_wanted.get(r.name)
+        if want is None or not st or not st.get("available") or "enabled" not in st:
+            return
+        if bool(st["enabled"]) == want or now - r.lidar_t < self.retry_s:
+            return
+        if any(v["robot"] == r.name and v["req"]["op"] == "lidar" for v in self._pending.values()):
+            return
+        r.lidar_t = now
+        self._pending_send(r.name, "lidar", {"enable": want})
+
+    def _lidar_idle(self, r: _Robot, now: float) -> None:
+        """Lock held: nobody read the frames for ``lidar_idle_s``: turn it off
+        (also a stream nobody here asked for, e.g. from before a console restart)."""
+        want = self._lidar_wanted.get(r.name)
+        streaming = bool(((r.state or {}).get("lidar") or {}).get("enabled"))
+        if not self.lidar_idle_s or not (want or (want is None and streaming)):
+            return
+        if now - r.lidar_read_t < self.lidar_idle_s:
+            if want and self.lidar_refresh_s and now - r.lidar_t >= self.lidar_refresh_s:
+                r.lidar_t = now  # keepalive for the agent's lidar_ttl_s
+                self._queue_req(r.name, {"id": f"{self._session}-l{next(self._ids)}",
+                                         "op": "lidar", "args": {"enable": True}})  # fmt: skip
+            return
+        self._lidar_wanted[r.name] = False
+        r.lidar = None
+        r.lidar_t = now
+        for rid in [k for k, v in self._pending.items() if v["robot"] == r.name and v["req"]["op"] == "lidar"]:
+            del self._pending[rid]
+        self._pending_send(r.name, "lidar", {"enable": False})
+
     def set_auto(self, robot: str, enabled: bool) -> str:
         return self._send(robot, "auto", {"enabled": bool(enabled)})
 
@@ -676,6 +768,7 @@ class Receiver:
             if self.store is not None:
                 self._store_requests(self.store.on_state(r.name, p.get("store"), now))
             self._store_send_reconcile(r, p.get("store"), now)
+            self._lidar_reconcile(r, p.get("lidar"), now)
         elif stream == "grid/occupancy":
             r.grid = p
             keys = ("hash", "frame", "width", "height", "resolution", "t")
@@ -683,6 +776,13 @@ class Receiver:
         elif stream == "paths":
             r.paths = p
             events.append(("paths", p))
+        elif stream == "lidar/points":
+            if self._lidar_wanted.get(r.name) is False:
+                return events  # turned off here: a late frame is not shown
+            r.lidar = self._lidar_frame(p, seq)
+            if r.lidar_read_t < 0:  # unasked stream: the idle time starts now
+                r.lidar_read_t = now
+            events.append(("lidar", {k: r.lidar.get(k) for k in ("frame", "n", "stamp", "seq")}))
         elif stream == "mesh/tile":
             r.tiles[p["key"]] = p
             r.tile_req_t.pop(p["key"], None)
@@ -706,6 +806,24 @@ class Receiver:
         elif stream == "store/frame" and self.store is not None:
             self._store_requests(self.store.on_frame(r.name, p, now))
         return events
+
+    @staticmethod
+    def _lidar_frame(p: dict, seq: int) -> dict:
+        """Wire lidar payload → the console's frame dict (xyz interleaved int16)."""
+        from fleetlink.pointcloud_codec import xyz_int16
+
+        return {
+            "frame": p.get("frame"),
+            "sensor_frame": p.get("sensor_frame"),
+            "origin": p.get("origin"),
+            "scale": p.get("scale"),
+            "voxel": p.get("voxel"),
+            "n": int(p.get("n") or 0),
+            "xyz": xyz_int16(p),
+            "intensity": p.get("intensity"),
+            "stamp": p.get("stamp"),
+            "seq": seq,
+        }
 
     def _store_requests(self, reqs) -> None:
         """Lock held: send C6 ``store`` requests; a newer one replaces any still
@@ -921,6 +1039,7 @@ class Receiver:
         r.tile_req_t.clear()
         r.grid = None
         r.paths = None
+        r.lidar = None
         r.mismatch_since.clear()
         r.resend_req_t.clear()
         r.video.clear()
@@ -1036,6 +1155,9 @@ class Receiver:
             }
         if "auto" in res and isinstance(r.state, dict):
             r.state.setdefault("stats", {})["auto"] = res["auto"]
+        if pend is not None and pend["req"]["op"] == "lidar" and "enabled" in res:
+            if isinstance(r.state, dict) and isinstance(r.state.get("lidar"), dict):
+                r.state["lidar"]["enabled"] = bool(res["enabled"])  # shown before the next state
         if pend is not None and pend["req"]["op"] == "store_send" and "send" in res:
             if isinstance(r.state, dict) and isinstance(r.state.get("store"), dict):
                 r.state["store"]["send"] = bool(res["send"])  # shown before the next state
@@ -1059,6 +1181,7 @@ class Receiver:
                 self._queue_req(pend["robot"], pend["req"])
             for r in self._robots.values():
                 events.extend((r.name, k, d) for k, d in self._c2_tick(r, now))
+                self._lidar_idle(r, now)
                 if r.win_t is None:
                     r.win_t = now
                 elif now - r.win_t >= 1.0:

@@ -106,6 +106,41 @@ def store_send(robot: str, body: StoreSendBody, request: Request):
     return {"ok": True, "request": req, "store_send": rx.store_send_status(robot)}
 
 
+class LidarBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/{robot}/lidar")
+def lidar_toggle(robot: str, body: LidarBody, request: Request):
+    """Turn the robot's lidar stream (C3, ~1 Hz, off by default) on or off.
+    The receiver remembers it, asks again after an agent restart and turns it
+    off when ``GET .../lidar`` has not been polled for a while."""
+    rx = _rx(request)
+    st = services(request).live.state(robot) or {}
+    if body.enabled and st.get("platform") and "lidar" not in st:
+        raise HTTPException(400, f"{robot} has no lidar")
+    services(request).live.set_lidar(robot, body.enabled)
+    return {"ok": True, "enabled": body.enabled, "lidar": rx.lidar_status(robot)}
+
+
+@router.get("/{robot}/lidar")
+def lidar_frame(robot: str, request: Request):
+    """Latest lidar frame as msgpack ``{frame, origin: [x, y, z, qx, qy, qz, qw],
+    scale, n, xyz: int16 LE x,y,z interleaved (sensor frame, units of scale m),
+    intensity: uint8 | null, stamp, seq}``; ``origin`` is the sensor pose in the
+    frame of the robot's ``pose``."""
+    f = services(request).live.lidar(robot)
+    if f is None:
+        raise HTTPException(404, f"no lidar frame from {robot}")
+    etag = f'"{f.get("seq", "")}"'
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(
+        msgpack.packb(f, use_bin_type=True), media_type=MSGPACK, headers=headers
+    )
+
+
 class AutoBody(BaseModel):
     enabled: bool
 
