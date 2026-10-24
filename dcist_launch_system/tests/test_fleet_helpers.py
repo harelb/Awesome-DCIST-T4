@@ -543,9 +543,21 @@ class TestCheckZenohPort:
 # ---------------------------------------------------------------------------
 
 
+def _popen(stdout="", stderr="", timeout_first=False):
+    """A fake ``subprocess.Popen`` whose ``communicate`` returns ``stdout``; with
+    ``timeout_first`` the first call times out (the echo never ends on its own)."""
+    proc = MagicMock()
+    result = (stdout, stderr)
+    if timeout_first:
+        proc.communicate.side_effect = [subprocess.TimeoutExpired(cmd="ros2", timeout=5), result]
+    else:
+        proc.communicate.return_value = result
+    return proc
+
+
 class TestGetRosNodeStatus:
-    @patch("dcist_launch_system.fleet_helpers.subprocess.run")
-    def test_parses_multi_robot_yaml(self, mock_run):
+    @patch("dcist_launch_system.fleet_helpers.subprocess.Popen")
+    def test_parses_multi_robot_yaml(self, mock_popen):
         yaml_output = (
             "monitor_name: euclid\n"
             "status:\n"
@@ -565,7 +577,7 @@ class TestGetRosNodeStatus:
             "  notes: ''\n"
             "  required: true\n"
         )
-        mock_run.return_value = MagicMock(stdout=yaml_output, returncode=0)
+        mock_popen.return_value = _popen(yaml_output)
         result = get_ros_node_status(timeout=5)
         assert "euclid" in result
         assert "hamilton" in result
@@ -576,14 +588,18 @@ class TestGetRosNodeStatus:
         assert result["euclid"][1]["status"] == 4
         assert result["hamilton"][0]["nickname"] == "imu_monitor"
 
-    @patch("dcist_launch_system.fleet_helpers.subprocess.run")
-    def test_empty_output_returns_empty(self, mock_run):
-        mock_run.return_value = MagicMock(stdout="", returncode=0)
-        result = get_ros_node_status(timeout=5)
-        assert result == {}
+    @patch("dcist_launch_system.fleet_helpers.subprocess.Popen")
+    def test_empty_output_returns_empty(self, mock_popen):
+        mock_popen.return_value = _popen("")
+        assert get_ros_node_status(timeout=5) == {}
 
-    @patch("dcist_launch_system.fleet_helpers.subprocess.run")
-    def test_timeout_collects_stdout(self, mock_run):
+    @patch("dcist_launch_system.fleet_helpers.subprocess.Popen")
+    def test_empty_output_reports_stderr(self, mock_popen):
+        mock_popen.return_value = _popen("", "ros2: command not found")
+        assert get_ros_node_status(timeout=5) == {"_debug_stderr": "ros2: command not found"}
+
+    @patch("dcist_launch_system.fleet_helpers.subprocess.Popen")
+    def test_timeout_collects_stdout(self, mock_popen):
         yaml_output = (
             "monitor_name: euclid\n"
             "status:\n"
@@ -592,18 +608,17 @@ class TestGetRosNodeStatus:
             "  notes: ''\n"
             "  required: true\n"
         )
-        exc = subprocess.TimeoutExpired(cmd="ros2", timeout=5)
-        exc.stdout = yaml_output
-        mock_run.side_effect = exc
+        proc = _popen(yaml_output, timeout_first=True)
+        mock_popen.return_value = proc
         result = get_ros_node_status(timeout=5)
+        proc.kill.assert_called_once()
         assert "euclid" in result
         assert result["euclid"][0]["nickname"] == "lidar_monitor"
 
-    @patch("dcist_launch_system.fleet_helpers.subprocess.run")
-    def test_os_error_returns_empty(self, mock_run):
-        mock_run.side_effect = OSError("ros2 not found")
-        result = get_ros_node_status(timeout=5)
-        assert result == {}
+    @patch("dcist_launch_system.fleet_helpers.subprocess.Popen")
+    def test_os_error_returns_no_robots(self, mock_popen):
+        mock_popen.side_effect = OSError("ros2 not found")
+        assert get_ros_node_status(timeout=5) == {"_debug_error": "ros2 not found"}
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +742,7 @@ class TestDeployZenohConfig:
 class TestPatchZenohConfigLocal:
     def test_patches_connect_endpoints(self, tmp_path, zenoh_template):
         result = patch_zenoh_config_local(
-            ["tcp/10.0.0.1:7447"], listen_port=7447, template_path=zenoh_template
+            ["tcp/10.0.0.1:7447"], template_path=zenoh_template
         )
         assert result is not None
         import pathlib
@@ -735,15 +750,14 @@ class TestPatchZenohConfigLocal:
         content = pathlib.Path(result).read_text()
         assert "10.0.0.1:7447" in content
 
-    def test_patches_listen_port(self, tmp_path, zenoh_template):
-        result = patch_zenoh_config_local(
-            [], listen_port=9999, template_path=zenoh_template
-        )
+    def test_listen_port_stays_template_default(self, tmp_path, zenoh_template):
+        # every zenoh instance (fleet or base station) shares the template's port
+        result = patch_zenoh_config_local([], template_path=zenoh_template)
         assert result is not None
         import pathlib
 
         content = pathlib.Path(result).read_text()
-        assert "9999" in content
+        assert "7447" in content
 
     def test_missing_template_returns_none(self, tmp_path):
         result = patch_zenoh_config_local(

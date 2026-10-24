@@ -14,11 +14,15 @@ from dcist_launch_system.fleet import run_identity as ri
 
 from adt4_console.routes import maps as maps_route
 
-from .conftest import make_client
+from ruamel.yaml import YAML
+
+from .conftest import TOPOLOGY, make_client
 from .test_launch_topology import FakeSSH
 from .test_maps_listing import make_store
 
-HAMILTON_IP = "10.31.144.106"
+# hamilton's address on the network the fake fleet detects (mit_wifi), from the real
+# topology so an address change there does not break these tests
+HAMILTON_IP = YAML(typ="safe").load(TOPOLOGY.read_text())["machines"]["hamilton"]["addresses"]["mit_wifi"]
 
 
 @pytest.fixture(autouse=True)
@@ -245,7 +249,7 @@ def _launch_deps():
 
 
 def _launch(c, svc, **plan):
-    body = {"robots": ["euclid"], "session": "spot-default", "experiment": "reloc_1", "mode": "relocalize", **plan}
+    body = {"robots": ["euclid"], "session": "spot-default", "experiment": "reloc_1", "mode": "relocalize", "preflight": False, **plan}
     job = _wait(svc, c.post("/api/launch", json=body).json()["job_id"])
     assert job["state"] == "succeeded", job["log"]
     return job

@@ -39,7 +39,8 @@ def _wait_confirm(client, job_id, timeout=5):
     raise AssertionError("no confirmation requested")
 
 
-PLAN = {"robots": ["euclid"], "session": "spot-default", "experiment": "exp1"}
+# preflight off: these cover the later phases (preflight: test_preflight_route.py)
+PLAN = {"robots": ["euclid"], "session": "spot-default", "experiment": "exp1", "preflight": False}
 
 
 def test_launch_kill_session_confirm_then_launch(settings):
@@ -97,7 +98,7 @@ def test_launch_validation_and_dry_run(client):
     assert "spot-default" in d["sessions"] and "euclid" in d["robots"]
     # robot links: any topology network, chosen per launch; unknown names refused
     assert "silvus" in d["link_networks"] and d["link_network"] in d["link_networks"]
-    lines = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "silvus"}).json()["lines"]
+    lines = client.post("/api/launch/dry_run", json={**PLAN, "link_network": "silvus", "link_mode": "router"}).json()["lines"]
     assert lines[0].startswith("Robot links: silvus, router mode ")
     lines = client.post("/api/launch/dry_run", json={**PLAN, "link_mode": "fleetlink"}).json()["lines"]
     assert "fleetlink mode" in lines[0] and "ADT4_FLEET_LINK=fleetlink" in lines[1]
