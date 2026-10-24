@@ -1,6 +1,7 @@
 // Persisted (per browser) map-viewer styling: background, colour overrides,
 // per-layer heights, region display and screenshot options.
 import {create} from "zustand";
+import type {RobotHighlight, RobotModelMode} from "../lib/robotModel";
 import {
   DEFAULT_SHOT,
   type ColorKey,
@@ -21,6 +22,10 @@ export interface ViewStyleState {
   regionColorPlaces: boolean;
   /** convex-hull fill + outline per room / region */
   regionHulls: boolean;
+  /** robots drawn as their platform's model (Spot, Husky) or as the arrow */
+  robotModel: RobotModelMode;
+  /** a model highlighted in the robot's (path) colour */
+  robotHighlight: RobotHighlight;
   shot: ShotOpts;
 }
 
@@ -34,6 +39,8 @@ export const DEFAULT_VIEW_STYLE: ViewStyleState = {
   heights: {},
   regionColorPlaces: true,
   regionHulls: true,
+  robotModel: "model",
+  robotHighlight: "outline",
   shot: DEFAULT_SHOT,
 };
 
@@ -63,6 +70,8 @@ export function parseStoredStyle(raw: string | null): ViewStyleState {
   if (isObj(v.heights)) for (const [k, h] of Object.entries(v.heights)) if (typeof h === "number" && Number.isFinite(h)) out.heights[k as keyof Heights] = h;
   if (typeof v.regionColorPlaces === "boolean") out.regionColorPlaces = v.regionColorPlaces;
   if (typeof v.regionHulls === "boolean") out.regionHulls = v.regionHulls;
+  if (v.robotModel === "model" || v.robotModel === "arrow") out.robotModel = v.robotModel;
+  if (v.robotHighlight === "off" || v.robotHighlight === "outline" || v.robotHighlight === "tint") out.robotHighlight = v.robotHighlight;
   if (isObj(v.shot)) {
     const s = v.shot;
     out.shot = {

@@ -202,8 +202,8 @@ def _mount_static(app: FastAPI, static_dir: pathlib.Path) -> None:
                     else {}
                 )
                 # not in every Python's mimetypes table; browsers ignore a
-                # manifest served as octet-stream
-                media = "application/manifest+json" if target.suffix == ".webmanifest" else None
+                # manifest served as octet-stream (robot models: viewer/RobotModel)
+                media = {".webmanifest": "application/manifest+json", ".glb": "model/gltf-binary"}.get(target.suffix)
                 return FileResponse(target, headers=headers, media_type=media)
         if index.is_file():
             return FileResponse(index, headers={"Cache-Control": "no-cache"})

@@ -5,6 +5,7 @@ import {useViewer, readyModels} from "../stores/viewer";
 import {useViewStyle} from "../stores/viewStyle";
 import {layerInfo} from "../lib/graphModel";
 import {Toggle} from "../components/ui";
+import {ROBOT_HIGHLIGHTS, ROBOT_MODEL_MODES} from "../lib/robotModel";
 import {labelSpaceName} from "./layout";
 import {
   BG_PRESETS,
@@ -235,6 +236,40 @@ export function ColorsPanel() {
         </div>
       )}
     </section>
+  );
+}
+
+/** How robots are drawn: their platform's model or the arrow, and a highlight in
+ *  the robot's (path) colour. */
+export function RobotLookControl() {
+  const robotModel = useViewStyle(s => s.robotModel);
+  const robotHighlight = useViewStyle(s => s.robotHighlight);
+  const patch = useViewStyle(s => s.patch);
+  return (
+    <>
+      <div className="bg-row">
+        <span>Robots</span>
+        <span className="segmented seg-sm" role="group" aria-label="Robot look">
+          {ROBOT_MODEL_MODES.map(o => (
+            <button key={o.value} type="button" className={robotModel === o.value ? "on" : ""} aria-pressed={robotModel === o.value} onClick={() => patch({robotModel: o.value})}>
+              {o.label}
+            </button>
+          ))}
+        </span>
+      </div>
+      {robotModel === "model" && (
+        <div className="bg-row">
+          <span title="In each robot's colour, the colour of its paths and plans">Highlight</span>
+          <span className="segmented seg-sm" role="group" aria-label="Robot highlight">
+            {ROBOT_HIGHLIGHTS.map(o => (
+              <button key={o.value} type="button" className={robotHighlight === o.value ? "on" : ""} aria-pressed={robotHighlight === o.value} onClick={() => patch({robotHighlight: o.value})}>
+                {o.label}
+              </button>
+            ))}
+          </span>
+        </div>
+      )}
+    </>
   );
 }
 

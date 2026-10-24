@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useRef, type CSSProperties} from "react";
+import {Suspense, useEffect, useMemo, useRef, type CSSProperties} from "react";
 import * as THREE from "three";
 import {Canvas, useThree} from "@react-three/fiber";
 import {CameraControls, Html, Line} from "@react-three/drei";
@@ -19,6 +19,9 @@ import {useTheme} from "../stores/theme";
 import {useBackground, useRobotColor3D} from "./background";
 import {captureBridge} from "./screenshot";
 import {DimGroup, useFocusLook} from "./DimGroup";
+import {ModelBoundary, RobotModel} from "./RobotModel";
+import {usePlatform} from "./usePlatform";
+import {robotModelFor} from "../lib/robotModel";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -214,6 +217,47 @@ function GlyphTag({robot, color, stale}: {robot: string; color: string; stale: b
   );
 }
 
+function ArrowGlyph({color, stale}: {color: string; stale: boolean}) {
+  return (
+    <mesh position={[0.35, 0, 0.3]} rotation={[0, 0, -Math.PI / 2]}>
+      <coneGeometry args={[0.32, 0.9, 3]} />
+      <meshBasicMaterial color={color} transparent opacity={stale ? 0.4 : 1} />
+    </mesh>
+  );
+}
+
+/** The robot in its pose frame: its platform's model (the arrow while the model
+ *  loads, or when there is none / the view asks for arrows), a ground ring and its
+ *  name tag, all in the robot's colour. */
+function RobotBody({robot, color, stale}: {robot: string; color: string; stale: boolean}) {
+  const platform = usePlatform(robot);
+  const mode = useViewStyle(s => s.robotModel);
+  const highlight = useViewStyle(s => s.robotHighlight);
+  const spec = mode === "model" ? robotModelFor(platform) : null;
+  const groundZ = spec ? spec.groundZ + 0.02 : 0.05;
+  const ring = spec?.ring ?? 0.78;
+  return (
+    <>
+      {spec ? (
+        <ModelBoundary fallback={<ArrowGlyph color={color} stale={stale} />}>
+          <Suspense fallback={<ArrowGlyph color={color} stale={stale} />}>
+            <RobotModel url={spec.url} color={color} highlight={highlight} opacity={stale ? 0.45 : 1} />
+          </Suspense>
+        </ModelBoundary>
+      ) : (
+        <ArrowGlyph color={color} stale={stale} />
+      )}
+      <mesh position={[0, 0, groundZ]}>
+        <ringGeometry args={[ring - 0.08, ring + 0.07, 40]} />
+        <meshBasicMaterial color={color} side={THREE.DoubleSide} transparent opacity={stale ? 0.3 : 0.85} />
+      </mesh>
+      <Html position={[0, 0, (spec?.topZ ?? 0.6) + 0.8]} center zIndexRange={[20, 0]} className="robot-tag-wrap">
+        <GlyphTag robot={robot} color={color} stale={stale} />
+      </Html>
+    </>
+  );
+}
+
 function RobotGlyphs() {
   const states = useRobots(s => s.state);
   const stateAt = useRobots(s => s.stateAt);
@@ -231,17 +275,7 @@ function RobotGlyphs() {
           <RobotGlyph key={r} robot={r}>
           <AlignedGroup robot={r} frame={p.frame}>
           <group position={[p.x, p.y, p.z]} rotation={[0, 0, yaw]}>
-            <mesh position={[0.35, 0, 0.3]} rotation={[0, 0, -Math.PI / 2]}>
-              <coneGeometry args={[0.32, 0.9, 3]} />
-              <meshBasicMaterial color={color} transparent opacity={stale ? 0.4 : 1} />
-            </mesh>
-            <mesh position={[0, 0, 0.05]}>
-              <ringGeometry args={[0.7, 0.85, 40]} />
-              <meshBasicMaterial color={color} side={THREE.DoubleSide} transparent opacity={stale ? 0.3 : 0.85} />
-            </mesh>
-            <Html position={[0, 0, 1.4]} center zIndexRange={[20, 0]} className="robot-tag-wrap">
-              <GlyphTag robot={r} color={color} stale={stale} />
-            </Html>
+            <RobotBody robot={r} color={color} stale={stale} />
           </group>
           </AlignedGroup>
           </RobotGlyph>
