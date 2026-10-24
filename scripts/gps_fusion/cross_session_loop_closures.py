@@ -43,7 +43,11 @@ def main():
     parser.add_argument("--config", default="default", help="dcist_launch_system config")
     parser.add_argument("--no-single-robot", action="store_true",
                         help="skip loop closures of a run with itself")
+    parser.add_argument("--shard", default=None, metavar="K/N",
+                        help="only align every N-th pair starting at K (run N of these in "
+                        "parallel, then once without --shard to collect)")
     args = parser.parse_args()
+    shard = tuple(map(int, args.shard.split("/"))) if args.shard else None
 
     runs = [run.absolute() for run in args.runs]
     names = [run.name for run in runs]
@@ -52,9 +56,13 @@ def main():
     params = SubmapAlignParams.from_yaml(str(DLS / "config" / args.config / "roman_lc.yaml"))
 
     loop_closures = []
+    pair_idx = -1
     for i in range(len(runs)):
         for j in range(i, len(runs)):
             if i == j and args.no_single_robot:
+                continue
+            pair_idx += 1
+            if shard and pair_idx % shard[1] != shard[0]:
                 continue
             sm_io = SubmapAlignInputOutput(
                 inputs=[str(roman_map(runs[i])), str(roman_map(runs[j]))],
@@ -62,9 +70,13 @@ def main():
                 run_name=f"{names[i]}_{names[j]}",
                 robot_names=[names[i], names[j]],
             )
-            pair_params = copy.deepcopy(params)
-            pair_params.single_robot_lc = i == j
-            submap_align(sm_params=pair_params, sm_io=sm_io)
+            if not pathlib.Path(sm_io.output_lc_json).exists():  # reuse finished pairs
+                pair_params = copy.deepcopy(params)
+                pair_params.single_robot_lc = i == j
+                submap_align(sm_params=pair_params, sm_io=sm_io)
+            if shard:
+                print(f"{names[i]} -> {names[j]}: aligned", flush=True)
+                continue
             with open(sm_io.output_lc_json) as fin:
                 contents = json.load(fin)
             print(f"{names[i]} -> {names[j]}: {len(contents)} loop closures")
@@ -79,6 +91,8 @@ def main():
                     "to_R_from": dict(zip(lc["rotation_convention"], lc["rotation"])),
                 })
 
+    if shard:
+        return
     out_path = output / "loop_closures.json"
     out_path.write_text(json.dumps(loop_closures, indent=2))
     print(f"wrote {len(loop_closures)} loop closures to {out_path}")

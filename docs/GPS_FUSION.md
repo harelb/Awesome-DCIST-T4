@@ -53,3 +53,30 @@ with one merged image store and cross-day change annotations. Offline (`hydra-mu
 - Apr 16 euclid (no RTK, sigma ~6 m) and Apr 17 hamilton (no GPS) aligned via loop closures;
   ground places of every session pair agree to ~1 m (median).
 - Bravo (Apr 15, both robots with GPS): 3.5 / 3.9 cm vs RTK.
+
+## Meridian (cross-view localization) instead of GPS
+
+[Meridian](https://github.com/mit-acl/meridian) (Mason's `feature/depth-scale`) localizes a
+ground robot against an orthophoto. Its trajectory can stand in for `gps.csv`:
+
+1. Aerial GeoTIFF: `scripts/gps_fusion/meridian/fetch_aerial.py LAT LON --half-size-m 250 -o aerial.tif`
+   (Esri World Imagery, zoom 19, ~0.23 m/px), then
+   `python -m meridian.pipeline.aerial_patch_mapping -p <params> -o <aerial_primitives>`.
+2. Meridian reads bags very slowly when they are large; cut each session first:
+   `scripts/gps_fusion/meridian/cut_bag.py BAG OUT ROBOT T0 TF` (rgb as JPEG + depth at 5 Hz, tf).
+3. `python -m meridian.pipeline.cross_view_incremental -p <params> -o <out>` (demo.yaml settings;
+   camera pose from `ROBOT/odom` -> `ROBOT_zed_left_camera_optical_frame`).
+4. `scripts/gps_fusion/meridian/meridian_to_gps.py <out>/localization/dense_trajectory_3d.csv gps.csv
+   --sigma 1.5 --camera-offset X,Y,Z` (camera in base_link: Spot 0.521,0.087,0.141; Husky
+   0.303,0.071,0.371), fuse with `--gps-lever 0 0 0`.
+5. Only use sessions Meridian reports as localized (`incremental/results.txt`: `Final state: POST`);
+   leave the others to the loop-closure alignment (an unlocalized Penn session was 42 m off).
+   More than 8 sessions is not possible (kimera_pgmo robot prefixes a-h); with 8, use `-s 0`.
+
+Cross-session loop closures for many runs: `cross_session_loop_closures.py ... --shard K/N` in N
+processes, then once without `--shard` to collect (finished pairs are reused).
+
+Results (meridian vs RTK / GT, median): West Point alpha 1.1-4.2 m (3 of 4 sessions localized);
+fused with loop closures, every session within 1-7 m. Penn (courtyard + slam_hard, 8 sessions,
+5 localized): fused 2.5-6.4 m, of which ~4.1 m is a common offset of the satellite imagery
+(0.5-3.5 m after removing it). Outputs: `/data/dcist/penn_2025_meridian/`.
