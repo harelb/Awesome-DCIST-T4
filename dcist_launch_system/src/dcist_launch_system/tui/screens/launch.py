@@ -48,6 +48,7 @@ class LaunchScreen(ModalScreen):
         Binding("m", "preset_mapping", "Mapping (m)", priority=True),
         Binding("r", "preset_relocalize", "Relocalize (r)", priority=True),
         Binding("d", "dry_run", "Dry Run", priority=True),
+        Binding("c", "preflight", "Checks (c)", priority=True),
         Binding("g", "do_launch", "Launch (g)", priority=True),
         Binding("z", "deploy_zenoh", "Deploy Zenoh (z)", priority=True),
         Binding("p", "browse_prior", "Refresh Priors (p)", priority=True),
@@ -108,7 +109,7 @@ class LaunchScreen(ModalScreen):
 
         yield VerticalScroll(
             Label(
-                "[bold]Launch[/] — m=mapping, r=relocalize, g=launch, d=dry run, p=refresh priors"
+                "[bold]Launch[/] — m=mapping, r=relocalize, g=launch, d=dry run, c=checks, p=refresh priors"
             ),
             Rule(),
             Label("Select robots:"),
@@ -336,6 +337,43 @@ class LaunchScreen(ModalScreen):
         log.write("[bold cyan]Dry run:[/]")
         for line in lines:
             log.write(f"  {line}")
+
+    def action_preflight(self):
+        """Run the pre-launch checks on the selected machines (launch runs them too)."""
+        from dcist_launch_system.fleet import preflight as pf
+        from dcist_launch_system.fleet.launch_workflow import LaunchDeps
+
+        log = self.query_one("#launch_log", RichLog)
+        plan = self._current_plan()
+        rc = self.ctx.runtime_config
+        machines = [rc[r] for r in plan.robots if r in rc]
+        bs = rc.get(plan.base_station) if plan.base_station else None
+        if bs and bs["name"] not in plan.robots:
+            machines.append(bs)
+        if not machines:
+            log.write("[yellow]Select robots first.[/]")
+            return
+        log.write(f"[bold cyan]Preflight checks on {', '.join(m['name'] for m in machines)}...[/]")
+
+        def bg():
+            checks = pf.run_checks(
+                machines, self.ctx.topo, self.ctx.output_root, LaunchDeps(),
+                reference=bs["name"] if bs else None,
+            )  # fmt: skip
+            self.app.call_from_thread(show, checks)
+
+        def show(checks):
+            color = {"go": "green", "warn": "yellow", "nogo": "red", "info": "dim"}
+            for machine, verdict in pf.verdicts(checks).items():
+                log.write(f"  [bold]{machine}[/]: [{color[verdict]}]{verdict.upper()}[/]")
+                for c in checks:
+                    if c.machine == machine:
+                        hint = f" [dim]→ {escape(c.hint)}[/]" if c.status in ("warn", "nogo") and c.hint else ""
+                        log.write(f"    [{color[c.status]}]{c.name}[/]: {escape(c.detail)}{hint}")
+            n = len(pf.nogos(checks))
+            log.write(f"[bold {'red' if n else 'green'}]{n} NO-GO[/]" if n else "[bold green]All GO[/]")
+
+        threading.Thread(target=bg, daemon=True).start()
 
     def _update_launch_progress(self, name, pct):
         try:

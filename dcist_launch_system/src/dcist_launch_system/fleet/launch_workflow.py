@@ -3,9 +3,12 @@
 Lifted out of ``tui/screens/launch.py`` so the Textual TUI, the click CLI and
 the web console all drive the exact same sequence:
 
+    Preflight read-only checks on every machine (``fleet.preflight``); each NO-GO
+              is named in one confirmation (launch anyway / abort)
     Phase 0   deploy zenoh config to the base station
     Phase 1   ensure the prior map is present on every robot (rsync), skipping
-              robots that already hold a run with the prior's run_id
+              robots that already hold a run with the prior's run_id and the
+              same map; then verify every machine's prior against the source
     Phase 1.5 detect / kill an existing ``adt4_system`` tmux session
     Phase 2   detect / remove an existing output dir (typed confirm if >= 1 GB)
               then ``run-adt4`` on each robot
@@ -74,6 +77,8 @@ class LaunchPlan:
     link_network: str | None = None
     # "router" | "fleetlink" for this launch (None: fleet_defaults.fleet_link)
     link_mode: str | None = None
+    # run the pre-launch checks (fleet.preflight); a NO-GO asks the user to confirm
+    preflight: bool = True
 
 
 def with_link_mode(topo: dict | None, mode: str | None) -> dict | None:
@@ -419,6 +424,16 @@ def ensure_prior_on(
                 d in r.get("subdirs", []) for d in ("hydra", "roman")
             ):
                 path = f"{output_root}/{r['name']}"
+                if _copy_map_differs(deps, target, output_root, r["name"], prior_entry):
+                    cb.log(
+                        "warn",
+                        f"{target['name']}: {r['name']} has the prior's run id but a "
+                        "different map (partial or changed copy); re-copying it",
+                    )
+                    return _transfer_prior(
+                        prior_path, prior_source, target, path, runtime_config, cb, deps,
+                        prior_entry,
+                    )  # fmt: skip
                 cb.log(
                     "dim",
                     f"{target['name']}: prior run already present as {r['name']} "
@@ -472,6 +487,17 @@ def ensure_prior_on(
     return _transfer_prior(
         prior_path, prior_source, target, dest_path, runtime_config, cb, deps, prior_entry
     )
+
+
+def _copy_map_differs(deps, target, output_root, name, prior_entry) -> bool:
+    """True when ``target``'s run ``name`` provably holds a different map than the
+    prior (``preflight.compare_prior`` NO-GO); unknown (scan failed) -> False."""
+    from dcist_launch_system.fleet import preflight as pf
+
+    found = scan_identities(deps, target, output_root, [name], manifest=True)
+    if not found or not (prior_entry or {}).get("manifest"):
+        return False
+    return pf.compare_prior(target["name"], name, prior_entry, found[0]).status == pf.NOGO
 
 
 def _unlabelled_copy(deps, target, output_root, runs, dest_name, prior_entry):
@@ -708,6 +734,11 @@ def run_launch(
         if bs_machine["name"] != plan.prior_source:
             bs_prior = prior_dest_path(plan.prior_path, output_root)
 
+    if plan.preflight:
+        machines = [m for m, _ in cmds] + ([bs_machine] if bs_machine and not bs_is_robot else [])
+        if not _run_preflight(machines, topo, output_root, bs_machine, cb, deps):
+            return False
+
     # Phase 0: zenoh config on the base station only (star topology; robots listen).
     # In fleetlink mode the endpoints are [] (the deploy clears any robot links
     # left from router mode): robots reach the base only as fleetlink clients.
@@ -797,6 +828,12 @@ def run_launch(
             cmds = build_robot_commands(
                 plan, runtime_config, output_root, topo, prior_overrides=overrides
             )
+        if plan.preflight:
+            loads = {m["name"]: (m, plan.prior_path if m["name"] == plan.prior_source else overrides.get(m["name"], default_dest)) for m, _ in cmds}
+            if bs_machine and not bs_is_robot and bs_prior:
+                loads[bs_machine["name"]] = (bs_machine, bs_prior)
+            if not _verify_prior_maps(plan, runtime_config, loads, cb, deps):
+                return False
 
     # Phase 1.5: running tmux sessions (the base station's too: a session left from
     # an earlier launch would keep running with the old prior, or none)
@@ -839,6 +876,52 @@ def run_launch(
 
     cb.log("heading", "Launch sequence complete.")
     return all_ok
+
+
+_CHECK_LEVEL = {"go": "ok", "info": "dim", "warn": "warn", "nogo": "error"}
+
+
+def _log_checks(checks, cb) -> None:
+    for c in checks:
+        cb.log(_CHECK_LEVEL.get(c.status, "info"), f"[{c.status.upper()}] {c.machine} / {c.name}: {c.detail}")
+
+
+def _confirm_nogos(checks, stage, cb) -> bool:
+    """True to go on: no NO-GO, or the user confirmed every one of them."""
+    from dcist_launch_system.fleet import preflight as pf
+
+    issues = pf.nogos(checks)
+    if not issues:
+        cb.log("ok", f"{stage}: GO")
+        return True
+    answer = cb.confirm(pf.nogo_confirmation(issues, stage))
+    if not answer:
+        cb.log("error", f"Launch aborted: {stage} NO-GO not confirmed.")
+        return False
+    cb.log("warn", f"{stage}: launching despite {len(issues)} NO-GO issue(s) (confirmed).")
+    return True
+
+
+def _run_preflight(machines, topo, output_root, bs_machine, cb, deps) -> bool:
+    from dcist_launch_system.fleet import preflight as pf
+
+    cb.log("heading", "Preflight: checking every machine...")
+    checks = pf.run_checks(machines, topo, output_root, deps, reference=bs_machine["name"] if bs_machine else None)
+    _log_checks(checks, cb)
+    return _confirm_nogos(checks, "Preflight", cb)
+
+
+def _verify_prior_maps(plan, runtime_config, loads, cb, deps) -> bool:
+    """Every machine's prior (``loads``: name -> (machine, path)) holds the source map."""
+    from dcist_launch_system.fleet import preflight as pf
+
+    src = runtime_config.get(plan.prior_source)
+    if not src:
+        return True
+    cb.log("heading", "Verifying the prior map on every machine...")
+    checks = pf.verify_prior(src, plan.prior_path, loads, deps, scan_identities)
+    _log_checks(checks, cb)
+    return _confirm_nogos(checks, "Prior map", cb)
 
 
 def _hosts_this_process(machine, deps) -> bool:

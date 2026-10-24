@@ -5,7 +5,8 @@ import {preferBaseCopy, priorAvailability} from "../lib/runCopies";
 import {useFleet} from "../stores/fleet";
 import {trackJob} from "../stores/jobs";
 import {errorText, postJSON, useApi} from "../lib/api";
-import type {ConsoleConfig, LaunchDefaults, LaunchPlan, MapEntry, MapsResponse} from "../types";
+import {groupChecks, preflightLabel, preflightTone} from "../lib/preflight";
+import type {ConsoleConfig, LaunchDefaults, LaunchPlan, MapEntry, MapsResponse, PreflightResult} from "../types";
 import {Badge, Card, Dot, Empty, ErrorBox, Field, FuzzyPicker, Loading, PageHeader, Segmented, Spinner, Toggle} from "../components/ui";
 import {jobIdOf} from "./Fleet";
 
@@ -42,7 +43,8 @@ export function LaunchPage() {
   const [linkMode, setLinkMode] = useState(""); // "" = topology default
   const [prior, setPrior] = useState<string>(preset ? `${preset.source}\u0000${preset.prior}` : ""); // "machine\u0000path"
   const [dry, setDry] = useState<{lines: string[]} | null>(null);
-  const [busy, setBusy] = useState<"dry" | "launch" | null>(null);
+  const [busy, setBusy] = useState<"dry" | "launch" | "checks" | null>(null);
+  const [checks, setChecks] = useState<PreflightResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [presetNote, setPresetNote] = useState<string | null>(null);
   const [copying, setCopying] = useState(false);
@@ -120,6 +122,18 @@ export function LaunchPage() {
       setDry(await postJSON<{lines: string[]}>("api/launch/dry_run", plan()));
     } catch (e) {
       setDry(null);
+      setErr(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const doChecks = async () => {
+    setBusy("checks");
+    setErr(null);
+    try {
+      setChecks(await postJSON<PreflightResult>("api/launch/preflight", plan()));
+    } catch (e) {
+      setChecks(null);
       setErr(errorText(e));
     } finally {
       setBusy(null);
@@ -279,6 +293,9 @@ export function LaunchPage() {
             </span>
           )}
         </div>
+        <button className="btn" onClick={doChecks} disabled={!!busy || !robots.length} title="Read-only checks on every selected machine (also run at launch)">
+          {busy === "checks" && <Spinner />} Run checks
+        </button>
         <button className="btn" onClick={doDry} disabled={!!busy || problems.length > 0}>
           {busy === "dry" && <Spinner />} Dry run
         </button>
@@ -287,12 +304,58 @@ export function LaunchPage() {
         </button>
       </div>
       {err && <ErrorBox error={err} compact />}
+      {checks && <PreflightPanel result={checks} order={[...robots, baseStation].filter(Boolean)} onClear={() => setChecks(null)} />}
       {dry && (
         <Card title="Dry run: commands that would run" actions={<button className="btn btn-sm" onClick={() => setDry(null)}>Clear</button>}>
           <pre className="dryrun mono">{dry.lines.join("\n") || "(nothing to do)"}</pre>
         </Card>
       )}
     </div>
+  );
+}
+
+
+export function PreflightPanel({result, order, onClear}: {result: PreflightResult; order: string[]; onClear: () => void}) {
+  const groups = groupChecks(result.checks, order);
+  return (
+    <Card
+      title={
+        <>
+          Preflight checks{" "}
+          <Badge tone={result.nogo ? "err" : "ok"}>{result.nogo ? `${result.nogo} NO-GO` : "all GO"}</Badge>
+        </>
+      }
+      actions={
+        <>
+          <span className="muted small">at {new Date(result.t * 1000).toLocaleTimeString()}</span>{" "}
+          <button className="btn btn-sm" onClick={onClear}>
+            Clear
+          </button>
+        </>
+      }
+    >
+      <p className="muted small">Launch runs these again and asks you to confirm every NO-GO. The prior map is checked during the launch, after it is copied.</p>
+      <div className="preflight-grid">
+        {groups.map(([machine, cs]) => (
+          <div key={machine} className={`preflight-machine pf-${preflightTone(result.verdicts[machine])}`} data-testid={`preflight-${machine}`}>
+            <div className="preflight-head">
+              <span className="pick-name">{machine}</span>
+              <Badge tone={preflightTone(result.verdicts[machine])}>{preflightLabel(result.verdicts[machine])}</Badge>
+            </div>
+            <ul className="preflight-checks">
+              {cs.map(c => (
+                <li key={c.name + c.detail} className={`preflight-check status-${c.status}`}>
+                  <Dot tone={preflightTone(c.status)} />
+                  <span className="mono small">{c.name}</span>
+                  <span className="small">{c.detail}</span>
+                  {c.status !== "go" && c.hint && <span className="muted small preflight-hint">Fix: {c.hint}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 

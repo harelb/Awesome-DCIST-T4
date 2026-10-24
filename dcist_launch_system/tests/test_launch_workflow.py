@@ -114,7 +114,8 @@ def make_deps(ssh, rsync=None):
     )
 
 
-def run(plan, ssh, rec, rsync=None):
+def run(plan, ssh, rec, rsync=None, preflight=False):
+    plan.preflight = preflight  # the preflight phase has its own tests (test_preflight.py)
     return run_launch(
         plan,
         topo=TOPO,

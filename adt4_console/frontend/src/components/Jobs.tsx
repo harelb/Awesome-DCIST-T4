@@ -3,6 +3,7 @@ import {fetchJob, isActive, useJobs} from "../stores/jobs";
 import {errorText, postJSON} from "../lib/api";
 import {canAnswerYes, confirmBody} from "../lib/confirm";
 import {fmtTime} from "../lib/fuzzy";
+import {issueKey, preflightIssues} from "../lib/preflight";
 import type {Job, JobConfirm, JobState} from "../types";
 import {Badge, Empty, Modal, ProgressBar, Spinner, type Tone} from "./ui";
 
@@ -220,7 +221,17 @@ export function ConfirmDialog({job, confirm, onDone}: {job: Job; confirm: JobCon
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const yesOk = canAnswerYes(confirm, typed);
+  // a preflight NO-GO: each issue must be ticked before "Launch anyway"
+  const issues = preflightIssues(confirm);
+  const [acked, setAcked] = useState<Set<string>>(new Set());
+  const yesOk = canAnswerYes(confirm, typed) && issues.every(i => acked.has(issueKey(i)));
+  const toggleAck = (k: string) =>
+    setAcked(cur => {
+      const next = new Set(cur);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
   const answer = async (yes: boolean) => {
     setBusy(true);
     setErr(null);
@@ -249,8 +260,35 @@ export function ConfirmDialog({job, confirm, onDone}: {job: Job; confirm: JobCon
         </>
       }
     >
-      <p className="confirm-msg">{confirm.message}</p>
-      {confirm.detail !== undefined && confirm.detail !== null && !(typeof confirm.detail === "object" && Object.keys(confirm.detail as object).length === 0) && (
+      {issues.length > 0 ? (
+        <div className="preflight-ack">
+          <p className="confirm-msg">
+            {(confirm.detail as {stage?: string} | null)?.stage ?? "Preflight"} found {issues.length} NO-GO issue{issues.length > 1 ? "s" : ""}. Tick each one to launch anyway.
+          </p>
+          <ul className="preflight-issues">
+            {issues.map(i => {
+              const k = issueKey(i);
+              return (
+                <li key={k}>
+                  <label className={`preflight-issue ${acked.has(k) ? "on" : ""}`}>
+                    <input type="checkbox" checked={acked.has(k)} onChange={() => toggleAck(k)} aria-label={`Acknowledge ${i.machine} ${i.name}`} />
+                    <span>
+                      <strong className="mono">
+                        {i.machine} / {i.name}
+                      </strong>
+                      : {i.detail}
+                      {i.hint && <span className="muted small preflight-hint">Fix: {i.hint}</span>}
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : (
+        <p className="confirm-msg">{confirm.message}</p>
+      )}
+      {issues.length === 0 && confirm.detail !== undefined && confirm.detail !== null && !(typeof confirm.detail === "object" && Object.keys(confirm.detail as object).length === 0) && (
         <pre className="confirm-detail mono">{typeof confirm.detail === "string" ? confirm.detail : JSON.stringify(confirm.detail, null, 2)}</pre>
       )}
       {confirm.required_text && (

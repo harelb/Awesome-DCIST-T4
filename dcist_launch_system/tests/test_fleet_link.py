@@ -288,7 +288,7 @@ def _env_of(cmd):
 
 
 def test_robot_commands_carry_fleet_env():
-    plan = LaunchPlan(robots=["alpha"], session="spot-default", experiment="e1")
+    plan = LaunchPlan(robots=["alpha"], session="spot-default", experiment="e1", preflight=False)
     [(_, cmd)] = build_robot_commands(plan, RUNTIME, OUT, topo("fleetlink"))
     env = _env_of(cmd)
     assert env["ADT4_FLEET_LINK"] == "fleetlink"
@@ -318,7 +318,7 @@ def test_base_command_carries_fleet_link():
 
 
 def test_dry_run_lines_show_env():
-    plan = LaunchPlan(robots=["alpha"], session="spot-default", experiment="e1")
+    plan = LaunchPlan(robots=["alpha"], session="spot-default", experiment="e1", preflight=False)
     links, line = dry_run_lines(plan, RUNTIME, OUT, topo("fleetlink"))
     assert links.startswith("Robot links: ") and "robots dial the fleetlink base" in links
     assert "ADT4_FLEET_LINK=fleetlink" in line
@@ -364,7 +364,7 @@ def test_run_launch_phase0_and_env(mode):
     )
     plan = LaunchPlan(
         robots=["alpha"], session="spot-default", experiment="e1",
-        base_station="gamma", bs_session="base_station-default",
+        base_station="gamma", bs_session="base_station-default", preflight=False,
     )  # fmt: skip
     rec = _Rec()
     t = topo(mode)

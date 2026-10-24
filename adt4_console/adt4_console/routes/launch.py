@@ -29,6 +29,8 @@ class LaunchPlanBody(BaseModel):
     link_network: str | None = None
     # "router" | "fleetlink" for this launch; None = fleet_defaults.fleet_link
     link_mode: str | None = None
+    # pre-launch checks; a NO-GO asks to confirm each issue (fleet.preflight)
+    preflight: bool = True
 
 
 def _plan(body: LaunchPlanBody, topo: dict | None = None):
@@ -93,6 +95,42 @@ def launch_dry_run(body: LaunchPlanBody, request: Request):
     except LaunchError as e:
         raise HTTPException(400, str(e)) from None
     return {"lines": lines}
+
+
+@router.post("/launch/preflight")
+def launch_preflight(body: LaunchPlanBody, request: Request):
+    """Run the pre-launch checks on this plan's machines now (read-only ssh).
+
+    The prior map is verified during the launch itself, after it is copied."""
+    from dcist_launch_system.fleet import preflight as pf
+    from dcist_launch_system.fleet.launch_workflow import LaunchDeps, with_link_mode
+
+    svc = services(request)
+    fleet = svc.fleet
+    with fleet.lock:
+        topo = fleet.topo
+        runtime_config = {k: dict(v) for k, v in fleet.runtime_config.items()}
+    plan = _plan(body, topo)
+    unknown = [r for r in plan.robots if r not in runtime_config]
+    if unknown:
+        raise HTTPException(400, f"unknown robot(s): {', '.join(unknown)}")
+    machines = [runtime_config[r] for r in plan.robots]
+    bs = runtime_config.get(plan.base_station) if plan.base_station else None
+    if bs and bs["name"] not in plan.robots:
+        machines.append(bs)
+    checks = pf.run_checks(
+        machines,
+        with_link_mode(topo, plan.link_mode),
+        svc.settings.output_root,
+        svc.launch_deps or LaunchDeps(),
+        reference=bs["name"] if bs else None,
+    )
+    return {
+        "checks": [c.to_dict() for c in checks],
+        "verdicts": pf.verdicts(checks),
+        "nogo": len(pf.nogos(checks)),
+        "t": time.time(),
+    }
 
 
 @router.post("/launch")

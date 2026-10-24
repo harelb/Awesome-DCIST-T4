@@ -1177,6 +1177,85 @@ input[type="checkbox"] {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+/* preflight: NO-GO acknowledgement (confirm dialog) and the Launch page panel */
+.preflight-issues {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.preflight-issue {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.preflight-issue.on {
+  border-color: var(--line);
+  background: var(--bg-2);
+}
+.preflight-issue input {
+  margin-top: 3px;
+  flex: none;
+}
+.preflight-hint {
+  display: block;
+  margin-top: 2px;
+}
+.preflight-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 10px;
+}
+.preflight-machine {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  min-width: 0;
+}
+.preflight-machine.pf-ok {
+  border-left-color: var(--ok);
+}
+.preflight-machine.pf-warn {
+  border-left-color: var(--warn);
+}
+.preflight-machine.pf-err {
+  border-left-color: var(--err);
+}
+.preflight-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.preflight-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.preflight-check {
+  display: grid;
+  grid-template-columns: auto minmax(70px, auto) minmax(0, 1fr);
+  gap: 2px 8px;
+  align-items: baseline;
+  overflow-wrap: anywhere;
+}
+.preflight-check .preflight-hint {
+  grid-column: 3;
+}
 .req-text {
   background: var(--err-bg);
   color: #ffb3b5;

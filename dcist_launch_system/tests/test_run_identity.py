@@ -249,6 +249,7 @@ def _plan(**kw):
         experiment="e",
         prior_path="~/adt4_output/map_x__hamilton",
         prior_source="willow",
+        preflight=False,
     )
     base.update(kw)
     return LaunchPlan(**base)

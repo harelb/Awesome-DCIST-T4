@@ -526,6 +526,27 @@ export interface LaunchPlan {
   link_network?: string | null;
   /** "router" | "fleetlink" for this launch; null = the topology default */
   link_mode?: string | null;
+  /** run the pre-launch checks (default true); a NO-GO asks to confirm each issue */
+  preflight?: boolean;
+}
+
+export type PreflightStatus = "go" | "warn" | "nogo" | "info";
+
+/** One pre-launch check (fleet.preflight.Check). */
+export interface PreflightCheck {
+  machine: string;
+  name: string;
+  status: PreflightStatus;
+  detail: string;
+  hint?: string;
+}
+
+/** POST /api/launch/preflight */
+export interface PreflightResult {
+  checks: PreflightCheck[];
+  verdicts: Record<string, PreflightStatus>;
+  nogo: number;
+  t: number;
 }
 
 export interface LaunchDefaults {

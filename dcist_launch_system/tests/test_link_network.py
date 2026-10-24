@@ -50,7 +50,8 @@ def _launch(plan, topo=TOPO):
 
 def _plan(**kw):
     return LaunchPlan(robots=["smaug"], session="spot-default", experiment="e1",
-                      base_station="willow", bs_session="base_station-default", **kw)  # fmt: skip
+                      base_station="willow", bs_session="base_station-default",
+                      preflight=False, **kw)  # fmt: skip
 
 
 def test_router_mode_base_dials_robots_on_the_link_network():

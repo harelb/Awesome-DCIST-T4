@@ -49,6 +49,7 @@ ORIGIN = ".adt4_origin.json"
 MANIFEST_SKIP_DIRS = {STORE_DIR, "recorded_data", "image_store.partial"}
 MANIFEST_SKIP_FILES = {ORIGIN}
 MANIFEST_MAX_FILES = 50000
+MAP_DIRS = ("hydra/", "roman/")  # the map a relocalize loads (manifest map_digest)
 
 
 def _mtime(path):
@@ -276,10 +277,14 @@ def manifest(run):
             rows.append("%s\t%d\t%d" % (rel, st.st_size, int(st.st_mtime)))
             newest = max(newest, st.st_mtime)
         if len(rows) > MANIFEST_MAX_FILES:
-            return {"digest": None, "files": len(rows), "newest": round(newest, 3)}
+            return {"digest": None, "map_digest": None, "files": len(rows), "newest": round(newest, 3)}
     rows.sort()
     digest = hashlib.sha1("\n".join(rows).encode()).hexdigest()
-    return {"digest": digest, "files": len(rows), "newest": round(newest, 3)}
+    # the map alone (what a relocalize loads as the prior), so a copy that gained or
+    # lost unrelated files still shows the same map
+    map_rows = [r for r in rows if r.startswith(MAP_DIRS)]
+    map_digest = hashlib.sha1("\n".join(map_rows).encode()).hexdigest() if map_rows else None
+    return {"digest": digest, "map_digest": map_digest, "files": len(rows), "newest": round(newest, 3)}
 
 
 def store_fingerprint(store):
