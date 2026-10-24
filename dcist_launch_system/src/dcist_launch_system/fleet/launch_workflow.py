@@ -120,6 +120,16 @@ class LaunchCallbacks(Protocol):
     def local_zenohd_running(self) -> bool: ...
 
 
+def session_launches_rviz(session: str | None, tmux_dir: pathlib.Path = TMUX_DIR) -> bool:
+    """Whether ``session``'s tmuxp file starts RViz (``launch_rviz:=true``); the
+    web-console sessions do not, so they need no namespaced RViz config.  An
+    unknown session counts as starting it (the config is harmless)."""
+    try:
+        return "launch_rviz:=true" in (tmux_dir / f"{session}.yaml").read_text()
+    except (OSError, TypeError):
+        return True
+
+
 def list_sessions(tmux_dir: pathlib.Path = TMUX_DIR) -> list[str]:
     return sorted(f.stem for f in tmux_dir.glob("*.yaml")) if tmux_dir.exists() else []
 
@@ -342,6 +352,7 @@ class LaunchDeps:
     deploy_zenoh: Callable = deploy_zenoh_config
     zenoh_endpoints: Callable = generate_zenoh_endpoints
     rviz: Callable = generate_namespaced_rviz
+    session_rviz: Callable = session_launches_rviz
     parallel: Callable = run_parallel
     sleep: Callable = time.sleep
     local_ips: Callable = get_local_ips
@@ -949,13 +960,17 @@ def _launch_base_station(
         cb.log("dim", "Stopping fleet zenohd (base station will take over)...")
         cb.stop_local_zenohd()
 
-    # mapping → first selected robot; relocalize → base station (publishes prior)
+    # mapping → first selected robot; relocalize → base station (publishes prior);
+    # none for a session without RViz (the web console ones)
     rviz_path = None
     rviz_name = (
         bs_machine["name"]
         if plan.mode == "relocalize"
         else (plan.robots[0] if plan.robots else None)
     )
+    if not deps.session_rviz(plan.bs_session):
+        rviz_name = None
+        cb.log("dim", f"{plan.bs_session}: no RViz in this session, no RViz config")
     if rviz_name:
         try:
             rviz_path = deps.rviz(rviz_name)

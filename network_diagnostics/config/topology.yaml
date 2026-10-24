@@ -110,7 +110,7 @@ fleet_defaults:
     relocalize:
       spot: spot_relocalize-relocalize
       phoenix: phoenix_relocalize-relocalize
-  base_station_session: base_station_heracles-default
+  base_station_session: base_station_web_repair-default  # web console + heracles, no RViz
   output_root: ~/adt4_output
   fleet_link: fleetlink  # router: rmw_zenohd router-to-router | fleetlink: only fleetlink crosses the radio
   fleetlink_base: willow  # base station that runs the fleetlink router

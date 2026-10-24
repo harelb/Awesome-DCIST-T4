@@ -101,7 +101,7 @@ fleet_defaults:
     relocalize:
       spot: "spot_relocalize-relocalize"
       phoenix: "phoenix_relocalize-relocalize"
-  base_station_session: "base_station_heracles-default"
+  base_station_session: "base_station_web_repair-default"  # web console, no RViz
   output_root: "~/adt4_output"
 ```
 
@@ -274,7 +274,7 @@ fleet_defaults:
     relocalize:
       spot: "spot_relocalize-relocalize"
       phoenix: "phoenix_relocalize-relocalize"
-  base_station_session: "base_station_heracles-default"
+  base_station_session: "base_station_web_repair-default"  # web console, no RViz
   output_root: "~/adt4_output"
 
 silvus_radios:

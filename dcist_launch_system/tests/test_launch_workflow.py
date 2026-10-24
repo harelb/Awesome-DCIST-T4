@@ -12,6 +12,7 @@ from dcist_launch_system.fleet.launch_workflow import (
     default_selection,
     dry_run_lines,
     run_launch,
+    session_launches_rviz,
 )
 
 OUT = "~/adt4_output"
@@ -228,6 +229,28 @@ def test_happy_path_launches_robot_and_base_station():
     assert any("run-adt4 spot-default" in c for c in ssh.cmds_for("10.0.0.1"))
     assert any("nohup" in c for c in ssh.cmds_for("10.0.0.9"))
     assert "base station launched" in rec.text()
+
+
+def test_session_launches_rviz_from_the_tmuxp_files():
+    assert session_launches_rviz("base_station_heracles-default") is True
+    assert session_launches_rviz("base_station_web_repair-default") is False
+    assert session_launches_rviz("base_station_web-default") is False
+    assert session_launches_rviz("no-such-session") is True  # unknown: keep the config
+    assert session_launches_rviz(None) is True
+
+
+@pytest.mark.parametrize("bs_session,with_rviz", [("base_station-default", True), ("base_station_web_repair-default", False)])
+def test_rviz_config_only_for_sessions_with_rviz(bs_session, with_rviz):
+    ssh = FakeSsh({"&& echo OK": (0, "OK", "", "10.0.0.9")})
+    rec = Recorder()
+    made = []
+    deps = make_deps(ssh)
+    deps.rviz = lambda name: made.append(name) or f"/tmp/dcist_{name}.rviz"
+    plan = LaunchPlan(robots=["smaug"], session="spot-default", experiment="e", base_station="willow", bs_session=bs_session, preflight=False)
+    assert run_launch(plan, topo=TOPO, active_network="silvus", runtime_config=RUNTIME, output_root=OUT, callbacks=rec, deps=deps)
+    (bs_cmd,) = [c for c in ssh.cmds_for("10.0.0.9") if "nohup" in c]
+    assert ("--rviz-config" in bs_cmd) is with_rviz
+    assert bool(made) is with_rviz
 
 
 def test_base_station_command_passes_the_prior():
