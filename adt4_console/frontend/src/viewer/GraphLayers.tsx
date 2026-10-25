@@ -1,7 +1,7 @@
 import {useEffect, useLayoutEffect, useMemo, useRef} from "react";
 import * as THREE from "three";
 import {useFrame, useThree} from "@react-three/fiber";
-import {Line} from "@react-three/drei";
+import {Html, Line} from "@react-three/drei";
 import {LineSegments2} from "three/examples/jsm/lines/LineSegments2.js";
 import {LineSegmentsGeometry} from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import {LineMaterial} from "three/examples/jsm/lines/LineMaterial.js";
@@ -9,7 +9,8 @@ import type {GraphLayout, LayerBuffers, TextLabel, VizStyle} from "./layout";
 import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES, PLACE_BOUNDARY} from "./layout";
 import {REGION_FILL_ALPHA, uniformOf, type ColorOpts} from "./style";
 import {declutter, labelPrio, labelSize, MAX_LABELS, type LabelBox} from "../lib/labels";
-import {useViewer} from "../stores/viewer";
+import {pathColors, useViewer, type TrajPath, type TrajRobot} from "../stores/viewer";
+import {useRobotColorOf} from "../lib/palette";
 import {useMapEdit} from "../stores/mapEdit";
 
 /** Displayed node positions per source, used by the click picker. */
@@ -229,12 +230,45 @@ function Segments({positions, colors, color, opacity = 1}: {positions: Float32Ar
   );
 }
 
-export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, edgeKinds, style = "classic", showText = false, colors, edgeInk = "#000000"}: {
+/** Each robot's session, robot and source bag, at the start of its first path. */
+function PathLabels({paths, robots, colors, fallback}: {paths: TrajPath[]; robots: TrajRobot[]; colors: Record<string, string> | null; fallback: string}) {
+  const starts = useMemo(() => {
+    const seen = new Map<string, [number, number, number]>();
+    for (const p of paths) if (!seen.has(p.robot)) seen.set(p.robot, p.points[0]);
+    return seen;
+  }, [paths]);
+  return (
+    <group name="path-labels">
+      {robots.map(r => {
+        const at = starts.get(r.key);
+        if (!at) return null;
+        return (
+          <Html key={r.key} position={at} zIndexRange={[15, 0]} style={{pointerEvents: "none"}}>
+            <div className="path-label" style={{borderColor: colors?.[r.key] ?? fallback}} title={r.bag}>
+              <b>{r.session ?? r.key}</b>
+              {r.robot && r.robot !== r.session ? ` · ${r.robot}` : ""}
+              {r.bag && <div className="path-label-bag">{bagName(r.bag)}</div>}
+            </div>
+          </Html>
+        );
+      })}
+    </group>
+  );
+}
+
+/** The bag's last path parts (``…/hard_robot_2_hamilton/recorded_data``): the full path is in the title. */
+export function bagName(bag: string): string {
+  const parts = bag.split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : bag;
+}
+
+export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory, trajectoryRobots = [], edgeKinds, style = "classic", showText = false, colors, edgeInk = "#000000"}: {
   src: string;
   layout: GraphLayout;
   showBBoxes: boolean;
   showTrajectory: boolean;
-  trajectory: [number, number, number][] | null;
+  trajectory: TrajPath[] | null;
+  trajectoryRobots?: TrajRobot[];
   edgeKinds: Record<string, boolean>;
   style?: VizStyle;
   showText?: boolean;
@@ -254,12 +288,18 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
     return () => void pickRegistry.delete(src);
   }, [src, layout]);
   const trajPoints = useMemo(() => {
-    if (trajectory && trajectory.length > 1) return trajectory;
-    if (!layout.agentPath) return null;
-    const out: [number, number, number][] = [];
-    for (let i = 0; i < layout.agentPath.length; i += 3) out.push([layout.agentPath[i], layout.agentPath[i + 1], layout.agentPath[i + 2]]);
-    return out;
-  }, [trajectory, layout.agentPath]);
+    if (trajectory && trajectory.length) return trajectory;
+    return layout.agentPaths.length ? layout.agentPaths : null;
+  }, [trajectory, layout.agentPaths]);
+  const pathColor = useViewer(s => s.pathColor);
+  const pathLabels = useViewer(s => s.pathLabels);
+  const robotColorOf = useRobotColorOf();
+  const robots = useMemo(() => {
+    if (trajectoryRobots.length) return trajectoryRobots;
+    return [...new Set((trajPoints ?? []).map(p => p.robot))].map(key => ({key}));
+  }, [trajectoryRobots, trajPoints]);
+  const perRobot = useMemo(() => pathColors(robots, pathColor, robotColorOf), [robots, pathColor, robotColorOf]);
+  const trajDefault = trajUniform ?? (hydra ? HYDRA_EDGES["agents-agents"].color : EDGE_COLORS["agents-agents"]);
   return (
     <group name={`graph:${src}`}>
       {layout.layers.map(l => (
@@ -284,9 +324,9 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
           )
         ) : null,
       )}
-      {showTrajectory && trajPoints && trajPoints.length > 1 && (
-        <Line points={trajPoints} color={trajUniform ?? (hydra ? HYDRA_EDGES["agents-agents"].color : EDGE_COLORS["agents-agents"])} lineWidth={hydra ? 2 : 2.5} />
-      )}
+      {showTrajectory &&
+        trajPoints?.map((p, i) => <Line key={i} points={p.points} color={perRobot?.[p.robot] ?? trajDefault} lineWidth={hydra ? 2 : 2.5} />)}
+      {showTrajectory && pathLabels && trajPoints && <PathLabels paths={trajPoints} robots={robots} colors={perRobot} fallback={trajDefault} />}
       {showText && layout.texts.length > 0 && <TextLabels texts={layout.texts} />}
     </group>
   );

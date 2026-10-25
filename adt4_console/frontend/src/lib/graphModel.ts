@@ -16,6 +16,8 @@ export function layerInfo(layer: number, part: number): LayerInfo {
   // 2/97 'a' agent keyframes, 2/115 's' sub-keyframes, 3/1 mesh places, 3/2 traversability.
   if (layer === 2 && part === 97) return {key, name: "agents", kind: "agents", order: 0};
   if (layer === 2 && part === 115) return {key, name: "subkeyframes", kind: "subkeyframes", order: 0};
+  // other lower-case partitions: more robots' keyframes (multi-robot maps: b, c, ...)
+  if (layer === 2 && part > 97 && part <= 122) return {key, name: `agents ${String.fromCharCode(part)}`, kind: "agents", order: 0};
   if (layer === 2) return {key, name: part ? `objects ${part}` : "objects", kind: "objects", order: 0};
   if (layer === 3 && part === 1) return {key, name: "mesh places", kind: "places", order: 1};
   if (layer === 3 && part === 2) return {key, name: "traversability", kind: "places", order: 1};

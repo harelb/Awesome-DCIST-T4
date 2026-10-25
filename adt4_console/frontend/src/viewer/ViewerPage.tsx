@@ -20,7 +20,7 @@ import {RobotLegend} from "./RobotLegend";
 import {CameraPanel} from "./CameraPanel";
 import {DriveFullscreen, requestPageFullscreen} from "./DriveFullscreen";
 import {TeleopPanel} from "./TeleopPanel";
-import {SearchImagesPanel} from "./SearchImagesPanel";
+import {ImagesTab} from "./FrameBrowser";
 import {Segmented} from "../components/ui";
 import {plannerSourceId, readyModels} from "../stores/viewer";
 import {useWsStatus} from "../ws";
@@ -56,9 +56,9 @@ export const NARROW_MAP_W = 700;
 /** the same on /mission, whose toolbar has the extra "Fit mission" button */
 export const NARROW_MISSION_MAP_W = 1000;
 /** the mission planner's side-panel tabs; the others are under "More" (desktop) */
-export const MISSION_TABS: Tab[] = ["mission", "map", "inspect"];
+export const MISSION_TABS: Tab[] = ["mission", "map", "inspect", "images"];
 
-/** The side-panel strip on /mission (desktop): Mission | Map | Inspect, the
+/** The side-panel strip on /mission (desktop): Mission | Map | Inspect | Images, the
  *  rest in the More menu; elsewhere (and on phones) every tab is on the strip. */
 export function splitTabs(strip: Tab[], missionMode: boolean, phone: boolean): {shown: Tab[]; more: Tab[]} {
   if (!missionMode || phone) return {shown: strip, more: []};
@@ -507,7 +507,7 @@ export default function ViewerPage({mode = "viewer"}: {mode?: "viewer" | "missio
       case "chat":
         return <ChatPanel />;
       case "images":
-        return <SearchImagesPanel />;
+        return <ImagesTab />;
       case "live":
         return <LivePanel />;
       case "camera":

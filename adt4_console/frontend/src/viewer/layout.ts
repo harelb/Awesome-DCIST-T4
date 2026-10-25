@@ -1,6 +1,7 @@
 // Pure scene-graph -> render-buffer layout (hydra_visualizer-style layer stacking).
 import type {NodeRecord} from "../codec";
-import {GraphModel, layerHidden, layerInfo, type LayerInfo} from "../lib/graphModel";
+import type {TrajPath} from "../stores/viewer";
+import {GraphModel, isAgentNode, layerHidden, layerInfo, type LayerInfo} from "../lib/graphModel";
 import {LAYER_COLORS, nodeColor} from "../lib/palette";
 import {
   colorKeyOf,
@@ -87,7 +88,8 @@ export interface GraphLayout {
   regionOutline: {positions: Float32Array; colors: Float32Array} | null;
   texts: TextLabel[];
   edgeCounts: Record<string, number>;
-  agentPath: Float32Array | null;
+  /** agent keyframes as polylines per robot (prefix key), split where consecutive keyframes are > PATH_GAP_M apart */
+  agentPaths: TrajPath[];
   bounds: {min: [number, number, number]; max: [number, number, number]} | null;
 }
 
@@ -427,14 +429,20 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
   const edgeColors: Record<string, Float32Array> = {};
   for (const [k, v] of colBuckets) edgeColors[k] = new Float32Array(v);
 
-  // agent trajectory from agent nodes ordered by symbol index
-  const agents = [...model.nodes.values()].filter(n => layerInfo(n.layer, n.part).kind === "agents");
-  let agentPath: Float32Array | null = null;
-  if (agents.length > 1) {
-    agents.sort((a, b) => symIndex(a.sym) - symIndex(b.sym));
-    agentPath = new Float32Array(agents.length * 3);
-    agents.forEach((n, i) => agentPath!.set(displayPos(n, opts.flat, opts.stackHeight, style, heights), i * 3));
-  }
+  // agent trajectories: per robot (partition), keyframes in symbol order, broken at gaps
+  const agents = [...model.nodes.values()].filter(isAgentNode);
+  agents.sort((a, b) => a.part - b.part || symIndex(a.sym) - symIndex(b.sym));
+  const agentPaths: TrajPath[] = [];
+  let cur: TrajPath | null = null;
+  agents.forEach((n, i) => {
+    const prev = agents[i - 1];
+    if (!cur || (prev && (prev.part !== n.part || Math.hypot(n.pos[0] - prev.pos[0], n.pos[1] - prev.pos[1]) > PATH_GAP_M))) {
+      if (cur && cur.points.length > 1) agentPaths.push(cur);
+      cur = {robot: String.fromCharCode(n.part), points: []};
+    }
+    cur.points.push(displayPos(n, opts.flat, opts.stackHeight, style, heights));
+  });
+  if (cur && (cur as TrajPath).points.length > 1) agentPaths.push(cur);
 
   const hulls = hasRooms && opts.regionHulls ? regionHulls(model, parents, opts) : null;
 
@@ -449,7 +457,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     regionFill: hulls?.fill ?? null,
     regionOutline: hulls?.outline ?? null,
     edgeCounts: counts,
-    agentPath,
+    agentPaths,
     bounds: Number.isFinite(min[0]) ? robustBounds(model) : null,
   };
 }
@@ -509,6 +517,11 @@ export function regionHulls(
     outline: {positions: new Float32Array(op), colors: new Float32Array(oc)},
   };
 }
+
+/** Consecutive keyframes of a robot are ~1 m apart: a longer step is a stretch with
+ *  no keyframes (drawn as a break, not a straight line). Same as the server's
+ *  TRAJECTORY_GAP_M. */
+export const PATH_GAP_M = 4;
 
 /** 2nd-98th percentile box of node positions, so a few outliers don't wreck framing. */
 function robustBounds(model: GraphModel): {min: [number, number, number]; max: [number, number, number]} {

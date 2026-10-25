@@ -1,7 +1,8 @@
 // Map-viewer styling controls: background, per-layer heights, colours, areas
 // (left panel) and the screenshot toolbar button.
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import {useViewer, readyModels} from "../stores/viewer";
+import {pathColors, useViewer, readyModels, type PathColorMode} from "../stores/viewer";
+import {useRobotColorOf} from "../lib/palette";
 import {useViewStyle} from "../stores/viewStyle";
 import {layerInfo} from "../lib/graphModel";
 import {Toggle} from "../components/ui";
@@ -293,6 +294,47 @@ export function RegionControls() {
         label="Colour members by area"
         title="Places take their area's colour (hydra ParentColorAdapter); while editing the map, objects too"
       />
+    </div>
+  );
+}
+
+/** Robot paths: colour mode, bag labels, and a legend of each path's session, robot
+ *  and source bag (from the map's trajectory ``robots``). */
+export function PathControls() {
+  const {sources, order, showTrajectory, pathColor, pathLabels, set} = useViewer();
+  const robotColorOf = useRobotColorOf();
+  const robots = order.flatMap(id => (sources[id]?.enabled ? sources[id].trajectoryRobots : []));
+  const colors = pathColors(robots, pathColor, robotColorOf);
+  return (
+    <div className="path-controls">
+      <Toggle checked={showTrajectory} onChange={v => set({showTrajectory: v})} label="Robot paths" />
+      {showTrajectory && (
+        <>
+          <label className="slider-row">
+            <span>Path colour</span>
+            <select className="input input-sm" value={pathColor} onChange={e => set({pathColor: e.target.value as PathColorMode})} aria-label="Path colour">
+              <option value="bag">Per bag</option>
+              <option value="robot">Per robot</option>
+              <option value="single">Single colour</option>
+            </select>
+          </label>
+          <Toggle checked={pathLabels} onChange={v => set({pathLabels: v})} label="Label paths with their bag" title="Each path's session, robot and source bag at its start" />
+          {robots.some(r => r.session || r.bag) && (
+            <ul className="path-legend">
+              {robots.map(r => (
+                <li key={r.key} title={r.bag}>
+                  <span className="path-swatch" style={{background: colors?.[r.key] ?? "transparent"}} />
+                  <span>
+                    <b>{r.session ?? r.key}</b>
+                    {r.robot && r.robot !== r.session ? ` · ${r.robot}` : ""}
+                    {r.bag && <span className="mono small muted path-bag">{r.bag}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
     </div>
   );
 }

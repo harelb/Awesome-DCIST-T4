@@ -745,17 +745,21 @@ TRAJECTORY_GAP_M = 4.0
 
 
 def trajectory_payload(rows: list, sources: dict | None = None) -> dict:
-    """``rows`` = [t, x, y, z, robot prefix]: ``points`` [t, x, y, z] ordered by robot then
+    """``rows`` = [t, x, y, z, robot prefix, (agent symbol)]: ``points`` [t, x, y, z] ordered by robot then
     t; ``breaks``, the indices where a new polyline starts (another robot, or a gap); and
     ``robots``, each robot's first index with its session / robot / bag when known."""
     rows = sorted(rows, key=lambda r: (str(r[4]), r[0]))
     breaks, robots = [], []
+    syms = [r[5] if len(r) > 5 else None for r in rows]
     for i, r in enumerate(rows):
         if i == 0 or r[4] != rows[i - 1][4]:
             robots.append({"key": str(r[4]), "start": i, **(sources or {}).get(str(r[4]), {})})
         if i and (r[4] != rows[i - 1][4] or math.dist(rows[i - 1][1:3], r[1:3]) > TRAJECTORY_GAP_M):
             breaks.append(i)
-    return {"points": [r[:4] for r in rows], "breaks": breaks, "robots": robots}
+    out = {"points": [r[:4] for r in rows], "breaks": breaks, "robots": robots}
+    if any(syms):
+        out["syms"] = syms  # each point's agent node, for its keyframe images
+    return out
 
 
 def _spark_trajectory_sources(G) -> dict:
@@ -788,7 +792,7 @@ def _records_trajectory(loaded: Loaded) -> list:
                 idx = parse_symbol(rec.sym)[1]
             except ValueError:
                 continue
-            pts.append([float(idx), *rec.pos, chr(rec.part)])
+            pts.append([float(idx), *rec.pos, chr(rec.part), rec.sym])
     return pts
 
 
@@ -808,7 +812,7 @@ def _spark_trajectory(G) -> list:
             )
             if not hasattr(a, "external_key"):  # agent (keyframe) nodes only
                 continue
-            pts.append([t, *(float(v) for v in a.position), chr(part)])
+            pts.append([t, *(float(v) for v in a.position), chr(part), canonical_symbol(node.id.str())])
     return pts
 
 
@@ -911,7 +915,16 @@ class FileSource(Source):
         return self.loaded().extra.get("trajectory", [])
 
     def trajectory_sources(self) -> dict:
-        return self.loaded().extra.get("trajectory_sources", {})
+        sources = self.loaded().extra.get("trajectory_sources", {})
+        if sources:
+            return sources
+        # a single ADT4 run: name its robot(s) from <run>/run_info.json
+        try:
+            info = json.loads((self.run_dir / "run_info.json").read_text())
+        except (OSError, ValueError):
+            return {}
+        label = {"session": info.get("experiment") or self.run_dir.name, "robot": info.get("robot")}
+        return {k: {kk: v for kk, v in label.items() if v} for k in {p[4] for p in self.trajectory()}}
 
 
 def _neo4j_image(r: dict) -> NodeImage:
@@ -1045,7 +1058,23 @@ class Neo4jSource(Source):
             G = db_to_spark_dsg(db)
         except Exception as e:  # noqa: BLE001
             raise GraphUnavailable(f"db_to_spark_dsg failed: {e}") from None
-        return _graph_loaded(G, version)
+        loaded = _graph_loaded(G, version)
+        self._add_agent_records(loaded)
+        return loaded
+
+    def _add_agent_records(self, loaded: Loaded) -> None:
+        """heracles' db_to_spark_dsg leaves the agent (keyframe) layer out: add the
+        Agent nodes as records in their robot-prefix partitions, so robot poses can be
+        picked (keyframe images) and browsed."""
+        codec = _codec()
+        for r in self.query("MATCH (a:Agent) WHERE a.center IS NOT NULL RETURN a.nodeSymbol AS s, a.center AS c"):
+            try:
+                c, i = parse_symbol(str(r["s"]))
+            except ValueError:
+                continue
+            sym = f"{c}({i})"
+            if sym not in loaded.records:
+                loaded.records[sym] = codec.NodeRecord(sym, AGENT_LAYER, ord(c), tuple(float(v) for v in r["c"][:3]))
 
     def mesh_path(self):
         from heracles.graph_interface import read_mesh_path
@@ -1273,7 +1302,11 @@ class Neo4jSource(Source):
             if c is None:
                 continue
             t = (r["t"] or 0) / 1e9
-            pts.append([t, float(c[0]), float(c[1]), float(c[2]), (r["s"] or "?")[0]])
+            try:
+                sym = canonical_symbol(str(r["s"]))
+            except ValueError:
+                sym = None
+            pts.append([t, float(c[0]), float(c[1]), float(c[2]), (r["s"] or "?")[0], sym])
         return pts or self._source_file_trajectory()
 
     def trajectory_sources(self) -> dict:

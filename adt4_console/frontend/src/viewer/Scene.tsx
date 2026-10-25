@@ -93,6 +93,7 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
           showBBoxes={showBBoxes}
           showTrajectory={showTrajectory}
           trajectory={src.trajectory}
+          trajectoryRobots={src.trajectoryRobots}
           edgeKinds={edgeKinds}
           style={vizStyle}
           showText={showText}

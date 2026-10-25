@@ -251,8 +251,8 @@ describe("7 · detections to review", () => {
 
 describe("8 · /mission side-panel tabs", () => {
   const strip = ["inspect", "mission", "map", "plan", "teleop", "images", "live", "camera"] as const;
-  it("Mission | Map | Inspect, the rest under More (desktop only)", () => {
-    expect(splitTabs([...strip], true, false)).toEqual({shown: ["mission", "map", "inspect"], more: ["plan", "teleop", "images", "live", "camera"]});
+  it("Mission | Map | Inspect | Images, the rest under More (desktop only)", () => {
+    expect(splitTabs([...strip], true, false)).toEqual({shown: ["mission", "map", "inspect", "images"], more: ["plan", "teleop", "live", "camera"]});
     expect(splitTabs([...strip], true, true)).toEqual({shown: [...strip], more: []});
     expect(splitTabs([...strip], false, false).more).toEqual([]);
   });

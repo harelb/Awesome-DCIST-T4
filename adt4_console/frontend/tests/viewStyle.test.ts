@@ -17,6 +17,7 @@ import {
   STYLE_BACKGROUND,
 } from "../src/viewer/style";
 import {DEFAULT_VIEW_STYLE, parseStoredStyle, saveStyle, STYLE_STORAGE_KEY} from "../src/stores/viewStyle";
+import {pathColors, splitPath, trajectoryPaths} from "../src/stores/viewer";
 
 const rec = (sym: string, layer: number, part: number, pos: [number, number, number], label = -1, name = "", bbox: NodeRecord["bbox"] = null): NodeRecord => ({
   sym, layer, part, pos, label, bbox, color: [0, 0, 0], name, active: false,
@@ -214,5 +215,40 @@ describe("settings persistence", () => {
     expect(b.heights).toEqual({rooms: 2});
     expect(b.shot.format).toBe("png");
     expect(b.shot.quality).toBe(DEFAULT_SHOT.quality);
+  });
+});
+
+describe("robot paths", () => {
+  it("one polyline per robot, broken where keyframes are far apart", () => {
+    const m = GraphModel.fromSnapshot({
+      nodes: [
+        rec("a(0)", 2, 97, [0, 0, 0]), rec("a(1)", 2, 97, [1, 0, 0]), rec("a(2)", 2, 97, [41, 0, 0]), rec("a(3)", 2, 97, [42, 0, 0]),
+        rec("b(0)", 2, 98, [0, 5, 0]), rec("b(1)", 2, 98, [1, 5, 0]),
+      ],
+      edges: [],
+      labelspaces: {},
+    });
+    const paths = layoutGraph(m, {...base, flat: true}).agentPaths;
+    expect(paths.map(p => p.points.map(q => q[0]))).toEqual([[0, 1], [41, 42], [0, 1]]);
+    expect(paths.map(p => p.robot)).toEqual(["a", "a", "b"]);
+  });
+  it("splits server points at breaks, dropping lone points", () => {
+    expect(splitPath([1, 2, 3, 4, 5, 6], [2, 3])).toEqual([[1, 2], [4, 5, 6]]);
+    expect(splitPath([1, 2], [])).toEqual([[1, 2]]);
+  });
+});
+
+describe("path sources", () => {
+  it("tags each server path with its robot", () => {
+    const pts = [[0, 0, 0], [1, 0, 0], [41, 0, 0], [42, 0, 0], [0, 5, 0], [1, 5, 0]] as [number, number, number][];
+    const paths = trajectoryPaths(pts, [2, 4], [{key: "a", start: 0}, {key: "b", start: 4}]);
+    expect(paths.map(p => [p.robot, p.points.length])).toEqual([["a", 2], ["a", 2], ["b", 2]]);
+  });
+  it("colours per bag, per robot (sessions of one robot match) or not at all", () => {
+    const robots = [{key: "a", robot: "euclid", session: "courtyard"}, {key: "b", robot: "euclid", session: "slam"}];
+    const byBag = pathColors(robots, "bag", n => n)!;
+    expect(byBag.a).not.toBe(byBag.b);
+    expect(pathColors(robots, "robot", n => `c-${n}`)).toEqual({a: "c-euclid", b: "c-euclid"});
+    expect(pathColors(robots, "single", n => n)).toBeNull();
   });
 });

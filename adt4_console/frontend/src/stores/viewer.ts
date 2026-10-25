@@ -1,5 +1,6 @@
 // Robot-viewer state: overlaid graph sources (heavy data kept in mutable GraphModel
 // objects, React re-renders keyed on `rev`) plus all viewer UI toggles.
+import {PALETTE_HEX} from "../lib/palette";
 import {create} from "zustand";
 import {decodeDelta, decodeGraph, unpack} from "../codec";
 import {GraphModel} from "../lib/graphModel";
@@ -24,7 +25,12 @@ export interface SourceView {
   version: number | null;
   manifest: TileManifest | null;
   manifestRev: number;
-  trajectory: [number, number, number][] | null;
+  /** robot paths: polylines per robot, split where its keyframes have a gap */
+  trajectory: TrajPath[] | null;
+  /** the robots of `trajectory`, with their session / robot / source bag when known */
+  trajectoryRobots: TrajRobot[];
+  /** each robot's keyframes in time order (agent symbol, time, position), for browsing images */
+  keyframes: KeyframeTrack[];
   showMesh: boolean;
   showGraph: boolean;
 }
@@ -48,6 +54,10 @@ interface ViewerStore {
   stackHeight: number;
   showBBoxes: boolean;
   showTrajectory: boolean;
+  /** robot path colour: one colour, per robot (its fleet colour), or per bag (session) */
+  pathColor: PathColorMode;
+  /** label each robot's path with its session, robot and source bag */
+  pathLabels: boolean;
   topDown: boolean;
   follow: string | null; // robot name
   meshOpacity: number;
@@ -116,6 +126,8 @@ function blankSource(s: GraphSource): SourceView {
     manifest: null,
     manifestRev: 0,
     trajectory: null,
+    trajectoryRobots: [],
+    keyframes: [],
     showMesh: true,
     showGraph: true,
   };
@@ -137,6 +149,8 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   stackHeight: 2, // hydra_visualizer layer_z_step
   showBBoxes: true,
   showTrajectory: true,
+  pathColor: "bag",
+  pathLabels: false,
   topDown: false,
   follow: null,
   meshOpacity: 1,
@@ -278,12 +292,95 @@ async function loadManifest(id: string, after: Promise<void>) {
   });
 }
 
+type V3 = [number, number, number];
+
+export type PathColorMode = "single" | "robot" | "bag";
+
+/** A robot of a trajectory: its prefix key and, when the map knows them, the session,
+ *  robot name and source bag (GET .../trajectory ``robots``). */
+export interface TrajRobot {
+  key: string;
+  session?: string;
+  robot?: string;
+  bag?: string;
+}
+
+export interface TrajPath {
+  robot: string; // TrajRobot.key
+  points: V3[];
+}
+
+/** Server points cut at ``breaks`` into paths, each tagged with the robot whose
+ *  ``start`` index it falls after. */
+export function trajectoryPaths(points: V3[], breaks: number[], robots: {key: string; start: number}[]): TrajPath[] {
+  const out: TrajPath[] = [];
+  let start = 0;
+  for (const b of [...breaks, points.length]) {
+    if (b - start > 1) {
+      const r = robots.filter(x => x.start <= start).at(-1);
+      out.push({robot: r?.key ?? "", points: points.slice(start, b)});
+    }
+    start = b;
+  }
+  return out;
+}
+
+/** One robot's keyframes, time-ordered: ``t`` seconds (unix time for timestamped
+ *  maps), the agent node ``syms`` (images) and positions. */
+export interface KeyframeTrack {
+  robot: TrajRobot;
+  t: number[];
+  syms: string[];
+  pos: V3[];
+}
+
+/** Server trajectory points [t, x, y, z] + per-point agent symbols -> one track per robot
+ *  (points without a symbol are skipped: they have no images to browse). */
+export function keyframeTracks(points: number[][], syms: (string | null)[], robots: (TrajRobot & {start: number})[]): KeyframeTrack[] {
+  return robots
+    .map((r, k) => {
+      const end = robots[k + 1]?.start ?? points.length;
+      const track: KeyframeTrack = {robot: (({start: _, ...rest}) => rest)(r), t: [], syms: [], pos: []};
+      for (let i = r.start; i < end; i++) {
+        const s = syms[i];
+        if (!s) continue;
+        track.t.push(points[i][0]);
+        track.syms.push(s);
+        track.pos.push([points[i][1], points[i][2], points[i][3]]);
+      }
+      return track;
+    })
+    .filter(tr => tr.syms.length > 0);
+}
+
+/** Path colour per robot key (null: one colour). "bag" gives each session its own
+ *  colour; "robot" uses the robot's fleet colour, so sessions of one robot match. */
+export function pathColors(robots: TrajRobot[], mode: PathColorMode, robotColor: (name: string) => string): Record<string, string> | null {
+  if (mode === "single" || !robots.length) return null;
+  const out: Record<string, string> = {};
+  robots.forEach((r, i) => (out[r.key] = mode === "robot" ? robotColor(r.robot ?? r.key) : PALETTE_HEX[i % PALETTE_HEX.length]));
+  return out;
+}
+
+/** ``points`` cut into polylines at ``breaks`` (start indices); single points dropped. */
+export function splitPath<T>(points: T[], breaks: number[]): T[][] {
+  const out: T[][] = [];
+  let start = 0;
+  for (const b of [...breaks, points.length]) {
+    if (b - start > 1) out.push(points.slice(start, b));
+    start = b;
+  }
+  return out;
+}
+
 async function loadTrajectory(id: string) {
   try {
     const body = await fetchTracked(`${srcPath(id)}/trajectory`, `traj:${id}`, "", "application/json");
-    const traj = JSON.parse(new TextDecoder().decode(body)) as {points?: number[][]};
-    const pts = traj?.points?.length ? traj.points.map(p => [p[1], p[2], p[3]] as [number, number, number]) : null;
-    if (useViewer.getState().sources[id]) useViewer.getState().patchSource(id, {trajectory: pts});
+    const traj = JSON.parse(new TextDecoder().decode(body)) as {points?: number[][]; breaks?: number[]; robots?: (TrajRobot & {start: number})[]; syms?: (string | null)[]};
+    const robots = traj?.robots ?? [];
+    const paths = traj?.points?.length ? trajectoryPaths(traj.points.map(p => [p[1], p[2], p[3]] as V3), traj.breaks ?? [], robots) : null;
+    const keyframes = keyframeTracks(traj?.points ?? [], traj?.syms ?? [], robots);
+    if (useViewer.getState().sources[id]) useViewer.getState().patchSource(id, {trajectory: paths, trajectoryRobots: robots.map(({start: _, ...r}) => r), keyframes});
   } catch {
     /* no trajectory */
   }

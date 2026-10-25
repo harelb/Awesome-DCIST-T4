@@ -17,7 +17,7 @@ import {applyPoint, robotOfSource} from "../lib/frameAlign";
 import {sourceMatrix, useRobots} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
 import {useViewStyle} from "../stores/viewStyle";
-import {BackgroundControl, HeightsControl, RegionControls, RobotLookControl, ThemeControl} from "./StylePanels";
+import {BackgroundControl, HeightsControl, PathControls, RegionControls, RobotLookControl, ThemeControl} from "./StylePanels";
 
 const KIND_LABEL: Record<string, string> = {neo4j: "Neo4j", file: "file", live: "live"};
 
@@ -124,6 +124,7 @@ export function LayersPanel() {
         <h4>Layers</h4>
       </header>
       {layers.some(([, l]) => l.kind === "rooms") && <RegionControls />}
+      {(layers.some(([, l]) => l.kind === "agents") || order.some(id => sources[id]?.trajectory?.length)) && <PathControls />}
       <ul className="layer-list">
         {layers.map(([k, l]) => (
           <li key={k}>
@@ -204,7 +205,7 @@ function MeshDetailControl() {
 }
 
 export function DisplayPanel() {
-  const {showBBoxes, showTrajectory, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, focusOthers, set} = useViewer();
+  const {showBBoxes, meshOpacity, vizStyle, showText, meshCull, meshClipOn, meshClipHeight, focusOthers, set} = useViewer();
   return (
     <section className="vsec">
       <header className="vsec-head">
@@ -244,7 +245,6 @@ export function DisplayPanel() {
       )}
       <Toggle checked={showBBoxes} onChange={v => set({showBBoxes: v})} label="Object bounding boxes" />
       <Toggle checked={showText} onChange={v => set({showText: v})} label="Text labels" />
-      <Toggle checked={showTrajectory} onChange={v => set({showTrajectory: v})} label="Agent trajectory" />
       <label className="slider-row">
         <span>Other robots</span>
         <select
