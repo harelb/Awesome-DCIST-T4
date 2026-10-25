@@ -12,6 +12,7 @@ import {declutter, labelPrio, labelSize, MAX_LABELS, type LabelBox} from "../lib
 import {pathColors, useViewer, type TrajPath, type TrajRobot} from "../stores/viewer";
 import {useRobotColorOf} from "../lib/palette";
 import {useMapEdit} from "../stores/mapEdit";
+import {useViewStyle} from "../stores/viewStyle";
 
 /** Displayed node positions per source, used by the click picker. */
 export const pickRegistry = new Map<string, Map<string, LayerBuffers>>();
@@ -293,6 +294,7 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
   }, [trajectory, layout.agentPaths]);
   const pathColor = useViewer(s => s.pathColor);
   const pathLabels = useViewer(s => s.pathLabels);
+  const trajOpacity = useViewStyle(s => s.trajectoryOpacity);
   const robotColorOf = useRobotColorOf();
   const robots = useMemo(() => {
     if (trajectoryRobots.length) return trajectoryRobots;
@@ -325,7 +327,9 @@ export function GraphLayers({src, layout, showBBoxes, showTrajectory, trajectory
         ) : null,
       )}
       {showTrajectory &&
-        trajPoints?.map((p, i) => <Line key={i} points={p.points} color={perRobot?.[p.robot] ?? trajDefault} lineWidth={hydra ? 2 : 2.5} />)}
+        trajPoints?.map((p, i) => (
+          <Line key={i} points={p.points} color={perRobot?.[p.robot] ?? trajDefault} lineWidth={hydra ? 2 : 2.5} transparent={trajOpacity < 1} opacity={trajOpacity} depthWrite={trajOpacity >= 1} />
+        ))}
       {showTrajectory && pathLabels && trajPoints && <PathLabels paths={trajPoints} robots={robots} colors={perRobot} fallback={trajDefault} />}
       {showText && layout.texts.length > 0 && <TextLabels texts={layout.texts} />}
     </group>

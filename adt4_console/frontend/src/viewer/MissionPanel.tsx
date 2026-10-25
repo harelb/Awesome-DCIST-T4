@@ -523,6 +523,31 @@ function CursorReadout() {
   );
 }
 
+/** How the mission draws on the map: planned path and robot trajectory opacity, start / end marker size. */
+function MissionDisplay() {
+  const pathOpacity = useViewStyle(v => v.missionPathOpacity);
+  const markerScale = useViewStyle(v => v.missionMarkerScale);
+  const trajOpacity = useViewStyle(v => v.trajectoryOpacity);
+  const patch = useViewStyle(v => v.patch);
+  const row = (label: string, value: number, min: number, max: number, step: number, set: (x: number) => void, shown: string) => (
+    <label className="slider-row">
+      <span>{label}</span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={e => set(Number(e.target.value))} aria-label={label} />
+      <span className="mono small">{shown}</span>
+    </label>
+  );
+  return (
+    <section className="vsec">
+      <header className="vsec-head">
+        <h4>Display</h4>
+      </header>
+      {row("Mission paths", pathOpacity, 0.15, 1, 0.05, x => patch({missionPathOpacity: x}), `${Math.round(pathOpacity * 100)}%`)}
+      {row("Start / end markers", markerScale, 0.5, 4, 0.25, x => patch({missionMarkerScale: x}), `×${markerScale.toFixed(2)}`)}
+      {row("Robot trajectories", trajOpacity, 0.1, 1, 0.05, x => patch({trajectoryOpacity: x}), `${Math.round(trajOpacity * 100)}%`)}
+    </section>
+  );
+}
+
 /** An agent's id, renamed on Enter / blur (Escape reverts). Edited as a draft: the
  *  roster rows are keyed by id, so renaming on every keystroke remounted the row,
  *  dropped the focus after one letter and sent the next keys to the map shortcuts. */
@@ -737,6 +762,7 @@ export function MissionPanel() {
       <Roster />
       <AreasSection />
       <MockObjects />
+      <MissionDisplay />
       <section className="vsec">
         <header className="vsec-head">
           <h4>Satellite</h4>

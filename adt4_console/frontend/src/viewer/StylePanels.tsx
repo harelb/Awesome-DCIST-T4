@@ -303,6 +303,8 @@ export function RegionControls() {
 export function PathControls() {
   const {sources, order, showTrajectory, pathColor, pathLabels, set} = useViewer();
   const robotColorOf = useRobotColorOf();
+  const trajOpacity = useViewStyle(s => s.trajectoryOpacity);
+  const patchStyle = useViewStyle(s => s.patch);
   const robots = order.flatMap(id => (sources[id]?.enabled ? sources[id].trajectoryRobots : []));
   const colors = pathColors(robots, pathColor, robotColorOf);
   return (
@@ -319,6 +321,11 @@ export function PathControls() {
             </select>
           </label>
           <Toggle checked={pathLabels} onChange={v => set({pathLabels: v})} label="Label paths with their bag" title="Each path's session, robot and source bag at its start" />
+          <label className="slider-row">
+            <span>Opacity</span>
+            <input type="range" min={0.1} max={1} step={0.05} value={trajOpacity} onChange={e => patchStyle({trajectoryOpacity: Number(e.target.value)})} aria-label="Robot path opacity" />
+            <span className="mono small">{Math.round(trajOpacity * 100)}%</span>
+          </label>
           {robots.some(r => r.session || r.bag) && (
             <ul className="path-legend">
               {robots.map(r => (

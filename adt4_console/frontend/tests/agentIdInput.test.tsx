@@ -76,3 +76,22 @@ describe("renaming an agent", () => {
     expect(input.value).toBe("spot1");
   });
 });
+
+import {agentEnds} from "../src/viewer/MissionOverlay";
+import {parseStoredStyle} from "../src/stores/viewStyle";
+
+describe("mission display", () => {
+  it("an agent's plan ends at its last task's target (else its last path point)", () => {
+    const tasks = {
+      t1: {agent: "spot1", path: [[0, 0], [5, 0]], target: [5, 0]},
+      t2: {agent: "husky1", path: [[1, 1], [2, 9]], target: null},
+      t3: {agent: "spot1", path: [[5, 0], [9, 9]], target: [9, 9]},
+    };
+    expect(agentEnds({tasks} as never)).toEqual({spot1: [9, 9], husky1: [2, 9]});
+    expect(agentEnds(null)).toEqual({});
+  });
+  it("opacity / marker settings are kept within range", () => {
+    const s = parseStoredStyle(JSON.stringify({missionPathOpacity: 0.01, missionMarkerScale: 9, trajectoryOpacity: 0.4}));
+    expect([s.missionPathOpacity, s.missionMarkerScale, s.trajectoryOpacity]).toEqual([0.15, 4, 0.4]);
+  });
+});

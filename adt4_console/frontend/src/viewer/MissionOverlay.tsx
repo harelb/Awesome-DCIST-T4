@@ -192,6 +192,54 @@ function AgentGlyph({agent, pos, yaw, color, z, status, stamp}: {agent: Agent; p
   );
 }
 
+/** Where each agent's plan ends: the target (else the last path point) of its last task
+ *  in the preview, which lists each agent's legs in execution order. */
+export function agentEnds(preview: Preview | null): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const tp of Object.values(preview?.tasks ?? {})) {
+    const p = tp.target ?? tp.path.at(-1);
+    if (p) out[tp.agent] = p;
+  }
+  return out;
+}
+
+/** An agent's start: a disc in its colour with a white rim (under its glyph). */
+function StartMarker({pos, z, color, scale}: {pos: number[]; z: number; color: string; scale: number}) {
+  const r = 1.2 * scale;
+  return (
+    <group position={[pos[0], pos[1], z + 0.07]}>
+      <mesh renderOrder={ORDER + 4}>
+        <circleGeometry args={[r + 0.25 * scale, 32]} />
+        <meshBasicMaterial color="#ffffff" depthTest={false} transparent opacity={0.95} />
+      </mesh>
+      <mesh renderOrder={ORDER + 5} position={[0, 0, 0.01]}>
+        <circleGeometry args={[r, 32]} />
+        <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.9} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Where an agent's plan ends: a diamond in its colour with a white rim and its name. */
+function EndMarker({pos, z, color, scale, label}: {pos: number[]; z: number; color: string; scale: number; label: string}) {
+  const r = 1.6 * scale;
+  return (
+    <group position={[pos[0], pos[1], z + 0.08]}>
+      <mesh renderOrder={ORDER + 5}>
+        <circleGeometry args={[r + 0.35 * scale, 4]} />
+        <meshBasicMaterial color="#ffffff" depthTest={false} transparent opacity={0.95} />
+      </mesh>
+      <mesh renderOrder={ORDER + 6} position={[0, 0, 0.01]}>
+        <circleGeometry args={[r, 4]} />
+        <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.97} />
+      </mesh>
+      <Html position={[0, 0, 0.5]} center className="mission-end-tag" zIndexRange={[25, 0]} style={{pointerEvents: "none"}}>
+        <span style={{borderColor: color}}>■ {label} end</span>
+      </Html>
+    </group>
+  );
+}
+
 export function MissionOverlay({groundZ}: {groundZ: number}) {
   const invalidate = useThree(s => s.invalidate);
   const m = useMission();
@@ -203,6 +251,9 @@ export function MissionOverlay({groundZ}: {groundZ: number}) {
   const z = groundZ + 0.3;
   const agents = current?.agents ?? roster;
   const colors = useMemo(() => agentColors(agents, robotColor), [agents, robotColor]);
+  const pathOpacity = useViewStyle(s => s.missionPathOpacity);
+  const markerScale = useViewStyle(s => s.missionMarkerScale);
+  const ends = useMemo(() => agentEnds(preview), [preview]);
 
   return (
     <group>
@@ -229,7 +280,7 @@ export function MissionOverlay({groundZ}: {groundZ: number}) {
           const width = state === "active" ? 6 : state === "done" ? 2.5 : 4;
           return (
             <group key={`leg-${tid}`}>
-              <Line points={pts} color="#000000" lineWidth={width + 3} transparent opacity={state === "done" ? 0.15 : 0.45} depthTest={false} renderOrder={ORDER + 2} />
+              <Line points={pts} color="#000000" lineWidth={width + 3} transparent opacity={(state === "done" ? 0.15 : 0.45) * pathOpacity} depthTest={false} renderOrder={ORDER + 2} />
               <Line
                 points={pts}
                 color={color}
@@ -238,7 +289,7 @@ export function MissionOverlay({groundZ}: {groundZ: number}) {
                 dashSize={tp.tentative ? 0.4 : 1.2}
                 gapSize={tp.tentative ? 0.8 : 0.5}
                 transparent
-                opacity={state === "done" ? 0.4 : 1}
+                opacity={(state === "done" ? 0.4 : 1) * pathOpacity}
                 depthTest={false}
                 renderOrder={ORDER + 3}
               />
@@ -281,6 +332,16 @@ export function MissionOverlay({groundZ}: {groundZ: number}) {
             <meshBasicMaterial color="#ff4040" depthTest={false} side={THREE.DoubleSide} />
           </mesh>
         ))}
+      {agents.map(a => {
+        const start = a.start ?? preview?.agents[a.id]?.start;
+        const end = ends[a.id];
+        return (
+          <group key={`ends-${a.id}`}>
+            {start && <StartMarker pos={start} z={z} color={colors[a.id]} scale={markerScale} />}
+            {end && <EndMarker pos={end} z={z} color={colors[a.id]} scale={markerScale} label={a.id} />}
+          </group>
+        );
+      })}
       {agents.map(a => {
         const r = run?.agents[a.id];
         const start = shownPos(a, run, preview);

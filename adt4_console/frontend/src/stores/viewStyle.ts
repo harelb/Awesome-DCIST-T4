@@ -26,6 +26,12 @@ export interface ViewStyleState {
   regionHulls: boolean;
   /** the ground grid under the map */
   grid: boolean;
+  /** opacity of the mission's planned agent paths (0.15..1) */
+  missionPathOpacity: number;
+  /** size of the mission's start / end markers (x the base size) */
+  missionMarkerScale: number;
+  /** opacity of the map's robot trajectories (0.1..1) */
+  trajectoryOpacity: number;
   /** robots drawn as their platform's model (Spot, Husky) or as the arrow */
   robotModel: RobotModelMode;
   /** a model highlighted in the robot's (path) colour */
@@ -49,6 +55,9 @@ export const DEFAULT_VIEW_STYLE: ViewStyleState = {
   regionColorPlaces: true,
   regionHulls: true,
   grid: true,
+  missionPathOpacity: 1,
+  missionMarkerScale: 1.5,
+  trajectoryOpacity: 1,
   robotModel: "model",
   robotHighlight: "outline",
   robotGait: true,
@@ -83,6 +92,10 @@ export function parseStoredStyle(raw: string | null): ViewStyleState {
   if (typeof v.regionColorPlaces === "boolean") out.regionColorPlaces = v.regionColorPlaces;
   if (typeof v.regionHulls === "boolean") out.regionHulls = v.regionHulls;
   if (typeof v.grid === "boolean") out.grid = v.grid;
+  const num = (x: unknown, lo: number, hi: number) => (typeof x === "number" && Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : null);
+  out.missionPathOpacity = num(v.missionPathOpacity, 0.15, 1) ?? out.missionPathOpacity;
+  out.missionMarkerScale = num(v.missionMarkerScale, 0.5, 4) ?? out.missionMarkerScale;
+  out.trajectoryOpacity = num(v.trajectoryOpacity, 0.1, 1) ?? out.trajectoryOpacity;
   if (v.robotModel === "model" || v.robotModel === "arrow") out.robotModel = v.robotModel;
   if (isRobotHighlight(v.robotHighlight)) out.robotHighlight = v.robotHighlight;
   if (typeof v.robotGait === "boolean") out.robotGait = v.robotGait;
