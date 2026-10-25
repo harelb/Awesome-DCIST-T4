@@ -219,6 +219,37 @@ Graph sources (all served from the same `fleetlink.codec` formats):
   `session` comes from its agent nodes' metadata (hydra_multi: the input's `session.txt`), `robot` and
   `bag` from the graph metadata `sessions: {session: {robot, bag}}` (the source DSG for `neo4j:`)
   (pre-gzipped JSON with `ETag` + `X-Uncompressed-Length`)
+* `GET /api/graph/{src}/place/{sym}/keyframes?sort=newest|oldest|visible` → every keyframe that observed the
+  traversability place `sym` (MESH_PLACES, 3p1; another node → 404, another `sort` → 422):
+  ```
+  {src, sym, version, sort, n, keyframes_total, table: "ready"|"building", seconds,
+   keyframes: [{frame_id, agent, robot_key, t_ns, visible, dist_m, image}],
+   sessions: [{key, session, robot, bag, bag_short, n, first_ns, last_ns, date}]}
+  ```
+  `visible` is the keyframe's weight: the fraction of the place's 9 sample points it saw. `dist_m` is camera
+  to place centre. `agent` is the agent node (robot pose) the frame is anchored to, `robot_key` its symbol
+  prefix (the trajectory's robot `key`; an unanchored frame takes its robot_id's commonest prefix). `image` =
+  `GET /api/graph/{src}/frame/{frame_id}[?w=]`, the keyframe's rgb (only keyframes of this map; `w` downscales).
+  `sessions` lists the robots with keyframes here, labelled like the trajectory robots (same
+  `trajectory_sources`); `bag_short` is the bag's last meaningful path component, `n`/`first_ns`/`last_ns`
+  count this place's keyframes. Ordering: `newest`/`oldest` by `t_ns`, `visible` by `visible` then
+  nearest; sessions by first keyframe (newest first only for `newest`).
+  Visibility (`place_keyframes.py`; the test `scripts/gps_fusion/regions/place_features.py` used to give
+  places their region features): the centre plus 8 points at 0.6 of the boundary rays are projected
+  with world_T_sensor = (anchor agent pose ∘ `anchor_T_body`, else the odometric pose) ∘ `body_T_sensor`.
+  A point is seen when z > 0.3 m, range < 12 m, inside the image, and the median of the valid depth
+  pixels in a 5×5 window (depth image scaled to the image size) is ≥ z − max(0.5, 0.1 z); a point
+  without valid depth (or a frame without a depth image) only within 5 m. Keyframes come from the image
+  store (`FrameKind.KEYFRAME`, sensors for intrinsics). Agent poses: file sources the loaded graph, Neo4j
+  the `Agent` rows (center + rot_*), live sources odometry. A map without image store answers `n: 0`,
+  `keyframes_total: 0`.
+  Caching: the first query of a graph version (+ store contents) indexes the keyframes (Penn: 0.4 s) and
+  starts the full place × keyframe table in a background thread (one depth decode per keyframe, Penn
+  4065 × 3874 ≈ 24 s); until it is ready (`table: "building"`) the query tests that place alone
+  (frustum + range against all keyframes, depth on the shortlist, ~0.1 s). The table is kept on disk in
+  `~/.adt4_console/place_keyframes/<content key>.npz` (key = places, keyframe poses, parameters; newest 8
+  kept), so a restart or a Neo4j edit that leaves places and poses alone reuses it. Live sources skip the
+  table (their graph changes per delta) and answer place by place.
 
 Viewer load order (frontend `stores/viewer.ts`, `viewer/MeshTiles.tsx`, `lib/meshPlan.ts`): the
 snapshot first, so the graph shows as soon as it lands. The manifest request starts at the same time
@@ -1517,6 +1548,12 @@ A backend that follows these works with the UI unchanged.
   `start`. Stats: received fps and kbit/s over a 2 s window, decode time (decode call to output),
   lag (browser clock minus the frame's robot `t`, so it includes clock skew), skipped frames,
   "waiting for key frame", and the robot's own report from the keepalive response.
+* Inspect tab, a traversability place selected (`viewer/PlaceKeyframes.tsx`, `lib/placeKeyframes.ts`):
+  "Keyframes (N)" from `place/{sym}/keyframes`, sorted newest / oldest / most visible (re-sorted in the
+  browser, no new request) and optionally grouped by session (header: date · robot · bag short name).
+  Both choices are kept per device (localStorage). Thumbnails are lazy (`w=240`, 60 before "Show all");
+  a thumbnail opens the lightbox (previous / next in display order), whose "Show pose on map" selects
+  and flies to the keyframe's agent node; the Inspector then offers "← Back to place".
 * Inspect tab with nothing selected: a "Graph statistics" block for each enabled, loaded source. It refetches on a
   version change. A live source refetches on deltas, throttled to once every 3 s.
 

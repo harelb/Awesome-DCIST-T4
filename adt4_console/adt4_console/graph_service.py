@@ -420,6 +420,10 @@ class Source:
         self._products = None  # mesh_lod.TileProducts of the tiles held
         self._snapshot_gz: tuple[bytes, bytes, str] | None = None  # (raw, gz, etag)
         self.mesh_cache = None  # mesh_lod.MeshDiskCache (GraphService sets it)
+        self.place_cache_dir = None  # place keyframe tables on disk (GraphService sets it)
+        self._store_lock = threading.Lock()  # image store reads (subclasses keep their own)
+        self._pk_lock = threading.Lock()  # builds the place keyframe index
+        self._pk = None  # (key, place_keyframes.PlaceKeyframeIndex)
 
     # -- to implement ------------------------------------------------------
     def version(self) -> int:
@@ -500,6 +504,76 @@ class Source:
 
     def trajectory(self) -> list:
         return _records_trajectory(self.loaded())
+
+    # -- place keyframes (place_keyframes.py) ---------------------------------
+    def keyframe_pose_lookup(self, loaded):
+        """What resolves keyframe anchors to world poses (a spark_dsg graph, or node id
+        -> 4x4); None = the frames' odometric poses."""
+        return None
+
+    def place_keyframe_index(self):
+        """The PlaceKeyframeIndex of the current graph version and image store contents,
+        built on first use; its full place x keyframe table follows in a thread (sources
+        whose graph changes per delta answer place by place only)."""
+        from .place_keyframes import PlaceKeyframeIndex, is_place_record, store_keyframes
+
+        loaded = self.loaded()
+        store = self.image_store()
+        key = (loaded.version, store_signature(store))
+        with self._pk_lock:
+            cur = self._pk
+            if cur is None or cur[0] != key:
+                t0 = time.time()
+                places = {s: (r.pos, r.radii) for s, r in loaded.records.items() if is_place_record(r)}
+                frames = []
+                if store is not None and places:
+                    lookup = self.keyframe_pose_lookup(loaded)
+                    with self._store_lock:
+                        frames = store_keyframes(store, lookup)
+                idx = PlaceKeyframeIndex(places, frames, self.trajectory_sources(),
+                                         cache_dir=self.place_cache_dir if self.cacheable else None, label=self.id)  # fmt: skip
+                log.info("%s: place keyframe index (%d places, %d keyframes) in %.2fs", self.id, len(places),
+                         len(frames), time.time() - t0)  # fmt: skip
+                cur = self._pk = (key, idx)
+        idx = cur[1]
+        if self.cacheable:
+            idx.start_build()
+        return idx
+
+    def place_keyframes(self, sym: str, sort: str = "newest") -> dict:
+        """Every keyframe that observed the place ``sym`` (API.md §7)."""
+        from .place_keyframes import SORTS, is_place_record
+
+        if sort not in SORTS:
+            raise ValueError(f"sort must be one of {', '.join(SORTS)}")
+        loaded = self.loaded()
+        try:
+            key = canonical_symbol(sym)
+        except ValueError as e:
+            raise NotFound(str(e)) from None
+        rec = loaded.records.get(key)
+        if rec is None:
+            raise NotFound(f"no node {sym} in {self.id}")
+        if not is_place_record(rec):
+            raise NotFound(f"{key} is not a traversability place")
+        t0 = time.time()
+        idx = self.place_keyframe_index()
+        out = idx.query(key, sort)
+        for r in out["keyframes"]:
+            r["image"] = f"/api/graph/{self.id}/frame/{r['frame_id']}"
+        return {
+            "src": self.id, "sym": key, "version": loaded.version, "sort": sort,
+            "n": len(out["keyframes"]), **out,
+            "keyframes_total": len(idx), "table": "ready" if idx.ready else "building",
+            "seconds": round(time.time() - t0, 3),
+        }  # fmt: skip
+
+    def keyframe_image(self, frame_id: int) -> NodeImage:
+        """The rgb image of one of this map's keyframes (the place keyframe index's)."""
+        path = self.place_keyframe_index().frame_rgb(frame_id)
+        if path is None or not pathlib.Path(path).is_file():
+            raise NotFound(f"no keyframe {frame_id} in {self.id}")
+        return NodeImage(pathlib.Path(path), kind="keyframe", frame_id=int(frame_id))
 
     def trajectory_sources(self) -> dict:
         """Robot prefix -> {session, robot, bag} where the source knows them."""
@@ -911,6 +985,9 @@ class FileSource(Source):
                 self._store = open_image_store(self.run_dir / "image_store")
             return self._store
 
+    def keyframe_pose_lookup(self, loaded):
+        return loaded.G
+
     def trajectory(self):
         return self.loaded().extra.get("trajectory", [])
 
@@ -1281,6 +1358,23 @@ class Neo4jSource(Source):
             log.warning("imaged nodes (neo4j) failed: %s", e)
         return out | super()._imaged_syms()
 
+    def keyframe_pose_lookup(self, loaded):
+        """Agent poses (center + rotation) by node id: the agent layer is not in the
+        graph heracles rebuilds."""
+        from .place_keyframes import quat_pose
+
+        poses = {}
+        for r in self.query(
+            "MATCH (a:Agent) WHERE a.center IS NOT NULL AND a.rot_w IS NOT NULL RETURN a.nodeSymbol AS s, "
+            "a.center AS c, a.rot_w AS w, a.rot_x AS x, a.rot_y AS y, a.rot_z AS z"
+        ):
+            try:
+                nid = node_id_of(str(r["s"]))
+            except ValueError:
+                continue
+            poses[nid] = quat_pose([float(v) for v in r["c"]][:3], r["w"], r["x"], r["y"], r["z"])
+        return poses
+
     def image_store_paths(self) -> list[str]:
         rec = self.query(
             "MATCH (m:_GraphMetadata) WHERE m.image_store_paths IS NOT NULL "
@@ -1444,6 +1538,8 @@ class GraphService:
 
         cache_dir = getattr(settings, "mesh_cache_dir", None)
         self.mesh_cache = MeshDiskCache(cache_dir) if cache_dir else None
+        # place keyframe tables next to the mesh cache (None: memory only, tests)
+        self.place_cache_dir = pathlib.Path(cache_dir).expanduser().parent / "place_keyframes" if cache_dir else None
         for name, uri in settings.neo4j.items():
             self.add_neo4j(name, uri)
         for name, path in settings.maps.items():
@@ -1455,6 +1551,7 @@ class GraphService:
     def add_file(self, name: str, path, label: str | None = None) -> FileSource:
         src = FileSource(name, path)
         src.mesh_cache = self.mesh_cache
+        src.place_cache_dir = self.place_cache_dir
         if label:
             src.label = label
         with self._lock:
@@ -1467,6 +1564,7 @@ class GraphService:
             name, uri, s.neo4j_user, s.neo4j_password, prior=name == s.prior_neo4j
         )
         src.mesh_cache = self.mesh_cache
+        src.place_cache_dir = self.place_cache_dir
         with self._lock:
             self.sources[src.id] = src
         return src

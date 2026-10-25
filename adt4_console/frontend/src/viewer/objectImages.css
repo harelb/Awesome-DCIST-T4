@@ -111,3 +111,37 @@
 .thumb-tag .nowrap {
   white-space: nowrap;
 }
+/* Inspect › place: the keyframes that observed it (PlaceKeyframes.tsx) */
+.place-kf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.place-kf-head .sub-title {
+  margin: 0;
+}
+.place-kf-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.place-kf-session {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line-2);
+  min-width: 0;
+}
+.place-kf-session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.place-kf-grid {
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+}
+.place-kf-meta {
+  text-align: center;
+  overflow-wrap: anywhere;
+}

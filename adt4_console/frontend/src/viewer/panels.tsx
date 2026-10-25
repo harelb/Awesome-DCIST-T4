@@ -16,6 +16,7 @@ import {editInMapTab} from "../stores/mapEdit";
 import {applyPoint, robotOfSource} from "../lib/frameAlign";
 import {sourceMatrix, useRobots} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
+import {PlaceKeyframes, usePlaceReturn} from "./PlaceKeyframes";
 import {useViewStyle} from "../stores/viewStyle";
 import {BackgroundControl, HeightsControl, PathControls, RegionControls, RobotLookControl, ThemeControl} from "./StylePanels";
 
@@ -350,6 +351,8 @@ export function SearchBox({autoFocus, onPicked}: {autoFocus?: boolean; onPicked?
 export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string) => void; onGoto: (src: string, sym: string) => void}) {
   const {selected, sources, fly, flat, stackHeight, select, vizStyle} = useViewer();
   const heights = useViewStyle(s => s.heights);
+  const placeReturn = usePlaceReturn(s => s.from);
+  const placeReturnPose = usePlaceReturn(s => s.pose);
   const [detail, setDetail] = useState<(NodeDetail & {masks?: boolean[]; image_info?: ImageInfo[]}) | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -378,6 +381,13 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
   const images = detail?.images ?? [];
   const isObject = info.kind === "objects";
   const isAgent = info.kind === "agents";
+  // traversability ("mesh") places: the keyframes that observed them
+  const isMeshPlace = node.layer === 3 && node.part === 1;
+  const flyTo = (src: string, sym: string) => {
+    const n = sources[src]?.model?.nodes.get(sym);
+    if (n) fly(applyPoint(sourceMatrix(src), displayPos(n, flat, stackHeight, vizStyle, heights)));
+  };
+  const backToPlace = placeReturn && isAgent && placeReturn.src === selected.src && placeReturnPose === selected.sym && sources[placeReturn.src]?.model?.nodes.has(placeReturn.sym) ? placeReturn : null;
   const imagesEl = (
     <ObjectImages images={images} masks={detail?.masks} info={detail?.image_info} title={model.displayName(node)} sym={node.sym} isObject={isObject} />
   );
@@ -409,6 +419,24 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
           </button>
         )}
       </div>
+      {backToPlace && (
+        <div className="row gap-sm">
+          <button className="btn btn-sm" onClick={() => select(backToPlace)} title="Back to the place whose keyframe this pose took">
+            ← Back to place {backToPlace.sym}
+          </button>
+        </div>
+      )}
+      {isMeshPlace && (
+        <PlaceKeyframes
+          src={selected.src}
+          sym={selected.sym}
+          hasPose={agent => Boolean(model.nodes.get(agent))}
+          onShowPose={agent => {
+            select({src: selected.src, sym: agent});
+            flyTo(selected.src, agent);
+          }}
+        />
+      )}
       {sources[selected.src]?.kind === "neo4j" && editLayerOf(node) && (
         <div className="row gap-sm">
           <button className="btn btn-sm" onClick={() => editInMapTab(selected.src, selected.sym)} title="Edit it in the Map tab: class, name, position, remove (one editor for single nodes and selections)">

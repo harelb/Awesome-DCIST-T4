@@ -123,6 +123,44 @@ async def image(
     return Response(data, media_type="image/jpeg", headers=headers)
 
 
+@router.get("/{src}/place/{sym}/keyframes")
+async def place_keyframes(
+    src: str,
+    sym: str,
+    request: Request,
+    sort: str = Query("newest", description="newest | oldest | visible"),
+):
+    """Every keyframe that observed a traversability place (place_keyframes.py). The
+    first query of a map version indexes its keyframes and starts the full table in a
+    thread; meanwhile the place is tested on its own (off the event loop)."""
+    source = services(request).graph.get(src)
+    try:
+        return await run_in_threadpool(source.place_keyframes, sym, sort)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+
+
+@router.get("/{src}/frame/{frame_id}")
+async def keyframe_image(
+    src: str,
+    frame_id: int,
+    request: Request,
+    w: int | None = Query(None, ge=1, le=4096, description="downscale to this width"),
+):
+    """The rgb image of one of the map's keyframes (place keyframes' ``image``)."""
+    source = services(request).graph.get(src)
+    img = await run_in_threadpool(source.keyframe_image, frame_id)
+    headers = {"Cache-Control": "public, max-age=3600"}
+    if not w or not image_render.available():
+        return FileResponse(img.path, headers=headers)
+    key = image_render.variant_key(src, img, w, False, False)
+    data = _renders.get(key)
+    if data is None:
+        data = await run_in_threadpool(image_render.render, img, w, False, False)
+        _renders.put(key, data)
+    return Response(data, media_type="image/jpeg", headers=headers)
+
+
 @router.get("/{src}/trajectory")
 def trajectory(src: str, request: Request):
     source = services(request).graph.get(src)
