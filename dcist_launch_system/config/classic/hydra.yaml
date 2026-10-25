@@ -21,7 +21,7 @@ input:
         verbosity: 1
         semantics_type: instance
         use_exact: true
-        queue_size: 30
+        queue_size: 150
         filters:
           - {type: InvalidDepthFilter, max_invalid_ratio: 0.5}
 active_window:

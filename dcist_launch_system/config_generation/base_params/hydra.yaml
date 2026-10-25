@@ -20,7 +20,11 @@ input:
         verbosity: 1
         semantics_type: instance
         use_exact: true
-        queue_size: 30
+        # Exact sync waits for the semantic image of each color/depth frame. queue_size
+        # bounds how stale a semantic image may be: at 15 Hz, 30 frames = 2 s, and a
+        # segmentation node that falls behind past that (e.g. under GPU/CPU contention)
+        # makes every frame miss, so hydra gets no input at all. 150 = 10 s.
+        queue_size: 150
         filters:
           - {type: InvalidDepthFilter, max_invalid_ratio: 0.5}
 active_window:
