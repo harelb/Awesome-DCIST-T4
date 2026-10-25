@@ -88,6 +88,13 @@ Mesh places: ADT4 runs keep region-growing traversability places in `MESH_PLACES
 updates them with `UpdateRegionGrowingTraversabilityFunctor` (the per-robot backend's functor).
 `Update2dPlacesFunctor` leaves them behind the pose-graph correction (Penn courtyard: 2.8 m off the mesh).
 
+Fused mesh tears: kimera_pgmo used to treat a mesh control point's absolute pose as its deformation, so
+robots added with a `world_T_robot` rotation had every vertex rotated about its nearest control points
+(Penn Huskies, yaw ~160 deg: faces stretched up to 21 m). Fixed in kimera_pgmo (deformation =
+value * initial^-1; also fixes objects/places). The few faces still torn by out-of-order vertex stamps
+are dropped with `backend.torn_face_stretch_ratio: 3.0` / `torn_face_min_edge_m: 0.5` (Penn: 51,680 faces
+over 3 m -> 0, 0.03% of faces dropped; trajectories unchanged).
+
 Inter-robot loop closures on Penn are mostly wrong (0-19% correct per pair vs GT), so keep the 5 m gate.
 
 Cross-session loop closures for many runs: `cross_session_loop_closures.py ... --shard K/N` in N

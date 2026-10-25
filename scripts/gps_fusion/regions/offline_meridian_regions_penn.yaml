@@ -8,6 +8,8 @@
 backend:
   type: MultiBackendModule
   anchor_robot_id: -1
+  torn_face_stretch_ratio: 3.0  # drop faces with an edge stretched > 3x by the deformation
+  torn_face_min_edge_m: 0.5     # ... and longer than 0.5 m (frontend edges are <= 0.2 m)
   gps:
     enable: true
     min_sigma_m: 0.1
