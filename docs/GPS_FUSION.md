@@ -59,8 +59,10 @@ with one merged image store and cross-day change annotations. Offline (`hydra-mu
 [Meridian](https://github.com/mit-acl/meridian) (Mason's `feature/depth-scale`) localizes a
 ground robot against an orthophoto. Its trajectory can stand in for `gps.csv`:
 
-1. Aerial GeoTIFF: `scripts/gps_fusion/meridian/fetch_aerial.py LAT LON --half-size-m 250 -o aerial.tif`
-   (Esri World Imagery, zoom 19, ~0.23 m/px), then
+1. Aerial GeoTIFF, written in UTM (north-up, metric: meridian's pixel <-> UTM model is exact only there):
+   `scripts/gps_fusion/meridian/fetch_aerial.py LAT LON --half-size-m 350 --source phl2025 --zoom 21 --utm --res-m 0.1 -o aerial.tif`.
+   `--source esri` is Esri World Imagery (at Penn: 0.5 m WorldView-2, zoom <= 19); `phl2025` is the City
+   of Philadelphia 2025 aerial (3 in, ArcGIS Online). Then
    `python -m meridian.pipeline.aerial_patch_mapping -p <params> -o <aerial_primitives>`.
 2. Meridian reads bags very slowly when they are large; cut each session first:
    `scripts/gps_fusion/meridian/cut_bag.py BAG OUT ROBOT T0 TF` (rgb as JPEG + depth at 5 Hz, tf).
@@ -114,6 +116,26 @@ fused with loop closures, every session within 1-7 m. Penn (courtyard + slam_har
 6 localized after the gate-2 change, lewis + gauss_2 altitude-only): fused 2.5-4.8 m, of which
 ~4.1 m is a common offset of the satellite imagery (0.8-2.7 m after removing it); every session's
 ground within 0.15 m of the others. Outputs: `/data/dcist/penn_2025_meridian/`.
+
+### Better trajectories: city imagery + localization rerun (Penn, 2026-10-25)
+Mason's `meridian.pipeline.cross_view_localization` on the incremental run's ground submaps, with the
+known-rotation rerun (`localization/rerun/dense_trajectory_3d.csv`):
+`scripts/gps_fusion/meridian/meridian_loc.sh VARIANT AERIAL_TAG SESSION...`; scored by `eval_loc.py`
+(GT: slam_hard base_link, or the bag's `/ROBOT/fix` via `extract_fix.py`).
+
+| session | incremental, Esri 3857 | rerun, Esri 3857 | rerun, city 2025 UTM |
+|---|---|---|---|
+| hamilton | 4.14 m | 3.92 m | 1.51 m |
+| euclid (v2) | 3.36 m | 3.56 m | 1.13 m |
+| pascal_2 | 4.09 m | 2.43 m | 1.42 m |
+| gauss_2 | 4.15 m | 4.29 m | 1.67 m |
+| fence_parking (RTK) | 3.42 m | - | 1.61 m |
+| courtyard (GPS) | 3.23 m | - | 1.43 m |
+
+The ~3.5 m mostly-northward bias came with the Esri image; lewis fails with both (46 m, 3 inliers).
+Console caches are keyed by fused frame id (`session << 48 | frame`): after dropping/reordering
+sessions run `rekey_caches.py OLD NEW CACHE_DIR`, and renumber loop closures with `remap_lc.py`.
+kimera_pgmo prefixes now cover 15 robots (ids 0-14).
 
 ## Open-vocabulary regions (offline, no bag replay)
 
