@@ -97,7 +97,7 @@ function PlaceFill({positions, colors}: {positions: Float32Array; colors: Float3
   );
 }
 
-/** Room / region convex hulls: translucent fill + outline in the region colour. */
+/** Room / region areas (the union of their places' footprints): translucent fill + outline in the region colour. */
 function RegionHulls({fill, outline}: {fill: {positions: Float32Array; colors: Float32Array}; outline: {positions: Float32Array; colors: Float32Array} | null}) {
   const geom = useMemo(() => {
     const g = new THREE.BufferGeometry();

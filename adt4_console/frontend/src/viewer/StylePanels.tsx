@@ -45,6 +45,7 @@ export function ThemeControl() {
 
 export function BackgroundControl() {
   const bg = useViewStyle(s => s.background);
+  const grid = useViewStyle(s => s.grid);
   const patch = useViewStyle(s => s.patch);
   const cur = useBackground().toLowerCase();
   return (
@@ -72,6 +73,7 @@ export function BackgroundControl() {
           Use style default
         </button>
       )}
+      <Toggle checked={grid} onChange={v => patch({grid: v})} label="Grid" title="The ground grid under the map" />
     </div>
   );
 }
@@ -284,7 +286,7 @@ export function RegionControls() {
   const patch = useViewStyle(s => s.patch);
   return (
     <div className="region-controls">
-      <Toggle checked={regionHulls} onChange={v => patch({regionHulls: v})} label="Area boundaries" title="Each area's boundary (Room nodes: the drawn polygon, else the convex hull of its places)" />
+      <Toggle checked={regionHulls} onChange={v => patch({regionHulls: v})} label="Area boundaries" title="Each area's boundary (Room nodes: the drawn polygon, else the ground its places cover)" />
       <Toggle
         checked={regionColorPlaces}
         onChange={v => patch({regionColorPlaces: v})}

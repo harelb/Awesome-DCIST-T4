@@ -21,9 +21,11 @@ export interface ViewStyleState {
   /** Layers › "Colour members by area": places with a parent area (Room) take its
    *  colour; while editing the map, objects too (EditOverlay) */
   regionColorPlaces: boolean;
-  /** Layers › "Area boundaries": convex-hull fill + outline per Room, and the
+  /** Layers › "Area boundaries": fill + outline of the ground each Room's places cover, and the
    *  drawn polygon of map areas (EditOverlay) */
   regionHulls: boolean;
+  /** the ground grid under the map */
+  grid: boolean;
   /** robots drawn as their platform's model (Spot, Husky) or as the arrow */
   robotModel: RobotModelMode;
   /** a model highlighted in the robot's (path) colour */
@@ -46,6 +48,7 @@ export const DEFAULT_VIEW_STYLE: ViewStyleState = {
   heights: {},
   regionColorPlaces: true,
   regionHulls: true,
+  grid: true,
   robotModel: "model",
   robotHighlight: "outline",
   robotGait: true,
@@ -79,6 +82,7 @@ export function parseStoredStyle(raw: string | null): ViewStyleState {
   if (isObj(v.heights)) for (const [k, h] of Object.entries(v.heights)) if (typeof h === "number" && Number.isFinite(h)) out.heights[k as keyof Heights] = h;
   if (typeof v.regionColorPlaces === "boolean") out.regionColorPlaces = v.regionColorPlaces;
   if (typeof v.regionHulls === "boolean") out.regionHulls = v.regionHulls;
+  if (typeof v.grid === "boolean") out.grid = v.grid;
   if (v.robotModel === "model" || v.robotModel === "arrow") out.robotModel = v.robotModel;
   if (isRobotHighlight(v.robotHighlight)) out.robotHighlight = v.robotHighlight;
   if (typeof v.robotGait === "boolean") out.robotGait = v.robotGait;

@@ -5,13 +5,13 @@ import {bboxZOffset, displayPos, layoutGraph, regionParents} from "../src/viewer
 import {
   contrastFor,
   contrastRatio,
-  convexHull,
   effectiveShot,
   heightScale,
   luminance,
   niceLength,
   overrideColor,
   placeFootprint,
+  regionFootprint,
   shotFilename,
   DEFAULT_SHOT,
   STYLE_BACKGROUND,
@@ -107,11 +107,38 @@ describe("layer heights", () => {
 });
 
 describe("regions", () => {
-  it("convex hull drops interior points", () => {
-    const hull = convexHull([[0, 0], [2, 0], [2, 2], [0, 2], [1, 1], [1, 0.5], [0, 0]]);
-    expect(hull).toHaveLength(4);
-    expect(hull).toContainEqual([2, 2]);
-    expect(hull.some(p => p[0] === 1 && p[1] === 1)).toBe(false);
+  const sq = (x0: number, y0: number, x1: number, y1: number): [number, number][] => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  const area = (tris: number[]) => {
+    let a = 0;
+    for (let i = 0; i < tris.length; i += 6) a += Math.abs((tris[i + 2] - tris[i]) * (tris[i + 5] - tris[i + 1]) - (tris[i + 4] - tris[i]) * (tris[i + 3] - tris[i + 1])) / 2;
+    return a;
+  };
+  const covers = (tris: number[], x: number, y: number) => {
+    for (let i = 0; i < tris.length; i += 6) {
+      const [ax, ay, bx, by, cx, cy] = tris.slice(i, i + 6);
+      const d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+      const d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+      const d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+      if (!((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))) return true;
+    }
+    return false;
+  };
+  it("footprint area keeps a loop's hole (no hull over the building)", () => {
+    // a 2 m wide road around a 10 x 10 m block
+    const ring = [sq(0, 0, 14, 2), sq(0, 12, 14, 14), sq(0, 0, 2, 14), sq(12, 0, 14, 14)];
+    const {tris, segs} = regionFootprint(ring);
+    expect(covers(tris, 1, 7)).toBe(true);
+    expect(covers(tris, 7, 7)).toBe(false); // the block
+    expect(area(tris)).toBeGreaterThan(14 * 14 - 10 * 10 - 4);
+    expect(area(tris)).toBeLessThan(14 * 14 - 10 * 10 + 8);
+    expect(segs.length).toBeGreaterThan(0);
+  });
+  it("footprint area fuses touching places, keeps distant ones apart", () => {
+    const {tris} = regionFootprint([sq(0, 0, 2, 2), sq(2.2, 0, 4, 2), sq(20, 0, 22, 2)]);
+    expect(covers(tris, 2.1, 1)).toBe(true); // a 0.2 m gap is closed
+    expect(covers(tris, 10, 1)).toBe(false);
+    expect(covers(tris, 21, 1)).toBe(true);
+    expect(regionFootprint([]).tris).toHaveLength(0);
   });
   it("footprints: rays, bbox, then padded square", () => {
     expect(placeFootprint({pos: [0, 0, 0], radii: [1, 1, 1, 1]})[0]).toEqual([1, 0]);

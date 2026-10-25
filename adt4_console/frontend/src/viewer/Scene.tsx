@@ -575,6 +575,7 @@ function CaptureBridge() {
 
 function Ground({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
   const style = useViewer(s => s.vizStyle);
+  const show = useViewStyle(s => s.grid);
   const bg = useBackground();
   const ct = contrastFor(bg, style);
   const size = bounds ? Math.ceil(Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], 20) / 10) * 10 + 40 : 100;
@@ -587,7 +588,7 @@ function Ground({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
     (g.material as THREE.Material).opacity = ct.gridOpacity;
     return g;
   }, [size, ct.grid[0], ct.grid[1], ct.gridOpacity]);
-  return <primitive object={grid} position={[cx, cy, -0.05]} />;
+  return show ? <primitive object={grid} position={[cx, cy, -0.05]} /> : null;
 }
 
 // Phones / tablets: tile GPUs with little memory. Cap the pixel ratio, skip

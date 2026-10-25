@@ -299,29 +299,6 @@ export function niceLength(target: number): number {
 
 // ---------------------------------------------------------------- regions
 
-/** Andrew's monotone-chain convex hull of 2D points (counter-clockwise, no repeat). */
-export function convexHull(points: [number, number][]): [number, number][] {
-  const pts = [...new Map(points.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1])).map(p => [`${p[0]},${p[1]}`, p])).values()].sort(
-    (a, b) => a[0] - b[0] || a[1] - b[1],
-  );
-  if (pts.length < 3) return pts;
-  const cross = (o: [number, number], a: [number, number], b: [number, number]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const lower: [number, number][] = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper: [number, number][] = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  upper.pop();
-  lower.pop();
-  return lower.concat(upper);
-}
-
 /** Footprint points of a member place: its ray boundary, else bbox corners,
  *  else a small square around its position (pad metres). */
 export function placeFootprint(
@@ -343,6 +320,112 @@ export function placeFootprint(
     out.push([x - pad, y - pad], [x + pad, y - pad], [x + pad, y + pad], [x - pad, y + pad]);
   }
   return out;
+}
+
+/** The area covered by a region's member footprints (their union, gaps up to one
+ *  cell closed), traced by marching squares on a ``cell``-metre grid: fill
+ *  triangles (x, y per vertex) and outline segments (x, y per end). Unlike the
+ *  convex hull it keeps a road's shape, holes (a loop around a building) and
+ *  separate parts. */
+export function regionFootprint(rings: [number, number][][], cell = 0.5): {tris: number[]; segs: number[]} {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const ring of rings)
+    for (const [x, y] of ring) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
+    }
+  if (!(x1 > x0 || y1 > y0)) return {tris: [], segs: []};
+  const pad = 3; // cells of empty margin, so every contour closes inside the grid
+  const ox = x0 - pad * cell;
+  const oy = y0 - pad * cell;
+  const W = Math.ceil((x1 - x0) / cell) + 2 * pad + 1;
+  const H = Math.ceil((y1 - y0) / cell) + 2 * pad + 1;
+  if (W * H > 16e6) return {tris: [], segs: []};
+  let grid = new Uint8Array(W * H); // inside samples at the grid vertices
+  for (const ring of rings) {
+    if (ring.length < 3) continue;
+    let rx0 = Infinity, ry0 = Infinity, rx1 = -Infinity, ry1 = -Infinity;
+    for (const [x, y] of ring) {
+      rx0 = Math.min(rx0, x);
+      ry0 = Math.min(ry0, y);
+      rx1 = Math.max(rx1, x);
+      ry1 = Math.max(ry1, y);
+    }
+    if (!Number.isFinite(rx0 + ry0 + rx1 + ry1)) continue;
+    for (let j = Math.ceil((ry0 - oy) / cell); j <= Math.floor((ry1 - oy) / cell); j++) {
+      const py = oy + j * cell;
+      for (let i = Math.ceil((rx0 - ox) / cell); i <= Math.floor((rx1 - ox) / cell); i++) {
+        if (grid[j * W + i]) continue;
+        const px = ox + i * cell;
+        let inside = false;
+        for (let a = 0, b = ring.length - 1; a < ring.length; b = a++) {
+          const [ax, ay] = ring[a];
+          const [bx, by] = ring[b];
+          if (ay > py !== by > py && px < ((bx - ax) * (py - ay)) / (by - ay) + ax) inside = !inside;
+        }
+        if (inside) grid[j * W + i] = 1;
+      }
+    }
+  }
+  // closing (dilate then erode, 8-neighbourhood): fuses footprints a cell apart
+  const morph = (src: Uint8Array, dilate: boolean) => {
+    const out = new Uint8Array(W * H);
+    for (let j = 1; j < H - 1; j++)
+      for (let i = 1; i < W - 1; i++) {
+        let v = dilate ? 0 : 1;
+        for (let dj = -1; dj <= 1; dj++)
+          for (let di = -1; di <= 1; di++) {
+            const s = src[(j + dj) * W + i + di];
+            v = dilate ? v | s : v & s;
+          }
+        out[j * W + i] = v;
+      }
+    return out;
+  };
+  grid = morph(morph(grid, true), false);
+  const tris: number[] = [];
+  const segs: number[] = [];
+  const poly: [number, number][] = [];
+  const crossed: number[] = [];
+  // per cell: corners c0..c3 = (i,j) (i+1,j) (i+1,j+1) (i,j+1); edge e runs from corner e to e+1
+  for (let j = 0; j < H - 1; j++)
+    for (let i = 0; i < W - 1; i++) {
+      const c = [grid[j * W + i], grid[j * W + i + 1], grid[(j + 1) * W + i + 1], grid[(j + 1) * W + i]];
+      const k = c[0] | (c[1] << 1) | (c[2] << 2) | (c[3] << 3);
+      if (k === 0) continue;
+      const X = ox + i * cell;
+      const Y = oy + j * cell;
+      if (k === 15) {
+        tris.push(X, Y, X + cell, Y, X + cell, Y + cell, X, Y, X + cell, Y + cell, X, Y + cell);
+        continue;
+      }
+      const h = cell / 2;
+      const corner: [number, number][] = [[X, Y], [X + cell, Y], [X + cell, Y + cell], [X, Y + cell]];
+      const mid: [number, number][] = [[X + h, Y], [X + cell, Y + h], [X + h, Y + cell], [X, Y + h]];
+      // the cell's inside part: inside corners plus the midpoints of crossed edges, in
+      // perimeter order (a saddle is joined across the diagonal; the polygon stays convex)
+      poly.length = 0;
+      crossed.length = 0;
+      for (let e = 0; e < 4; e++) {
+        if (c[e]) poly.push(corner[e]);
+        if (c[e] !== c[(e + 1) % 4]) {
+          poly.push(mid[e]);
+          crossed.push(e);
+        }
+      }
+      for (let t = 1; t + 1 < poly.length; t++) tris.push(poly[0][0], poly[0][1], poly[t][0], poly[t][1], poly[t + 1][0], poly[t + 1][1]);
+      // boundary: an edge leaving the inside joins the next crossed edge, cutting off the outside corners between
+      for (let a = 0; a < crossed.length; a++) {
+        const e = crossed[a];
+        if (c[(e + 1) % 4]) continue;
+        const f = crossed[(a + 1) % crossed.length];
+        segs.push(mid[e][0], mid[e][1], mid[f][0], mid[f][1]);
+      }
+    }
+  return {tris, segs};
 }
 
 export const REGION_FILL_ALPHA = 0.3;

@@ -43,6 +43,7 @@ import {useRobots} from "../stores/robots";
 import {useRobotColor3D} from "./background";
 import {agentColors} from "./MissionOverlay";
 import {useViewer} from "../stores/viewer";
+import {useViewStyle} from "../stores/viewStyle";
 import {prefillChat, useChat} from "../stores/chat";
 import {armMissionTool} from "../stores/tools";
 import {undoLabel} from "../stores/mapEdit";
@@ -525,6 +526,8 @@ function CursorReadout() {
 export function MissionPanel() {
   const s = useMission();
   const {current, preview, run, list, error, geo, layers, satellite, satOpacity} = s;
+  const grid = useViewStyle(v => v.grid);
+  const patchStyle = useViewStyle(v => v.patch);
   const [omniText, setOmniText] = useState("");
   const [planner, setPlanner] = useState<"chat" | "omniplanner">("chat");
   useEffect(() => {
@@ -712,6 +715,7 @@ export function MissionPanel() {
           <>
             <div className="row gap">
               <Toggle checked={satellite} onChange={v => s.set({satellite: v})} label="show" />
+              <Toggle checked={grid} onChange={v => patchStyle({grid: v})} label="grid" title="The ground grid over the imagery" />
               <input type="range" min={0.2} max={1} step={0.05} value={satOpacity} onChange={e => s.set({satOpacity: Number(e.target.value)})} aria-label="Satellite opacity" />
             </div>
             <div className="small muted">

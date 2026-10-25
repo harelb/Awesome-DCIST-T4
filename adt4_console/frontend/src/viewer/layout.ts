@@ -4,11 +4,11 @@ import {GraphModel, layerHidden, layerInfo, type LayerInfo} from "../lib/graphMo
 import {LAYER_COLORS, nodeColor} from "../lib/palette";
 import {
   colorKeyOf,
-  convexHull,
   heightKeyOf,
   heightScale,
   overrideColor,
   placeFootprint,
+  regionFootprint,
   uniformOf,
   type ColorOpts,
   type Heights,
@@ -461,23 +461,24 @@ function hexRgbLin(hex: string): [number, number, number] | null {
   return [lin(((v >> 16) & 255) / 255), lin(((v >> 8) & 255) / 255), lin((v & 255) / 255)];
 }
 
-/** Convex hull of each room / region's member-place footprints, drawn just
- *  under the members' displayed height (the places layer). Rooms whose layer
- *  is hidden get no hull. */
+/** The area each room / region's member-place footprints cover (their union,
+ *  not the convex hull, so a region never spans unmapped ground between its
+ *  places), drawn just under the members' displayed height (the places layer).
+ *  Rooms whose layer is hidden get none. */
 export function regionHulls(
   model: GraphModel,
   parents: Map<string, NodeRecord>,
   opts: Pick<LayoutOpts, "hiddenLayers" | "flat" | "stackHeight" | "style" | "heights" | "colors">,
 ): {fill: {positions: Float32Array; colors: Float32Array}; outline: {positions: Float32Array; colors: Float32Array}} | null {
   const style = opts.style ?? "classic";
-  const members = new Map<string, {room: NodeRecord; pts: [number, number][]; z: number; n: number}>();
+  const members = new Map<string, {room: NodeRecord; rings: [number, number][][]; z: number; n: number}>();
   for (const [sym, room] of parents) {
     if (layerHidden(opts.hiddenLayers, room.layer, room.part)) continue;
     const p = model.nodes.get(sym);
     if (!p) continue;
     let m = members.get(room.sym);
-    if (!m) members.set(room.sym, (m = {room, pts: [], z: 0, n: 0}));
-    m.pts.push(...placeFootprint(p));
+    if (!m) members.set(room.sym, (m = {room, rings: [], z: 0, n: 0}));
+    m.rings.push(placeFootprint(p));
     m.z += displayPos(p, opts.flat, opts.stackHeight, style, opts.heights)[2];
     m.n++;
   }
@@ -486,26 +487,20 @@ export function regionHulls(
   const op: number[] = [];
   const oc: number[] = [];
   for (const m of members.values()) {
-    const hull = convexHull(m.pts);
-    if (hull.length < 3) continue;
+    const {tris, segs} = regionFootprint(m.rings);
+    if (!tris.length) continue;
     const z = m.z / m.n - 0.04;
     const c = regionColor(m.room, opts.colors);
     const r = lin(c[0] / 255);
     const g = lin(c[1] / 255);
     const b = lin(c[2] / 255);
-    let cx = 0;
-    let cy = 0;
-    for (const [x, y] of hull) {
-      cx += x / hull.length;
-      cy += y / hull.length;
+    for (let i = 0; i < tris.length; i += 2) {
+      fp.push(tris[i], tris[i + 1], z);
+      fc.push(r, g, b);
     }
-    for (let i = 0; i < hull.length; i++) {
-      const a = hull[i];
-      const bb = hull[(i + 1) % hull.length];
-      fp.push(cx, cy, z, a[0], a[1], z, bb[0], bb[1], z);
-      for (let k = 0; k < 3; k++) fc.push(r, g, b);
-      op.push(a[0], a[1], z, bb[0], bb[1], z);
-      oc.push(r, g, b, r, g, b);
+    for (let i = 0; i < segs.length; i += 2) {
+      op.push(segs[i], segs[i + 1], z);
+      oc.push(r, g, b);
     }
   }
   if (!fp.length) return null;
