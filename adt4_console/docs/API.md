@@ -212,7 +212,12 @@ Graph sources (all served from the same `fleetlink.codec` formats):
   sources (file sources also their snapshot) in the background.
 * `GET /api/graph/{src}/node/{sym}` → JSON `{sym, layer, part, label, label_name, name, pos, bbox, attributes: {...readable extras}, images: [url, ...]}`
 * `GET /api/graph/{src}/image/{sym}/{i}` → image bytes (rgb jpg of the i-th frame in the node's image folder; Neo4j/file sources resolve `<run>/images/<O_n>/frame_*_rgb.jpg`)
-* `GET /api/graph/{src}/trajectory` → `{points: [[t_s, x, y, z], ...]}` from the agents layer (layer 2 partition 97), time-ordered
+* `GET /api/graph/{src}/trajectory` → `{points: [[t_s, x, y, z], ...], breaks: [i, ...], robots: [{key, start, session?, robot?, bag?}, ...]}`
+  from the agents layer (every robot's partition), ordered by robot then time. `breaks` are the indices
+  where a new polyline starts: another robot, or a step over 4 m (a stretch the robot's map has no
+  keyframes for, drawn as a break rather than a straight line). `robots` gives each robot's first index;
+  `session` comes from its agent nodes' metadata (hydra_multi: the input's `session.txt`), `robot` and
+  `bag` from the graph metadata `sessions: {session: {robot, bag}}` (the source DSG for `neo4j:`)
   (pre-gzipped JSON with `ETag` + `X-Uncompressed-Length`)
 
 Viewer load order (frontend `stores/viewer.ts`, `viewer/MeshTiles.tsx`, `lib/meshPlan.ts`): the
@@ -1450,7 +1455,7 @@ A backend that follows these works with the UI unchanged.
   The body sent is `{answer: true, text}` for a typed confirm and `{answer: false}` for No.
 * `GET /api/graph/sources` may be an array or `{sources: [...]}`.
 * `GET /api/graph/{src}/trajectory` points are `[t, x, y, z]`. When there are none, the viewer draws
-  the trajectory from agents-layer nodes ordered by symbol index.
+  the trajectory from agents-layer nodes per robot partition in symbol order, broken at steps over 4 m.
 
 **Request bodies the UI sends**
 * LaunchPlan: `prior_path` is `""` (not null) when no prior is chosen. When one is chosen,
