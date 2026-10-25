@@ -10,6 +10,7 @@ backend:
   anchor_robot_id: -1
   torn_face_stretch_ratio: 3.0  # drop faces with an edge stretched > 3x by the deformation
   torn_face_min_edge_m: 0.5     # ... and longer than 0.5 m (frontend edges are <= 0.2 m)
+  rotate_place_boundaries: true  # place radii are world-frame angles: rotate them with world_T_robot
   gps:
     enable: true
     min_sigma_m: 0.1
@@ -35,8 +36,14 @@ backend:
       type: UpdateObjectsFunctor
       merge_exclusion_metadata_key: awcd_change  # objects changed between sessions never merge
     surface_places:  # MESH_PLACES holds region-growing traversability places, deformed like in the per-robot backend
-      type: UpdateRegionGrowingTraversabilityFunctor
+      # merges places of different robots / passes that cover the same ground (union footprint)
+      type: UpdateMultiTraversabilityFunctor
       layer: MESH_PLACES
+      merge_places: true
+      merge_same_robot: true
+      min_overlap: 0.3  # of the smaller place
+      trim_overlaps: true
+      max_merge_iterations: 5
     places:
       type: UpdatePlacesFunctor
     # Open-vocabulary regions (layer 4 / ROOMS) over the traversability places (MESH_PLACES),

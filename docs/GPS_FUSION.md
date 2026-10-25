@@ -87,6 +87,15 @@ newly localized session against GT (the same change "localized" lewis 70 m off).
 Mesh places: ADT4 runs keep region-growing traversability places in `MESH_PLACES`; `offline_gps.yaml`
 updates them with `UpdateRegionGrowingTraversabilityFunctor` (the per-robot backend's functor).
 `Update2dPlacesFunctor` leaves them behind the pose-graph correction (Penn courtyard: 2.8 m off the mesh).
+Place merging across sessions: `type: UpdateMultiTraversabilityFunctor` (hydra_multi; same `layer`, plus
+`merge_places`, `merge_same_robot`, `min_overlap` 0.3, `trim_overlaps`, `max_merge_iterations`) merges
+places that overlap by >= `min_overlap` of the smaller footprint into the largest one (stable id, union
+footprint, area-weighted feature, merges listed in `fusion_node_map.json`), then splits the overlaps
+left over at the bisectors. The per-robot functor only merges when one center lies inside the other place
+and keeps a single footprint (Penn: 19% of the ground lost). `backend.rotate_place_boundaries`
+(default true) rotates place radii by each robot's `world_T_robot` yaw. Without it, footprints keep the
+odometry-frame orientation (~160 deg off for the Huskies). Penn: `offline_meridian_flat_trav_regions_v2_meshtorn_placemerge.yaml`
+-> `fusion/final_mesh_hfix_placemerge`, plots and stats in `placemerge/`.
 
 Fused mesh tears: kimera_pgmo used to treat a mesh control point's absolute pose as its deformation, so
 robots added with a `world_T_robot` rotation had every vertex rotated about its nearest control points
