@@ -31,8 +31,9 @@ export function declutter(boxes: readonly LabelBox[], max: number, gap = 2): num
 
 /** Size estimate of a label (the CSS of .viz-text-<kind>), px. */
 export function labelSize(text: string, kind: string): {w: number; h: number} {
-  const [cw, h] = kind === "places" ? [5.2, 12] : kind === "rooms" ? [7.6, 17] : [6.2, 14];
-  return {w: text.length * cw + 6, h};
+  // areas: bold upper-case with letter spacing on a padded pill (styles.css .viz-text-rooms)
+  const [cw, h, pad] = kind === "places" ? [5.2, 12, 6] : kind === "rooms" ? [10, 22, 20] : [6.2, 14, 6];
+  return {w: text.length * cw + pad, h};
 }
 
 const KIND_WEIGHT: Record<string, number> = {rooms: 4, buildings: 4, agents: 3, objects: 2, places: 1};

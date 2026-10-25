@@ -2960,9 +2960,17 @@ input[type="checkbox"] {
   font-size: 9px;
   opacity: 0.9;
 }
+/* areas: heavier, upper-case, on a dark pill, so they read apart from object labels */
 .viz-text-rooms {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 9px;
+  background: rgba(10, 14, 20, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  text-shadow: none;
 }
 
 /* ---- Maps page: fuzzy search, image store / file badges ---- */
