@@ -176,12 +176,55 @@ Maps:
 
 Graph sources (all served from the same `fleetlink.codec` formats):
 * `GET /api/graph/sources` → `[{id, kind: "neo4j"|"file"|"live", label, version, nodes}]`
-* `GET /api/graph/{src}/snapshot` → msgpack `encode_graph(...)` + `{"version": int, "src": str}`
-* `GET /api/graph/{src}/mesh/manifest` → JSON `{tile_size, tiles: {key: {hash, nv, nf, origin}}}` (empty tiles if no mesh)
-* `GET /api/graph/{src}/mesh/tile/{key}` → msgpack tile dict (codec `tile_mesh` output entry)
+* `GET /api/graph/{src}/snapshot` → msgpack `encode_graph(...)` + `{"version": int, "src": str}`.
+  Pre-gzipped once per version, with an `ETag` (`If-None-Match` → 304) and `X-Uncompressed-Length`.
+* `GET /api/graph/{src}/mesh/manifest` → JSON (empty `tiles` if no mesh):
+  ```
+  {tile_size, enc: 2,
+   lods: [{level: 0, cell: 0, name: "full"}, {level: 1, cell: 0.2, name: "medium"}, {level: 2, cell: 0.4, name: "coarse"}],
+   tiles: {key: {hash, nv, nf, origin, lod: [[bytes, etag] | null, ...]}},   # one entry per `lods` item
+   bundles: [{level: 2, bytes, etag}]}
+  ```
+  `lod[i]` gives tile `key` at level `lods[i].level`. `bytes` is the gzipped size on the wire (the
+  client's progress bar and ETA). `null` means the tile has no faces at that level. Levels 1 and 2 are
+  vertex clustering on a 0.2 / 0.4 m grid run over **all** tiles at once in integer quantised
+  coordinates (`codec.decimate_tiles`). Neighbouring tiles therefore get identical border vertices (no
+  cracks), and every tile keeps its key, so a coarse tile replaces exactly its full tile. Live sources
+  offer level 0 only (`lods` has one entry, `bundles` is empty). Robots send decimated tiles on
+  request, see `mesh_lod`.
+* `GET /api/graph/{src}/mesh/tile/{key}` → msgpack tile dict (codec `tile_mesh` output entry; the legacy, full-level form)
+* `GET /api/graph/{src}/mesh/tile/{key}?enc=2&lod=L&h=ETAG` → msgpack **packed tile** (codec `pack_tile`;
+  browser: `codec.ts decodePackedTile`), pre-gzipped (`Content-Encoding: gzip` when accepted, inflated
+  otherwise). Same mesh as the legacy tile, vertices reordered by first use. Positions are per-axis
+  zigzag deltas of the int16 coordinates in low/high byte planes, colours are per-channel uint8
+  deltas, indices are zigzag deltas in `ib` (2 or 4) byte planes. Penn: 23.7 MB gzipped vs 37.2 MB
+  for the legacy tiles. With `h` equal to the tile's current etag the response is
+  `Cache-Control: public, max-age=31536000, immutable`, so reloads cost nothing; otherwise it is
+  `no-cache`. Always `ETag` + `X-Uncompressed-Length`. `lod` without `enc=2` → 422; unknown level or
+  empty tile → 404.
+* `GET /api/graph/{src}/mesh/bundle/{level}?h=ETAG` → msgpack array of every packed tile of `level`
+  (the manifest's `bundles`). The coarse preview arrives in one request instead of hundreds (each
+  of which costs a round trip on a high-latency link). Same caching as tiles.
+* Tiles, levels and their gzipped blobs are computed once per mesh and kept in memory and on disk
+  (`~/.adt4_console/mesh_cache/<key>.msgpack`, key = mesh file path + size + mtime, newest 6 kept).
+  A console restart therefore skips re-parsing the PLY (Penn: 25 s → 0.3 s), and a Neo4j graph edit
+  that leaves the mesh file alone keeps the tiles. At startup `warm()` builds them for file and Neo4j
+  sources (file sources also their snapshot) in the background.
 * `GET /api/graph/{src}/node/{sym}` → JSON `{sym, layer, part, label, label_name, name, pos, bbox, attributes: {...readable extras}, images: [url, ...]}`
 * `GET /api/graph/{src}/image/{sym}/{i}` → image bytes (rgb jpg of the i-th frame in the node's image folder; Neo4j/file sources resolve `<run>/images/<O_n>/frame_*_rgb.jpg`)
 * `GET /api/graph/{src}/trajectory` → `{points: [[t_s, x, y, z], ...]}` from the agents layer (layer 2 partition 97), time-ordered
+  (pre-gzipped JSON with `ETag` + `X-Uncompressed-Length`)
+
+Viewer load order (frontend `stores/viewer.ts`, `viewer/MeshTiles.tsx`, `lib/meshPlan.ts`): the
+snapshot first, so the graph shows as soon as it lands. The manifest request starts at the same time
+(a cold server may need a while to build it), but tiles and the trajectory only start once the
+snapshot is in. Then the coarse bundle covers the whole map, and the tiles nearest the camera target
+are refined to the wanted **mesh detail** (Display panel: auto / full / medium / coarse, kept per
+device in localStorage). "Auto" means coarse in the mission planner (satellite top view), medium on
+a phone and full otherwise. Six requests are in flight at most. The load bar (`viewer/LoadBar.tsx`)
+shows `Graph ✓ · Mesh 12.4/38.0 MB · Imagery 30/42 · ~25 s left`: wire bytes from the manifest
+sizes / `Content-Length` and `X-Uncompressed-Length`, and an ETA from an EWMA (τ 3 s) of the measured
+throughput, sampled only while requests are in flight (`lib/loadProgress.ts`).
 
 Place boundaries: graph records (snapshots, C2 deltas, `/snapshot`) carry the
 spark_dsg `TravNodeAttributes` ray boundary of traversability ("mesh") places as
@@ -805,6 +848,406 @@ base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirr
   last_error, bytes, nodes, raw_nodes, has_nodes, mesh_faces, layer_keys, warning}`. `has_nodes`
   comes from the payload header (`fleetlink.codec.dsg_binary_info`, read without spark_dsg);
   `warning` is set when the payload has nodes but the imported spark_dsg decoded none.
+
+## 14. Geo: GPS anchor and satellite tiles
+
+Maps are drawn in their own map frame. A **GPS anchor** ties a map to the world: a 2-D rigid
+transform `utm = R(yaw) · [x, y] + t` (EPSG UTM zone, no scale), fitted from the robot's GPS
+fixes against the Hydra trajectory by `scripts/geo/anchor_from_gps.py`. The script writes
+`geo_anchor.json` next to the run's `hydra/` (or next to `output/`). Its fields:
+`{epsg, yaw, t, z0, rms, n, source, lonlat_center}`. `z0` is a rough ground height in the map frame.
+
+* Anchor lookup: an explicit `--geo-anchor SRC=JSON` (`SRC` is a source id or name; `*` means every
+  source) wins; otherwise the source's run dir (file sources) or the run dir of the Neo4j map's
+  mesh is used.
+* `GET /api/geo/anchor` → `{anchor}`, the first source that has an anchor.
+* `GET /api/geo/anchor/{src}?cx=&cy=` → `{src, anchor, affine}`, or `{anchor: null}`.
+  * `affine` is a least-squares affine fit around `(cx, cy)` (±300 m): `map_to_lonlat` and
+    `lonlat_to_map` as 2×3 rows, plus `max_err_m` (millimetres at this scale).
+  * The browser uses it to place tiles and for the cursor's lat/lon readout, so it needs no
+    projection library.
+* `GET /api/geo/layers` → `{layers: [{id, attribution, zmin, zmax, bbox_lonlat, cached, live}]}`.
+  The values come from each layer's `tiles.json` manifest.
+* `GET /api/geo/tiles/{layer}/{z}/{x}/{y}` → the tile (XYZ / slippy-map numbering).
+  * Tiles are served from `--tiles-dir` (`<dir>/<layer>/{z}/{x}/{y}.jpg`, written by
+    `scripts/geo/fetch_tiles.py`).
+  * On a miss, with `--tiles-live`, the tile is fetched from the layer's URL template and kept.
+    A failed URL is not retried for 60 s.
+  * Without `--tiles-live` a miss is a 404. Offline is the default.
+* **Frontend.** `viewer/SatelliteGround.tsx` draws one textured quad per tile, with exact
+  map-frame corners, just under the lowest graph point.
+  * Zoom: the highest one, at or below the layer's `zmax`, that keeps the map extent + 60 m under
+    160 tiles.
+  * Offline, only tiles inside the manifest's `bbox_lonlat` are requested.
+
+## 15. Missions (multi-agent, chat-first; simulate, then execute)
+
+A **mission** (`mission/model.py`) is up to 5 agents and a task DAG:
+
+* **Agent** `{id, kind: spot|husky|quad, start [x,y] | null, speed, binding, color, altitude, endurance_s}`.
+  The console moves a start (typed, or by dragging the agent on the map) with a PUT of the mission
+  with only that agent's `start` changed: a new revision and its preview; `start: null` with a
+  `binding` = start at the bound robot's live pose.
+  `binding` = a real robot id, or null = simulated only. Default speeds: spot 1.0, husky 1.2,
+  quad 4.0 m/s. Quad: 20 m altitude, 20 min endurance.
+* **Task** `{id, agent, type, target, area, depends_on, params, note}`. Each agent does its tasks
+  in list order; `depends_on` adds cross-agent ordering. Types:
+
+  | type | what it does |
+  |---|---|
+  | `goto` | go to the target |
+  | `inspect` | go to the target, then dwell (`params.dwell_s`, default 10; ground robots stop `standoff_m` = 1.5 m short) |
+  | `explore_area` | quad only: lawnmower sweep of `area`, imaging; `params.query` = what to look for |
+  | `request_image` | quad snapshot |
+  | `wait_for` | block until `params.event` happens |
+  | `return_home` | go back to the agent's start |
+  | `hold` | stay put for `params.dwell_s` |
+
+* **Targets.** A node symbol (`O(12)`, `P(850)`), a map point `[x, y]`, or `$found:<query>`. The
+  last is the object a search for `<query>` turned up; it is resolved when the find is approved, and
+  a task targeting it waits for that automatically. Searches raise the event `found:<query>`.
+* Also on the mission: `geofences` (the no-go zones; the model name stays `Geofence`), `planted` (mock objects only the simulated
+  quad camera sees, for rehearsals), `src` (the graph planned on), `planner` (`llm|omniplanner|manual`)
+  and `revision`. A PUT with the same id is a revision; the revision number goes up and any run of
+  the old revision is dropped.
+* Missions are saved as `~/.adt4_console/missions/<id>.json` (`settings.missions_dir`; tests keep them in memory).
+
+### 15.1 Preview and validation (`mission/planning.py`)
+
+* **Ground legs** use Dijkstra over the mesh-places graph (the layer omniplanner plans on:
+  layer 3 partition 1, else 20, else places).
+  * The start snaps into the agent's connected component, and places inside geofences are removed.
+  * A target far from every reachable place gets a straight last leg (`offgraph_m`, with a
+    warning). This is how a ground robot reaches something only the quad has seen.
+* **Quad legs** are straight lines. `explore_area` sweeps lines spaced at the camera footprint
+  × (1 − 0.2).
+* **Schedule:** earliest start from the dependencies and travel time. A `wait_for` (or a
+  `$found:` target) waits for its search to end, and such legs are drawn `tentative` to the search
+  area's centre.
+* **Issues**: `error` blocks simulate/execute; `warning` is advice.
+  * errors: unknown symbol (`code: "missing_target"`, `task`, `target`: the map no longer has it,
+    e.g. a re-ingest renumbered the nodes; the Mission tab offers *Pick on map*, *Drop task* and
+    *Re-plan in chat*), no start, `explore_area` without a quad, nothing raises an awaited
+    event, dependency cycle;
+  * warnings: a ground start more than 4 m from every place (`code: "start_offgraph"`, `agent`,
+    `pos`: the start, `snap`: the nearest place's `[x, y]`, `offgraph_m`; the roster offers *Snap
+    to nearest place*), off-graph last leg, quad over a no-go zone, endurance exceeded, ground agents
+    predicted within 2 m of each other (`agents, t, pos`), a planted mock object whose label
+    matches no search query of the mission (`code: "planted_unmatched"`, `label`: a mock
+    "crate" is never reported by a search for "box").
+  * Deconfliction ignores a pair that is still at its starts (each within 2 m of its own) during
+    the first 10 s, and later while it is no closer than it was parked; robots that leave their
+    starts towards each other, or one that drives past another, are still flagged.
+* The geo anchor is included as `geo`.
+
+### 15.2 Routes
+
+| Route | |
+|---|---|
+| `GET /api/missions` | summaries `{id, name, text, agents, tasks, created_at, revision, planner, run, saved, decisions, has_chat, errors}`; `errors` = a quick count without planning (symbol targets the map no longer has + agents without a start), shown as "⚠ n errors" in the mission picker (with the date / time). Names are unique (case-insensitive): a new mission, or a save, under a name another mission has becomes "name (2)", "(3)", …; missions stored with the same name earlier are told apart the same way on load |
+| `GET /api/missions/world?src=` | `{src, bounds, start_hint, objects}`; `start_hint` = a place of the largest component, near the centre |
+| `POST /api/missions` (Mission) | → `{mission, preview}`; 422 with the reason when invalid |
+| `GET /api/missions/{id}` | `{mission, preview, run}` |
+| `PUT /api/missions/{id}` · `DELETE` | revise · delete |
+| `GET /api/missions/{id}/preview` | preview only |
+| `POST /api/missions/{id}/sim {cmd, value, auto_approve}` | `cmd`: `new` (a fresh run) · `play` · `pause` · `speed` (0.1–50×) · `step` (s) · `seek` (s) · `reset` · `auto_approve` → run state |
+| `GET /api/missions/{id}/run` | run state (404: not running) |
+| `POST /api/missions/{id}/candidates/{cid} {approve, commit}` | approve / reject a detection; `commit` also writes it into Neo4j (§15.3). An already accepted (run-only, `sym: "sim:…"`) detection can be committed later: the map's symbol replaces the run-only one; committing one that is in the map already is a no-op, approving a rejected one a 400 |
+| `POST /api/missions/{id}/annotate {image, bbox, label, query?}` | the operator boxed something in a quad image → a candidate at the box centre's ground point |
+| `GET /api/missions/{id}/image/{img}` | the stamped image (JPEG): the live quad's, or rendered from the satellite cache for the simulator |
+| `POST /api/missions/{id}/execute` · `abort` | live run (§15.4) · pause it (ground robots: executor pause) |
+| `GET /api/missions/{id}/export` | mission JSON download |
+| `POST /api/missions/plan/omniplanner {text, agents, src}` | planner B (§15.5) → `{mission, preview}`; 503 when omniplanner, Fast Downward or the key is missing |
+
+**Run state**: WS topic `mission/<id>`, latest-value, about 5 Hz:
+`{mission, kind: sim|live, revision, t, finished, playing, speed, agents: {id: {pos, yaw, task,
+status}}, tasks: {id: {state: pending|active|done|failed, times, note}}, candidates: [...], found,
+events (last 40), images}`.
+
+**Chat (planner A, `mission/llm_planner.py`).**
+* `POST /api/chat` accepts `mission_ctx: {roster, areas: [{name, polygon, scope: "mission"}],
+  no_go: [{name, polygon}], planted, mission}`. With it, the model gets the mission prompt (agent
+  kinds, task types, roster, **one list of named areas**: the map's areas (Room nodes, `scope:
+  "map"`, with `symbol` and `members`) merged with the operator's mission-only ones; a mission area
+  named like a map area is listed once, as the map's), the no-go zones, the current mission and the
+  map extent) and the tool `propose_mission`.
+* **No silent substitution.** When the operator names an area that is not in the list, or a class /
+  place the map does not have, the model asks one clarifying question ("There's no area called
+  'courtyard': draw it, or pick one of: …") instead of proposing. An `area` string that matches no
+  area is a tool error telling it so. Everything it still interprets goes in the required
+  `assumptions: [str]` of `propose_mission`.
+* The tool validates and stores the mission (`revise: true` revises the current one). A task's
+  `area` may be an area's name (either scope) or a map area's symbol. Without `geofences`, the
+  operator's no-go zones apply. It streams a `{type: "mission", id, revision, name, agents, tasks,
+  issues, assumptions, makespan, map}` card (the assumptions render in amber), and returns the
+  errors and warnings to the model so it can fix them.
+* Starts and bindings the model left out are filled in from the roster. `max_tokens` is 4000 in
+  mission mode.
+* The mission's `text` (the command it was planned for) is `propose_mission`'s `goal` (the
+  operator's request in one sentence), else for a revision the revised mission's text, else the
+  first operator message of the planning thread since the last `propose_mission` (so a mission
+  proposed after a clarifying question is not called "yes"; `[operator] …` notes do not count).
+
+### 15.3 Simulation (`mission/sim.py`), detections and objects
+
+* **Not physics.** Agents slide along their legs at their speed, dwell, and follow the DAG.
+* **Quad capture:** a "nadir image" every footprint × 0.7 metres along an `explore_area` (and at
+  the end of quad `inspect`/`request_image`). Planted objects in view whose label matches the query
+  become **candidates** `{id, label, query, pos, image, task, agent, bbox, status, sym, t}`.
+* **Approval** fires `found:<query>`. A task that depends on a search **fails** once the search has
+  ended with nothing pending and `FIND_GRACE_S` (120 s) has passed, leaving time to annotate images.
+* **Determinism.** The only inputs are the mission and the operator's decisions, which are logged
+  with their sim time. `seek` rebuilds the run and replays them; images are rendered lazily
+  (`quad/camera.py render_nadir` samples the tile cache), so replays are cheap.
+* **`commit`** (`mission/objects.py add_object`) writes DB-first:
+  * an `Object` with heracles properties, `class` = label (appended to `_Labelspace{layer:'object'}`
+    if new), `admission_status: admitted`, `admission_policy_version: quad_operator_v0`,
+    `source: quad`, and the next free `O<n>` symbol;
+  * an `Observation{rgb_path, bbox_2d, timestamp_ns, kept, source}` via `HAS_OBSERVATION`. The JPEG
+    goes to `~/.adt4_console/quad_images/`, so the Inspector shows it;
+  * both map version counters are bumped. The object is then a normal goto target for the ground
+    robots.
+
+### 15.4 Live execution (`mission/live.py`, not yet run on robots)
+
+* `LiveRun` is the same DAG in wall time. **Bound** agents act for real; unbound ones stay
+  simulated.
+* **Ground** agents get an omniplanner `goto` per task: the target's symbol, else the place nearest
+  the leg's end. A task is done on the executor's final success result, or when the live pose is
+  within 1.5 m. It fails on an executor failure or after 3 × the estimate + 60 s.
+* **Quad** agents get each leg point as a PennQuadCommand. A poller requests a stamped image every
+  2 s; its pose is the quad's telemetry. Waypoint i+1 is sent within 3 m of waypoint i. Every image
+  taken during a search is a capture: it can be annotated, and planted objects in view are detected
+  as in the simulator.
+* `execute` refuses: missions with errors, missions with no bound agent, and a bound quad without
+  `--quad-cmd-uri`.
+
+### 15.5 Planner B: omniplanner in-process (`mission/omni_planner.py`)
+
+* Uses the language plugin's own pieces: a dsg_pddl domain (default `GotoObjectDomain`), the
+  `llm_config.yaml` of `dcist_launch_system/config/default`, and the nlu_interface prompt. It runs
+  `full_planning_pipeline` on the mission's graph and turns each `goto-*` action into a `goto` task.
+* Ground robots only.
+* The prompt knows only euclid / hamilton / hilbert, so mission agents are aliased onto those
+  names for the call and mapped back.
+* Fast Downward must be on `PATH`.
+* Saved maps have place-graph islands. When the start or a target snaps to one, the problem is
+  unsolvable (the error says so); the chat planner routes around islands.
+
+## 16. Penn quadrotor link (`quad/`)
+
+**Waypoints.** This is exactly heracles_agents `tools/penn_integration_tool.py`
+(`origin/feature/penn_tool`):
+* a `PennQuadCommand` dict `{x, y, timestamp: 0, query}`, `send_pyobj`, on a ZMQ **PUSH** socket
+  that **binds** `--quad-cmd-uri` (the quad connects);
+* `x, y` = `utm − local_utm_origin + map_offset` (`--quad-utm-origin`, `--quad-map-offset`, the
+  `UtmToMapInfo` values), with UTM from the map's GPS anchor.
+
+The console binds at startup. A send waits up to 1 s for the quad to be connected, otherwise it
+reports "not connected".
+
+**Stamped images. This is a MOCK schema.** Penn's image server spec does not exist yet; the
+schema lives only in `quad/protocol.py`.
+* REQ/REP on `--quad-image-uri`, two frames each way (no pickle):
+  * request: `{"op": "get_image", "version": 1, "stamp_ns": null|int}`
+  * reply: `[json header, jpeg]`, header
+    `{version, ok, stamp_ns, frame: "quad", pose {x, y, z (AGL), yaw} in the quad frame, K [fx, fy, cx, cy], width, height, nadir}`
+* Lazy-pirate retries: 3 s timeout, 2 retries.
+
+| Route | |
+|---|---|
+| `GET /api/quad` | `{configured, cmd_uri, image_uri, local_utm_origin, map_offset, last_command, pose}` (`pose` in the map frame, from the newest image) |
+| `POST /api/quad/waypoint {x, y, query}` | map frame |
+| `POST /api/quad/image` | header + `pose_map` + `jpeg` data URI |
+
+**Mock quad** (`python -m adt4_console.quad.mock_server`):
+* connects the PULL and flies kinematically;
+* binds the image REP and renders nadir images from the tile cache, with `--plant LABEL:X,Y`
+  objects painted in;
+* use it for rehearsals and the live-execution test.
+
+
+
+## 17. Map editing (`edit_service.py`, `routes/edit.py`; heracles `graph_edit`)
+
+The operator fixes and annotates the Neo4j map before planning: reclassify or remove
+phantom objects, add objects the robots never saw, mark places blocked, and save a drawn
+area to the map (a **map area** is a `Room` node, layer 4, with a `boundary` polygon and
+`CONTAINS` edges to the places and objects inside it; the UI says "area", the API and the
+graph keep `Room` / `region`). The edits live in Neo4j, so the chat's
+Cypher, omniplanner's region domains, plan repair and the robots all see them. Only
+`neo4j:<name>` sources can be edited; a `file:` map gets 400.
+
+The CRUD is heracles `heracles/graph_edit.py` (ported from SGET's `neo4j_crud.py`;
+SGET's own heracles pin, `robust-node-handling` @1a96017, is already an ancestor of the
+heracles we use). **Every edit is one heracles `GraphUnitOfWork`**:
+* optimistic revision check (`_State{key:'open_set_graph'}.revision`; a stale
+  `expected_revision` is **409**);
+* a `GraphMutation` audit node: `provenance_json` (`source: adt4_console`, `src`,
+  `operator` from the `X-Operator` header, `client`, `via: ui|chat|publish`, `mission`),
+  `summary`, `ops_json`, `inverse_json`, `affected`, `map_version`;
+* both version counters bumped **in the same transaction** (`_State{key:'global'}` with
+  `dirty_layers` as `"layer:partition"` and `_MapState`), so the heracles DSG publisher /
+  plan repair never see half an edit; then the console invalidates the source and
+  publishes `graph/<src>/version` and `edit/<src>`.
+
+### 17.1 Ops (shared by every route, `/batch` and the chat)
+
+| op | fields | inverse (for undo) |
+|---|---|---|
+| `create_node` | `layer` (Object, Place, MeshPlace, Room/region, Building), `pos [x,y,z?]`, `class`, `name?`, `symbol?`, `size?` / `bbox {center, dim}?`, `boundary [[x,y],...]?`, `props?` | `delete_node` |
+| `update_node` | `symbol`, `set {..}`, `unset [..]?`, `expect {..}?` | `update_node` with the old values and `expect` = the new ones |
+| `retire_node` | `symbol`, `reason?` | `restore_node` |
+| `restore_node` | `symbol` | `retire_node` |
+| `delete_node` | `symbol` (DETACH DELETE) | `recreate_node` (labels, every property, every edge) |
+| `create_edge` / `delete_edge` | `from`, `to`, `type?` | each other |
+| `group` | `parent_layer` (Room), `class` (`region`), `name`, `members [..]` or `polygon [[x,y],...]`, `member_layers?` | `delete_node` of the parent |
+| `add_class` | `layer: object|room`, `name` | `set_labelspace` (previous lists) |
+
+* **Symbols** are allocated server-side: next free index of the layer's prefix
+  (`O`, `p`, `P`, `R`, `B`) over the whole DB, stored like heracles stores them (`O578`).
+* **Edge type** derives from the two layers (SGET's `determine_edge_type`): `*_CONNECTED`
+  within a layer, `CONTAINS` between layers, always parent -> child (the ends are swapped
+  if needed).
+* **Property whitelist** for `update_node`: class, name, center (a point; `pos_x/y/z` follow,
+  and the object's box moves with it), bbox_center, bbox_dim, boundary, colour,
+  admission fields, `blocked`, `blocked_reason`, `note`, `source`, and the other heracles
+  attribute properties. Anything else is 400.
+* **A new class** is appended to `_Labelspace{layer:'object'|'room'}` so the node gets a
+  `semantic_label` and survives `db_to_spark_dsg` (a missing room labelspace is created;
+  a missing object labelspace is never created).
+* **Retire, not delete**: `retire_node` replaces the layer label with `:Retired`
+  (`retired_label`, `retired_at_revision`, `retirement_reason`); properties and edges stay.
+  Everything that matches by layer label (the viewer, planners, `MATCH (o:Object)`) stops
+  seeing it.
+* **Group by polygon** selects the active nodes of `member_layers` (default for a Room:
+  Place, MeshPlace, Object) whose `center` is inside the polygon. The parent sits at the
+  polygon's centroid (z = the members' mean), with `boundary` = the polygon (a Point3D
+  list) and a bbox = the polygon's extent.
+* A failing op rolls the whole batch back (400 / 404 / 409, message names the op).
+
+### 17.2 Routes (`/api/edit/{src}`)
+
+| Route | |
+|---|---|
+| `GET /state` | `{mode: immediate|staged, live, launch, revision, state_version, map_version, staged, can_undo}` |
+| `POST /nodes` | `create_node` body (`layer, pos, class, name, symbol?, size?, bbox?, boundary?, props?`) |
+| `PATCH /nodes/{sym}` | `{set, unset?}` |
+| `DELETE /nodes/{sym}` | retire (`?reason=`); `?hard=true&confirm=delete` = DETACH DELETE |
+| `POST /nodes/{sym}/restore` | un-retire |
+| `POST /edges`, `DELETE /edges` | `{from, to, type?}` |
+| `POST /group` | `{parent_layer: Room, class: region, name, members? | polygon?, member_layers?}` |
+| `POST /batch` | `{ops[], summary?}`: one unit of work |
+| `POST /preview` | `{ops[]}`: dry run (applied and rolled back), nothing written |
+| `GET /history?limit=` | newest first: `{mutation_id, revision, kind, committed_at, summary, provenance, undo_of, undone_by, undoable, n_ops, affected, map_version}` |
+| `POST /undo` | `{mutation_id?, force?}`; default = the latest edit not yet undone (never an undo). An inverse whose `expect` no longer holds (a later edit changed the same field) is **409** unless `force` |
+| `GET /regions` | `[{symbol, name, class, center, polygon, source, members: {label: n}}]` |
+| `GET /staged`, `DELETE /staged`, `DELETE /staged/{i}` | staged ops + their combined dry-run summary; discard |
+| `POST /staged/publish` | `{confirm: "publish", expected_revision?}` |
+| `GET /snapshots`, `POST /snapshots {name, include_mesh?, mission?}` | list / take |
+| `GET /snapshots/{id}/download` | zip of `dsg.json`, `extras.json`, `meta.json`, `info.json` |
+| `DELETE /snapshots/{id}` | |
+| `POST /snapshots/{id}/restore` | a job (`restore`) that asks for the typed confirm **"restore"** (`POST /api/jobs/{id}/confirm {answer, text}`) |
+
+Every edit route takes `expected_revision?`, `mission?` and `dry_run?`. A committed edit
+answers `{mutation_id, revision, changes[], summary[], affected[], dirty_layers,
+state_version, map_version, staged: false}`. `summary` lines read like a diff:
+`O41 class vehicle -> crate`, `new region R0 'courtyard' containing 37 places, 5 objects`,
+`remove O7 (chair) (retired, can be undone)`.
+
+### 17.3 Staged vs immediate (live robots)
+
+`--map-edits auto` (default): while a launch is active (`launch_state`, the record
+`POST /api/launch` writes and Stop clears), edits are **staged**; offline they apply
+immediately. `staged` / `immediate` force either.
+
+A staged edit is validated by a dry run of all staged ops plus the new ones (an invalid op
+is refused, not staged) and answers `{staged: true, count, summary, staged_summary,
+affected}`. New nodes get their symbol pinned by that dry run, so later staged ops can
+name them. `POST /staged/publish {confirm: "publish"}` commits every staged op in **one**
+unit of work: one revision, one map-version bump. Undo is never staged (it reverts a
+published edit as one unit of work). The staged list is held by the console process
+(lost on a restart).
+
+### 17.4 Snapshots
+
+`<snapshots_dir>/<source name>/<id>/` (cli: `~/.adt4_console/snapshots`):
+* `dsg.json`: heracles `db_to_spark_dsg` (with the source DSG's mesh when `include_mesh`);
+* `extras.json`: what a DSG round trip loses: room boundaries, `name`/`class`, admission
+  and operator properties, the edges `db_to_spark_dsg` does not rebuild (`Room -> Object`
+  `CONTAINS`, `Object -> Observation`, ...), `_GraphMetadata`;
+* `meta.json` / `info.json`: counts per layer + edges, versions, revision, name, author, mission.
+
+**Restore** deletes every map-layer node (and `:Retired` ones) and the labelspaces,
+reloads `dsg.json` with `spark_dsg_to_db`, re-applies the extras and sets both version
+counters past where they were, so every reader reloads. Agents, observations and the
+mutation history stay; edges to nodes that have no `nodeSymbol` are not restored.
+
+### 17.5 Chat (`propose_map_edit`)
+
+The Cypher chat has a structured edit tool next to `propose_cypher_write` (which stays
+for anything the ops cannot express). `propose_map_edit {summary, ops[]}` dry-runs the
+ops (errors go back to the model) and streams a card:
+
+```json
+{"type": "map_edit", "id": "e3-1729...", "src": "neo4j:penn", "summary": "...",
+ "diff": ["O41 class vehicle -> crate"], "ops": [...], "affected": ["O41"], "staged": false}
+```
+
+`POST /api/chat/map_edit {id, approve}` applies exactly those ops (or stages them while
+robots are live) through the same service as `/batch`, with `via: chat`; it answers
+`{ok, staged, summary, mutation_id, map_version, affected}` or `{ok: true, rejected: true}`.
+The system prompt describes regions (`MATCH (r:Room {name: 'courtyard'})-[:CONTAINS]->(o:Object)`).
+
+### 17.6 Frontend (edit mode)
+
+`stores/mapEdit.ts` (+ `lib/mapEdit.ts`): the viewer's `pickMode` is `"edit"` while editing;
+clicks and search hits go to the edit selection (select / Shift-click toggles / lasso corner /
+add object) without switching tabs.
+* **Map tab** (`viewer/MapEditPanel.tsx`, its own side-panel tab next to Mission): the one
+  editor. A single selected node edits class, name, position and (places) "blocked"; several
+  nodes get batch class edits; Remove, Connect / Disconnect, *Focus on its members* for an area,
+  and *Advanced › Group selection into area* (the same `Room` as a drawn area saved to the map).
+  The Inspector has no editor of its own, only *Edit in Map tab*.
+* **One map tool at a time** (`stores/tools.ts`): the mission tools (set start, draw area, plant
+  mock, pick a new task target) and the edit tools (lasso, add object) share the clicks; arming
+  one disarms the other, and the viewer shows one banner (`viewer/ToolBanner.tsx`) for whatever
+  is armed. Drawing keys: Enter or double-click finishes, Backspace drops the last corner, Esc
+  cancels.
+* **Areas** (`viewer/AreaTools.tsx`, Mission tab): one *Draw area* tool and one list. A finished
+  drawing opens a popover: name (default `A<n>` / `No-go <n>`, unique over both scopes), purpose
+  (*Search area* | *No-go zone*) and scope: *This mission only* (browser + the mission's JSON; the
+  default) or *Save to map* (a `group` op with the polygon, i.e. a `Room`; only this choice warns
+  that it writes now / is staged while robots are live). No-go zones are mission scope only. The
+  list shows name · purpose · scope badge (*Mission* / *Map*, from `GET /regions`); mission search
+  areas can be promoted (*Save to map*), map areas removed (retire, with Undo).
+* **Display**: Layers › *Area boundaries* (hull + drawn polygon) and *Colour members by area*
+  (places; objects too while editing) are the only area display controls
+  (`viewStyle.regionHulls` / `regionColorPlaces`).
+* `viewer/EditOverlay.tsx` draws the map areas' boundaries (a name tag only when the graph's own
+  text labels are off: one label per area), the selection rings, the lasso, colour members by
+  area and the subtree focus (dimming the edited graph with `DimGroup`'s `applyDim`);
+  `viewer/MapEditCard.tsx` is the chat card. The store is exposed as `window.__adt4MapEdit` for
+  e2e scripts (`frontend/scripts/capture-map-edit.mjs`). The edit panel refreshes on the hub
+  topic `edit/<src>`; the graph itself reloads on `graph/<src>/version` as for any write. Colour
+  by class is the existing *Colours › objects › label* mode.
+
+### 17.7 Missions and map versions
+
+* A mission stores `map_revision`, `map_version` (and optionally `map_snapshot`) of its
+  Neo4j map whenever it is stored (`POST/PUT /api/missions`, `propose_mission`).
+* The preview carries `map: {planned_revision, revision, planned_map_version, map_version,
+  edits_since, stale, unknown, message, snapshot}`. A mission stored before map versions were
+  recorded (`map_version` null) on an editable map is `unknown` and therefore `stale`
+  ("planned before map versions were recorded, so the map may have changed"). A stale map adds the warning issue
+  `{code: "map_stale", msg: "map changed since planning (3 edits): ..."}`. A `replay` of a
+  saved run on a changed map answers with `warning` + `map`.
+* `POST /api/missions/{id}/rebase`: accept the current map (after re-previewing).
+* `POST /api/missions/{id}/map_snapshot {name?}`: snapshot the map and record it on the mission.
+* The mission chat's context lists the map areas (symbol, name, members, polygon) with the
+  mission-only ones (§15.2). A task's `area` may be an area's symbol or name (it becomes the
+  area's polygon), and a map area's symbol is a goto/inspect target (its centre).
+
 
 ## Deviations
 

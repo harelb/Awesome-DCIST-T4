@@ -413,6 +413,13 @@ class Source:
         self._snapshot: tuple[int, bytes] | None = None
         self._tiles: tuple[int, dict] | None = None
         self._tile_bytes: dict[str, bytes] = {}
+        # the mesh has its own lock: building tiles can take tens of seconds
+        # (Penn: 19 s to parse the ASCII PLY) and must not hold up snapshots
+        self._mesh_lock = threading.RLock()
+        self._mesh_key: str | None = None  # MeshDiskCache key of the tiles held
+        self._products = None  # mesh_lod.TileProducts of the tiles held
+        self._snapshot_gz: tuple[bytes, bytes, str] | None = None  # (raw, gz, etag)
+        self.mesh_cache = None  # mesh_lod.MeshDiskCache (GraphService sets it)
 
     # -- to implement ------------------------------------------------------
     def version(self) -> int:
@@ -423,6 +430,13 @@ class Source:
 
     def _mesh_arrays(self):
         """(pos, col, faces) or None."""
+        return None
+
+    # levels of detail served to the browser (mesh_lod.LODS)
+    lod_levels: tuple[int, ...] = (0, 1, 2)
+
+    def mesh_file(self):
+        """The file the mesh is read from (keys the on-disk tile cache), or None."""
         return None
 
     def node_detail_extra(self, sym: str, loaded: Loaded) -> tuple[dict, list]:
@@ -533,37 +547,101 @@ class Source:
             self._snapshot = (loaded.version, data)
             return data
 
+    def snapshot_blob(self) -> tuple[bytes, bytes, str]:
+        """(raw msgpack, gzipped, etag) of the snapshot, gzipped once per version."""
+        from .mesh_lod import etag_of, gzip_bytes
+
+        data = self.snapshot_bytes()
+        cur = self._snapshot_gz
+        if cur is not None and cur[0] is data:
+            return cur
+        blob = (data, gzip_bytes(data), etag_of(data))
+        self._snapshot_gz = blob
+        return blob
+
     def tiles(self) -> dict:
         v = self.version()
-        with self._lock:
+        with self._mesh_lock:
             if self._tiles and self._tiles[0] == v:
                 return self._tiles[1]
-            arrays = self._mesh_arrays()
-            tiles = _codec().tile_mesh(*arrays) if arrays is not None else {}
+            # a new graph version with the same mesh file (a Neo4j map edit)
+            # keeps the tiles: no re-parse
+            from .mesh_lod import MeshDiskCache
+
+            path = self.mesh_file()
+            key = MeshDiskCache.file_key(path) if path is not None else None
+            if key is not None and self._tiles and key == self._mesh_key:
+                self._tiles = (v, self._tiles[1])
+                return self._tiles[1]
+            cached = self.mesh_cache.load(key) if (self.mesh_cache and key) else None
+            if cached is not None:
+                tiles, self._products = cached
+                log.info("%s: %d mesh tiles from the disk cache", self.id, len(tiles))
+            else:
+                arrays = self._mesh_arrays()
+                tiles = _codec().tile_mesh(*arrays) if arrays is not None else {}
+                self._products = None
             self._tiles = (v, tiles)
+            self._mesh_key = key
             self._tile_bytes = {}
             return tiles
 
-    def manifest(self) -> dict:
+    def products(self):
+        """mesh_lod.TileProducts of the current tiles (built on first use)."""
+        from .mesh_lod import TileProducts
+
         tiles = self.tiles()
-        return {
+        with self._mesh_lock:
+            prev = self._products
+            prods = TileProducts.build(tiles, self.lod_levels, prev)
+            if prods is not prev:
+                self._products = prods
+                if self.mesh_cache is not None and self._mesh_key and self.cacheable:
+                    self.mesh_cache.save_async(self._mesh_key, tiles, prods)
+            return prods
+
+    def manifest(self) -> dict:
+        from .mesh_lod import LODS
+
+        tiles = self.tiles()
+        prods = self.products()
+        out = {
             "tile_size": _codec().DEFAULT_TILE_SIZE,
-            "tiles": {
-                k: {
-                    "hash": t["hash"],
-                    "nv": t["nv"],
-                    "nf": t["nf"],
-                    "origin": t["origin"],
-                }
-                for k, t in tiles.items()
-            },
+            "enc": _codec().PACKED_TILE_ENCODING,
+            "lods": [{"level": lv, "cell": LODS[lv]["cell"], "name": LODS[lv]["name"]} for lv in prods.levels],
+            "tiles": prods.manifest_rows(tiles),
+            "bundles": [],
         }
+        # the coarsest level as one download (the client's first preview)
+        if len(prods.levels) > 1:
+            lv = max(prods.levels)
+            b = prods.bundle(lv)
+            if b is not None:
+                out["bundles"].append({"level": lv, "bytes": len(b.gz), "etag": b.etag})
+        return out
+
+    def bundle_blob(self, level: int):
+        """All tiles of ``level`` packed in one body (mesh_lod.TileProducts.bundle)."""
+        b = self.products().bundle(level)
+        if b is None:
+            raise NotFound(f"no bundle at level {level} for {self.id}")
+        return b
+
+    def tile_blob(self, key: str, level: int):
+        """The packed, gzipped tile ``key`` at ``level`` (mesh_lod.Blob)."""
+        prods = self.products()
+        if level not in prods.levels:
+            raise NotFound(f"no level {level} for {self.id}")
+        b = prods.blob(key, level)
+        if b is None:
+            raise NotFound(f"no tile {key} at level {level}")
+        return b
 
     def tile_bytes(self, key: str) -> bytes:
         tiles = self.tiles()
         if key not in tiles:
             raise NotFound(f"no tile {key}")
-        with self._lock:
+        with self._mesh_lock:
             data = self._tile_bytes.get(key)
             if data is None:
                 data = msgpack.packb(tiles[key], use_bin_type=True)
@@ -747,6 +825,10 @@ class FileSource(Source):
             raise GraphUnavailable(f"spark_dsg unavailable: {e}") from None
         G = dsg.DynamicSceneGraph.load(str(self.dsg_path))
         return _graph_loaded(G, version, {"trajectory": _spark_trajectory(G)})
+
+    def mesh_file(self):
+        ply = self.dsg_path.parent / "mesh.ply"
+        return ply if ply.is_file() else self.dsg_path
 
     def _mesh_arrays(self):
         from .plyio import load_ply
@@ -945,6 +1027,10 @@ class Neo4jSource(Source):
             src = pathlib.Path(rec[0]["p"])
             return src.parents[2] if src.parent.name == "backend" else src.parent
         return None
+
+    def mesh_file(self):
+        p = self.mesh_path()
+        return p if p is not None and p.is_file() else None
 
     def _mesh_arrays(self):
         from .plyio import load_ply
@@ -1168,6 +1254,9 @@ class Neo4jSource(Source):
 class LiveSource(Source):
     kind = "live"
     cacheable = False
+    # a robot's mesh grows tile by tile: no server-side LODs (clustering runs
+    # over the whole mesh); robots send decimated tiles on request (mesh_lod)
+    lod_levels = (0,)
 
     def __init__(self, robot: str, live_service):
         super().__init__(robot)
@@ -1264,6 +1353,10 @@ class GraphService:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
+        from .mesh_lod import MeshDiskCache
+
+        cache_dir = getattr(settings, "mesh_cache_dir", None)
+        self.mesh_cache = MeshDiskCache(cache_dir) if cache_dir else None
         for name, uri in settings.neo4j.items():
             self.add_neo4j(name, uri)
         for name, path in settings.maps.items():
@@ -1274,6 +1367,7 @@ class GraphService:
 
     def add_file(self, name: str, path, label: str | None = None) -> FileSource:
         src = FileSource(name, path)
+        src.mesh_cache = self.mesh_cache
         if label:
             src.label = label
         with self._lock:
@@ -1285,6 +1379,7 @@ class GraphService:
         src = Neo4jSource(
             name, uri, s.neo4j_user, s.neo4j_password, prior=name == s.prior_neo4j
         )
+        src.mesh_cache = self.mesh_cache
         with self._lock:
             self.sources[src.id] = src
         return src
@@ -1378,16 +1473,21 @@ class GraphService:
                 s.close()
 
     def warm(self) -> None:
-        """Pre-load file sources (snapshot + tiles) so the first page load is fast."""
+        """Pre-load file sources (snapshot + mesh tiles and their levels of detail)
+        and the mesh of Neo4j sources, so the first page load is fast. A Neo4j
+        source's graph is not pre-loaded: that holds the source lock (and its
+        shared driver) for many seconds while map edits may be running."""
 
         def run():
             for s in list(self.sources.values()):
-                if isinstance(s, FileSource):
-                    try:
+                try:
+                    if isinstance(s, FileSource):
                         s.snapshot_bytes()
-                        s.tiles()
-                    except Exception as e:  # noqa: BLE001
-                        log.warning("warm %s failed: %s", s.id, e)
+                        s.products()
+                    elif isinstance(s, Neo4jSource):
+                        s.products()  # one query for the mesh path; PLY / disk cache
+                except Exception as e:  # noqa: BLE001
+                    log.warning("warm %s failed: %s", s.id, e)
 
         threading.Thread(target=run, name="graph-warm", daemon=True).start()
 

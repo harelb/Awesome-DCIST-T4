@@ -1,8 +1,9 @@
-// Media-query hooks for the phone layout. PHONE_MQ must match the
-// `max-width: 640px` breakpoint in styles.css.
+// Media-query hooks for the phone layout. PHONE_MQ must match the phone
+// breakpoint in styles.css / theme.css: portrait phones (<= 640 px wide) and
+// phones held sideways (a touch screen <= 480 px tall, e.g. 844 x 390).
 import {useSyncExternalStore} from "react";
 
-export const PHONE_MQ = "(max-width: 640px)";
+export const PHONE_MQ = "(max-width: 640px), (max-height: 480px) and (pointer: coarse)";
 
 const subscribers = new Map<string, (cb: () => void) => () => void>();
 

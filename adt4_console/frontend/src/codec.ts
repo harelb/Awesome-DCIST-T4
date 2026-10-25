@@ -201,6 +201,59 @@ export function decodeTile(obj: unknown): DecodedTile {
   };
 }
 
+/** Packed tile (encoding 2, fleetlink codec.pack_tile): per-axis zigzag deltas of
+ *  the int16 positions in low/high byte planes, per-channel uint8 colour deltas,
+ *  zigzag-delta indices in `ib` byte planes. Same mesh as decodeTile, with the
+ *  vertices in first-use order. Reads the msgpack bin views in place (byte
+ *  access needs no alignment). */
+export function decodePackedTile(obj: unknown): DecodedTile {
+  const o = (obj ?? {}) as Raw;
+  const origin = ((o.origin as number[]) ?? [0, 0, 0]).map(Number) as [number, number, number];
+  const scale = Number(o.scale ?? 0.01);
+  const nv = Number(o.nv ?? 0);
+  const nf = Number(o.nf ?? 0);
+  const ib = Number(o.ib ?? 2);
+  const pos = (o.pos as Uint8Array) ?? new Uint8Array(0);
+  const col = (o.col as Uint8Array) ?? new Uint8Array(0);
+  const idx = (o.idx as Uint8Array) ?? new Uint8Array(0);
+  if ((ib !== 2 && ib !== 4) || pos.length < 6 * nv || col.length < 3 * nv || idx.length < 3 * nf * ib) {
+    throw new Error("malformed packed tile");
+  }
+  const positions = new Float32Array(nv * 3);
+  for (let a = 0; a < 3; a++) {
+    const lo = 2 * nv * a;
+    const hi = lo + nv;
+    let q = 0;
+    for (let i = 0; i < nv; i++) {
+      const z = pos[lo + i] | (pos[hi + i] << 8);
+      q = ((q + ((z >>> 1) ^ -(z & 1))) << 16) >> 16; // int16 wrap
+      positions[i * 3 + a] = q * scale + origin[a];
+    }
+  }
+  const colors = new Uint8Array(nv * 3);
+  for (let c = 0; c < 3; c++) {
+    let v = 0;
+    for (let i = 0; i < nv; i++) {
+      v = (v + col[c * nv + i]) & 255;
+      colors[i * 3 + c] = v;
+    }
+  }
+  const n = 3 * nf;
+  const indices = new Uint32Array(n);
+  let prev = 0;
+  let max = 0;
+  for (let i = 0; i < n; i++) {
+    const z =
+      ib === 2 ? idx[i] | (idx[n + i] << 8) : (idx[i] | (idx[n + i] << 8) | (idx[2 * n + i] << 16) | (idx[3 * n + i] << 24)) >>> 0;
+    const d = (z >>> 1) ^ -(z & 1);
+    prev = ib === 2 ? (prev + d) & 0xffff : (prev + d) >>> 0; // wrap like the encoder
+    indices[i] = prev;
+    if (prev > max) max = prev;
+  }
+  if (n && max >= nv) throw new Error("packed tile index out of range");
+  return {key: String(o.key ?? ""), origin, scale, positions, colors, indices, nv, nf, hash: String(o.hash ?? "")};
+}
+
 export function unpack(buf: ArrayBuffer | Uint8Array): unknown {
   return decode(buf instanceof Uint8Array ? buf : new Uint8Array(buf));
 }

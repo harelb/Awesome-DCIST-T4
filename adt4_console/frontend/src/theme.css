@@ -12,7 +12,7 @@
   gap: 6px;
   margin-left: auto;
 }
-@media (max-width: 640px) {
+@media (max-width: 640px), (max-height: 480px) and (pointer: coarse) {
   .theme-btn {
     margin-left: 0;
   }

@@ -85,6 +85,23 @@ def parse_args(argv=None):
         "anyone who can reach the console gets a shell, so pair it with --token "
         "off a closed network",
     )
+    g = p.add_argument_group("geo / missions / quad")
+    g.add_argument("--geo-anchor", action="append", metavar="SRC=JSON",
+                   help="map→UTM anchor (scripts/geo/anchor_from_gps.py) for a source; SRC '*' "
+                   "= every source (default: <run>/geo_anchor.json)")  # fmt: skip
+    g.add_argument("--tiles-dir", default="~/.adt4_console/tiles",
+                   help="satellite tile cache (scripts/geo/fetch_tiles.py)")  # fmt: skip
+    g.add_argument("--tiles-live", action="store_true",
+                   help="fetch missing satellite tiles from the internet (cached for offline use)")  # fmt: skip
+    g.add_argument("--quad-cmd-uri", help="PUSH (bound) URI for Penn quad waypoints, e.g. tcp://*:6555")
+    g.add_argument("--quad-image-uri", help="Penn quad stamped-image server, e.g. tcp://10.10.10.30:6556")
+    g.add_argument("--quad-utm-origin", type=float, nargs=2, default=(0.0, 0.0), metavar=("E", "N"),
+                   help="UtmToMapInfo.local_utm_origin of the quad frame")  # fmt: skip
+    g.add_argument("--quad-map-offset", type=float, nargs=2, default=(0.0, 0.0), metavar=("X", "Y"),
+                   help="UtmToMapInfo.map_offset of the quad frame")  # fmt: skip
+    g.add_argument("--map-edits", choices=("auto", "staged", "immediate"), default="auto",
+                   help="map edits: staged + published with a confirm while a launch is active "
+                   "(auto, default), always staged, or always applied immediately")
     p.add_argument("--log-level", default="info")
     return p.parse_args(argv)
 
@@ -136,6 +153,18 @@ def settings_from_args(args):
         terminal=args.terminal,
         sam3_url=args.sam3_url,
         launch_state_path="~/.adt4_console/active_launch.json",
+        geo_anchors=_pairs(args.geo_anchor, "--geo-anchor"),
+        tiles_dir=args.tiles_dir,
+        tiles_live=args.tiles_live,
+        missions_dir="~/.adt4_console/missions",
+        quad_images_dir="~/.adt4_console/quad_images",
+        snapshots_dir="~/.adt4_console/snapshots",
+        mesh_cache_dir="~/.adt4_console/mesh_cache",
+        map_edit_mode=args.map_edits,
+        quad_cmd_uri=args.quad_cmd_uri,
+        quad_image_uri=args.quad_image_uri,
+        quad_utm_origin=tuple(args.quad_utm_origin),
+        quad_map_offset=tuple(args.quad_map_offset),
     )
 
 

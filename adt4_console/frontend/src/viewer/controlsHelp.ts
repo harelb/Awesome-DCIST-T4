@@ -98,6 +98,23 @@ export const COMMON_HELP: HelpSection[] = [
   },
 ];
 
+/** Mission planner and map editing (ToolBanner.tsx drawing keys, shortcuts.ts,
+ *  MissionOverlay.tsx start dragging). None of the keys fire while typing. */
+export const MISSION_HELP: HelpSection = {
+  title: "Mission / map edit",
+  entries: [
+    {keys: "Enter / double-click", does: "Finish the area or lasso being drawn"},
+    {keys: "Backspace", does: "Drop the drawing's last corner"},
+    {keys: "Esc", does: "Cancel the armed tool / the start being dragged"},
+    {keys: "Drag an agent", does: "Move its start (Shift inverts snap to places)"},
+    {keys: "Shift-click", does: "Add to / remove from the edit selection"},
+    {keys: "Delete", does: "Remove the edit selection (undoable)"},
+    {keys: "Ctrl / ⌘ + Z", does: "Undo the newest of: your last start move, your last map edit (this browser)"},
+    {keys: "F", does: "Fit the open mission in view"},
+    {keys: "Space", does: "Simulate · pause / resume the simulation"},
+  ],
+};
+
 /** Pane layout controls (wide screens only; Panes.tsx). */
 export const LAYOUT_HELP: HelpSection = {
   title: "Layout",
@@ -114,11 +131,15 @@ export const LAYOUT_HELP: HelpSection = {
 
 /** One-time hint shown the first time the operator switches to Top. */
 export const TOP_HINT = "Right-drag to rotate · Q/E 90° · R north up";
+/** the same hint for touch screens (no right button, no keys) */
+export const TOP_HINT_TOUCH = "One finger pans · two fingers pinch to zoom, drag to rotate";
 export const TOP_HINT_KEY = "adt4.viewer.topHintDismissed";
 
-/** Sections for the help card in the given mode. */
-export function helpSections(mode: HelpMode, withLayout: boolean): HelpSection[] {
-  return [MODE_HELP[mode], ...COMMON_HELP, ...(withLayout ? [LAYOUT_HELP] : [])];
+/** Sections for the help card in the given mode (the mission planner lists its
+ *  own keys first). */
+export function helpSections(mode: HelpMode, withLayout: boolean, mission = false): HelpSection[] {
+  const common = mission ? [MISSION_HELP, ...COMMON_HELP] : [...COMMON_HELP, MISSION_HELP];
+  return [MODE_HELP[mode], ...common, ...(withLayout ? [LAYOUT_HELP] : [])];
 }
 
 export function hintDismissed(storage: Pick<Storage, "getItem"> | null | undefined): boolean {

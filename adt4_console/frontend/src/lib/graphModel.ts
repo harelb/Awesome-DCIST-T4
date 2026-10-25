@@ -27,6 +27,13 @@ export function layerInfo(layer: number, part: number): LayerInfo {
   return {key, name: `layer ${key}`, kind: "other", order: 2};
 }
 
+/** Whether a layer is hidden: its own "layer/part" entry, else its kind's
+ *  ("kind:places"; the mission planner hides every places layer by default). */
+export function layerHidden(hidden: Record<string, boolean>, layer: number, part: number): boolean {
+  const i = layerInfo(layer, part);
+  return hidden[i.key] ?? hidden[`kind:${i.kind}`] ?? false;
+}
+
 export class GraphModel {
   nodes = new Map<string, NodeRecord>();
   edges = new Map<string, Edge>();

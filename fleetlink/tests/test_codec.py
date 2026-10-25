@@ -209,3 +209,73 @@ def test_node_record_reads_trav_attributes():
     rec = codec.node_record(Node())
     assert rec.radii == (0.5, 1.0, 2.0)
     assert rec.states == (1, 2, 0)
+
+
+def _tile_triangles(t):
+    """A tile's triangles as a sorted array of quantised corner coordinates."""
+    oq = np.round(np.asarray(t["origin"]) / t["scale"]).astype(np.int64)
+    q = np.frombuffer(t["pos"], np.int16).reshape(-1, 3).astype(np.int64) + oq
+    idx = np.frombuffer(t["idx"], np.uint32).reshape(-1, 3)
+    tri = q[idx].reshape(len(idx), 9)
+    return tri[np.lexsort(tri.T[::-1])]
+
+
+def test_pack_tile_roundtrip_is_lossless():
+    pos, col, faces = synthetic_mesh(900, extent=37.3, seed=5)
+    tiles = codec.tile_mesh(pos, col, faces, tile_size=8.0)
+    for t in codec.unpack(codec.pack(tiles)).values():
+        p = codec.pack_tile(t)
+        assert p["enc"] == codec.PACKED_TILE_ENCODING and p["ib"] == 2
+        assert (p["nv"], p["nf"], p["hash"]) == (t["nv"], t["nf"], t["hash"])
+        u = codec.unpack_tile(codec.unpack(codec.pack(p)))
+        np.testing.assert_array_equal(_tile_triangles(u), _tile_triangles(t))
+        # colours follow their vertices
+        dp, dc, _ = codec.decode_tile(t)
+        up, uc, _ = codec.decode_tile(u)
+        ref = {tuple(np.round(a, 3)): tuple(c) for a, c in zip(dp, dc)}
+        assert all(ref[tuple(np.round(a, 3))] == tuple(c) for a, c in zip(up, uc))
+
+
+def test_pack_tile_wide_indices_and_extremes():
+    # > 65536 vertices: 4-byte index planes; int16 extremes wrap correctly
+    rng = np.random.default_rng(3)
+    nv = 70000
+    q = rng.integers(-32768, 32767, (nv, 3), dtype=np.int16)
+    q[0] = (-32768, 32767, 0)
+    q[1] = (32767, -32768, 0)
+    idx = rng.permutation(np.tile(np.arange(nv), 3)).reshape(-1, 3).astype(np.uint32)
+    t = {"key": "0_0_0", "origin": [8.0, -16.0, 0.0], "scale": 0.01, "pos": q.tobytes(),
+         "col": rng.integers(0, 256, (nv, 3), dtype=np.uint8).tobytes(), "idx": idx.tobytes(),
+         "nv": nv, "nf": len(idx), "hash": "x"}
+    p = codec.pack_tile(t)
+    assert p["ib"] == 4
+    np.testing.assert_array_equal(_tile_triangles(codec.unpack_tile(p)), _tile_triangles(t))
+
+
+def test_decimate_tiles_keeps_keys_and_has_no_cracks():
+    pos, col, faces = synthetic_mesh(2500, extent=6.0, seed=2)  # 0.24 m spacing
+    tiles = codec.tile_mesh(pos, col, faces, tile_size=8.0)
+    dec = codec.decimate_tiles(tiles, 0.4)
+    assert set(dec) <= set(tiles) and len(dec) >= len(tiles) - 1
+    assert sum(t["nf"] for t in dec.values()) < sum(t["nf"] for t in tiles.values()) * 0.8  # bumpy: z noise 0.2 m
+    # every shared border edge of the full mesh maps to identical vertices in
+    # both tiles: collect each tile's quantised vertex set and check that
+    # neighbouring tiles agree on all vertices near their common border
+    verts = {}
+    for k, t in dec.items():
+        oq = np.round(np.asarray(t["origin"]) / t["scale"]).astype(np.int64)
+        verts[k] = {tuple(v) for v in (np.frombuffer(t["pos"], np.int16).reshape(-1, 3).astype(np.int64) + oq)}
+    shared = 0
+    for a in dec:
+        for b in dec:
+            if a < b:
+                shared += len(verts[a] & verts[b])
+    assert shared > 20  # tiles share border vertices exactly
+    # the coarse surface stays close to the original (vertex clustering error <= cell)
+    for t in dec.values():
+        dp, _, didx = codec.decode_tile(t)
+        assert didx.max() < len(dp)
+        d = np.linalg.norm(dp[:, None, :2] - pos[None, :, :2], axis=2).min(axis=1)
+        assert d.max() < 0.4
+    assert codec.decimate_tiles({}, 0.4) == {}
+    assert codec.decimate_tiles(tiles, 0) == tiles

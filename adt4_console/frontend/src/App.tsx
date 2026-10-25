@@ -27,6 +27,14 @@ const router = createHashRouter([
           </Suspense>
         ),
       },
+      {
+        path: "mission",
+        element: (
+          <Suspense fallback={<Loading label="Loading mission planner" />}>
+            <ViewerPage mode="mission" />
+          </Suspense>
+        ),
+      },
       {path: "network", element: <NetworkPage />},
       {path: "config", element: <ConfigPage />},
       {path: "*", element: <Navigate to="/fleet" replace />},

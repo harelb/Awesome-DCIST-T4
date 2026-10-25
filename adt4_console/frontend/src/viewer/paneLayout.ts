@@ -5,8 +5,9 @@
 // Every storage access is wrapped: the layout falls back to defaults when
 // storage is blocked, empty or holds junk.
 
-export type PaneTab = "inspect" | "plan" | "teleop" | "chat" | "images" | "live" | "camera";
-export const PANE_TABS: PaneTab[] = ["inspect", "plan", "teleop", "chat", "images", "live", "camera"];
+export type PaneTab = "inspect" | "mission" | "map" | "plan" | "teleop" | "chat" | "images" | "live" | "camera";
+/** "map": map editing (MapEditPanel), next to Mission */
+export const PANE_TABS: PaneTab[] = ["inspect", "mission", "map", "plan", "teleop", "chat", "images", "live", "camera"];
 
 export interface WinRect {
   x: number;
@@ -51,6 +52,8 @@ export const FLOAT_MQ = "(min-width: 901px)";
 /** Default floating size per tab (the camera wants a 16:9-ish video pane). */
 const DEFAULT_SIZE: Record<PaneTab, {w: number; h: number}> = {
   inspect: {w: 380, h: 520},
+  mission: {w: 440, h: 680},
+  map: {w: 420, h: 640},
   plan: {w: 400, h: 560},
   teleop: {w: 420, h: 760},
   chat: {w: 400, h: 560},

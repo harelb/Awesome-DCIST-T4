@@ -11,6 +11,7 @@ import {layoutGraph, displayPos, type GraphLayout} from "./layout";
 import {GraphLayers, pickRegistry} from "./GraphLayers";
 import {pickBox, type BoxSet} from "../lib/bboxPick";
 import {MeshTiles, type TileStats} from "./MeshTiles";
+import {DETAIL_LEVEL} from "../lib/meshPlan";
 import {currentActionIndex} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
 import {useViewStyle} from "../stores/viewStyle";
@@ -22,6 +23,13 @@ import {DimGroup, useFocusLook} from "./DimGroup";
 import {ModelBoundary, RobotModel} from "./RobotModel";
 import {usePlatform} from "./usePlatform";
 import {robotModelFor} from "../lib/robotModel";
+import {PoseTrack} from "../lib/gait";
+import {SatelliteGround} from "./SatelliteGround";
+import {MapHover, MissionOverlay} from "./MissionOverlay";
+import {pickRadius, TapTracker} from "../lib/tap";
+import {useMission} from "../stores/mission";
+import {EditOverlay} from "./EditOverlay";
+import {fitTopView} from "../lib/fitView";
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
 
@@ -48,6 +56,7 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
   const heights = useViewStyle(s => s.heights);
   const regionHulls = useViewStyle(s => s.regionHulls);
   const meshColor = useViewStyle(s => s.meshColor);
+  const meshLevel = useViewer(s => DETAIL_LEVEL[s.meshDetail === "auto" ? s.meshAutoDetail : s.meshDetail]);
   const colors = useColorOpts();
   const bg = useBackground();
   const edgeInk = contrastFor(bg, vizStyle).edge;
@@ -68,6 +77,7 @@ function SourceContent({src, cb}: {src: SourceView; cb: SceneCallbacks}) {
           src={src.id}
           manifest={src.manifest}
           manifestRev={src.manifestRev}
+          detail={meshLevel}
           opacity={meshOpacity}
           cullBackfaces={meshCull}
           clipHeight={meshClipOn ? meshClipHeight : null}
@@ -110,15 +120,13 @@ function Picker({cb}: {cb: SceneCallbacks}) {
   cbRef.current = cb;
   useEffect(() => {
     const el = gl.domElement;
-    let down: [number, number] | null = null;
-    const pd = (e: PointerEvent) => {
-      if (e.button === 0) down = [e.clientX, e.clientY];
-    };
+    // tap vs drag / pinch (lib/tap.ts): only a tap picks or places a corner
+    const taps = new TapTracker();
+    const pd = (e: PointerEvent) => taps.onDown(e);
+    const pc = (e: PointerEvent) => taps.onCancel(e);
     const pu = (e: PointerEvent) => {
-      if (!down || e.button !== 0) return;
-      const moved = Math.hypot(e.clientX - down[0], e.clientY - down[1]);
-      down = null;
-      if (moved > 5) return;
+      if (!taps.onUp(e)) return;
+      const radius = pickRadius(e.pointerType);
       const rect = el.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
@@ -139,7 +147,7 @@ function Picker({cb}: {cb: SceneCallbacks}) {
             const sx = ((v.x + 1) / 2) * rect.width;
             const sy = ((1 - v.y) / 2) * rect.height;
             const d = Math.hypot(sx - x, sy - y);
-            if (d < 10 && (!best || d < best.d - 2 || (Math.abs(d - best.d) <= 2 && v.z < best.depth))) {
+            if (d < radius && (!best || d < best.d - 2 || (Math.abs(d - best.d) <= 2 && v.z < best.depth))) {
               best = {src, sym: l.syms[i], d, depth: v.z};
             }
           }
@@ -154,7 +162,7 @@ function Picker({cb}: {cb: SceneCallbacks}) {
       // object bounding boxes (inspect mode, boxes shown): nodes inside a box were
       // tried first; overlapping boxes resolve to the smallest one
       const vs = useViewer.getState();
-      if (vs.showBBoxes && vs.pickMode === "inspect") {
+      if (vs.showBBoxes && (vs.pickMode === "inspect" || vs.pickMode === "edit")) {
         const o = ray.ray.origin;
         const d = ray.ray.direction;
         // boxes are in each source's own frame: test the ray in that frame
@@ -190,9 +198,11 @@ function Picker({cb}: {cb: SceneCallbacks}) {
     };
     el.addEventListener("pointerdown", pd);
     el.addEventListener("pointerup", pu);
+    el.addEventListener("pointercancel", pc);
     return () => {
       el.removeEventListener("pointerdown", pd);
       el.removeEventListener("pointerup", pu);
+      el.removeEventListener("pointercancel", pc);
     };
   }, [gl, camera, scene]);
   return null;
@@ -228,9 +238,18 @@ function ArrowGlyph({color, stale}: {color: string; stale: boolean}) {
 
 /** The robot in its pose frame: its platform's model (the arrow while the model
  *  loads, or when there is none / the view asks for arrows), a ground ring and its
- *  name tag, all in the robot's colour. */
-function RobotBody({robot, color, stale}: {robot: string; color: string; stale: boolean}) {
+ *  name tag, all in the robot's colour. The model walks at the ground speed of its
+ *  pose updates (``x``, ``y``, ``yaw`` at ``at`` ms; the drawn pose is not interpolated). */
+function RobotBody({robot, color, stale, x, y, yaw, at}: {robot: string; color: string; stale: boolean; x: number; y: number; yaw: number; at: number}) {
   const platform = usePlatform(robot);
+  const motion = useMemo(() => new PoseTrack(), []);
+  const invalidate = useThree(s => s.invalidate);
+  useEffect(() => {
+    // fleetlink re-sends the state at 4 Hz: an unchanged pose is a standing sample
+    if (stale) motion.reset();
+    else motion.push(performance.now(), x, y, yaw);
+    invalidate();
+  }, [motion, x, y, yaw, at, stale, invalidate]);
   const mode = useViewStyle(s => s.robotModel);
   const highlight = useViewStyle(s => s.robotHighlight);
   const spec = mode === "model" ? robotModelFor(platform) : null;
@@ -241,7 +260,7 @@ function RobotBody({robot, color, stale}: {robot: string; color: string; stale: 
       {spec ? (
         <ModelBoundary fallback={<ArrowGlyph color={color} stale={stale} />}>
           <Suspense fallback={<ArrowGlyph color={color} stale={stale} />}>
-            <RobotModel url={spec.url} color={color} highlight={highlight} opacity={stale ? 0.45 : 1} />
+            <RobotModel url={spec.url} color={color} highlight={highlight} opacity={stale ? 0.45 : 1} motion={motion} />
           </Suspense>
         </ModelBoundary>
       ) : (
@@ -275,7 +294,7 @@ function RobotGlyphs() {
           <RobotGlyph key={r} robot={r}>
           <AlignedGroup robot={r} frame={p.frame}>
           <group position={[p.x, p.y, p.z]} rotation={[0, 0, yaw]}>
-            <RobotBody robot={r} color={color} stale={stale} />
+            <RobotBody robot={r} color={color} stale={stale} x={p.x} y={p.y} yaw={yaw} at={stateAt[r] ?? 0} />
           </group>
           </AlignedGroup>
           </RobotGlyph>
@@ -427,7 +446,9 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
     const cy = (bounds.min[1] + bounds.max[1]) / 2;
     const span = Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], 10);
     const cz = bounds.min[2];
-    void c.setLookAt(cx - span * 0.2, cy - span * 1.0, cz + span * 0.9, cx, cy, cz, false);
+    // already in the top view (the mission planner opens in it): frame from straight above
+    if (useViewer.getState().topDown) void c.setLookAt(cx, cy, cz + span * 1.1, cx, cy, cz, false);
+    else void c.setLookAt(cx - span * 0.2, cy - span * 1.0, cz + span * 0.9, cx, cy, cz, false);
   }, [bounds]);
   useEffect(() => {
     const c = ref.current;
@@ -479,6 +500,36 @@ function CameraRig({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
     if (useViewer.getState().topDown) void c.setLookAt(x, y, z + dist * 1.5, x, y, z, true);
     else void c.setLookAt(x - dist * 0.3, y - dist * 0.7, z + dist * 0.65, x, y, z, true);
   }, [flyTo]);
+  // "Fit mission": top view keeps its rotation and frames the points in the part
+  // of the canvas the overlays leave free; 3D keeps its angle and fits a sphere
+  const fitTo = useViewer(s => s.fitTo);
+  const fitNonce = useRef(fitTo?.nonce ?? 0);
+  const {camera, size} = useThree();
+  useEffect(() => {
+    const c = ref.current;
+    if (!c || !fitTo || fitTo.nonce === fitNonce.current || !fitTo.pts.length) return;
+    fitNonce.current = fitTo.nonce;
+    fitted.current = true; // the first map framing must not undo it
+    const z = c.getTarget(new THREE.Vector3()).z;
+    if (useViewer.getState().topDown && camera instanceof THREE.PerspectiveCamera) {
+      camera.updateMatrixWorld();
+      const e = camera.matrixWorld.elements;
+      const axis = (x: number, y: number) => {
+        const n = Math.hypot(x, y) || 1;
+        return [x / n, y / n];
+      };
+      const f = fitTopView(fitTo.pts, axis(e[0], e[1]), axis(e[4], e[5]), size.width, size.height, (camera.fov * Math.PI) / 180, fitTo.insets);
+      if (!f) return;
+      void c.moveTo(f.target[0], f.target[1], z, true);
+      void c.dollyTo(Math.min(Math.max(f.height, 8), 1900), true);
+      return;
+    }
+    const box = new THREE.Box3();
+    for (const p of fitTo.pts) box.expandByPoint(new THREE.Vector3(p[0], p[1], z));
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    sphere.radius = Math.max(sphere.radius * 1.15, 10);
+    void c.fitToSphere(sphere, true);
+  }, [fitTo, camera, size]);
   useEffect(() => {
     if (!follow) return;
     let last: [number, number] | null = null;
@@ -546,6 +597,18 @@ const COARSE = typeof window !== "undefined" && window.matchMedia?.("(pointer: c
 const DPR: [number, number] = COARSE ? [1, 1.5] : [1, 2];
 const GL = {antialias: !COARSE, powerPreference: "high-performance" as const, preserveDrawingBuffer: !COARSE};
 
+/** Missions are drawn at ground height: the GPS anchor's, else the floor of the map. */
+function MissionLayer({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
+  const z0 = useMission(s => s.geo?.anchor.z0);
+  const z = z0 ?? (bounds ? bounds.min[2] : 0);
+  return (
+    <>
+      <MissionOverlay groundZ={z} />
+      <MapHover z={z} />
+    </>
+  );
+}
+
 export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {min: number[]; max: number[]} | null; cb: SceneCallbacks}) {
   const bg = useBackground();
   const style = useViewer(s => s.vizStyle);
@@ -570,12 +633,15 @@ export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {mi
       <Background />
       <CaptureBridge />
       <Ground bounds={bounds} />
+      <SatelliteGround floorZ={bounds ? bounds.min[2] : null} />
       {sources.map(s => (
         <SourceContent key={s.id} src={s} cb={cb} />
       ))}
       <LiveOverlays />
       <RobotGlyphs />
       <PlanOverlay />
+      <MissionLayer bounds={bounds} />
+      <EditOverlay />
       <Markers />
       <Picker cb={cb} />
       <CameraRig bounds={bounds} />

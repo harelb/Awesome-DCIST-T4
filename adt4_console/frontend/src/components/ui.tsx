@@ -159,11 +159,11 @@ export function Toggle({checked, onChange, label, title}: {checked: boolean; onC
   );
 }
 
-export function Segmented<T extends string>({value, options, onChange, ariaLabel}: {value: T; options: {value: T; label: ReactNode}[]; onChange: (v: T) => void; ariaLabel?: string}) {
+export function Segmented<T extends string>({value, options, onChange, ariaLabel}: {value: T; options: {value: T; label: ReactNode; disabled?: boolean; title?: string}[]; onChange: (v: T) => void; ariaLabel?: string}) {
   return (
     <div className="segmented" role="tablist" aria-label={ariaLabel}>
       {options.map(o => (
-        <button key={o.value} role="tab" aria-selected={o.value === value} className={o.value === value ? "on" : ""} onClick={() => onChange(o.value)}>
+        <button key={o.value} role="tab" aria-selected={o.value === value} className={o.value === value ? "on" : ""} disabled={o.disabled} title={o.title} onClick={() => onChange(o.value)}>
           {o.label}
         </button>
       ))}

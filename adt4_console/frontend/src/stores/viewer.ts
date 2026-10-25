@@ -1,13 +1,16 @@
 // Robot-viewer state: overlaid graph sources (heavy data kept in mutable GraphModel
 // objects, React re-renders keyed on `rev`) plus all viewer UI toggles.
 import {create} from "zustand";
-import {decodeDelta, decodeGraph} from "../codec";
+import {decodeDelta, decodeGraph, unpack} from "../codec";
 import {GraphModel} from "../lib/graphModel";
-import {errorText, getJSON, getMsgpack} from "../lib/api";
+import {errorText, fetchWithProgress, getJSON} from "../lib/api";
+import {loadDetail, type MeshDetail} from "../lib/meshPlan";
+import {beginTask, dropTask, endTask, progressTask} from "./loading";
 import type {GraphSource, TileManifest} from "../types";
 import type {VizStyle} from "../viewer/layout";
 import {ws} from "../ws";
 import {loadFocus, saveFocus, type Focus} from "../viewer/robotFocus";
+import type {Insets} from "../lib/fitView";
 
 export interface SourceView {
   id: string;
@@ -26,7 +29,7 @@ export interface SourceView {
   showGraph: boolean;
 }
 
-export type PickMode = "inspect" | "goto";
+export type PickMode = "inspect" | "goto" | "mission" | "edit";
 
 export interface Selection {
   src: string;
@@ -48,6 +51,10 @@ interface ViewerStore {
   topDown: boolean;
   follow: string | null; // robot name
   meshOpacity: number;
+  /** mesh level of detail; "auto" = `meshAutoDetail` */
+  meshDetail: MeshDetail;
+  /** what "auto" means on this page (ViewerPage: lib/meshPlan autoDetail) */
+  meshAutoDetail: Exclude<MeshDetail, "auto">;
   /** "hydra" mimics the ADT4 hydra_visualizer config; "classic" is the old look */
   vizStyle: VizStyle;
   /** node / object text labels (hydra text adapters) */
@@ -70,6 +77,8 @@ interface ViewerStore {
   query: string;
   highlight: Selection[];
   flyTo: {target: [number, number, number]; nonce: number} | null;
+  /** frame these map points (lib/fitView.ts) inside the canvas minus `insets` px */
+  fitTo: {pts: number[][]; insets: Insets; nonce: number} | null;
   pickMode: PickMode;
   gotoDraft: {sym: string; src: string; pos: [number, number, number]; label: string}[];
   /** phone full-screen drive view open (DriveFullscreen); the Teleop tab
@@ -85,6 +94,7 @@ interface ViewerStore {
   set: (patch: Partial<ViewerStore>) => void;
   select: (sel: Selection | null) => void;
   fly: (target: [number, number, number]) => void;
+  fit: (pts: number[][], insets: Insets) => void;
   /** Change the robot focus (persisted). A robot focus also becomes the plan
    *  robot, and moves an active camera follow onto that robot. */
   setFocus: (f: Focus) => void;
@@ -130,6 +140,8 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   topDown: false,
   follow: null,
   meshOpacity: 1,
+  meshDetail: loadDetail(),
+  meshAutoDetail: "full",
   vizStyle: "hydra",
   showText: true,
   meshCull: true,
@@ -143,6 +155,7 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   query: "",
   highlight: [],
   flyTo: null,
+  fitTo: null,
   pickMode: "inspect",
   gotoDraft: [],
   driveFull: false,
@@ -192,41 +205,89 @@ export const useViewer = create<ViewerStore>((set, get) => ({
   reloadSource: async id => {
     const {patchSource} = get();
     patchSource(id, {status: "loading", error: null});
+    // the graph shows as soon as its snapshot is in: the mesh manifest (which
+    // a cold server may take a while to build) and the trajectory arrive on
+    // their own, each with byte progress on the load bar (stores/loading)
+    // (the manifest is requested at once, but its tiles and the trajectory only
+    // start once the snapshot is in: the graph gets the whole link first)
+    let snapDone = () => {};
+    const afterSnap = new Promise<void>(r => (snapDone = r));
+    const mesh = loadManifest(id, afterSnap);
     try {
-      const [snap, manifest, traj] = await Promise.all([
-        getMsgpack(`${srcPath(id)}/snapshot`),
-        getJSON<TileManifest>(`${srcPath(id)}/mesh/manifest`).catch(() => null),
-        getJSON<{points: number[][]}>(`${srcPath(id)}/trajectory`).catch(() => null),
-      ]);
+      const snap = unpack(await fetchTracked(`${srcPath(id)}/snapshot`, `graph:${id}`, "Graph", "application/x-msgpack"));
       const g = decodeGraph(snap);
       const cur = get().sources[id];
       const model = cur?.model ?? new GraphModel();
       model.loadSnapshot(g);
       model.lastSeq = g.seq ?? null;
-      patchSource(id, {
-        status: "ready",
-        model,
-        rev: model.rev,
-        version: g.version ?? cur?.version ?? null,
-        // a failed manifest fetch keeps the tiles we already show
-        manifest: manifest ?? cur?.manifest ?? {tile_size: 8, tiles: {}},
-        manifestRev: (cur?.manifestRev ?? 0) + 1,
-        trajectory: traj?.points?.length ? traj.points.map(p => [p[1], p[2], p[3]] as [number, number, number]) : null,
-      });
+      patchSource(id, {status: "ready", model, rev: model.rev, version: g.version ?? cur?.version ?? null});
     } catch (e) {
       patchSource(id, {status: "error", error: errorText(e)});
     }
+    snapDone();
+    await Promise.all([mesh, loadTrajectory(id)]);
   },
 
   set: patch => set(patch as Partial<ViewerStore>),
   select: sel => set({selected: sel}),
   fly: target => set(s => ({flyTo: {target, nonce: (s.flyTo?.nonce ?? 0) + 1}})),
+  fit: (pts, insets) => set(s => ({fitTo: {pts, insets, nonce: (s.fitTo?.nonce ?? 0) + 1}})),
   setFocus: f => {
     const focus = f || "all";
     saveFocus(focus);
     set(s => (focus === "all" ? {focus} : {focus, planRobot: focus, follow: s.follow ? focus : null}));
   },
 }));
+
+/** GET with byte progress as load-bar task `task` ("" label = bytes only). */
+async function fetchTracked(path: string, task: string, label: string, accept?: string): Promise<Uint8Array> {
+  beginTask(task, label);
+  try {
+    const body = await fetchWithProgress(path, {
+      accept,
+      onTotal: t => progressTask(task, 0, t),
+      onBytes: b => progressTask(task, b),
+    });
+    endTask(task);
+    return body;
+  } catch (e) {
+    endTask(task, false);
+    throw e;
+  }
+}
+
+async function loadManifest(id: string, after: Promise<void>) {
+  const task = `mesh:${id}`;
+  // until the tile loader takes over: the server may still be building the mesh
+  beginTask(task, "Mesh", "bytes", null, "preparing");
+  let manifest: TileManifest | null = null;
+  try {
+    manifest = await getJSON<TileManifest>(`${srcPath(id)}/mesh/manifest`);
+  } catch {
+    /* keep what we show */
+  }
+  await after;
+  const cur = useViewer.getState().sources[id];
+  // the tile loader (viewer/MeshTiles) reports the tiles; nothing to load ends it here
+  if (!manifest || !Object.keys(manifest.tiles ?? {}).length || !cur?.showMesh || !cur.enabled) dropTask(task);
+  if (!cur) return;
+  useViewer.getState().patchSource(id, {
+    // a failed manifest fetch keeps the tiles we already show
+    manifest: manifest ?? cur.manifest ?? {tile_size: 8, tiles: {}},
+    manifestRev: (cur.manifestRev ?? 0) + 1,
+  });
+}
+
+async function loadTrajectory(id: string) {
+  try {
+    const body = await fetchTracked(`${srcPath(id)}/trajectory`, `traj:${id}`, "", "application/json");
+    const traj = JSON.parse(new TextDecoder().decode(body)) as {points?: number[][]};
+    const pts = traj?.points?.length ? traj.points.map(p => [p[1], p[2], p[3]] as [number, number, number]) : null;
+    if (useViewer.getState().sources[id]) useViewer.getState().patchSource(id, {trajectory: pts});
+  } catch {
+    /* no trajectory */
+  }
+}
 
 async function refetchManifest(id: string) {
   try {

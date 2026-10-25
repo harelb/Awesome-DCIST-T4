@@ -131,7 +131,7 @@ def test_cypher_tools_and_schema_in_prompt(neo4j_chat):
     out = _chat(client, "what is O7?", src="neo4j:live")
     first = fake.chat.completions.calls[0]
     names = [t["function"]["name"] for t in first["tools"]]
-    assert names == ["run_cypher", "propose_cypher_write", "show_object_images", "search_robot_images", "propose_goal"]
+    assert names == ["run_cypher", "propose_map_edit", "propose_cypher_write", "show_object_images", "search_robot_images", "propose_goal"]
     system = first["messages"][0]["content"]
     assert "Database contents now" in system and "Object:" in system and "Labelspace" in system
     tools = [o for o in out if o["type"] == "tool"]

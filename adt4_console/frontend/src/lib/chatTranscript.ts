@@ -120,3 +120,65 @@ export function scrollAnchor(items: SearchCard[], from: number): number | null {
   while (i - 1 >= from && items[i - 1].type === "object_candidate" && items[i - 1].pending_id === pid) i--;
   return i;
 }
+
+interface ToolLike {
+  type: string;
+  name?: string;
+  result?: unknown;
+}
+
+/** Tool calls the chat folds into one "Looked up the map" disclosure per turn
+ *  (a SAM3 image search stays visible: its candidates follow it). */
+const folded = (it: ToolLike) => it.type === "tool" && it.name !== "search_robot_images";
+
+/** The chat's lookup groups, one per turn (a turn starts at a user message):
+ *  index of the turn's first lookup -> every lookup index of that turn; the
+ *  other lookup indices -> null (shown inside the group). */
+export function toolGroups(items: readonly ToolLike[]): Map<number, number[] | null> {
+  const out = new Map<number, number[] | null>();
+  let cur: number[] | null = null;
+  items.forEach((it, i) => {
+    if (it.type === "user") cur = null;
+    if (!folded(it)) return;
+    if (cur) {
+      cur.push(i);
+      out.set(i, null);
+    } else {
+      cur = [i];
+      out.set(i, cur);
+    }
+  });
+  return out;
+}
+
+const errOf = (t: ToolLike) => !!(t.result && typeof t.result === "object" && (t.result as {error?: unknown}).error);
+
+/** "3 queries, 2 retried": Cypher queries (a failed one followed by another
+ *  query was retried, else it failed) and other lookups. */
+export function lookupSummary(tools: readonly ToolLike[]): {text: string; queries: number; retried: number; failed: number} {
+  const q = tools.filter(t => t.name === "run_cypher");
+  let retried = 0;
+  let failed = 0;
+  q.forEach((t, i) => {
+    if (errOf(t)) i < q.length - 1 ? retried++ : failed++;
+  });
+  const other = tools.length - q.length;
+  const parts = [
+    q.length ? `${q.length} quer${q.length === 1 ? "y" : "ies"}` : "",
+    retried ? `${retried} retried` : "",
+    failed ? `${failed} failed` : "",
+    other ? `${other} search${other === 1 ? "" : "es"}` : "",
+  ].filter(Boolean);
+  return {text: parts.join(", "), queries: q.length, retried, failed};
+}
+
+/** A Neo4j error in one line: "Syntax error: Invalid input 'x' ..." (the full
+ *  text stays behind a disclosure). */
+export function cypherErrorShort(err: string, max = 140): string {
+  const code = /Neo\.\w+Error\.\w+\.(\w+)/.exec(err);
+  const kind = code ? code[1].replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase() : null;
+  const m = /message:\s*([^\n]*)/.exec(err);
+  let msg = (m ? m[1] : (err.split("\n").find(l => l.trim() && !/Neo\.\w+Error/.test(l)) ?? err)).trim().replace(/\}+$/, "");
+  if (msg.length > max) msg = `${msg.slice(0, max - 1)}…`;
+  return kind ? `${kind[0].toUpperCase()}${kind.slice(1)}: ${msg}` : msg;
+}

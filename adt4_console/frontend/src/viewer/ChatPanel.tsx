@@ -10,8 +10,11 @@ import {Badge, Spinner} from "../components/ui";
 import {sendGoal} from "./PlanPanel";
 import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
-import {chatAbort, clearChat, useChat} from "../stores/chat";
-import {candidateNote, candidateOrdinals, cellText, fmtLeft, mergeTargetsAfterCommit, scrollAnchor, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
+import {chatAbort, clearChat, storable, useChat} from "../stores/chat";
+import {closeMission, fitMission, missionContext, openMission, saveCurrent, simCmd, useMission} from "../stores/mission";
+import {decideMapEdit, MapEditCard, mapEditNote, statusOf, toMapEditItem, type MapEditItem} from "./MapEditCard";
+import {refreshEdit} from "../stores/mapEdit";
+import {candidateNote, candidateOrdinals, cellText, cypherErrorShort, fmtLeft, lookupSummary, mergeTargetsAfterCommit, scrollAnchor, toolGroups, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
 
 export type ChatItem =
   | {type: "user"; text: string; note?: boolean}
@@ -19,9 +22,25 @@ export type ChatItem =
   | {type: "tool"; name: string; args: unknown; result: unknown}
   | {type: "goal"; kind: string; body: Record<string, unknown>; robot?: string | null; sent?: {tone: SendTone; text: string}}
   | {type: "error"; text: string}
+  | MissionCardItem
   | CypherWrite
+  | MapEditItem
   | ImagesItem
   | ObjectCandidate;
+
+/** A mission the assistant proposed (propose_mission); stored server-side. */
+export interface MissionCardItem {
+  type: "mission";
+  id: string;
+  revision: number;
+  name: string;
+  agents: {id: string; kind: string; binding?: string | null}[];
+  tasks: {id: string; agent: string; type: string; target?: unknown; depends_on?: string[]}[];
+  issues: {level: string; msg: string}[];
+  /** what the assistant interpreted or substituted (shown in amber) */
+  assumptions: string[];
+  makespan: number | null;
+}
 
 /** A database change the assistant proposed; runs only when approved. */
 export interface CypherWrite {
@@ -74,8 +93,22 @@ export function toChatItem(o: Record<string, unknown>): ChatItem | null {
       return {type: "goal", kind: String(o.kind), body: (o.body as Record<string, unknown>) ?? {}, robot: typeof o.robot === "string" ? o.robot : null};
     case "error":
       return {type: "error", text: String(o.text ?? "error")};
+    case "mission":
+      return {
+        type: "mission",
+        id: String(o.id),
+        revision: Number(o.revision ?? 1),
+        name: String(o.name ?? ""),
+        agents: Array.isArray(o.agents) ? (o.agents as MissionCardItem["agents"]) : [],
+        tasks: Array.isArray(o.tasks) ? (o.tasks as MissionCardItem["tasks"]) : [],
+        issues: Array.isArray(o.issues) ? (o.issues as MissionCardItem["issues"]) : [],
+        assumptions: Array.isArray(o.assumptions) ? o.assumptions.map(String).filter(Boolean) : [],
+        makespan: typeof o.makespan === "number" ? o.makespan : null,
+      };
     case "cypher_write":
       return {type: "cypher_write", id: String(o.id), query: String(o.query ?? ""), summary: String(o.summary ?? ""), src: typeof o.src === "string" ? o.src : null};
+    case "map_edit":
+      return toMapEditItem(o);
     case "images":
       return {type: "images", src: String(o.src ?? ""), items: Array.isArray(o.items) ? (o.items as ImagesItem["items"]) : []};
     case "object_candidate": {
@@ -174,13 +207,22 @@ const turnStart = {
 };
 const abort = chatAbort;
 
-export function ChatPanel() {
+export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   const {planRobot, order, sources} = useViewer();
   // the conversation lives in the chat store: it outlives this panel (page
   // switches, reloads) and a turn keeps streaming into it while unmounted
   const items = useChat(s => s.items);
   const busy = useChat(s => s.busy);
   const [input, setInput] = useState("");
+  // "Re-plan in chat" (Mission tab): the text lands in the message box, unsent
+  const prefill = useChat(s => s.prefill);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (prefill === null) return;
+    setInput(prefill);
+    useChat.setState({prefill: null});
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  }, [prefill]);
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [model, setModelRaw] = useState(loadModel);
@@ -219,6 +261,7 @@ export function ChatPanel() {
   };
   const chosenModel = model && models.includes(model) ? model : undefined;
   const ords = candidateOrdinals(items);
+  const groups = toolGroups(items);
 
   const push = (it: ChatItem) =>
     setItems(cur => {
@@ -251,7 +294,17 @@ export function ChatPanel() {
       const headers: Record<string, string> = {"Content-Type": "application/json"};
       const t = getToken();
       if (t) headers.Authorization = `Bearer ${t}`;
-      const body = {message, robot: planRobot ?? undefined, src, history: trimTranscript(transcript.current), model: chosenModel};
+      // the mission planner's context: agents, drawn areas, the open mission (propose_mission)
+      const ms = useMission.getState();
+      const withMission = missionMode || (ms.chatOn && (ms.roster.length > 0 || !!ms.current));
+      const body = {
+        message,
+        robot: planRobot ?? undefined,
+        src: withMission ? (ms.world?.src ?? src) : src,
+        history: trimTranscript(transcript.current),
+        model: chosenModel,
+        mission_ctx: withMission ? missionContext() : undefined,
+      };
       const res = await fetch("api/chat", {method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal});
       if (!res.ok || !res.body) {
         let detail = `HTTP ${res.status}`;
@@ -274,6 +327,12 @@ export function ChatPanel() {
         }
         const it = toChatItem(o);
         if (it) push(it);
+        // a proposed mission opens in the Mission tab at once (on a phone the
+        // chat sheet stays up: the tab is only selected for when the panel opens)
+        if (it?.type === "mission")
+          void openMission(it.id, {fit: true}).then(() => {
+            if (missionMode) window.dispatchEvent(new CustomEvent("adt4-show-tab", {detail: {tab: "mission", soft: true}}));
+          });
       };
       for (;;) {
         const {value, done} = await reader.read();
@@ -301,7 +360,21 @@ export function ChatPanel() {
     void ask(message);
   };
 
-  const newChat = clearChat;
+  const newChat = () => {
+    clearChat();
+    // the mission planner's Clear also starts the next mission from scratch
+    if (missionMode) closeMission();
+  };
+  const current = useMission(s => s.current);
+  const [saveName, setSaveName] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState<string | null>(null);
+  const doSave = async () => {
+    const {items: its, transcript: tr} = useChat.getState();
+    const ok = await saveCurrent(saveName ?? "", {items: storable(its), transcript: tr});
+    setSaveName(null);
+    setSavedNote(ok ? "saved" : null);
+    window.setTimeout(() => setSavedNote(null), 2500);
+  };
 
   const patch = (idx: number, f: (it: ChatItem) => ChatItem) => setItems(cur => cur.map((c, i) => (i === idx ? f(c) : c)));
 
@@ -325,6 +398,21 @@ export function ChatPanel() {
       else transcript.current = [...transcript.current, {role: "user", text: writeNote(it.summary, r)}];
     } catch (e) {
       patch(idx, c => ({...(c as CypherWrite), status: {state: "error", text: errorText(e)}}));
+    }
+  };
+
+  const decideEdit = async (idx: number, approve: boolean) => {
+    const it = items[idx];
+    if (it.type !== "map_edit") return;
+    patch(idx, c => ({...(c as MapEditItem), status: {state: "busy", text: approve ? "applying ..." : "rejecting ..."}}));
+    try {
+      const r = await decideMapEdit(it.id, approve);
+      patch(idx, c => ({...(c as MapEditItem), status: statusOf(r)}));
+      void refreshEdit();
+      if (approve && r.ok) void ask(mapEditNote(it, r), true);
+      else transcript.current = [...transcript.current, {role: "user", text: mapEditNote(it, r)}];
+    } catch (e) {
+      patch(idx, c => ({...(c as MapEditItem), status: {state: "error", text: errorText(e)}}));
     }
   };
 
@@ -397,8 +485,37 @@ export function ChatPanel() {
           </select>
         )}
         <span className="grow" />
-        <button className="btn btn-xs" onClick={newChat} disabled={!items.length} title="Start over: the assistant forgets this conversation">
-          New chat
+        {missionMode && current && saveName === null && (
+          <button className="btn btn-xs" onClick={() => setSaveName(current.name || "")} title="Keep this mission with its chat and the approvals of its simulated run, to replay or continue later">
+            {savedNote ? "✓ Saved" : current.saved ? "Save again" : "Save mission"}
+          </button>
+        )}
+        {missionMode && saveName !== null && (
+          <span className="row gap">
+            <input
+              className="input input-xs"
+              autoFocus
+              placeholder="mission name"
+              value={saveName}
+              onChange={e => setSaveName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter") void doSave();
+                if (e.key === "Escape") setSaveName(null);
+              }}
+              aria-label="Mission name"
+            />
+            <button className="btn btn-xs btn-primary" onClick={() => void doSave()}>
+              Save
+            </button>
+          </span>
+        )}
+        <button
+          className="btn btn-xs"
+          onClick={newChat}
+          disabled={!items.length && !(missionMode && current)}
+          title={missionMode ? "Start over: clear the chat and close the mission (saved missions stay in the Mission tab)" : "Start over: the assistant forgets this conversation"}
+        >
+          {missionMode ? "Clear" : "New chat"}
         </button>
       </div>
       <div className="chat-log" ref={scroller}>
@@ -409,6 +526,10 @@ export function ChatPanel() {
           </div>
         )}
         {items.map((it, i) => {
+          // a turn's lookups: one disclosure where the first one was
+          const grp = groups.get(i);
+          if (grp === null) return null;
+          if (grp) return <LookupGroup key={i} tools={grp.map(k => items[k] as ToolItem)} />;
           if (it.type === "user")
             return (
               <div key={i} className={`msg msg-user ${it.note ? "msg-note" : ""}`}>
@@ -419,8 +540,10 @@ export function ChatPanel() {
           if (it.type === "error") return <div key={i} className="msg msg-err">{it.text}</div>;
           if (it.type === "object_candidate") return <CandidateCard key={i} idx={i} ord={ords[i]} it={it} onAct={add => void actOnCandidate(i, add)} />;
           if (it.type === "cypher_write") return <WriteCard key={i} it={it} onDecide={ok => void decideWrite(i, ok)} />;
+          if (it.type === "map_edit") return <MapEditCard key={i} it={it} onDecide={ok => void decideEdit(i, ok)} />;
           if (it.type === "images") return <ImagesCard key={i} it={it} />;
           if (it.type === "tool") return <ToolCard key={i} it={it} />;
+          if (it.type === "mission") return <MissionCard key={i} it={it} />;
           return <GoalCard key={i} it={it} robot={it.robot ?? planRobot} onSend={() => void sendProposal(i)} />;
         })}
         {busy && <Spinner label="thinking" />}
@@ -428,6 +551,7 @@ export function ChatPanel() {
       <LeaseRefusalNotice robot={planRobot} />
       <div className="chat-input">
         <textarea
+          ref={inputRef}
           className="input"
           rows={2}
           value={input}
@@ -449,6 +573,115 @@ export function ChatPanel() {
   );
 }
 
+export function MissionCard({it}: {it: MissionCardItem}) {
+  const mine = useMission(s => s.current?.id === it.id);
+  // the newest revision: the open mission's, else the mission list's
+  const latest = useMission(s => (s.current?.id === it.id ? s.current.revision : (s.list.find(m => m.id === it.id)?.revision ?? it.revision)));
+  const mapNow = useMission(s => (s.current?.id === it.id ? s.preview?.map : null));
+  const run = useMission(s => (s.current?.id === it.id ? s.run : null));
+  const superseded = latest > it.revision;
+  const running = cardRunState(run);
+  const errors = it.issues.filter(i => i.level === "error");
+  const warnings = it.issues.filter(i => i.level === "warning");
+  const open = async (simulate: boolean) => {
+    await openMission(it.id, {fit: true});
+    window.dispatchEvent(new CustomEvent("adt4-show-tab", {detail: "mission"}));
+    if (simulate) {
+      await simCmd("new");
+      await simCmd("play");
+      fitMission();
+    }
+  };
+  const byAgent = it.agents.map(a => ({a, tasks: it.tasks.filter(t => t.agent === a.id)}));
+  return (
+    <div className={`card chat-card mission-card ${superseded ? "superseded" : ""}`}>
+      <div className="row gap">
+        <b>🗺 {it.name || "Mission"}</b>
+        <Badge tone="info">r{it.revision}</Badge>
+        {it.makespan != null && <span className="muted small">~{Math.round(it.makespan)} s</span>}
+        {superseded && <Badge tone="off">superseded</Badge>}
+        {!superseded && mine && <Badge tone="ok">open</Badge>}
+      </div>
+      <ul className="small mission-card-agents">
+        {byAgent.map(({a, tasks}) => (
+          <li key={a.id}>
+            <span className="mono">{a.id}</span> <span className="muted">({a.kind}{a.binding ? ` → ${a.binding}` : ""})</span>:{" "}
+            {tasks.map(t => `${t.type.replace("_", " ")}${t.target ? ` ${typeof t.target === "string" ? t.target : JSON.stringify(t.target)}` : ""}`).join(" → ") || "idle"}
+          </li>
+        ))}
+      </ul>
+      {(it.assumptions ?? []).length > 0 && (
+        <div className="mission-assumptions small" data-testid="mission-assumptions">
+          <b>Assumed</b>
+          <ul>
+            {it.assumptions.map((a, k) => (
+              <li key={k}>{a}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {errors.length > 0 && <div className="msg-err small">✖ {errors.map(e => e.msg).join("; ")}</div>}
+      {warnings.length > 0 && <div className="small muted">⚠ {warnings.length} warning(s)</div>}
+      {mapNow?.stale && !superseded && (
+        <div className="small tone-warn" role="status" data-testid="mission-map-stale">
+          ⚠ {mapNow.message ?? "map changed since planning"}{" "}
+          <button className="btn btn-xs" onClick={() => void open(false)} title="Re-preview on the current map in the Mission tab">
+            Re-preview
+          </button>
+        </div>
+      )}
+      <div className="row gap wrap">
+        {superseded ? (
+          <button className="btn btn-xs" onClick={() => void open(false)} data-testid="card-open-latest" title={`This is r${it.revision}; the mission is at r${latest} now (edited in the Mission tab or by a later proposal)`}>
+            Superseded by r{latest} — open latest
+          </button>
+        ) : (
+          <>
+            <button
+              className="btn btn-xs btn-primary"
+              disabled={errors.length > 0 || !!running}
+              onClick={() => void open(true)}
+              title={running ? `${running}: pause or reset it in the Mission tab` : errors.length ? "Fix the errors first" : "Simulate it (Mission tab)"}
+            >
+              {running ? `▶ ${running}…` : "▶ Simulate"}
+            </button>
+            <button className="btn btn-xs" onClick={() => void open(false)}>
+              {mine ? "Show in Mission tab" : "Open in Mission tab"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Why a mission card cannot start a simulation now (null: it can). */
+export function cardRunState(run: {kind: string; playing: boolean; finished: boolean} | null | undefined): string | null {
+  if (!run || run.finished) return null;
+  if (run.kind === "live") return "Running live";
+  return run.playing ? "Simulating" : null;
+}
+
+type ToolItem = Extract<ChatItem, {type: "tool"}>;
+
+/** One turn's map lookups (Cypher queries, searches) behind one disclosure:
+ *  "Looked up the map · 3 queries, 2 retried"; failed ones show a short reason. */
+function LookupGroup({tools}: {tools: ToolItem[]}) {
+  const sum = lookupSummary(tools);
+  return (
+    <details className="msg msg-tool msg-lookups" data-testid="chat-lookups">
+      <summary>
+        <span className="lookup-title">Looked up the map</span> <span className="muted small chip-nowrap">{sum.text}</span>
+      </summary>
+      <div className="lookup-list">
+        {tools.map((t, k) => (
+          <ToolCard key={k} it={t} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function ToolCard({it}: {it: Extract<ChatItem, {type: "tool"}>}) {
   if (it.name === "run_cypher") {
     const q = String((it.args as {query?: string})?.query ?? "");
@@ -456,13 +689,19 @@ function ToolCard({it}: {it: Extract<ChatItem, {type: "tool"}>}) {
     const cols = r.columns ?? (r.rows?.[0] ? Object.keys(r.rows[0]) : []);
     const label = r.error ? "error" : `${r.row_count ?? 0}${r.truncated ? "+" : ""} row${r.row_count === 1 ? "" : "s"}`;
     return (
-      <details className="msg msg-tool msg-cypher" open={Boolean(r.error)}>
+      <details className="msg msg-tool msg-cypher">
         <summary>
-          <Badge tone={r.error ? "err" : "info"}>Cypher</Badge> <span className="muted small">{label}</span> <span className="mono small cypher-peek">{q.replace(/\s+/g, " ")}</span>
+          <Badge tone={r.error ? "err" : "info"}>Cypher</Badge> <span className="muted small chip-nowrap">{label}</span> <span className="mono small cypher-peek">{q.replace(/\s+/g, " ")}</span>
         </summary>
         <pre className="mono small cypher-query">{q}</pre>
         {r.error ? (
-          <div className="small tone-err mono">{r.error}</div>
+          <div className="small tone-err cypher-err">
+            {cypherErrorShort(r.error)}
+            <details className="cypher-err-full">
+              <summary className="muted">full error</summary>
+              <pre className="mono small">{r.error}</pre>
+            </details>
+          </div>
         ) : r.rows && r.rows.length > 0 ? (
           <div className="table-wrap cypher-table">
             <table className="table small">

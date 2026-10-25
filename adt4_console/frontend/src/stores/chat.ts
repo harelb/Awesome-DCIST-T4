@@ -15,6 +15,8 @@ interface ChatStore {
   busy: boolean;
   /** index of the current turn's first item (scroll anchor) */
   turnStart: number;
+  /** text to put in the message box (e.g. "Re-plan in chat"); the panel takes it */
+  prefill: string | null;
 }
 
 /** What is kept on disk: no busy flag, and no embedded candidate images (data
@@ -34,7 +36,12 @@ function load(): Pick<ChatStore, "items" | "transcript"> {
   return {items: [], transcript: []};
 }
 
-export const useChat = create<ChatStore>(() => ({...load(), busy: false, turnStart: 0}));
+export const useChat = create<ChatStore>(() => ({...load(), busy: false, turnStart: 0, prefill: null}));
+
+/** Put `text` in the chat's message box (the mission planner shows the chat pane). */
+export function prefillChat(text: string): void {
+  useChat.setState({prefill: text});
+}
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 useChat.subscribe((s, prev) => {

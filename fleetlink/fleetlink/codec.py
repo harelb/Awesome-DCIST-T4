@@ -27,7 +27,9 @@ Graph wire format (``encode_graph`` / ``GraphState.delta``)::
 
 Mesh tiles: faces are bucketed by centroid into ``tile_size`` cubes; each
 tile carries its own vertex subset quantised to ``QUANT`` metres relative to
-the tile origin as int16, uint8 colours and uint32 indices.
+the tile origin as int16, uint8 colours and uint32 indices. For the browser
+the console also serves them coarser (``decimate_tiles``) and packed for gzip
+(``pack_tile``, mirrored by ``frontend/src/codec.ts decodePackedTile``).
 """
 
 from __future__ import annotations
@@ -638,6 +640,158 @@ def decode_tile(tile: dict):
     col = np.frombuffer(tile["col"], np.uint8).reshape(-1, 3)
     idx = np.frombuffer(tile["idx"], np.uint32).reshape(-1, 3)
     return pos, col, idx
+
+
+def decimate_tiles(tiles: dict[str, dict], cell: float = DEFAULT_DECIMATE_CELL) -> dict[str, dict]:
+    """``decimate_mesh`` applied to already tiled meshes, keeping every tile's key.
+
+    Vertex clustering runs over *all* tiles at once, in the tiles' integer
+    (``scale``) coordinates, so a vertex shared by two tiles lands in the same
+    cluster in both and every tile gets the very same cluster vertex: no cracks
+    between tiles. Each face stays in the tile it came from (unlike decimating
+    the whole mesh and re-tiling), so a coarse tile replaces exactly its full
+    tile on the client. Tiles left without faces are omitted.
+    Output tiles have the ``tile_mesh`` layout (``hash`` of the decimated data).
+    """
+    items = [(k, t) for k, t in tiles.items() if t.get("nf")]
+    if not items or not cell or cell <= 0:
+        return {k: t for k, t in items}
+    scale = float(items[0][1]["scale"])
+    cq = max(1, int(round(cell / scale)))  # cell in quantisation steps
+    qs, cols, offs = [], [], [0]
+    for _, t in items:
+        oq = np.round(np.asarray(t["origin"], np.float64) / scale).astype(np.int64)
+        q = np.frombuffer(t["pos"], np.int16).reshape(-1, 3).astype(np.int64) + oq
+        qs.append(q)
+        cols.append(np.frombuffer(t["col"], np.uint8).reshape(-1, 3))
+        offs.append(offs[-1] + len(q))
+    q = np.concatenate(qs)
+    col = np.concatenate(cols).astype(np.float64)
+    c = np.floor_divide(q, cq)
+    c -= c.min(axis=0)
+    dims = c.max(axis=0) + 1
+    lin = (c[:, 0] * dims[1] + c[:, 1]) * dims[2] + c[:, 2]
+    keys, inv = np.unique(lin, return_inverse=True)
+    n = len(keys)
+    cnt = np.bincount(inv, minlength=n).astype(np.float64)
+    mq = np.empty((n, 3), np.int64)  # cluster mean, rounded to the quantisation grid
+    mc = np.empty((n, 3), np.uint8)
+    for k in range(3):
+        mq[:, k] = np.round(np.bincount(inv, weights=q[:, k], minlength=n) / cnt)
+        mc[:, k] = np.clip(np.round(np.bincount(inv, weights=col[:, k], minlength=n) / cnt), 0, 255)
+    out = {}
+    for i, (key, t) in enumerate(items):
+        idx = np.frombuffer(t["idx"], np.uint32).reshape(-1, 3).astype(np.int64)
+        f = inv[offs[i] + idx]
+        f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+        if len(f) == 0:
+            continue
+        srt = np.sort(f, axis=1)
+        _, first = np.unique((srt[:, 0] * n + srt[:, 1]) * n + srt[:, 2], return_index=True)
+        f = f[np.sort(first)]
+        used, remap = np.unique(f.reshape(-1), return_inverse=True)
+        oq = np.round(np.asarray(t["origin"], np.float64) / scale).astype(np.int64)
+        pq = np.clip(mq[used] - oq, -32768, 32767).astype(np.int16)
+        pc = mc[used]
+        pi = remap.reshape(-1, 3).astype(np.uint32)
+        h = hashlib.blake2b(digest_size=8)
+        for arr in (pq, pc, pi):
+            h.update(arr.tobytes())
+        out[key] = {
+            "key": key,
+            "origin": list(t["origin"]),
+            "scale": scale,
+            "pos": pq.tobytes(),
+            "col": pc.tobytes(),
+            "idx": pi.tobytes(),
+            "nv": int(len(used)),
+            "nf": int(len(pi)),
+            "hash": h.hexdigest(),
+        }
+    return out
+
+
+# Packed tiles (encoding 2): the tile_mesh content laid out to compress well
+# under gzip (~37% smaller than a gzipped plain tile on Hydra meshes). Vertices
+# are reordered by first use in the face list, then
+#   pos: per axis x, y, z: zigzag(int16 wrapping delta of the quantised
+#        coordinate) as uint16, stored as a low-byte plane then a high-byte plane
+#   col: per channel r, g, b: uint8 wrapping delta
+#   idx: the flat index list (3 per face) as zigzag(wrapping delta) in ``ib``
+#        bytes (2 when nv <= 65536, else 4), one byte plane per byte, low first
+# frontend/src/codec.ts decodePackedTile is the browser decoder.
+PACKED_TILE_ENCODING = 2
+
+
+def _zigzag_delta(a: np.ndarray, bits: int) -> np.ndarray:
+    ut = np.uint16 if bits == 16 else np.uint32
+    st = np.int16 if bits == 16 else np.int32
+    d = np.diff(a.astype(ut), prepend=ut(0)).view(st).astype(np.int64)
+    return ((d << 1) ^ (d >> (bits - 1))).astype(ut)
+
+
+def _unzigzag_cumsum(z: np.ndarray, bits: int) -> np.ndarray:
+    z = z.astype(np.int64)
+    d = (z >> 1) ^ -(z & 1)
+    return np.cumsum(d) & ((1 << bits) - 1)
+
+
+def _planes(a: np.ndarray) -> bytes:
+    return np.ascontiguousarray(a).view(np.uint8).reshape(-1, a.itemsize).T.tobytes()
+
+
+def _unplanes(b: bytes, offset: int, n: int, width: int) -> np.ndarray:
+    p = np.frombuffer(b, np.uint8, n * width, offset).reshape(width, n).astype(np.int64)
+    v = np.zeros(n, np.int64)
+    for i in range(width):
+        v |= p[i] << (8 * i)
+    return v
+
+
+def pack_tile(tile: dict) -> dict:
+    """``tile_mesh`` tile → packed tile (encoding 2; same mesh, vertices reordered)."""
+    q = np.frombuffer(tile["pos"], np.int16).reshape(-1, 3)
+    c = np.frombuffer(tile["col"], np.uint8).reshape(-1, 3)
+    flat = np.frombuffer(tile["idx"], np.uint32).astype(np.int64)
+    _, first = np.unique(flat, return_index=True)
+    order = flat[np.sort(first)]  # vertices by first use (unused ones dropped)
+    remap = np.zeros(max(len(q), 1), np.int64)
+    remap[order] = np.arange(len(order))
+    q, c, flat = q[order], c[order], remap[flat]
+    ib = 2 if len(order) <= 65536 else 4
+    return {
+        "key": tile["key"],
+        "origin": list(tile["origin"]),
+        "scale": tile["scale"],
+        "nv": int(len(order)),
+        "nf": int(len(flat) // 3),
+        "hash": tile["hash"],
+        "enc": PACKED_TILE_ENCODING,
+        "ib": ib,
+        "pos": b"".join(_planes(_zigzag_delta(q[:, k], 16)) for k in range(3)),
+        "col": b"".join(np.diff(c[:, k], prepend=np.uint8(0)).tobytes() for k in range(3)),
+        "idx": _planes(_zigzag_delta(flat, 8 * ib)),
+    }
+
+
+def unpack_tile(packed: dict) -> dict:
+    """Packed tile → ``tile_mesh`` tile (with the packed vertex order)."""
+    nv, nf, ib = int(packed["nv"]), int(packed["nf"]), int(packed["ib"])
+    pb, cb = packed["pos"], packed["col"]
+    q = np.stack([_unzigzag_cumsum(_unplanes(pb, 2 * nv * k, nv, 2), 16) for k in range(3)], 1)
+    c = np.stack([np.cumsum(np.frombuffer(cb, np.uint8, nv, nv * k).astype(np.int64)) & 255 for k in range(3)], 1)
+    idx = _unzigzag_cumsum(_unplanes(packed["idx"], 0, 3 * nf, ib), 8 * ib)
+    return {
+        "key": packed["key"],
+        "origin": list(packed["origin"]),
+        "scale": packed["scale"],
+        "pos": q.astype(np.uint16).view(np.int16).tobytes(),
+        "col": c.astype(np.uint8).tobytes(),
+        "idx": idx.astype(np.uint32).tobytes(),
+        "nv": nv,
+        "nf": nf,
+        "hash": packed["hash"],
+    }
 
 
 def tile_manifest(tiles: dict[str, dict]) -> dict[str, str]:

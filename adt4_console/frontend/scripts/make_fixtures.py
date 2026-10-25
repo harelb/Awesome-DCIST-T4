@@ -11,6 +11,7 @@ Writes:
   tests/fixtures/delta_small.msgpack   + delta_small.json   (delta + expected state after apply)
   tests/fixtures/tile_small.msgpack    + tile_small.json    (expected decoded vertices/faces)
   tests/fixtures/graph_places.msgpack  + graph_places.json  (TravNode ray boundaries: radii/states)
+  tests/fixtures/tile_packed.msgpack   + tile_packed.json   (packed tile, encoding 2)
   tests/fixtures/mock/                 (a synthetic building for scripts/mock-server.mjs)
 """
 
@@ -438,10 +439,43 @@ def mock_fixtures():
     )
 
 
+def packed_tile_fixtures():
+    """codec.pack_tile output + the tile it decodes to (positions in the packed
+    vertex order): a wavy mesh with shuffled faces (negative deltas). The
+    4-byte index variant is covered in tests/codec.test.ts (too big to keep)."""
+    rng = np.random.default_rng(11)
+    n = 23
+    xs = np.linspace(0.3, 7.6, n)
+    X, Y = np.meshgrid(xs, xs)
+    Z = 0.4 * np.sin(X * 2.1) * np.cos(Y * 1.3) + 0.5
+    pos = np.stack([X.ravel(), Y.ravel(), Z.ravel()], 1).astype(np.float32)
+    col = rng.integers(0, 256, (len(pos), 3), dtype=np.uint8)
+    faces = []
+    for i in range(n - 1):
+        for j in range(n - 1):
+            a = i * n + j
+            faces += [[a, a + 1, a + n], [a + 1, a + n + 1, a + n]]
+    faces = rng.permutation(np.asarray(faces, np.uint32))
+    ((_, tile),) = codec.tile_mesh(pos, col, faces, tile_size=8.0).items()
+    packed = codec.pack_tile(tile)
+    (FIX / "tile_packed.msgpack").write_bytes(packb(packed))
+    p, c, i = codec.decode_tile(codec.unpack_tile(packed))
+    (FIX / "tile_packed.json").write_text(
+        json.dumps(
+            {
+                "key": packed["key"], "nv": packed["nv"], "nf": packed["nf"], "ib": packed["ib"],
+                "pos": [round(float(v), 4) for v in p.reshape(-1)],
+                "col": [int(v) for v in c.reshape(-1)],
+                "idx": [int(v) for v in i.reshape(-1)],
+            },
+        )
+    )  # fmt: skip
+
 if __name__ == "__main__":
     FIX.mkdir(parents=True, exist_ok=True)
     if not HEAVY:
         small_fixtures()
         places_fixture()
+        packed_tile_fixtures()
     mock_fixtures()
     print("fixtures written to", FIX)

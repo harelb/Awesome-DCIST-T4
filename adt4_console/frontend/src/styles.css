@@ -177,6 +177,34 @@ code,
   min-width: 0;
   min-height: 0;
 }
+.sidenav .grow {
+  flex: 1;
+}
+.nav-toggle {
+  background: none;
+  border: 0;
+  border-left: 3px solid transparent;
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+/* icon-only nav (Shell's collapse toggle; also forced at <= 1100 px below) */
+.shell.nav-collapsed {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
+.shell.nav-collapsed .navlabel,
+.shell.nav-collapsed .brand-text {
+  display: none;
+}
+.shell.nav-collapsed .brand {
+  justify-content: center;
+  padding: 4px 0 14px;
+}
+.shell.nav-collapsed .navlink {
+  justify-content: center;
+  padding: 10px 0;
+}
 .topbar {
   display: flex;
   align-items: center;
@@ -365,6 +393,19 @@ code,
   }
 }
 .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: saturate(0.2);
+}
+/* a disabled primary must not read as the call to action */
+.btn-primary:disabled,
+.btn-danger:disabled {
+  background: var(--bg-3);
+  border-color: var(--line-2);
+  color: var(--muted);
+  opacity: 0.7;
+}
+.segmented button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -1479,7 +1520,8 @@ input[type="checkbox"] {
 .vtoolbar.top-left {
   top: 10px;
   left: 10px;
-  right: 340px;
+  /* --tr-w: the top-right toolbar's measured width (ViewerPage) */
+  right: calc(var(--tr-w, 330px) + 20px);
 }
 .vtoolbar.top-right {
   top: 10px;
@@ -1645,7 +1687,9 @@ input[type="checkbox"] {
   bottom: 40px;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(53, 208, 127, 0.16);
+  /* opaque: it sits over bright satellite imagery */
+  background: color-mix(in srgb, var(--ok) 14%, rgba(16, 22, 29, 0.94));
+  backdrop-filter: blur(4px);
   border: 1px solid var(--ok);
   color: #c9f7de;
   padding: 6px 12px;
@@ -1654,7 +1698,31 @@ input[type="checkbox"] {
   display: flex;
   gap: 10px;
   align-items: center;
-  white-space: nowrap;
+  width: max-content;
+  max-width: calc(100% - 24px);
+}
+.pick-banner .pick-text {
+  min-width: 0;
+}
+/* the overflow menu of a narrow map's toolbar */
+.vtoolbar-more {
+  position: relative;
+}
+.vtoolbar-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px;
+  min-width: 200px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 50;
 }
 .toast {
   position: absolute;
@@ -2193,9 +2261,6 @@ input[type="checkbox"] {
   .vright {
     width: 340px;
   }
-  .vtoolbar.top-left {
-    right: 300px;
-  }
 }
 @media (max-width: 900px) {
   .vleft,
@@ -2405,7 +2470,7 @@ input[type="checkbox"] {
 }
 
 /* ---------- phones (≤640px; PHONE_MQ in lib/media.ts) ---------- */
-@media (max-width: 640px) {
+@media (max-width: 640px), (max-height: 480px) and (pointer: coarse) {
   .shell {
     display: flex;
     flex-direction: column;
@@ -2725,10 +2790,18 @@ input[type="checkbox"] {
     font-size: 11px;
   }
   .viewer.phone .pick-banner {
-    bottom: calc(var(--sheet-h, 0px) + 36px);
+    bottom: calc(var(--sheet-h, 0px) + 36px + env(safe-area-inset-bottom));
     white-space: normal;
     width: max-content;
     max-width: calc(100% - 20px);
+    flex-wrap: wrap;
+  }
+  /* the new-area popover sits at the top: the on-screen keyboard rises from the bottom */
+  .viewer.phone .area-popover {
+    top: calc(56px + env(safe-area-inset-top));
+    bottom: auto;
+    max-height: calc(100dvh - 140px);
+    overflow-y: auto;
   }
   .viewer.phone .toast {
     top: 64px;
@@ -2743,6 +2816,7 @@ input[type="checkbox"] {
   .btn-xs,
   .input,
   .input-sm,
+  .input-xs,
   .segmented button {
     min-height: 44px;
     min-width: 44px;
@@ -2763,9 +2837,32 @@ input[type="checkbox"] {
   /* iOS zooms the page when a focused field is under 16px */
   .input,
   .input-sm,
+  .input-xs,
   textarea,
   select {
     font-size: 16px;
+  }
+  /* .input-xs is defined further down (mission planner): win on specificity */
+  .input.input-xs,
+  select.input-xs {
+    height: auto;
+    font-size: 16px;
+  }
+  .mission-chips .chip button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .area-list li,
+  .mission-roster .roster-main {
+    flex-wrap: wrap;
+  }
+  /* the base rules are further down: win on specificity */
+  .mission-panel .mission-roster .start-field input.input-xs {
+    width: 92px;
+  }
+  .mission-panel .mission-roster .start-field input.input-xs[aria-label$="latitude (°)"],
+  .mission-panel .mission-roster .start-field input.input-xs[aria-label$="longitude (°)"] {
+    width: 124px;
   }
   .toggle,
   .mini-check,
@@ -2838,8 +2935,19 @@ input[type="checkbox"] {
 }
 
 /* 3D view text labels (hydra_visualizer text adapters) */
-.viz-text-wrap {
+/* one layer over the canvas; GraphLayers.tsx places (and declutters) the labels */
+.viz-text-layer {
+  position: absolute;
+  inset: 0;
   pointer-events: none;
+  overflow: hidden;
+  z-index: 5;
+}
+.viz-text-layer > .viz-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  will-change: transform;
 }
 .viz-text {
   font: 11px/1.1 var(--sans);
@@ -3484,4 +3592,839 @@ input[type="checkbox"] {
 }
 .plan-phx-chips {
   margin: -2px 0 2px;
+}
+
+/* ------------------------------------------------------------ mission planner */
+.vleft-chat {
+  overflow: hidden;
+  padding-bottom: 8px;
+}
+.vleft-switch {
+  margin-bottom: 6px;
+}
+.vleft-switch .segmented {
+  width: 100%;
+}
+.vleft-switch .segmented button {
+  flex: 1;
+}
+.mission-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.mission-panel .row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.mission-panel .gap {
+  gap: 6px;
+}
+.mission-panel .wrap {
+  flex-wrap: wrap;
+}
+.mission-panel .grow {
+  flex: 1;
+  min-width: 0;
+}
+.mission-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mission-roster li {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.mission-roster li:last-child {
+  border-bottom: none;
+}
+.mission-roster .roster-main {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+/* an agent's start (StartEditor.tsx): typed x/y or lat/lon, live pose, problems */
+.start-edit {
+  padding-left: 14px;
+  min-width: 0;
+}
+.start-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.start-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+}
+.mission-roster .start-field input.input-xs {
+  width: 72px;
+}
+.mission-roster .start-field input.input-xs[aria-label$="latitude (°)"],
+.mission-roster .start-field input.input-xs[aria-label$="longitude (°)"] {
+  width: 104px;
+}
+.input.invalid {
+  border-color: var(--err);
+}
+.start-msg {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+}
+.start-msg.warn {
+  color: var(--warn);
+}
+.start-msg.err {
+  color: var(--err);
+}
+.start-opts {
+  margin-bottom: 4px;
+  align-items: center;
+}
+.mission-drag-tag > div {
+  font: 600 11px var(--sans, sans-serif);
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-42px);
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(10, 14, 20, 0.82);
+  color: #fff;
+  text-align: center;
+}
+.mission-drag-tag em {
+  font-style: normal;
+  color: #7ee2a0;
+}
+.mission-drag-tag .hint {
+  font-weight: 400;
+  opacity: 0.75;
+}
+.mission-roster .input-xs {
+  min-width: 0;
+}
+.mission-roster input.input-xs {
+  width: 76px;
+  flex: none;
+}
+.mission-roster select.input-xs {
+  width: auto;
+  flex: 1 1 0;
+}
+.mission-roster .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+}
+.input-xs {
+  font-size: 12px;
+  padding: 2px 4px;
+  height: 24px;
+}
+.btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.mission-chips {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.mission-chips .chip {
+  font-size: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 1px 4px 1px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.mission-chips .chip button {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.chip-plant {
+  border-color: #ff9f1a !important;
+}
+.mission-transport {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.mission-timeline {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 6px 2px;
+  background: var(--bg-2);
+  cursor: pointer;
+  user-select: none;
+}
+.tl-row {
+  display: flex;
+  align-items: center;
+  height: 22px;
+  min-width: 0;
+}
+.tl-agent {
+  width: 58px;
+  flex: none;
+  font: 600 11px var(--mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tl-track {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  background: var(--bg-3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tl-bar {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 14px;
+  color: #000;
+  text-align: center;
+  overflow: hidden;
+  opacity: 0.55;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+}
+.tl-active {
+  opacity: 1;
+  box-shadow: 0 0 0 1px #fff inset;
+}
+.tl-done {
+  opacity: 0.9;
+}
+.tl-failed {
+  background: var(--err) !important;
+  opacity: 1;
+}
+.tl-pending {
+  opacity: 0.35;
+}
+.tl-cursor {
+  position: absolute;
+  top: 2px;
+  bottom: 14px;
+  width: 2px;
+  background: var(--warn);
+  pointer-events: none;
+}
+.tl-axis {
+  display: flex;
+  justify-content: space-between;
+  padding-left: 58px;
+}
+.mission-issues {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  font-size: 12px;
+}
+.mission-issues .error {
+  color: var(--err);
+}
+.mission-issues .warning {
+  color: var(--warn);
+}
+.mission-tasks {
+  margin: 4px 0;
+  padding-left: 16px;
+}
+.mission-tasks .ts-done {
+  opacity: 0.6;
+}
+.mission-tasks .ts-active {
+  color: var(--accent);
+}
+.mission-tasks .ts-failed {
+  color: var(--err);
+}
+.mission-cands {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mission-cand {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px;
+}
+.mission-cand.pending {
+  border-color: var(--warn);
+}
+.mission-cand .thumb {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+}
+.mission-cand .thumb img {
+  width: 96px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 4px;
+  display: block;
+}
+.mission-imgview {
+  position: absolute;
+  right: 12px;
+  bottom: 40px;
+  z-index: 70;
+  width: min(680px, calc(100% - 24px));
+  background: var(--bg-1);
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.mission-imgview .row {
+  display: flex;
+  align-items: center;
+}
+.mission-imgview .gap {
+  gap: 6px;
+}
+.mission-imgview .grow {
+  flex: 1;
+}
+.mission-imgview .imgwrap {
+  position: relative;
+  cursor: crosshair;
+  touch-action: none;
+}
+.mission-imgview img {
+  width: 100%;
+  display: block;
+  border-radius: 4px;
+  user-select: none;
+}
+.mission-imgview .box {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid var(--warn);
+}
+.mission-imgview .box-new {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+.mission-label,
+.mission-agent-tag span,
+.mission-plant-tag,
+.mission-cand-tag {
+  font: 600 11px var(--sans, sans-serif);
+  white-space: nowrap;
+  pointer-events: none;
+  color: var(--viz-text, #fff);
+  text-shadow: 0 0 3px var(--viz-halo, #000), 0 0 3px var(--viz-halo, #000);
+}
+.mission-agent-tag span {
+  display: inline-block;
+  transform: translateY(-14px);
+  border-left: 3px solid;
+  padding-left: 3px;
+}
+.mission-agent-tag em {
+  font-style: normal;
+  font-weight: 400;
+  opacity: 0.8;
+}
+.mission-cand-tag.pending {
+  color: #ffd33d;
+}
+.mission-cand-tag.approved {
+  color: #34d058;
+}
+.mission-card .mission-card-agents {
+  margin: 4px 0;
+  padding-left: 16px;
+}
+.mission-card.superseded {
+  opacity: 0.6;
+}
+.mission-transport select.input-xs {
+  width: auto;
+}
+
+/* ---------------------------------------------------------- map edit (§17) */
+.map-edit .vsec-head .toggle {
+  margin-left: auto;
+}
+.edit-selection,
+.edit-lasso,
+.edit-staged {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.edit-staged {
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.map-edit-diff {
+  margin: 4px 0;
+  padding-left: 16px;
+  max-height: 160px;
+  overflow: auto;
+}
+.map-edit-diff li {
+  overflow-wrap: anywhere;
+}
+.edit-sub {
+  margin-top: 6px;
+}
+.edit-sub > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 2px 0;
+}
+.edit-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  max-height: 260px;
+  overflow: auto;
+}
+.edit-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 3px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
+}
+.edit-history li > div {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.edit-history li.undone > div {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+.region-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1.5px solid;
+  background: color-mix(in srgb, var(--bg-2) 85%, transparent);
+  white-space: nowrap;
+}
+.edit-toast {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  max-width: min(640px, calc(100% - 32px));
+}
+/* ------------------------------------------------- areas, fixes, assumptions */
+.disabled-why {
+  margin: 2px 0 4px;
+}
+.area-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.area-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.area-list .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+}
+.area-list .swatch-nogo {
+  border-radius: 50%;
+}
+.area-list .area-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 9em;
+}
+.area-popover {
+  position: absolute;
+  bottom: 86px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(400px, calc(100% - 24px));
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  padding: 10px 12px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.area-popover .row {
+  display: flex;
+  align-items: center;
+}
+.area-popover .gap {
+  gap: 8px;
+}
+.area-field {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.area-field .segmented {
+  width: 100%;
+}
+.area-field .segmented button {
+  flex: 1;
+}
+.mission-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+.mission-issues li {
+  margin: 2px 0;
+}
+.issue-fixes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.issue-fixes .btn {
+  color: var(--text);
+}
+.mission-assumptions {
+  border-left: 3px solid var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn);
+  padding: 4px 8px;
+  margin: 4px 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.mission-assumptions ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+.edit-fields {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0;
+}
+.edit-fields label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+.edit-fields label .input {
+  min-width: 0;
+}
+
+/* phones held sideways (~844 x 390): every pixel of height goes to the map */
+@media (max-height: 480px) and (pointer: coarse) {
+  .topbar {
+    padding-top: calc(2px + env(safe-area-inset-top));
+    padding-bottom: 2px;
+  }
+  .topbar .btn {
+    min-height: 40px;
+  }
+  .tab {
+    flex-direction: row;
+    min-height: 44px;
+    padding: 2px;
+    gap: 6px;
+  }
+  .viewer.phone .area-popover {
+    top: calc(8px + env(safe-area-inset-top));
+    max-height: calc(100dvh - 16px);
+  }
+  .viewer.phone .pick-banner {
+    bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ---- mission planner P1 (UX review) ---- */
+/* map edit mode: a frame round the map and an opaque strip saying where edits go
+   (immediate: red, straight into Neo4j; staged: amber, waits for Publish) */
+.vcanvas.map-edit-on::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid var(--err);
+  pointer-events: none;
+  z-index: 45;
+}
+.vcanvas.map-edit-staged::after {
+  border-color: var(--warn);
+}
+.live-edit-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 46;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 30px;
+  padding: 3px 12px;
+  font-size: 13px;
+  color: #fff;
+  background: #b3261e;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
+.live-edit-strip.staged {
+  color: #1d1300;
+  background: #f0a20a;
+}
+.live-edit-strip .btn {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.5);
+  color: inherit;
+}
+.vcanvas.map-edit-on .vtoolbar.top-left,
+.vcanvas.map-edit-on .vtoolbar.top-right {
+  top: 42px;
+}
+.vcanvas.map-edit-on .canvas-notices {
+  top: 88px;
+}
+.edit-toast > span {
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .vcanvas.map-edit-on .vtoolbar.top-left {
+    top: 84px;
+  }
+}
+.viewer.phone .vcanvas.map-edit-on .vtoolbar.phone-bar {
+  top: 40px;
+}
+.viewer.phone .vcanvas.map-edit-on .vtoolbar.phone-bar2 {
+  top: 90px;
+}
+.viewer.phone .live-edit-strip {
+  font-size: 12px;
+  gap: 8px;
+  padding-top: calc(3px + env(safe-area-inset-top));
+}
+
+/* notices under the toolbar, stacked: toasts, the edit undo toast, detections */
+/* under the top-right toolbar (one row), clear of the search box on the left */
+.canvas-notices {
+  position: absolute;
+  top: 56px;
+  right: 10px;
+  z-index: 42;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  width: max-content;
+  max-width: min(460px, calc(100% - 20px));
+  pointer-events: none;
+}
+.canvas-notices > * {
+  pointer-events: auto;
+}
+.canvas-notices > .toast {
+  position: static;
+  transform: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.viewer.phone .canvas-notices {
+  top: 100px;
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  align-items: center;
+}
+.detect-toast {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* side-panel tabs: a count on Mission, the More menu on /mission */
+/* a corner badge: the tab keeps its width (tight phone strips) */
+.vright-head .segmented button {
+  position: relative;
+}
+.tab-badge {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  color: #1d1300;
+  background: var(--warn);
+}
+.tab-more {
+  position: relative;
+  flex: none;
+}
+.tab-more-btn {
+  white-space: nowrap;
+}
+.tab-more-btn.on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tab-more-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px;
+  min-width: 150px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.tab-more-menu .btn {
+  justify-content: flex-start;
+}
+
+/* agent roster rows: id line, then the kind / robot selects (never truncated) */
+.mission-roster .roster-main {
+  flex-wrap: wrap;
+  row-gap: 3px;
+}
+.mission-roster .roster-id {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 0 auto;
+}
+.mission-roster .roster-id input {
+  width: 84px;
+}
+.mission-roster .roster-selects {
+  display: flex;
+  gap: 4px;
+  flex: 1 0 auto;
+  padding-left: 14px;
+}
+.mission-roster .roster-selects select {
+  flex: 1 1 auto;
+  min-width: max-content;
+}
+.roster-diff {
+  flex-basis: 100%;
+}
+.mission-cand.flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  transition: outline-color 0.3s;
+}
+
+/* chat: a turn's lookups behind one disclosure; chips never wrap per letter */
+.chip-nowrap {
+  white-space: nowrap;
+  flex: none;
+}
+.msg-lookups {
+  width: 95%;
+}
+.msg-lookups > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.msg-lookups .lookup-title {
+  white-space: nowrap;
+}
+.lookup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.lookup-list .msg-tool {
+  width: 100%;
+  border-style: solid;
+}
+.cypher-err {
+  margin-top: 4px;
+}
+.cypher-err-full pre {
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow: auto;
 }

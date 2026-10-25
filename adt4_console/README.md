@@ -117,9 +117,115 @@ The header shows the server, WebSocket ("live"), ROS and fleetlink status, plus 
   * toolbar: robot focus, search (labels, names, symbols), follow a robot, drive layout, 3D/top camera;
   * right tabs: **Inspect** (selected node, attributes, images; with nothing selected,
     **graph statistics** for each enabled source: nodes per layer, edges per kind, mesh size and top
-    object labels), **Plan** (goto/TSP picking, PDDL, language goals, current plan and executor
+    object labels), **Mission** and **Map** (the mission planner's tabs, below; *Map* edits a Neo4j
+    map), **Plan** (goto/TSP picking, PDDL, language goals, current plan and executor
     pause/resume), **Chat**, **Live link** (per-robot staleness, latency, budgets and auto mode;
     see below), **Teleop**, **Images** and **Camera**.
+* **Mission planner** (`#/mission`). Multi-agent missions written in natural language, planned
+  over the satellite view, simulated, then executed (API.md §14–16).
+  * The left pane is the **Mission chat**. Describe the mission ("quad1 search A1 for a crate; when
+    found spot1 inspects it, spot2 guards the gate"). The assistant looks things up with Cypher and
+    proposes a mission card: *Simulate* or *Open in Mission tab*. Ask for changes to revise it.
+    A proposed mission opens in the Mission tab at once (on a phone the chat stays up; the side
+    panel opens on it). A card for an older revision says *Superseded by rN — open latest*, and
+    its *Simulate* is off while that mission's simulation plays or a live run is going. The
+    assistant's map lookups fold into one line per turn (*Looked up the map · 3 queries, 2
+    retried*); inside, a failed query shows a one-line reason with the full Neo4j error below.
+    It does not substitute silently: an area or class the map does not have gets a clarifying
+    question ("There's no area called 'courtyard': draw it, or pick one of: …"), and whatever it
+    still interpreted is listed in amber on the card (*Assumed*).
+  * The **Mission** tab:
+    * the mission picker (each with its date / time; missions with errors are marked "⚠ n
+      errors"; names are unique) and planner choice (chat, or omniplanner for ground-only
+      commands). *Update mission from roster* puts the roster's starts / robots / kinds, the
+      no-go zones and the mock objects into the open mission (a new revision); it says what
+      differs and is off when nothing does;
+    * **⌖ Fit mission** (map toolbar, *Fit* in the tab, key **F**) frames the mission's agents,
+      paths and areas clear of the toolbars; opening a mission and *Simulate* do it too;
+    * the transport (simulate / pause / speed / reset / auto-approve / *Execute…* / *Abort*) and a
+      per-agent timeline (click it to jump); when Simulate or Execute is off, the reason is
+      written under it;
+    * issues and the task list. A target the map no longer has (e.g. `O(17)` after a re-ingest)
+      offers *Pick on map* (click an object, a place or a point: the new target), *Drop task* and
+      *Re-plan in chat* (puts the mission and the problem in the chat box). A mission planned on
+      another map version, or before versions were recorded, says it may be stale, with *Accept
+      current map*;
+    * **detections**: quad images with *Accept* (this run only), *Add to map* (Neo4j object +
+      image, ground robots can go to it; still offered after *Accept*) and *Reject*. Click an
+      image to open it, and drag a box in it to report something yourself. Detections waiting
+      for review put a count on the Mission tab and a notice over the map ("quad1 found 'crate'
+      — review"; *Review* scrolls to it);
+    * the **agent roster** (up to 5; spot/husky/quad, *sim only* or bound to a real robot).
+      Opening a mission puts its agents in the roster. Each agent's **start** can be moved:
+      * type it: map *x / y* (metres, 2 decimals) or, when the map has a GPS anchor, *lat / lon*
+        (the *map x/y | lat/lon* switch); Enter or leaving the fields sets it, Esc reverts, a
+        field that is not a number is flagged and not sent. *Live pose* (bound robots only)
+        clears the start: the robot starts where it is. ⌖ arms the click-on-map start tool;
+      * or **drag the agent on the map** (mouse or finger): grabbing a glyph holds the camera for
+        that gesture, a ghost ring shows the new start with its x / y and lat/lon, release sets
+        it, Esc cancels. *Snap to places* (or Shift while dragging) lands it on the nearest place
+        node within 4 m;
+      * a moved start of an agent in the open mission is a new revision: the preview (paths,
+        timeline, issues) is recomputed at once. Starts are locked while a live run is going or a
+        simulation plays; moving one of a paused or finished simulation resets it.
+        *↶ Undo: move spot1* puts the last move back. New agents start 5 m apart (at least 4 m
+        from every other start);
+      * a start outside the map's extent is flagged in the row (a warning, not a block); a ground
+        start more than 4 m from every place gets the preview warning `start_offgraph` with
+        *Snap to nearest place*;
+    * **Areas**: one *Draw area* tool (click the corners; Enter or double-click finishes,
+      Backspace drops the last corner, Esc cancels). The popover then asks the name, the
+      purpose (*Search area* or *No-go zone*) and the scope: *This mission only* (the default)
+      or *Save to map* (an area in the Neo4j map that every mission, the chat, Cypher and
+      omniplanner see; no-go zones are mission only). The list shows both scopes (badge
+      *Mission* / *Map*) with *Save to map* and *Remove*; the chat gets them as one list;
+    * **Mock objects** for rehearsals (only the simulated quad camera sees them; a search finds
+      one when its query matches the label, and the preview warns when none does);
+    * the **satellite** controls and a lat/lon + UTM cursor readout.
+  * The **Map** tab (API.md §17, Neo4j maps only) is the one map editor: toggle *edit map*, then
+    map clicks and search hits select (Shift-click adds; *Lasso* selects inside a polygon by
+    layer) without switching tabs. One node: class, name, position, mark a place blocked; several:
+    class in one batch. *Remove* (retire, with an *Undo* toast), *Connect* / *Disconnect* two
+    nodes, *Focus on its members* for an area (the rest of the map dims), *Advanced › Group
+    selection into area*. *Add object*: type a class, click the map. *History* lists every edit
+    (who, when, via ui/chat) with *Undo*; *Snapshots* keeps named copies of the map (download as
+    zip, *Restore…* is a job with the typed confirm `restore`). While a launch is active the edits
+    are **staged**: the bar shows the staged diff and *Publish to robots* needs the typed word
+    `publish` (one unit of work, one map-version bump). The Inspector links here (*Edit in Map
+    tab*). The chat proposes edits as cards with a diff (*Approve & apply* / *Reject*).
+  * While editing the map, a red frame and strip say **Live map editing — changes write to
+    Neo4j** (amber **Staged — publish to send** while edits are staged); Undo buttons name what
+    they undo (*Undo: remove O(18)*).
+  * Keys (also in the **?** card, *Mission / map edit*): Enter / double-click finish a drawing,
+    Backspace drops a corner, Esc cancels, **Delete** removes the edit selection (undoable),
+    **Ctrl/⌘+Z** undoes the newest of your last start move and your last map edit (this browser),
+    **F** fits the mission, **Space** simulates / pauses / resumes. None fire while typing.
+  * On `/mission` the side panel shows *Mission | Map | Inspect*; Plan, Teleop, Images, Live link
+    and Camera are under *More* (phones keep the full strip). The map opens with the places
+    layers off (satellite + objects); layer changes made there are remembered for it. Object
+    labels are decluttered: the ones that fit without overlapping, the selected node's and those
+    nearest the pointer first.
+  * One map tool is armed at a time (a start, Draw area, mock objects, a new target, Lasso, Add
+    object): arming one disarms the other, and one banner over the map says what the next click
+    does. Area display: Layers › *Area boundaries* and *Colour members by area*.
+  * The side nav folds to icons (the arrow at its foot; remembered per browser, folded by default
+    up to 1366 px), and on a narrow map the toolbar keeps the essentials and puts the rest under ⋯.
+  * The map opens in the top view over **satellite imagery** (an offline tile cache, see
+    `scripts/geo/README.md`). Missions draw their planned legs (dashed = not started, bold =
+    active), search areas, camera footprints, detections and agents. Inspect works as in the viewer.
+  * Start it with the map's GPS anchor and the tile cache:
+    ```bash
+    adt4-console --neo4j penn=neo4j://localhost:7697 \
+        --geo-anchor '*=/home/harel/data/pennovation_2025/courtyard-alleyways/output/geo_anchor.json' \
+        [--tiles-live] [--quad-cmd-uri tcp://*:6555 --quad-image-uri tcp://<quad>:6556 \
+        --quad-utm-origin E N --quad-map-offset X Y]
+    # rehearsal quad (renders images from the tile cache):
+    python -m adt4_console.quad.mock_server --anchor <geo_anchor.json> --plant crate:30,-80
+    ```
+  * End-to-end capture: `node frontend/scripts/capture-mission-planner.mjs` (see its header);
+    moving starts (typed, dragged, touch-dragged on a Pixel 7):
+    `node frontend/scripts/capture-start-relocation.mjs` (it revises the mission: use a scratch console);
+    map editing: `node frontend/scripts/capture-map-edit.mjs` (it edits the map: use a scratch DB).
 * **Network.** The zenoh router and its links (deploy configs, start/stop the local router),
   the Silvus radio RSSI matrix and routes, and an iperf throughput test.
 * **Config.** Topology editor (machines, roles, addresses) and the console settings.
@@ -159,6 +265,10 @@ Two of them make you **type a word** before *Yes* is enabled:
   node count of the target.
 * `confirm`: *Launch*, when the experiment output directory already exists on a robot and
   holds at least 1 GB. Smaller directories get a plain yes/no.
+* `restore`: *Map › Snapshots › Restore…* replaces the map in Neo4j with the snapshot.
+* `publish` (in the panel, not a job): publishing staged map edits while robots are live.
+* `delete`: a permanent node delete (`DELETE /api/edit/{src}/nodes/{sym}?hard=true&confirm=delete`);
+  the UI only retires (undoable).
 
 Killing an existing `adt4_system` session before a launch is a plain yes/no. An unanswered confirm
 times out after 300 s and counts as *No*.
@@ -231,3 +341,9 @@ cd frontend && npm test
 ```
 
 Integration tests need Neo4j on `:7697` and the Pennovation run. They skip when either is missing.
+**`tests/test_integration.py::test_ingest_into_neo4j_then_serve` WIPES `:7697`** (it ingests
+Penn and then a tiny run): pass `-k "not ingest"` when someone is using that DB. The map-edit
+tests (`tests/test_map_edit.py`) only add nodes far from the map and remove everything they
+added; point them elsewhere with `ADT4_TEST_EDIT_NEO4J=neo4j://host:port`, and the snapshot
+restore test needs a throwaway Neo4j at `ADT4_TEST_SCRATCH_NEO4J` (default `:7701`, skipped
+when nothing listens; it wipes that DB).

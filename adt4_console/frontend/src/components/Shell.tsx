@@ -13,6 +13,7 @@ const P = {
   launch: "M12 2l4 6h-3v8h-2V8H8zM5 18h14v3H5z",
   maps: "M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15",
   viewer: "M12 2l9 5v10l-9 5-9-5V7zM12 12l9-5M12 12v10M12 12L3 7",
+  mission: "M12 21s-6-5.6-6-10a6 6 0 0112 0c0 4.4-6 10-6 10zM12 13a2 2 0 100-4 2 2 0 000 4zM3 21h18",
   network: "M12 20a2 2 0 100-4 2 2 0 000 4zM7.5 13.5a6.5 6.5 0 019 0M4.5 10.5a11 11 0 0115 0M1.5 7.5a15.5 15.5 0 0121 0",
   config: "M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M14 4v4M8 10v4M16 16v4",
   jobs: "M4 5h16M4 10h16M4 15h10M4 20h7",
@@ -22,6 +23,8 @@ const P = {
   sun: "M12 16a4 4 0 100-8 4 4 0 000 8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
   moon: "M20.5 14.5A8.5 8.5 0 019.5 3.5a8.5 8.5 0 1011 11z",
   more: "M3.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M10.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0M17.5 12a1.5 1.5 0 103 0 1.5 1.5 0 10-3 0",
+  collapse: "M15 6l-6 6 6 6",
+  expand: "M9 6l6 6-6 6",
 };
 
 export function Icon({name, size = 18}: {name: keyof typeof P; size?: number}) {
@@ -37,6 +40,7 @@ const NAV: {to: string; label: string; short?: string; icon: keyof typeof P}[] =
   {to: "/launch", label: "Launch", icon: "launch"},
   {to: "/maps", label: "Maps", icon: "maps"},
   {to: "/viewer", label: "Robot viewer", short: "Viewer", icon: "viewer"},
+  {to: "/mission", label: "Mission planner", short: "Mission", icon: "mission"},
   {to: "/network", label: "Network", icon: "network"},
   {to: "/config", label: "Config", icon: "config"},
 ];
@@ -212,11 +216,39 @@ function TabBar() {
   );
 }
 
+export const NAV_KEY = "adt4.nav.collapsed.v1";
+
+/** The side nav's icon-only state, remembered per browser; with nothing stored it
+ *  starts collapsed on screens up to 1366 px wide (the map needs the room). */
+export function loadNavCollapsed(width = typeof window !== "undefined" ? window.innerWidth : 1600): boolean {
+  try {
+    const v = window.localStorage.getItem(NAV_KEY);
+    if (v === "1" || v === "0") return v === "1";
+  } catch {
+    /* storage blocked: fall through to the width default */
+  }
+  return width <= 1366;
+}
+
+export function saveNavCollapsed(on: boolean) {
+  try {
+    window.localStorage.setItem(NAV_KEY, on ? "1" : "0");
+  } catch {
+    /* private window / quota: the toggle still works for this page */
+  }
+}
+
 export function Shell() {
   const backendUp = useBackendUp();
   const authError = useWsStatus(s => s.authError);
+  const [collapsed, setCollapsed] = useState(() => loadNavCollapsed());
+  const toggle = () =>
+    setCollapsed(c => {
+      saveNavCollapsed(!c);
+      return !c;
+    });
   return (
-    <div className="shell">
+    <div className={`shell ${collapsed ? "nav-collapsed" : ""}`}>
       <nav className="sidenav" aria-label="Main">
         <div className="brand">
           <Logo />
@@ -230,6 +262,11 @@ export function Shell() {
             <span className="navlabel">{n.label}</span>
           </NavLink>
         ))}
+        <span className="grow" />
+        <button className="navlink nav-toggle" onClick={toggle} aria-pressed={collapsed} aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} title={collapsed ? "Show page names" : "Icons only (more room for the map)"} data-testid="nav-toggle">
+          <Icon name={collapsed ? "expand" : "collapse"} />
+          <span className="navlabel">Collapse</span>
+        </button>
       </nav>
       <div className="main">
         <TopBar />

@@ -30,7 +30,7 @@ import time
 import msgpack
 
 # Topics whose frames carry the full current value: only the newest matters.
-LATEST_VALUE_PREFIXES = ("fleet/", "jobs", "job/", "robot/", "link/", "grid/")
+LATEST_VALUE_PREFIXES = ("fleet/", "jobs", "job/", "robot/", "link/", "grid/", "mission/")
 LATEST_VALUE_SUFFIXES = ("/version",)
 VIDEO_PREFIX = "video/"
 

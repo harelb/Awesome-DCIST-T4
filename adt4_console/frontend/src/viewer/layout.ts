@@ -1,6 +1,6 @@
 // Pure scene-graph -> render-buffer layout (hydra_visualizer-style layer stacking).
 import type {NodeRecord} from "../codec";
-import {GraphModel, layerInfo, type LayerInfo} from "../lib/graphModel";
+import {GraphModel, layerHidden, layerInfo, type LayerInfo} from "../lib/graphModel";
 import {LAYER_COLORS, nodeColor} from "../lib/palette";
 import {
   colorKeyOf,
@@ -42,10 +42,14 @@ export interface TextLabel {
   pos: [number, number, number];
   text: string;
   kind: LayerInfo["kind"];
+  /** the node it names (label decluttering keeps a picked node's) */
+  sym?: string;
 }
 
-/** Per-kind label caps: DOM labels get expensive past a few hundred. */
-export const TEXT_LIMITS: Partial<Record<LayerInfo["kind"], number>> = {objects: 400, places: 300, rooms: 200, buildings: 50};
+/** Per-kind label caps (a layer with more nodes gets no labels). The view shows
+ *  only a decluttered subset at a time (GraphLayers.tsx TextLabels), so these
+ *  bound the per-frame projection work, not the DOM. */
+export const TEXT_LIMITS: Partial<Record<LayerInfo["kind"], number>> = {objects: 2000, places: 1500, rooms: 400, buildings: 50};
 /** hydra style: kinds with per-node text, and kinds with one layer label (`draw_layer`). */
 export const HYDRA_NODE_TEXT = new Set<LayerInfo["kind"]>(["objects", "places", "rooms"]);
 export const HYDRA_LAYER_TEXT = new Set<LayerInfo["kind"]>(["agents"]);
@@ -321,7 +325,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
           max[k] = Math.max(max[k], n.pos[k]);
         }
       }
-    if (opts.hiddenLayers[key]) continue;
+    if (layerHidden(opts.hiddenLayers, nodes[0].layer, nodes[0].part)) continue;
     const z = zOffset(info, opts.flat, opts.stackHeight, style, heights);
     const shown = opts.labelFilter && info.kind === "objects" ? nodes.filter(n => opts.labelFilter!.has(n.label)) : nodes;
     const positions = new Float32Array(shown.length * 3);
@@ -371,11 +375,13 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
         let text = n.sym; // IdTextAdapter
         if (info.kind === "objects") text = `${model.labelName(n) || n.name || "?"} ${n.sym}`; // LabelIdTextAdapter
         else if (info.kind === "rooms" || info.kind === "buildings") {
-          // NameIdTextAdapter; rooms without a name fall back to their labelspace class
+          // NameIdTextAdapter, but a named room (an operator's area) is just its
+          // name: the UI calls them areas, the R(n) symbol is in Inspect; rooms
+          // without a name fall back to their labelspace class + symbol
           const nm = n.name || labelSpaceName(model, n);
-          text = nm ? `${nm} ${n.sym}` : n.sym;
+          text = n.name && info.kind === "rooms" ? n.name : nm ? `${nm} ${n.sym}` : n.sym;
         }
-        texts.push({pos: [n.pos[0], n.pos[1], n.pos[2] + z + dz], text, kind: info.kind});
+        texts.push({pos: [n.pos[0], n.pos[1], n.pos[2] + z + dz], text, kind: info.kind, sym: n.sym});
       }
     }
     const h = HYDRA_LAYERS[info.kind];
@@ -398,7 +404,7 @@ export function layoutGraph(model: GraphModel, opts: LayoutOpts): GraphLayout {
     const kind = edgeKind(a, b);
     counts[kind] = (counts[kind] ?? 0) + 1;
     if (opts.edgeKinds[kind] === false || (opts.edgeKinds[kind] === undefined && !defaultEdgeOn(kind, style))) continue;
-    if (opts.hiddenLayers[`${a.layer}/${a.part}`] || opts.hiddenLayers[`${b.layer}/${b.part}`]) continue;
+    if (layerHidden(opts.hiddenLayers, a.layer, a.part) || layerHidden(opts.hiddenLayers, b.layer, b.part)) continue;
     const pa = displayPos(a, opts.flat, opts.stackHeight, style, heights);
     const pb = displayPos(b, opts.flat, opts.stackHeight, style, heights);
     let arr = buckets.get(kind);
@@ -466,7 +472,7 @@ export function regionHulls(
   const style = opts.style ?? "classic";
   const members = new Map<string, {room: NodeRecord; pts: [number, number][]; z: number; n: number}>();
   for (const [sym, room] of parents) {
-    if (opts.hiddenLayers[`${room.layer}/${room.part}`]) continue;
+    if (layerHidden(opts.hiddenLayers, room.layer, room.part)) continue;
     const p = model.nodes.get(sym);
     if (!p) continue;
     let m = members.get(room.sym);

@@ -66,6 +66,26 @@ class Settings:
     )
     sam3_timeout_s: float = 180.0
 
+    # geo + missions (API.md §14-16)
+    geo_anchors: dict[str, str] = field(default_factory=dict)  # src id/name ("*": all) -> json
+    tiles_dir: str = "~/.adt4_console/tiles"
+    tiles_live: bool = False  # fetch missing satellite tiles from the internet (and keep them)
+    missions_dir: str | None = None  # None -> memory only (tests); cli: ~/.adt4_console/missions
+    quad_images_dir: str | None = None  # where approved quad detections' images are kept
+    # packed mesh tiles + levels of detail cached per mesh file (mesh_lod.py);
+    # None -> memory only (tests); cli: ~/.adt4_console/mesh_cache
+    mesh_cache_dir: str | None = None
+    # map editing (API.md §17)
+    snapshots_dir: str | None = None  # None -> <tmp>; cli: ~/.adt4_console/snapshots
+    # "auto": stage edits while a launch is active, apply immediately otherwise;
+    # "staged" / "immediate" force one behaviour
+    map_edit_mode: str = "auto"
+    # Penn quad (heracles_agents penn_integration_tool): PUSH-bind waypoints, REQ images
+    quad_cmd_uri: str | None = None
+    quad_image_uri: str | None = None
+    quad_utm_origin: tuple[float, float] = (0.0, 0.0)  # UtmToMapInfo.local_utm_origin
+    quad_map_offset: tuple[float, float] = (0.0, 0.0)  # UtmToMapInfo.map_offset
+
     @property
     def output_root_path(self) -> pathlib.Path:
         return pathlib.Path(os.path.expanduser(self.output_root))

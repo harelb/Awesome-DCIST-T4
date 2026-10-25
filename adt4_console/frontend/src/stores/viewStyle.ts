@@ -1,7 +1,7 @@
 // Persisted (per browser) map-viewer styling: background, colour overrides,
 // per-layer heights, region display and screenshot options.
 import {create} from "zustand";
-import type {RobotHighlight, RobotModelMode} from "../lib/robotModel";
+import {isRobotHighlight, type RobotHighlight, type RobotModelMode} from "../lib/robotModel";
 import {
   DEFAULT_SHOT,
   type ColorKey,
@@ -18,14 +18,21 @@ export interface ViewStyleState {
   labelColors: Record<string, string>;
   meshColor: {mode: MeshColorMode; color: string};
   heights: Heights;
-  /** places with a parent region are drawn in the region's colour */
+  /** Layers › "Colour members by area": places with a parent area (Room) take its
+   *  colour; while editing the map, objects too (EditOverlay) */
   regionColorPlaces: boolean;
-  /** convex-hull fill + outline per room / region */
+  /** Layers › "Area boundaries": convex-hull fill + outline per Room, and the
+   *  drawn polygon of map areas (EditOverlay) */
   regionHulls: boolean;
   /** robots drawn as their platform's model (Spot, Husky) or as the arrow */
   robotModel: RobotModelMode;
   /** a model highlighted in the robot's (path) colour */
   robotHighlight: RobotHighlight;
+  /** models walk (Spot's legs) / roll (the Husky's wheels) while they move */
+  robotGait: boolean;
+  /** the mission planner's layer choices ("layer/part" -> hidden) over its
+   *  defaults (stores/missionView.ts: places layers off) */
+  missionHidden: Record<string, boolean>;
   shot: ShotOpts;
 }
 
@@ -41,6 +48,8 @@ export const DEFAULT_VIEW_STYLE: ViewStyleState = {
   regionHulls: true,
   robotModel: "model",
   robotHighlight: "outline",
+  robotGait: true,
+  missionHidden: {},
   shot: DEFAULT_SHOT,
 };
 
@@ -71,7 +80,9 @@ export function parseStoredStyle(raw: string | null): ViewStyleState {
   if (typeof v.regionColorPlaces === "boolean") out.regionColorPlaces = v.regionColorPlaces;
   if (typeof v.regionHulls === "boolean") out.regionHulls = v.regionHulls;
   if (v.robotModel === "model" || v.robotModel === "arrow") out.robotModel = v.robotModel;
-  if (v.robotHighlight === "off" || v.robotHighlight === "outline" || v.robotHighlight === "tint") out.robotHighlight = v.robotHighlight;
+  if (isRobotHighlight(v.robotHighlight)) out.robotHighlight = v.robotHighlight;
+  if (typeof v.robotGait === "boolean") out.robotGait = v.robotGait;
+  if (isObj(v.missionHidden)) for (const [k, h] of Object.entries(v.missionHidden)) if (typeof h === "boolean") out.missionHidden[k] = h;
   if (isObj(v.shot)) {
     const s = v.shot;
     out.shot = {

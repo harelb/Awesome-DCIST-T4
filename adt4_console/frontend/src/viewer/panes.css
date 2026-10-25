@@ -72,6 +72,9 @@ body.pane-dragging-row * {
 .vright-head .segmented {
   flex: 1;
   min-width: 0;
+  /* nine tabs: scroll sideways rather than clip the last ones */
+  overflow-x: auto;
+  scrollbar-width: thin;
 }
 /* seven tabs share the strip: tighter buttons than the default segmented */
 .vright-head .segmented button {
@@ -79,6 +82,7 @@ body.pane-dragging-row * {
   padding: 6px 4px;
   font-size: 12.5px;
   line-height: 1.2;
+  white-space: nowrap;
 }
 .vright-head.dock-hover {
   box-shadow: 0 0 0 2px var(--accent);
@@ -618,16 +622,10 @@ body.pane-dragging-row * {
    them when the canvas is narrow); the right toolbar keeps its room */
 .vtoolbar.top-left {
   flex-wrap: wrap;
-  right: 470px;
 }
 .vtoolbar.top-left .searchbox {
   flex: 1 1 220px;
   min-width: 200px;
-}
-@media (max-width: 1100px) {
-  .vtoolbar.top-left {
-    right: 450px;
-  }
 }
 @media (max-width: 900px) {
   .vtoolbar.top-left {
@@ -643,4 +641,88 @@ body.pane-dragging-row * {
 }
 .camera-panel.compact .segmented button {
   padding: 4px 9px;
+}
+
+/* ---------- startup-load bar (LoadBar.tsx) ---------- */
+.load-bar {
+  position: absolute;
+  /* LoadBar.tsx measures it under the toolbars; this is before the first measure */
+  top: 54px;
+  left: 10px;
+  z-index: 38;
+  width: min(440px, calc(100% - 20px));
+  padding: 6px 10px 7px;
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent);
+  backdrop-filter: blur(4px);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius, 6px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition: opacity 0.35s ease;
+}
+.load-bar-hidden {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+}
+.load-bar-track {
+  position: relative;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.load-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+.load-bar-track.indeterminate .load-bar-fill {
+  animation: load-bar-slide 1.4s ease-in-out infinite;
+}
+@keyframes load-bar-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+.load-bar-err .load-bar-fill {
+  background: var(--warn);
+}
+.load-bar-text {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text-2);
+}
+.load-bar-text b {
+  font-weight: 600;
+  color: var(--text);
+}
+.load-part.done b {
+  color: var(--ok);
+}
+.load-sep {
+  color: var(--muted);
+}
+.load-eta {
+  color: var(--text);
+}
+/* phone: full width */
+.viewer.phone .load-bar {
+  left: max(8px, env(safe-area-inset-left));
+  right: max(8px, env(safe-area-inset-right));
+  width: auto;
+  padding: 5px 9px 6px;
+}
+.viewer.phone .load-bar-text {
+  font-size: 11px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .load-bar-track.indeterminate .load-bar-fill {
+    animation: none;
+  }
 }

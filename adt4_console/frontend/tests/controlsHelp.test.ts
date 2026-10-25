@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {COMMON_HELP, LAYOUT_HELP, MODE_HELP, TOP_HINT_KEY, dismissHint, helpSections, hintDismissed, type HelpMode} from "../src/viewer/controlsHelp";
+import {COMMON_HELP, LAYOUT_HELP, MISSION_HELP, MODE_HELP, TOP_HINT_KEY, dismissHint, helpSections, hintDismissed, type HelpMode} from "../src/viewer/controlsHelp";
 
 describe("controls help", () => {
   it("every mode has camera entries", () => {
@@ -18,8 +18,14 @@ describe("controls help", () => {
     expect(keys).toMatch(/\bR\b/);
   });
   it("sections include common help, layout only when asked", () => {
-    expect(helpSections("3d", false)).toEqual([MODE_HELP["3d"], ...COMMON_HELP]);
+    expect(helpSections("3d", false)).toEqual([MODE_HELP["3d"], ...COMMON_HELP, MISSION_HELP]);
     expect(helpSections("top", true).at(-1)).toBe(LAYOUT_HELP);
+    // the mission planner lists its keys right after the camera
+    expect(helpSections("top", false, true)[1]).toBe(MISSION_HELP);
+  });
+  it("mission help lists the shortcuts that exist", () => {
+    const keys = MISSION_HELP.entries.map(e => e.keys).join(" | ");
+    for (const k of ["Enter", "Backspace", "Esc", "Delete", "Z", "F", "Space"]) expect(keys).toContain(k);
   });
   it("hint dismissal survives broken storage", () => {
     const m = new Map<string, string>();

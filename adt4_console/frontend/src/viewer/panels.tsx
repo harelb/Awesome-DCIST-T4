@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useState} from "react";
 import {useViewer, readyModels, srcPath} from "../stores/viewer";
-import {layerInfo, searchNodes} from "../lib/graphModel";
+import {layerHidden, layerInfo, searchNodes} from "../lib/graphModel";
+import {setLayerHidden} from "../stores/missionView";
 import {nodeColor, LAYER_COLORS, rgbCss} from "../lib/palette";
 import {errorText, getJSON, postJSON} from "../lib/api";
 import {Badge, Dot, Empty, Spinner, Toggle} from "../components/ui";
@@ -8,7 +9,10 @@ import type {NodeDetail} from "../types";
 import {displayPos, defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {fmtBytes} from "../lib/fuzzy";
+import {DETAIL_LEVEL, levelBytes, saveDetail, type MeshDetail} from "../lib/meshPlan";
 import {StatsPanel} from "./StatsPanel";
+import {editLayerOf} from "../lib/mapEdit";
+import {editInMapTab} from "../stores/mapEdit";
 import {applyPoint, robotOfSource} from "../lib/frameAlign";
 import {sourceMatrix, useRobots} from "../stores/robots";
 import {ObjectImages, SearchThumb, useImaged, type ImageInfo} from "./objectImages";
@@ -124,7 +128,7 @@ export function LayersPanel() {
         {layers.map(([k, l]) => (
           <li key={k}>
             <label className="layer-row">
-              <input type="checkbox" checked={!hiddenLayers[k]} onChange={e => set({hiddenLayers: {...hiddenLayers, [k]: !e.target.checked}})} />
+              <input type="checkbox" checked={!layerHidden(hiddenLayers, ...(k.split("/").map(Number) as [number, number]))} onChange={e => setLayerHidden(k, !e.target.checked)} />
               <span
                 className="swatch"
                 style={{
@@ -132,7 +136,9 @@ export function LayersPanel() {
                     hydra && HYDRA_SWATCH[l.kind] ? HYDRA_SWATCH[l.kind] : rgbCss((LAYER_COLORS as Record<string, [number, number, number]>)[l.kind] ?? [230, 25, 75]),
                 }}
               />
-              <span className="layer-name">{l.kind === "rooms" ? "rooms / regions" : l.name}</span>
+              <span className="layer-name" title={l.kind === "rooms" ? "Room nodes (layer 4)" : undefined}>
+                {l.kind === "rooms" ? "areas" : l.name}
+              </span>
               <span className="mono small muted count-r">{l.count.toLocaleString()}</span>
             </label>
           </li>
@@ -156,6 +162,44 @@ export function LayersPanel() {
           ))}
       </ul>
     </section>
+  );
+}
+
+/** Mesh level of detail, with each level's download size for the shown sources. */
+function MeshDetailControl() {
+  const detail = useViewer(s => s.meshDetail);
+  const auto = useViewer(s => s.meshAutoDetail);
+  const sources = useViewer(s => s.sources);
+  const set = useViewer(s => s.set);
+  const size = (d: Exclude<MeshDetail, "auto">) => {
+    let n = 0;
+    for (const src of Object.values(sources)) if (src.enabled && src.showMesh) n += levelBytes(src.manifest, DETAIL_LEVEL[d]);
+    return n ? ` · ${fmtBytes(n)}` : "";
+  };
+  const opts: Exclude<MeshDetail, "auto">[] = ["full", "medium", "coarse"];
+  return (
+    <label className="slider-row">
+      <span>Mesh detail</span>
+      <select
+        className="input input-sm"
+        value={detail}
+        onChange={e => {
+          const d = e.target.value as MeshDetail;
+          saveDetail(d); // per device: a phone on a slow link keeps "coarse"
+          set({meshDetail: d});
+        }}
+        aria-label="Mesh detail"
+        title="Full: Hydra's mesh. Medium / coarse: simplified on a 0.2 / 0.4 m grid; far less to download over a slow link. Auto: coarse in the mission planner, medium on a phone, else full."
+      >
+        <option value="auto">Auto ({auto})</option>
+        {opts.map(d => (
+          <option key={d} value={d}>
+            {d[0].toUpperCase() + d.slice(1)}
+            {size(d)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -183,6 +227,7 @@ export function DisplayPanel() {
       <BackgroundControl />
       <RobotLookControl />
       <HeightsControl />
+      <MeshDetailControl />
       <label className="slider-row">
         <span>Mesh opacity</span>
         <input type="range" min={0} max={1} step={0.05} value={meshOpacity} onChange={e => set({meshOpacity: Number(e.target.value)})} />
@@ -364,6 +409,13 @@ export function Inspector({onVisit, onGoto}: {onVisit: (src: string, sym: string
           </button>
         )}
       </div>
+      {sources[selected.src]?.kind === "neo4j" && editLayerOf(node) && (
+        <div className="row gap-sm">
+          <button className="btn btn-sm" onClick={() => editInMapTab(selected.src, selected.sym)} title="Edit it in the Map tab: class, name, position, remove (one editor for single nodes and selections)">
+            Edit in Map tab
+          </button>
+        </div>
+      )}
       {(isObject || isAgent) && imagesEl}
       {(isObject || isAgent) && loading && !detail && <div className="obj-hero-wait muted small">Loading images…</div>}
       <table className="table compact kv-table">

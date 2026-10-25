@@ -130,7 +130,7 @@ describe("regions", () => {
     const zs = new Set(Array.from(l.regionFill!.positions).filter((_, i) => i % 3 === 2).map(z => z.toFixed(2)));
     expect([...zs]).toEqual([(4 - 0.04).toFixed(2)]);
     expect(l.regionOutline!.positions.length).toBeGreaterThan(0);
-    expect(l.texts.find(t => t.kind === "rooms")?.text).toBe("parking lot r(0)");
+    expect(l.texts.find(t => t.kind === "rooms")?.text).toBe("parking lot"); // a named area is labelled by its name (R(n) is in Inspect)
     expect(layoutGraph(m, {...base, regionHulls: false}).regionFill).toBeNull();
     expect(layoutGraph(m, {...base, regionHulls: true, hiddenLayers: {"4/0": true}}).regionFill).toBeNull();
   });

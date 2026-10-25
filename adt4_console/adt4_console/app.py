@@ -19,6 +19,7 @@ from . import __version__
 from .auth import TokenAuthMiddleware
 from .chat import ChatService
 from .fleet_service import FleetDeps, FleetService
+from .geo import GeoService
 from .graph_service import GraphService, GraphUnavailable, NotFound
 from .hub import Hub
 from .jobs import JobManager
@@ -68,6 +69,11 @@ class Services:
     helpers: object = field(default_factory=_fleet_helpers)  # fleet_helpers (or a fake)
     launch_state: object = None  # launch_state.LaunchState
     teleop: TeleopService | None = None
+    geo: GeoService | None = None
+    missions: object = None  # mission.service.MissionService
+    quad: object = None  # quad.link.QuadLink
+    edits: object = None  # edit_service.EditService
+
 
     def start(self) -> None:
         if self.settings.fleet_poll:
@@ -77,11 +83,13 @@ class Services:
         if self.teleop is not None:
             self.teleop.start()
         self.live.start()
+        if self.quad is not None:
+            self.quad.start()
         self.graph.start()
         self.graph.warm()
 
     def stop(self) -> None:
-        for svc in (self.teleop, self.live, self.ros, self.graph, self.fleet):
+        for svc in (self.missions, self.quad, self.teleop, self.live, self.ros, self.graph, self.fleet):
             if svc is None:
                 continue
             try:
@@ -97,6 +105,7 @@ def build_services(
     launch_deps=None,
     receiver=None,
     helpers=None,
+    tile_fetch=None,
 ) -> Services:
     hub = Hub()
     jobs = JobManager(hub, confirm_timeout=settings.confirm_timeout_s)
@@ -114,12 +123,31 @@ def build_services(
         platform_of=lambda robot: svc.ros.platform(robot),
     )
     ros.teleop_latch = svc.teleop.stopped
+    svc.geo = GeoService(settings, graph, fetch=tile_fetch)
+    from .mission.service import MissionService
+    from .quad.link import QuadLink
+    from .quad.protocol import QuadFrame
+
+    svc.quad = QuadLink(
+        settings.quad_cmd_uri,
+        settings.quad_image_uri,
+        QuadFrame(svc.geo.default_anchor() if settings.quad_cmd_uri or settings.quad_image_uri else None,
+                  settings.quad_utm_origin, settings.quad_map_offset),
+    )  # fmt: skip
+    svc.missions = MissionService(settings, hub, graph, svc.geo, live, ros, svc.quad)
+    chat.missions = svc.missions
     if helpers is not None:
         svc.helpers = helpers
     from . import launch_state
 
     svc.launch_state = launch_state.LaunchState(settings.launch_state_path)
     launch_state.restore(svc)
+    from .edit_service import EditService
+
+    svc.edits = EditService(settings, graph, hub, jobs,
+                            launch_state=lambda: svc.launch_state.get() if svc.launch_state else None)  # fmt: skip
+    chat.edits = svc.edits
+    svc.missions.edits = svc.edits
     return svc
 
 
@@ -159,21 +187,26 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
 
     from .routes import (
         chat,
+        edit,
         fleet,
+        geo,
         graph,
         jobs,
         launch,
         live,
         maps,
+        mission,
         network,
         plan,
+        quad,
         sam3,
         teleop,
         terminal,
         ws,
     )
 
-    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal, ws):
+    for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal,
+                geo, mission, quad, edit, ws):  # fmt: skip
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 

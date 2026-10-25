@@ -1,13 +1,16 @@
-import {useLayoutEffect, useMemo, useRef} from "react";
+import {useEffect, useLayoutEffect, useMemo, useRef} from "react";
 import * as THREE from "three";
-import {useThree} from "@react-three/fiber";
-import {Html, Line} from "@react-three/drei";
+import {useFrame, useThree} from "@react-three/fiber";
+import {Line} from "@react-three/drei";
 import {LineSegments2} from "three/examples/jsm/lines/LineSegments2.js";
 import {LineSegmentsGeometry} from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import {LineMaterial} from "three/examples/jsm/lines/LineMaterial.js";
 import type {GraphLayout, LayerBuffers, TextLabel, VizStyle} from "./layout";
 import {defaultEdgeOn, EDGE_COLORS, HYDRA_EDGES, PLACE_BOUNDARY} from "./layout";
 import {REGION_FILL_ALPHA, uniformOf, type ColorOpts} from "./style";
+import {declutter, labelPrio, labelSize, MAX_LABELS, type LabelBox} from "../lib/labels";
+import {useViewer} from "../stores/viewer";
+import {useMapEdit} from "../stores/mapEdit";
 
 /** Displayed node positions per source, used by the click picker. */
 export const pickRegistry = new Map<string, Map<string, LayerBuffers>>();
@@ -113,16 +116,102 @@ function RegionHulls({fill, outline}: {fill: {positions: Float32Array; colors: F
   );
 }
 
+/** Node text labels, decluttered (lib/labels.ts): one DOM layer over the canvas,
+ *  re-placed on every rendered frame; of the labels on screen the most important
+ *  ones that do not overlap are shown (the selected node's always, then areas,
+ *  objects, places, nearest the pointer first). */
 function TextLabels({texts}: {texts: TextLabel[]}) {
-  return (
-    <>
-      {texts.map((t, i) => (
-        <Html key={i} position={t.pos} center zIndexRange={[5, 0]} className="viz-text-wrap" style={{pointerEvents: "none"}}>
-          <div className={`viz-text viz-text-${t.kind}`}>{t.text}</div>
-        </Html>
-      ))}
-    </>
+  const {gl, camera, invalidate} = useThree();
+  const anchor = useRef<THREE.Group>(null);
+  const host = useMemo(() => {
+    const d = document.createElement("div");
+    d.className = "viz-text-layer";
+    return d;
+  }, []);
+  useLayoutEffect(() => {
+    gl.domElement.parentElement?.appendChild(host);
+    return () => host.remove();
+  }, [gl, host]);
+  const els = useMemo(
+    () =>
+      texts.map(t => {
+        const e = document.createElement("div");
+        e.className = `viz-text viz-text-${t.kind}`;
+        e.textContent = t.text;
+        e.style.display = "none";
+        return e;
+      }),
+    [texts],
   );
+  const sizes = useMemo(() => texts.map(t => labelSize(t.text, t.kind)), [texts]);
+  useLayoutEffect(() => {
+    host.replaceChildren(...els);
+    invalidate();
+  }, [host, els, invalidate]);
+  // picked nodes: the inspected one and the map-edit selection
+  const selected = useViewer(s => s.selected?.sym ?? null);
+  const editSel = useMapEdit(s => s.selection);
+  useEffect(() => invalidate(), [selected, editSel, invalidate]);
+  // the pointer: labels near it win; a move of 40 px re-sorts them
+  const pointer = useRef<{x: number; y: number} | null>(null);
+  useEffect(() => {
+    const el = gl.domElement;
+    let last: {x: number; y: number} | null = null;
+    const move = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      pointer.current = {x: e.clientX - r.left, y: e.clientY - r.top};
+      if (!last || Math.hypot(pointer.current.x - last.x, pointer.current.y - last.y) > 40) {
+        last = pointer.current;
+        invalidate();
+      }
+    };
+    const leave = () => (pointer.current = null);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerleave", leave);
+    return () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerleave", leave);
+    };
+  }, [gl, invalidate]);
+  const v = useMemo(() => new THREE.Vector3(), []);
+  useFrame(() => {
+    const g = anchor.current;
+    if (!g) return;
+    let shown = true;
+    for (let o: THREE.Object3D | null = g; o; o = o.parent) if (!o.visible) shown = false;
+    const w = gl.domElement.clientWidth;
+    const h = gl.domElement.clientHeight;
+    const focus = pointer.current ?? {x: w / 2, y: h / 2};
+    const picked = new Set(editSel);
+    if (selected) picked.add(selected);
+    const boxes: LabelBox[] = [];
+    const idx: number[] = [];
+    const at: [number, number][] = [];
+    if (shown)
+      texts.forEach((t, i) => {
+        v.set(t.pos[0], t.pos[1], t.pos[2]).applyMatrix4(g.matrixWorld).project(camera);
+        if (v.z > 1 || v.z < -1) return;
+        const x = ((v.x + 1) / 2) * w;
+        const y = ((1 - v.y) / 2) * h;
+        const sz = sizes[i];
+        if (x + sz.w / 2 < 0 || x - sz.w / 2 > w || y + sz.h / 2 < 0 || y - sz.h / 2 > h) return;
+        boxes.push({x, y, w: sz.w, h: sz.h, prio: labelPrio(t.kind, Math.hypot(x - focus.x, y - focus.y), !!t.sym && picked.has(t.sym))});
+        idx.push(i);
+        at.push([x, y]);
+      });
+    const keep = new Set(declutter(boxes, MAX_LABELS).map(k => idx[k]));
+    const pos = new Map(idx.map((i, k) => [i, at[k]]));
+    els.forEach((e, i) => {
+      if (!keep.has(i)) {
+        if (e.style.display !== "none") e.style.display = "none";
+        return;
+      }
+      const [x, y] = pos.get(i)!;
+      e.style.display = "";
+      e.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -50%)`;
+    });
+  });
+  return <group ref={anchor} />;
 }
 
 function Segments({positions, colors, color, opacity = 1}: {positions: Float32Array; colors?: Float32Array; color?: string; opacity?: number}) {

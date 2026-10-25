@@ -2,6 +2,8 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {getToken} from "./auth";
 import {unpack} from "../codec";
+import {wireProgress} from "./loadProgress";
+import {transfer} from "../stores/loading";
 
 export class ApiError extends Error {
   status: number; // 0 = network error / backend down
@@ -95,6 +97,65 @@ export const deleteJSON = <T,>(path: string) => sendJSON<T>("DELETE", path);
 export async function getMsgpack(path: string, signal?: AbortSignal): Promise<unknown> {
   const res = await request(path, {signal, headers: {Accept: "application/x-msgpack"}});
   return unpack(await res.arrayBuffer());
+}
+
+/** Wire-byte progress of one GET (see lib/loadProgress wireProgress). */
+export interface FetchProgress {
+  /** called once the headers are in: the wire size, when the server says */
+  onTotal?: (wireTotal: number | null) => void;
+  /** wire bytes delivered so far (monotonic) */
+  onBytes?: (wireDone: number) => void;
+  signal?: AbortSignal;
+  accept?: string;
+}
+
+/** GET a body while reporting wire-byte progress (load bar) and feeding the
+ *  shared throughput meter (stores/loading `transfer`). */
+export async function fetchWithProgress(path: string, p: FetchProgress = {}): Promise<Uint8Array> {
+  transfer.start();
+  try {
+    const res = await request(path, {signal: p.signal, headers: p.accept ? {Accept: p.accept} : undefined});
+    const num = (h: string) => {
+      const v = res.headers.get(h);
+      return v !== null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : null;
+    };
+    const encoded = !!res.headers.get("content-encoding");
+    const cl = num("content-length");
+    const raw = num("x-uncompressed-length");
+    const wireTotal = encoded ? (cl && raw ? cl : null) : (cl ?? raw);
+    p.onTotal?.(wireTotal);
+    if (!res.body) {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      const w = wireProgress(buf.length, cl, raw, encoded);
+      transfer.bytes(w);
+      p.onBytes?.(w);
+      return buf;
+    }
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let read = 0;
+    let wire = 0;
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      read += value.length;
+      const w = wireProgress(read, cl, raw, encoded);
+      transfer.bytes(w - wire);
+      wire = w;
+      p.onBytes?.(wire);
+    }
+    if (chunks.length === 1) return chunks[0];
+    const out = new Uint8Array(read);
+    let o = 0;
+    for (const c of chunks) {
+      out.set(c, o);
+      o += c.length;
+    }
+    return out;
+  } finally {
+    transfer.end();
+  }
 }
 
 /** msgpack GET with ``If-None-Match``: ``changed`` false on a 304 (nothing new

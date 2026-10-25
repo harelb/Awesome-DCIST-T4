@@ -1,10 +1,11 @@
 // "?" button + compact controls card for the current view mode, and the
 // one-time Top-view hint. Text lives in controlsHelp.ts.
 import {useEffect, useRef, useState} from "react";
-import {TOP_HINT, dismissHint, helpSections, hintDismissed, type HelpMode} from "./controlsHelp";
+import {TOP_HINT, TOP_HINT_TOUCH, dismissHint, helpSections, hintDismissed, type HelpMode} from "./controlsHelp";
+import {useMedia} from "../lib/media";
 import {safeStorage} from "./paneLayout";
 
-export function ControlsHelpButton({mode, withLayout, compact}: {mode: HelpMode; withLayout: boolean; compact?: boolean}) {
+export function ControlsHelpButton({mode, withLayout, compact, mission}: {mode: HelpMode; withLayout: boolean; compact?: boolean; mission?: boolean}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -31,7 +32,7 @@ export function ControlsHelpButton({mode, withLayout, compact}: {mode: HelpMode;
       </button>
       {open && (
         <div className="help-card" role="dialog" aria-label="Viewer controls">
-          {helpSections(mode, withLayout).map(s => (
+          {helpSections(mode, withLayout, mission).map(s => (
             <section key={s.title}>
               <h5>{s.title}</h5>
               <dl>
@@ -55,10 +56,11 @@ export function ControlsHelpButton({mode, withLayout, compact}: {mode: HelpMode;
 /** Shown the first time Top view is active, until dismissed (remembered per browser). */
 export function TopViewHint({active}: {active: boolean}) {
   const [dismissed, setDismissed] = useState(() => hintDismissed(safeStorage()));
+  const coarse = useMedia("(pointer: coarse)");
   if (!active || dismissed) return null;
   return (
     <div className="top-hint" role="status">
-      <span>{TOP_HINT}</span>
+      <span>{coarse ? TOP_HINT_TOUCH : TOP_HINT}</span>
       <button
         className="icon-btn"
         aria-label="Dismiss hint"

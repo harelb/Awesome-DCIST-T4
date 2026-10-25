@@ -1,5 +1,8 @@
-// Progressive mesh-tile streaming: one BufferGeometry per tile, fetched nearest
-// the camera first with a concurrency limit; tiles whose hash changed are refetched.
+// Progressive mesh-tile streaming: one BufferGeometry per tile. A coarse level
+// of every tile comes first (the whole map for a few hundred kB), then the
+// tiles nearest the camera target are refined to the wanted detail, with a
+// concurrency limit; tiles whose etag changed are refetched (lib/meshPlan.ts).
+// Byte progress goes to the load bar (stores/loading.ts).
 //
 // Ceilings: RViz (kimera_pgmo_rviz MeshDisplay, `Cull Backfaces: true`) hides them
 // because ceiling triangles face down into the room, so from above only their
@@ -9,8 +12,10 @@
 import {useEffect, useRef, useState} from "react";
 import * as THREE from "three";
 import {useFrame, useThree} from "@react-three/fiber";
-import {decodeTile} from "../codec";
-import {getMsgpack} from "../lib/api";
+import {decodePackedTile, decodeTile, unpack, type DecodedTile} from "../codec";
+import {fetchWithProgress} from "../lib/api";
+import {manifestLevels, nextStep, planTile, resolveLevel, tileRow, wanted, type Shown, type TileStep} from "../lib/meshPlan";
+import {beginTask, dropTask, endTask, progressTask} from "../stores/loading";
 import type {TileManifest} from "../types";
 import {srcPath} from "../stores/viewer";
 import type {MeshColorMode} from "./style";
@@ -32,20 +37,42 @@ vec3 adt4Turbo(float t) {
 `;
 const MESH_MODE: Record<MeshColorMode, number> = {rgb: 0, uniform: 1, height: 2};
 
+/** queue key of the coarse-level bundle step (not a tile key) */
+const BUNDLE = "*bundle";
+
+// requests in flight: each costs a round trip before its bytes flow, so on a
+// high-latency link (ssh tunnel) fewer would leave the link idle between tiles
 const CONCURRENCY = 6;
 
 export interface TileStats {
+  /** tiles shown at the wanted detail */
   loaded: number;
+  /** tiles that have faces at the wanted detail */
   total: number;
   triangles: number;
 }
 
 class TileLoader {
   group = new THREE.Group();
-  private have = new Map<string, {hash: string; mesh: THREE.Mesh}>();
-  private queue = new Map<string, {hash: string; center: THREE.Vector3}>();
-  private inflight = new Set<string>();
+  private have = new Map<string, Shown & {mesh: THREE.Mesh}>();
+  /** pending fetches per tile, in order (a coarse preview, then the target) */
+  private queue = new Map<string, TileStep[]>();
+  private inflight = new Map<string, TileStep>();
+  private centers = new Map<string, THREE.Vector3>();
+  private retries = new Map<string, number>();
+  private bundleFailed = new Set<string>();
+  private manifest: TileManifest = {tile_size: 8, tiles: {}};
+  private want = 0;
+  private target = 0;
+  private abort = new AbortController();
   private disposed = false;
+  // progress of the current batch of fetches (load bar)
+  private taskId: string;
+  private batchOn = false;
+  private loadedOnce = false;
+  private hasManifest = false;
+  private batchDone = 0;
+  private partial = new Map<string, number>();
   material: THREE.MeshLambertMaterial;
   /** keeps z <= floor + height when clipping is on, in the tiles' own frame */
   localClip = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
@@ -63,13 +90,13 @@ class TileLoader {
     uZMax: {value: 3},
   };
   triangles = 0;
-  total = 0;
 
   constructor(
     private src: string,
     private camTarget: () => THREE.Vector3,
     private onChange: () => void,
   ) {
+    this.taskId = `mesh:${src}`;
     this.material = new THREE.MeshLambertMaterial({vertexColors: true, side: THREE.FrontSide});
     // tile colours are sRGB bytes; three treats vertex colours as linear, so decode here
     // colour mode: 0 vertex RGB, 1 uniform colour, 2 height colormap (world z)
@@ -94,25 +121,84 @@ class TileLoader {
   }
 
   setManifest(m: TileManifest | null) {
-    const tiles = m?.tiles ?? {};
-    const size = m?.tile_size ?? 8;
-    this.total = Object.keys(tiles).length;
-    // removals
-    for (const [k, t] of this.have) {
-      if (!tiles[k]) {
-        this.drop(k, t.mesh);
-      }
-    }
-    for (const k of [...this.queue.keys()]) if (!tiles[k]) this.queue.delete(k);
-    // additions / changes
-    for (const [k, t] of Object.entries(tiles)) {
-      const cur = this.have.get(k);
-      if (cur && cur.hash === t.hash) continue;
+    this.manifest = m ?? {tile_size: 8, tiles: {}};
+    this.hasManifest = true;
+    const size = this.manifest.tile_size ?? 8;
+    this.centers.clear();
+    for (const [k, t] of Object.entries(this.manifest.tiles)) {
       const o = t.origin ?? (k.split("_").map(v => Number(v) * size) as [number, number, number]);
-      this.queue.set(k, {hash: t.hash, center: new THREE.Vector3(o[0] + size / 2, o[1] + size / 2, o[2] + size / 2)});
+      this.centers.set(k, new THREE.Vector3(o[0] + size / 2, o[1] + size / 2, o[2] + size / 2));
     }
+    this.replan();
+  }
+
+  /** Wanted level of detail (lib/meshPlan DETAIL_LEVEL; the manifest's
+   *  nearest offered level is used). */
+  setWant(level: number) {
+    if (level === this.want) return;
+    this.want = level;
+    this.replan();
+  }
+
+  private replan() {
+    const m = this.manifest;
+    this.target = resolveLevel(manifestLevels(m), this.want);
+    for (const [k, t] of this.have) if (!m.tiles[k]) this.drop(k, t.mesh);
+    this.queue.clear();
+    // the coarse level comes as one bundle when the server offers it (one
+    // round trip instead of hundreds); per tile if the bundle failed
+    const bundle = m.bundles?.find(b => !this.bundleFailed.has(b.etag));
+    let previews = 0;
+    for (const k of Object.keys(m.tiles)) {
+      const {steps, clear} = planTile(m, k, this.target, this.have.get(k));
+      const cur = this.have.get(k);
+      if (clear && cur) this.drop(k, cur.mesh);
+      // the step in flight still counts: don't queue it twice
+      const f = this.inflight.get(k);
+      let rest = f ? steps.filter(s => !(s.level === f.level && s.etag === f.etag)) : steps;
+      // a tile not shown yet gets its bundle-level step (preview or target) from the bundle
+      if (bundle && !cur && rest[0]?.level === bundle.level) {
+        rest = rest.slice(1);
+        previews++;
+      }
+      if (rest.length) this.queue.set(k, rest);
+    }
+    const flying = this.inflight.get(BUNDLE);
+    if (bundle && previews && !(flying && flying.etag === bundle.etag)) {
+      this.queue.set(BUNDLE, [{key: BUNDLE, level: bundle.level, bytes: bundle.bytes, etag: bundle.etag, preview: bundle.level !== this.target}]);
+    }
+    this.progress();
     this.onChange();
     this.pump();
+  }
+
+  /** Byte progress of the batch: done + in flight + queued. */
+  private progress() {
+    const queued = [...this.queue.values()].reduce((n, st) => n + st.reduce((a, s) => a + s.bytes, 0), 0);
+    const flying = [...this.inflight.values()].reduce((n, s) => n + s.bytes, 0);
+    const busy = this.queue.size > 0 || this.inflight.size > 0;
+    const sized = this.manifest.enc === 2;
+    if (!this.hasManifest) return;
+    // a robot's live mesh streams in all the time: only its first load shows
+    if (this.loadedOnce && this.src.startsWith("live:")) return;
+    if (busy) {
+      const partial = [...this.partial.values()].reduce((n, v) => n + v, 0);
+      if (!this.batchOn) {
+        this.batchOn = true;
+        this.batchDone = 0;
+        beginTask(this.taskId, "Mesh", sized ? "bytes" : "count");
+      }
+      if (sized) progressTask(this.taskId, this.batchDone + partial, this.batchDone + flying + queued);
+      else {
+        const st = this.stats();
+        progressTask(this.taskId, st.loaded, st.total);
+      }
+    } else {
+      // also ends the viewer store's "preparing" task when there is nothing to fetch
+      this.batchOn = false;
+      if (Object.keys(this.manifest.tiles).length) this.loadedOnce = true;
+      endTask(this.taskId);
+    }
   }
 
   setColorMode(mode: MeshColorMode, color: string) {
@@ -185,75 +271,136 @@ class TileLoader {
   private pump() {
     while (!this.disposed && this.inflight.size < CONCURRENCY && this.queue.size) {
       const target = this.camTarget();
-      let best: string | null = null;
-      let bestD = Infinity;
-      for (const [k, q] of this.queue) {
-        if (this.inflight.has(k)) continue;
-        const d = q.center.distanceToSquared(target);
-        if (d < bestD) {
-          bestD = d;
-          best = k;
-        }
-      }
-      if (!best) break;
-      const {hash} = this.queue.get(best)!;
-      this.queue.delete(best);
-      this.inflight.add(best);
-      void this.fetch(best, hash);
+      const heads: TileStep[] = [];
+      for (const [k, st] of this.queue) if (!this.inflight.has(k)) heads.push(st[0]);
+      if (!heads.length) break;
+      const i = nextStep(heads, k => this.centers.get(k)?.distanceToSquared(target) ?? Infinity);
+      const step = heads[i];
+      const rest = this.queue.get(step.key)!.slice(1);
+      if (rest.length) this.queue.set(step.key, rest);
+      else this.queue.delete(step.key);
+      this.inflight.set(step.key, step);
+      void this.fetch(step);
     }
   }
 
-  private async fetch(key: string, hash: string) {
+  private tileUrl(step: TileStep): string {
+    if (step.key === BUNDLE) return `${srcPath(this.src)}/mesh/bundle/${step.level}?h=${encodeURIComponent(step.etag)}`;
+    const base = `${srcPath(this.src)}/mesh/tile/${encodeURIComponent(step.key)}`;
+    if (this.manifest.enc !== 2) return base; // legacy manifest: full tiles, plain encoding
+    return `${base}?enc=2&lod=${step.level}&h=${encodeURIComponent(step.etag)}`;
+  }
+
+  private async fetch(step: TileStep) {
+    const key = step.key;
+    let ok = false;
     try {
-      const raw = await getMsgpack(`${srcPath(this.src)}/mesh/tile/${encodeURIComponent(key)}`);
+      const body = await fetchWithProgress(this.tileUrl(step), {
+        signal: this.abort.signal,
+        accept: "application/x-msgpack",
+        onBytes: b => {
+          this.partial.set(key, Math.min(b, step.bytes || b));
+          this.progress();
+        },
+      });
       if (this.disposed) return;
-      const t = decodeTile(raw);
-      const g = new THREE.BufferGeometry();
-      g.setAttribute("position", new THREE.BufferAttribute(t.positions, 3));
-      g.setAttribute("color", new THREE.BufferAttribute(t.colors, 3, true));
-      g.setIndex(new THREE.BufferAttribute(t.indices, 1));
-      g.computeVertexNormals();
-      g.computeBoundingSphere();
-      g.computeBoundingBox();
-      const mesh = new THREE.Mesh(g, this.material);
-      mesh.name = `tile:${key}`;
-      mesh.userData.tileKey = key;
-      mesh.matrixAutoUpdate = false;
-      const old = this.have.get(key);
-      if (old) this.drop(key, old.mesh);
-      this.group.add(mesh);
-      this.have.set(key, {hash: t.hash || hash, mesh});
-      if (g.boundingBox && Number.isFinite(g.boundingBox.min.z)) {
-        this.tileMinZ.set(key, g.boundingBox.min.z);
-        this.tileMaxZ.set(key, g.boundingBox.max.z);
+      const raw = unpack(body);
+      if (key === BUNDLE) {
+        ok = true;
+        // still this manifest's bundle: show each tile that still wants its preview
+        if (!this.manifest.bundles?.some(b => b.etag === step.etag)) return;
+        for (const o of (raw as unknown[]) ?? []) {
+          const t = decodePackedTile(o);
+          const row = tileRow(this.manifest, t.key, step.level);
+          if (!row) continue;
+          const one: TileStep = {key: t.key, level: step.level, bytes: 0, etag: row[1], preview: step.level !== this.target};
+          if (!this.inflight.has(t.key) && wanted(this.manifest, one, this.target, this.have.get(t.key))) this.show(t.key, one, t);
+        }
+        return;
       }
-      this.updateZRange();
-      if (this.clipHeight !== null) this.updateClip();
-      this.triangles += t.indices.length / 3;
-      this.onChange();
+      const t: DecodedTile = this.manifest.enc === 2 ? decodePackedTile(raw) : decodeTile(raw);
+      ok = true;
+      if (!wanted(this.manifest, step, this.target, this.have.get(key))) return;
+      this.show(key, step, t);
     } catch {
-      // leave it: a later manifest refresh re-queues it
+      if (key === BUNDLE) {
+        // fall back to per-tile previews
+        this.bundleFailed.add(step.etag);
+        this.inflight.delete(key);
+        if (!this.disposed) this.replan();
+        return;
+      }
+      // retried twice at the back of the queue, then left to a later manifest refresh
+      const id = `${key}/${step.level}/${step.etag}`;
+      const n = (this.retries.get(id) ?? 0) + 1;
+      this.retries.set(id, n);
+      if (n <= 2 && !this.disposed && !this.queue.has(key)) this.queue.set(key, [step]);
     } finally {
       this.inflight.delete(key);
-      if (!this.disposed) this.pump();
+      this.partial.delete(key);
+      if (!this.disposed) {
+        if (ok) this.batchDone += step.bytes;
+        this.progress();
+        this.onChange();
+        this.pump();
+      }
     }
+  }
+
+  private show(key: string, step: TileStep, t: DecodedTile) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(t.positions, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(t.colors, 3, true));
+    g.setIndex(new THREE.BufferAttribute(t.indices, 1));
+    g.computeVertexNormals();
+    g.computeBoundingSphere();
+    g.computeBoundingBox();
+    const mesh = new THREE.Mesh(g, this.material);
+    mesh.name = `tile:${key}`;
+    mesh.userData.tileKey = key;
+    mesh.userData.lod = step.level;
+    mesh.matrixAutoUpdate = false;
+    const old = this.have.get(key);
+    if (old) this.drop(key, old.mesh);
+    this.group.add(mesh);
+    this.have.set(key, {level: step.level, etag: step.etag, mesh});
+    if (g.boundingBox && Number.isFinite(g.boundingBox.min.z)) {
+      this.tileMinZ.set(key, g.boundingBox.min.z);
+      this.tileMaxZ.set(key, g.boundingBox.max.z);
+    }
+    this.updateZRange();
+    if (this.clipHeight !== null) this.updateClip();
+    this.triangles += t.indices.length / 3;
   }
 
   stats(): TileStats {
-    return {loaded: this.have.size, total: this.total, triangles: this.triangles};
+    let loaded = 0;
+    let total = 0;
+    for (const k of Object.keys(this.manifest.tiles)) {
+      const row = tileRow(this.manifest, k, this.target);
+      if (!row) continue; // no faces at this level
+      total++;
+      const h = this.have.get(k);
+      if (h && h.level === this.target && h.etag === row[1]) loaded++;
+    }
+    return {loaded, total, triangles: this.triangles};
   }
 
   dispose() {
     this.disposed = true;
+    this.abort.abort();
     for (const [k, t] of this.have) this.drop(k, t.mesh);
     this.material.dispose();
+    if (this.batchOn) dropTask(this.taskId);
   }
 }
 
-export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = true, clipHeight = null, colorMode = "rgb", uniformColor = "#b0b0b0", onStats}: {
+export function MeshTiles({src, manifest, manifestRev, detail = 0, opacity, cullBackfaces = true, clipHeight = null, colorMode = "rgb", uniformColor = "#b0b0b0", onStats}: {
   src: string;
   manifest: TileManifest | null;
   manifestRev: number;
+  /** wanted level of detail: 0 full, 1 medium, 2 coarse (lib/meshPlan DETAIL_LEVEL) */
+  detail?: number;
   opacity: number;
   /** RViz MeshDisplay `Cull Backfaces` */
   cullBackfaces?: boolean;
@@ -297,6 +444,9 @@ export function MeshTiles({src, manifest, manifestRev, opacity, cullBackfaces = 
       invalidate();
     };
   }, [src, camera, invalidate]);
+  useEffect(() => {
+    loader?.setWant(detail);
+  }, [loader, detail]);
   useEffect(() => {
     loader?.setManifest(manifest);
   }, [loader, manifest, manifestRev]);

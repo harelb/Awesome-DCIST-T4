@@ -21,6 +21,8 @@ class ChatBody(BaseModel):
     history: list[dict] | None = None
     # from the chat's model picker (``GET /api/chat/usage`` lists ``models``)
     model: str | None = None
+    # the mission planner's context: {roster, areas, mission, planted} (API.md §15.2)
+    mission_ctx: dict | None = None
 
 
 @router.post("/chat")
@@ -28,7 +30,8 @@ def chat(body: ChatBody, request: Request):
     chat_svc = services(request).chat
 
     def lines():
-        for item in chat_svc.stream(body.message, body.robot, body.src, body.history, body.model):
+        for item in chat_svc.stream(body.message, body.robot, body.src, body.history, body.model,
+                                   body.mission_ctx):
             yield json.dumps(item, default=str) + "\n"
 
     return StreamingResponse(
@@ -54,3 +57,12 @@ def cypher_write(body: WriteDecision, request: Request):
     """Run or reject a write the chat proposed (only the exact proposed query,
     by id).  An approved write that changed something bumps the map version."""
     return services(request).chat.execute_write(body.id, body.approve)
+
+
+@router.post("/chat/map_edit")
+def map_edit(body: WriteDecision, request: Request):
+    """Apply (or reject) a map edit the chat proposed: exactly the ops on its card, as one
+    unit of work (staged instead while robots are live; API.md §17.3, §17.5)."""
+    author = {"operator": request.headers.get("x-operator") or "operator",
+              "client": request.client.host if request.client else None}  # fmt: skip
+    return services(request).chat.execute_map_edit(body.id, body.approve, author)

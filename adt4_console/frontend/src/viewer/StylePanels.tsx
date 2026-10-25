@@ -1,4 +1,4 @@
-// Map-viewer styling controls: background, per-layer heights, colours, regions
+// Map-viewer styling controls: background, per-layer heights, colours, areas
 // (left panel) and the screenshot toolbar button.
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useViewer, readyModels} from "../stores/viewer";
@@ -239,11 +239,12 @@ export function ColorsPanel() {
   );
 }
 
-/** How robots are drawn: their platform's model or the arrow, and a highlight in
- *  the robot's (path) colour. */
+/** How robots (and mission planner agents) are drawn: their platform's model or
+ *  the arrow, a highlight in the robot's (path) colour, and whether models walk. */
 export function RobotLookControl() {
   const robotModel = useViewStyle(s => s.robotModel);
   const robotHighlight = useViewStyle(s => s.robotHighlight);
+  const robotGait = useViewStyle(s => s.robotGait);
   const patch = useViewStyle(s => s.patch);
   return (
     <>
@@ -259,29 +260,37 @@ export function RobotLookControl() {
       </div>
       {robotModel === "model" && (
         <div className="bg-row">
-          <span title="In each robot's colour, the colour of its paths and plans">Highlight</span>
+          <span title="In each robot's colour, the colour of its paths and plans (mission planner agents too)">Highlight</span>
           <span className="segmented seg-sm" role="group" aria-label="Robot highlight">
             {ROBOT_HIGHLIGHTS.map(o => (
-              <button key={o.value} type="button" className={robotHighlight === o.value ? "on" : ""} aria-pressed={robotHighlight === o.value} onClick={() => patch({robotHighlight: o.value})}>
+              <button key={o.value} type="button" className={robotHighlight === o.value ? "on" : ""} aria-pressed={robotHighlight === o.value} title={o.title} onClick={() => patch({robotHighlight: o.value})}>
                 {o.label}
               </button>
             ))}
           </span>
         </div>
       )}
+      {robotModel === "model" && (
+        <Toggle checked={robotGait} onChange={v => patch({robotGait: v})} label="Animate gait" title="Spot's legs walk and the Husky's wheels turn while the robot (or mission planner agent) moves" />
+      )}
     </>
   );
 }
 
-/** Region display toggles, shown in the Layers panel when a rooms/regions layer exists. */
+/** Area display toggles (Room nodes), shown in the Layers panel when the map has areas. */
 export function RegionControls() {
   const regionColorPlaces = useViewStyle(s => s.regionColorPlaces);
   const regionHulls = useViewStyle(s => s.regionHulls);
   const patch = useViewStyle(s => s.patch);
   return (
     <div className="region-controls">
-      <Toggle checked={regionColorPlaces} onChange={v => patch({regionColorPlaces: v})} label="Color places by region" title="hydra ParentColorAdapter: places take their region's colour" />
-      <Toggle checked={regionHulls} onChange={v => patch({regionHulls: v})} label="Region hulls" title="Convex hull of each region's member places" />
+      <Toggle checked={regionHulls} onChange={v => patch({regionHulls: v})} label="Area boundaries" title="Each area's boundary (Room nodes: the drawn polygon, else the convex hull of its places)" />
+      <Toggle
+        checked={regionColorPlaces}
+        onChange={v => patch({regionColorPlaces: v})}
+        label="Colour members by area"
+        title="Places take their area's colour (hydra ParentColorAdapter); while editing the map, objects too"
+      />
     </div>
   );
 }

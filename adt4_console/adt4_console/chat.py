@@ -182,6 +182,10 @@ class ChatService:
         self._client_provider = None
         self._schema = cypher_tools.SchemaCache()
         self._writes = WriteProposals()
+        self._edits = EditProposals()
+        self.missions = None  # mission.service.MissionService (propose_mission)
+        self.edits = None  # edit_service.EditService (propose_map_edit)
+        self._ctx = threading.local()  # this turn's mission context (roster, areas, mission)
         self.ledger = UsageLedger(
             getattr(settings, "llm_usage_path", "~/.adt4_console/llm_usage.json"),
             getattr(settings, "llm_budget_usd", 10.0),
@@ -278,12 +282,17 @@ class ChatService:
         src: str | None = None,
         history: list | None = None,
         model: str | None = None,
+        mission_ctx: dict | None = None,
     ):
         """One chat turn.  ``history``: the transcript items of earlier turns
         (the client keeps them; each turn ends with a ``transcript`` event
-        carrying this turn's items).  ``model``: from the picker."""
+        carrying this turn's items).  ``model``: from the picker.
+        ``mission_ctx``: ``{roster, areas, mission, planted}`` from the mission
+        planner (enables ``propose_mission``)."""
         src = self._default_src(src)
+        self._ctx.value = mission_ctx if self.missions is not None else None
         history = clean_history(history)
+        self._ctx.history = history  # propose_mission: the request the thread started with
         try:
             client = self.llm_client()
             if client is not None and self.ledger.remaining() <= 0:
@@ -389,6 +398,52 @@ class ChatService:
             "additionalProperties": False,
         },
     }
+    _T_PROPOSE_EDIT = {
+        "name": "propose_map_edit",
+        "description": "Propose structured map edits (preferred over propose_cypher_write). They "
+        "do not run: they are validated (a dry run; errors come back to you) and the operator "
+        "sees a card with the diff and approves or rejects it; you are told the outcome. While "
+        "robots are live, an approved edit is staged until the operator publishes it. Ops "
+        "(symbols as stored, e.g. 'O41', 'R0'): "
+        "update_node {symbol, set: {class?, name?, center?: [x, y, z], blocked?: bool, note?}}; "
+        "create_node {layer: 'Object', pos: [x, y, z], class, name?}; "
+        "retire_node {symbol, reason?} (removes it from the map; undoable); "
+        "restore_node {symbol}; create_edge / delete_edge {from, to} (type derived: CONTAINS "
+        "between layers, *_CONNECTED within one); "
+        "group {name, class: 'region', polygon: [[x, y], ...] | members: [symbols]} makes a "
+        "region (a Room node) that CONTAINS the places and objects inside the polygon; "
+        "add_class {layer: 'object', name}.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "one line: what changes and why"},
+                "ops": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": [
+                                "update_node", "create_node", "retire_node", "restore_node",
+                                "create_edge", "delete_edge", "group", "add_class"]},
+                            "symbol": {"type": "string"},
+                            "set": {"type": "object"},
+                            "layer": {"type": "string"},
+                            "pos": {"type": "array", "items": {"type": "number"}},
+                            "class": {"type": "string"},
+                            "name": {"type": "string"},
+                            "reason": {"type": "string"},
+                            "from": {"type": "string"},
+                            "to": {"type": "string"},
+                            "polygon": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                            "members": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["op"],
+                    },
+                },
+            },
+            "required": ["ops", "summary"],
+        },
+    }  # fmt: skip
     _T_SHOW_IMAGES = {
         "name": "show_object_images",
         "description": "Show the operator camera images of scene-graph nodes (objects, or agent "
@@ -464,12 +519,46 @@ class ChatService:
         },
     }
 
+    def _mission_ctx(self):
+        return getattr(self._ctx, "value", None)
+
     def _tools(self, src) -> list[dict]:
         if self._cypher_src(src) is not None:
-            return [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
-                    self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
-        return [self._T_FIND_OBJECTS, self._T_SHOW_IMAGES, self._T_SEARCH_IMAGES,
-                self._T_PROPOSE_GOAL]  # fmt: skip
+            tools = [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
+                     self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
+            if self.edits is not None:
+                tools.insert(1, self._T_PROPOSE_EDIT)
+        else:
+            tools = [self._T_FIND_OBJECTS, self._T_SHOW_IMAGES, self._T_SEARCH_IMAGES,
+                     self._T_PROPOSE_GOAL]  # fmt: skip
+        if self._mission_ctx() is not None:
+            from .mission import llm_planner
+
+            tools.append(llm_planner.TOOL)
+        return tools
+
+    def _mission_prompt(self, src) -> str:
+        ctx = self._mission_ctx()
+        if ctx is None:
+            return ""
+        from .mission import llm_planner
+
+        bounds = None
+        try:
+            pg = self.missions.place_graph(src)
+            if pg is not None and not pg.empty:
+                lo, hi = pg.P.min(0), pg.P.max(0)
+                bounds = (lo[0], lo[1], hi[0], hi[1])
+        except Exception:  # noqa: BLE001
+            pass
+        regions = None
+        csrc = self._cypher_src(src)
+        if self.edits is not None and csrc is not None:
+            try:
+                regions = self.edits.regions(csrc.id)
+            except Exception:  # noqa: BLE001
+                regions = None
+        return llm_planner.context_text(ctx, bounds, regions)
 
     def _cypher_src(self, src):
         """The Neo4j source Cypher runs on (the planner's map), or None."""
@@ -499,6 +588,7 @@ class ChatService:
                 "a robot to go somewhere, call propose_goal (the operator approves goals in the "
                 "UI; never claim the robot is moving). "
                 f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}.{where}"
+                + ("\n\n" + self._mission_prompt(src) if self._mission_ctx() is not None else "")
             )
         return "\n\n".join(
             [
@@ -508,6 +598,7 @@ class ChatService:
                 self._schema.text(csrc),
                 f"Database: {csrc.id}. Selected robot: {robot or 'none'}.{where}",
             ]
+            + ([self._mission_prompt(src)] if self._mission_ctx() is not None else [])
         )
 
     def _run_tool(self, name, args, message, robot, src, origin):
@@ -535,6 +626,8 @@ class ChatService:
                 "id": wid,
                 "note": "Not run yet. The operator approves or rejects it; you will be told.",
             }
+        if name == "propose_map_edit":
+            return self._propose_edit(args, src)
         if name == "show_object_images":
             return self._show_images(list(args.get("symbols") or []), src)
         if name == "find_objects":
@@ -559,6 +652,18 @@ class ChatService:
             return [goal], {"proposed": True, "note": "The operator approves and sends it."}
         if name == "search_robot_images":
             return self._search_images(str(args.get("query", "")), src)
+        if name == "propose_mission" and self.missions is not None:
+            from .mission import llm_planner
+
+            regions = None
+            csrc = self._cypher_src(src)
+            if self.edits is not None and csrc is not None:
+                try:
+                    regions = self.edits.regions(csrc.id)
+                except Exception:  # noqa: BLE001
+                    regions = None
+            return llm_planner.run_tool(args, self._mission_ctx(), self.missions, src, message, regions,
+                                        getattr(self._ctx, "history", None))  # fmt: skip
         return [], {"error": f"unknown tool {name}"}
 
     def _show_images(self, symbols, src):
@@ -624,6 +729,53 @@ class ChatService:
             if s["kind"] == "neo4j":
                 return s["id"]
         return src
+
+    # ------------------------------------------------------------ map edits
+    def _propose_edit(self, args, src):
+        """Dry-run the ops; a ``map_edit`` card (diff) for the operator, or the error."""
+        csrc = self._cypher_src(src)
+        ops = [dict(o) for o in (args.get("ops") or []) if isinstance(o, dict)]
+        if csrc is None or self.edits is None:
+            return [], {"error": "no editable Neo4j map is connected"}
+        if not ops:
+            return [], {"error": "no ops"}
+        try:
+            dry = self.edits.apply(csrc.id, ops, dry_run=True)
+        except Exception as e:  # noqa: BLE001 -- the model fixes its ops
+            return [], {"error": f"invalid edit: {e}"}
+        if not dry["changes"]:
+            return [], {"error": "these ops change nothing (already so?)"}
+        summary = str(args.get("summary") or "")
+        eid = self._edits.add(ops, summary, csrc.id, dry["summary"])
+        staged = self.edits.staged_mode()
+        card = {"type": "map_edit", "id": eid, "src": csrc.id, "summary": summary,
+                "diff": dry["summary"], "ops": ops, "affected": dry["affected"][:50],
+                "staged": staged}  # fmt: skip
+        return [card], {
+            "pending_approval": True,
+            "id": eid,
+            "diff": dry["summary"],
+            "note": "Not applied yet. The operator approves or rejects it; you will be told."
+            + (" Robots are live: an approved edit is staged until the operator publishes it." if staged else ""),
+        }
+
+    def execute_map_edit(self, eid: str, approve: bool, author: dict | None = None) -> dict:
+        """Apply (or stage, while robots are live) the exact ops of a chat proposal."""
+        e = self._edits.pop(eid)
+        if e is None:
+            return {"ok": False, "error": "unknown or expired edit proposal"}
+        if not approve:
+            return {"ok": True, "rejected": True, "diff": e["diff"]}
+        if self.edits is None:
+            return {"ok": False, "error": "map editing is not available"}
+        try:
+            out = self.edits.apply(e["src"], e["ops"], author={**(author or {}), "via": "chat"},
+                                   summary=e["summary"] or None)  # fmt: skip
+        except Exception as ex:  # noqa: BLE001
+            return {"ok": False, "error": str(ex), "diff": e["diff"]}
+        return {"ok": True, "staged": bool(out.get("staged")), "summary": out.get("summary"),
+                "mutation_id": out.get("mutation_id"), "map_version": out.get("map_version"),
+                "affected": out.get("affected")}  # fmt: skip
 
     # ------------------------------------------------------- approved writes
     def execute_write(self, wid: str, approve: bool) -> dict:
@@ -757,7 +909,7 @@ class ChatService:
                         + to_openai(list(history) + turn),
                         tools=tools,
                         temperature=0.2,
-                        max_tokens=1500,
+                        max_tokens=4000 if self._mission_ctx() is not None else 1500,
                     )
                 except openai.APIStatusError as e:
                     yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
@@ -823,6 +975,19 @@ class WriteProposals:
         if w is None or time.time() - w["t"] >= WRITE_TTL_S:
             return None
         return w
+
+
+class EditProposals(WriteProposals):
+    """Map edits (op lists) the model proposed, runnable by id for ``WRITE_TTL_S``."""
+
+    def add(self, ops: list, summary: str, src: str, diff: list | None = None) -> str:  # type: ignore[override]
+        with self._lock:
+            now = time.time()
+            self._items = {k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S}
+            self._n += 1
+            eid = f"e{self._n}-{int(now)}"
+            self._items[eid] = {"ops": ops, "summary": summary, "src": src, "diff": diff or [], "t": now}
+            return eid
 
 
 def _clip(text: str, n: int = TOOL_CONTENT_CHARS) -> str:

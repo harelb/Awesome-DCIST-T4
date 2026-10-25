@@ -1,6 +1,6 @@
 import {describe, expect, it} from "vitest";
 import * as THREE from "three";
-import {robotModelFor} from "../src/lib/robotModel";
+import {agentModelFor, isRobotHighlight, ROBOT_HIGHLIGHTS, robotModelFor} from "../src/lib/robotModel";
 import {DEFAULT_VIEW_STYLE, parseStoredStyle} from "../src/stores/viewStyle";
 import {hullShell} from "../src/viewer/RobotModel";
 
@@ -21,6 +21,29 @@ describe("robot models", () => {
     expect([s.robotModel, s.robotHighlight]).toEqual(["arrow", "tint"]);
     const bad = parseStoredStyle(JSON.stringify({robotModel: "blimp", robotHighlight: 3}));
     expect([bad.robotModel, bad.robotHighlight]).toEqual(["model", "outline"]);
+  });
+
+  it("animates the gait by default; the setting is stored", () => {
+    expect(DEFAULT_VIEW_STYLE.robotGait).toBe(true);
+    expect(parseStoredStyle(JSON.stringify({robotGait: false})).robotGait).toBe(false);
+    expect(parseStoredStyle(JSON.stringify({robotGait: "no"})).robotGait).toBe(true);
+  });
+
+  it("mission agents use their platform's model; the quad keeps its glyph", () => {
+    expect(agentModelFor("spot")).toBe(robotModelFor("spot"));
+    expect(agentModelFor("husky")).toBe(robotModelFor("phoenix"));
+    expect(agentModelFor("husky")?.url).toBe("models/husky.glb");
+    expect(agentModelFor("quad")).toBeNull();
+    expect(agentModelFor(null)).toBeNull();
+  });
+
+  it("offers recolouring the model, and loads settings stored before it", () => {
+    expect(ROBOT_HIGHLIGHTS.map(o => o.value)).toEqual(["outline", "tint", "paint", "off"]);
+    expect(ROBOT_HIGHLIGHTS.find(o => o.value === "paint")?.label).toBe("Recolour");
+    expect(isRobotHighlight("paint")).toBe(true);
+    expect(isRobotHighlight("glow")).toBe(false);
+    expect(parseStoredStyle(JSON.stringify({robotHighlight: "paint"})).robotHighlight).toBe("paint");
+    for (const old of ["off", "outline", "tint"]) expect(parseStoredStyle(JSON.stringify({robotHighlight: old})).robotHighlight).toBe(old);
   });
 
   it("the outline shell is the part's hull grown by d on every side", () => {

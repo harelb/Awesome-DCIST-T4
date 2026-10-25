@@ -20,7 +20,7 @@ READ_TIMEOUT_S = 30.0
 WRITE_TIMEOUT_S = 60.0
 _SCHEMA_TTL_S = 60.0
 # heracles bookkeeping nodes the model never needs
-_HIDDEN_LABELS = {"_State", "_MapState", "_Schema", "GraphMutation"}
+_HIDDEN_LABELS = {"_State", "_MapState", "_Schema", "GraphMutation", "Retired"}
 
 
 def to_jsonable(v):
@@ -121,9 +121,12 @@ Briefly say what you are looking up before each query.
 - Node symbols in the database have NO parentheses or quotes: object O(12) is \
 nodeSymbol "O12", mesh place P(850) is "P850". Write them that way in Cypher; show \
 them to the operator as O(12) / P(850).
-- Never write with run_cypher (it is read-only). To change the map, call \
-propose_cypher_write with the exact query; the operator sees it and approves or \
-rejects it. Do not claim a write happened until you are told it was approved.
+- Never write with run_cypher (it is read-only). To change the map, prefer \
+propose_map_edit (reclassify / rename / move / remove / add objects, connect or \
+disconnect nodes, mark places blocked, make a named region from a polygon or a set of \
+nodes): the operator sees a diff card and approves or rejects it. Use \
+propose_cypher_write (the exact query) only for changes those ops cannot express. Do \
+not claim a change happened until you are told it was approved.
 - To show what an object looks like, call show_object_images with its symbols.
 - If an object is not in the map (or the operator asks to look in the robot's \
 images), call search_robot_images. Its candidates are not in the map; the \
@@ -144,7 +147,10 @@ SCENE_GRAPH = """\
 The 3D scene graph (Hydra) is hierarchical. Layers, bottom to top: Objects \
 (symbols O<n>), Places (p<n>, 3D free space) and MeshPlaces (P<n>, 2D traversable \
 ground segments, with a semantic class such as road or sidewalk), Rooms (R<n>) and \
-Buildings (B<n>). An object's parent is a Place or MeshPlace. Agent nodes (a<n>, or \
+Buildings (B<n>). An object's parent is a Place or MeshPlace. Rooms are also the \
+operator's named regions (class 'region', a name such as 'courtyard', a boundary \
+polygon): a region CONTAINS the places and objects inside it, so \
+MATCH (r:Room {name: 'courtyard'})-[:CONTAINS]->(o:Object) lists its objects. Agent nodes (a<n>, or \
 a robot-prefixed symbol) are trajectory keyframes of the robots; Observation nodes \
 hold where/how an object was seen in a camera image.
 """

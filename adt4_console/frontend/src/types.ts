@@ -219,7 +219,23 @@ export interface GraphSource {
 
 export interface TileManifest {
   tile_size: number;
-  tiles: Record<string, {hash: string; nv: number; nf: number; origin: [number, number, number]}>;
+  /** 2: tiles also served packed (`?enc=2`, codec decodePackedTile) */
+  enc?: number;
+  /** levels of detail (0 = full; cell = vertex-clustering size in metres) */
+  lods?: {level: number; cell: number; name: string}[];
+  tiles: Record<
+    string,
+    {
+      hash: string;
+      nv: number;
+      nf: number;
+      origin: [number, number, number];
+      /** per `lods` entry: [gzipped bytes, etag], null = no faces at that level */
+      lod?: ([number, string] | null)[];
+    }
+  >;
+  /** a whole level in one download (`mesh/bundle/{level}`): the coarse preview */
+  bundles?: {level: number; bytes: number; etag: string}[];
 }
 
 export interface NodeDetail {

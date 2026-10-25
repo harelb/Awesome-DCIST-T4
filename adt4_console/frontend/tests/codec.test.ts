@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
-import {decodeDelta, decodeGraph, decodeTile, unpack, parseSym} from "../src/codec";
+import {decodeDelta, decodeGraph, decodePackedTile, decodeTile, unpack, parseSym} from "../src/codec";
 import {GraphModel} from "../src/lib/graphModel";
 
 const FIX = join(__dirname, "fixtures");
@@ -55,6 +55,75 @@ describe("codec", () => {
     expect(Array.from(t.indices)).toEqual(exp.idx);
     expect(t.positions.length).toBe(exp.pos.length);
     exp.pos.forEach((v: number, i: number) => expect(t.positions[i]).toBeCloseTo(v, 5));
+  });
+
+  it("decodes a packed tile (encoding 2) exactly like fleetlink.codec.unpack_tile", () => {
+    const t = decodePackedTile(unpack(bin("tile_packed.msgpack")));
+    const exp = js("tile_packed.json");
+    expect(exp.ib).toBe(2);
+    expect([t.key, t.nv, t.nf]).toEqual([exp.key, exp.nv, exp.nf]);
+    expect(Array.from(t.colors)).toEqual(exp.col);
+    expect(Array.from(t.indices)).toEqual(exp.idx);
+    expect(t.positions.length).toBe(exp.pos.length);
+    exp.pos.forEach((v: number, i: number) => expect(t.positions[i]).toBeCloseTo(v, 4));
+  });
+
+  it("decodes 4-byte packed indices and int16 extremes (reference encoder)", () => {
+    // mirror of codec.pack_tile for > 65536 vertices
+    const nv = 70000;
+    const nf = Math.ceil(nv / 3);
+    const q = new Int16Array(nv * 3);
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
+    for (let i = 0; i < q.length; i++) q[i] = Math.floor(rnd() * 65536) - 32768;
+    q.set([-32768, 32767, 0, 32767, -32768, 5]);
+    const idx = new Uint32Array(nf * 3);
+    for (let i = 0; i < idx.length; i++) idx[i] = i < nv ? i : Math.floor(rnd() * nv);
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    // first-use order is what the packer emits; build it the same way
+    const order: number[] = [];
+    const seen = new Int32Array(nv).fill(-1);
+    for (const v of idx) if (seen[v] < 0) seen[v] = order.push(v) - 1;
+    const zz16 = (d: number) => ((d << 1) ^ (d >> 15)) & 0xffff;
+    const pos = new Uint8Array(6 * nv);
+    for (let a = 0; a < 3; a++) {
+      let prev = 0;
+      order.forEach((v, i) => {
+        const cur = q[v * 3 + a];
+        const z = zz16(((cur - prev) << 16) >> 16);
+        prev = cur;
+        pos[2 * nv * a + i] = z & 255;
+        pos[2 * nv * a + nv + i] = z >> 8;
+      });
+    }
+    const n = 3 * nf;
+    const ib = new Uint8Array(4 * n);
+    let prev = 0;
+    for (let i = 0; i < n; i++) {
+      const cur = seen[idx[i]];
+      const d = (cur - prev) | 0;
+      prev = cur;
+      const z = ((d << 1) ^ (d >> 31)) >>> 0;
+      for (let b = 0; b < 4; b++) ib[b * n + i] = (z >>> (8 * b)) & 255;
+    }
+    const t = decodePackedTile({key: "k", origin: [8, -16, 0], scale: 0.01, nv, nf, hash: "h", enc: 2, ib: 4, pos, col: new Uint8Array(3 * nv), idx: ib});
+    for (let i = 0; i < n; i += 997) {
+      const v = idx[i];
+      expect(t.indices[i]).toBe(seen[v]);
+      expect(t.positions[seen[v] * 3]).toBeCloseTo(q[v * 3] * 0.01 + 8, 3);
+      expect(t.positions[seen[v] * 3 + 1]).toBeCloseTo(q[v * 3 + 1] * 0.01 - 16, 3);
+    }
+    expect(t.positions[0]).toBeCloseTo(q[order[0] * 3] * 0.01 + 8, 3);
+  });
+
+  it("rejects malformed packed tiles", () => {
+    const good = unpack(bin("tile_packed.msgpack")) as Record<string, unknown>;
+    expect(() => decodePackedTile({...good, ib: 3})).toThrow();
+    expect(() => decodePackedTile({...good, pos: (good.pos as Uint8Array).subarray(1)})).toThrow();
+    expect(() => decodePackedTile({...good, nv: 2})).toThrow();
   });
 
   it("parses node symbols", () => {
