@@ -98,3 +98,20 @@ fused with loop closures, every session within 1-7 m. Penn (courtyard + slam_har
 6 localized after the gate-2 change, lewis + gauss_2 altitude-only): fused 2.5-4.8 m, of which
 ~4.1 m is a common offset of the satellite imagery (0.8-2.7 m after removing it); every session's
 ground within 0.15 m of the others. Outputs: `/data/dcist/penn_2025_meridian/`.
+
+## Open-vocabulary regions (offline, no bag replay)
+
+Regions are `OpenVocabRegionsUpdateFunctor` nodes in the regions layer (ROOMS, `r(i)`), parents of the
+traversability places in `MESH_PLACES`, run inside the fusion (`scripts/gps_fusion/regions/`):
+1. `place_features.py`: each place of each run gets the visibility-weighted mean SigLIP2 embedding of
+   the keyframes that saw it (frustum, 12 m, depth occlusion), written to copies of the frontend graphs.
+2. `embed_prompts.py --debias`: prompt names averaged over phrases x templates, with the mean site
+   image direction removed (raw SigLIP2 cosines let one prompt win everywhere).
+3. Fuse with a config adding the regions functor as `zz_regions` (functors run in name order; it must
+   follow the places update) and without `UpdateRoomsFunctor`/`UpdateBuildingsFunctor`
+   (Penn example: `regions/offline_meridian_regions_penn.yaml`, prompts `regions/prompts_penn.json`).
+4. `strip_features.py <fused>/backend`: features only feed the clustering; move them to
+   `semantic_features.npz` (Penn dsg.json 133 MB -> 16 MB). The console ingest writes them to Neo4j as
+   `siglip2_emb` with vector indexes on MeshPlace/Room.
+Tune with `aib_replica.py` / `tune_prompts.py` (a Python replica of the clustering), check with
+`plot_regions.py` and `region_contact_sheet.py`.

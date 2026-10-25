@@ -1,0 +1,62 @@
+{
+ "parking lot": [
+  "parking lot",
+  "parking lot with parked cars",
+  "rows of parked cars",
+  "parking aisle",
+  "parking lot with trucks and vans",
+  "parking spaces",
+  "cars parked in a parking lot",
+  "parking lot with trees",
+  "asphalt lot with vans",
+  "van parking lot"
+ ],
+ "building": [
+  "building",
+  "building entrance",
+  "front of an office building"
+ ],
+ "intersection": [
+  "traffic intersection with crosswalks",
+  "intersection of two roads",
+  "crosswalk",
+  "street crossing"
+ ],
+ "field": [
+  "field",
+  "lawn",
+  "grass path",
+  "grassy meadow",
+  "dirt path through tall grass"
+ ],
+ "bridge": [
+  "bridge"
+ ],
+ "road": [
+  "road",
+  "street",
+  "access road",
+  "driveway"
+ ],
+ "courtyard": [
+  "courtyard",
+  "plaza",
+  "paved plaza",
+  "courtyard with trees"
+ ],
+ "alley": [
+  "alley",
+  "narrow alley between buildings"
+ ],
+ "sidewalk": [
+  "sidewalk",
+  "pedestrian walkway",
+  "paved footpath",
+  "concrete path"
+ ],
+ "loading dock": [
+  "loading dock",
+  "loading bay with garage doors",
+  "warehouse loading area"
+ ]
+}
