@@ -2,16 +2,53 @@
 // cache placed in the map frame through the GPS anchor's affine fit. Drawn
 // just under the lowest graph point so the mesh and graph stay on top in 3D;
 // in the top view it is the planning backdrop.
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import * as THREE from "three";
-import {useThree} from "@react-three/fiber";
+import {useFrame, useThree} from "@react-three/fiber";
 import {withToken} from "../lib/auth";
 import {fetchWithProgress} from "../lib/api";
-import {lonLatToTile, pickZoom, tilesForBox, type TileQuad} from "../lib/geo";
+import {lonLatToTile, pickZoom, tilesForBox, type TileLayer, type TileQuad} from "../lib/geo";
 import {useMission} from "../stores/mission";
 import {beginTask, dropTask, endTask, progressTask} from "../stores/loading";
 
 const MARGIN_M = 60;
+// context imagery around the map: the ground in view, coarser, at most this many tiles
+const CONTEXT_TILES = 48;
+// how far out the view footprint reaches (rays toward the horizon are cut here), metres
+const CONTEXT_MAX_M = 4000;
+
+/** The map-frame box of the ground (plane ``z``) the camera sees: its four view
+ *  corners cast onto the plane, rays that miss it (or reach past ``maxM``) cut at
+ *  ``maxM`` from the camera. */
+export function viewFootprint(camera: THREE.Camera, z: number, maxM = CONTEXT_MAX_M): {min: number[]; max: number[]} {
+  const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -z);
+  const ray = new THREE.Raycaster();
+  const hit = new THREE.Vector3();
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, 1], [0, 0]] as const) {
+    ray.setFromCamera(new THREE.Vector2(u, v), camera);
+    const o = ray.ray.origin;
+    let p = ray.ray.intersectPlane(plane, hit);
+    if (!p || p.distanceTo(o) > maxM) {
+      const d = ray.ray.direction.clone().setZ(0);
+      if (d.lengthSq() < 1e-9) d.set(1, 0, 0);
+      p = hit.copy(o).addScaledVector(d.normalize(), maxM);
+    }
+    xs.push(p.x);
+    ys.push(p.y);
+  }
+  return {min: [Math.min(...xs), Math.min(...ys)], max: [Math.max(...xs), Math.max(...ys)]};
+}
+
+/** Tiles of ``layer`` the cache can have (offline: inside its manifest's box). */
+function servable(tiles: TileQuad[], layer: TileLayer, z: number): TileQuad[] {
+  const bb = layer.bbox_lonlat;
+  if (layer.live || !bb) return tiles;
+  const [x0, y1] = lonLatToTile(bb[0], bb[1], z);
+  const [x1, y0] = lonLatToTile(bb[2], bb[3], z);
+  return tiles.filter(q => q.x >= Math.floor(x0) && q.x <= Math.floor(x1) && q.y >= Math.floor(y0) && q.y <= Math.floor(y1));
+}
 
 // imagery on the load bar (stores/loading): tiles in / tiles wanted
 const IMAGERY_TASK = "imagery";
@@ -30,7 +67,7 @@ function imageryGot(key: string) {
   if (imagery.got.size >= imagery.want.size) endTask(IMAGERY_TASK);
 }
 
-function Tile({q, layer, z, opacity}: {q: TileQuad; layer: string; z: number; opacity: number}) {
+function Tile({q, layer, z, opacity, counted = true}: {q: TileQuad; layer: string; z: number; opacity: number; counted?: boolean}) {
   const invalidate = useThree(s => s.invalidate);
   const [tex, setTex] = useState<THREE.Texture | null>(null);
   useEffect(() => {
@@ -53,7 +90,7 @@ function Tile({q, layer, z, opacity}: {q: TileQuad; layer: string; z: number; op
       } catch {
         // not cached (and no live fetching): leave the hole
       } finally {
-        imageryGot(q.key);
+        if (counted) imageryGot(q.key);
       }
     })();
     return () => {
@@ -61,7 +98,7 @@ function Tile({q, layer, z, opacity}: {q: TileQuad; layer: string; z: number; op
       t?.dispose();
       (t?.image as ImageBitmap | undefined)?.close?.();
     };
-  }, [layer, q.z, q.x, q.y, invalidate]);
+  }, [layer, q.z, q.x, q.y, invalidate, counted]);
   const geom = useMemo(() => {
     const g = new THREE.BufferGeometry();
     const c = q.corners; // NW NE SE SW
@@ -73,7 +110,7 @@ function Tile({q, layer, z, opacity}: {q: TileQuad; layer: string; z: number; op
   useEffect(() => () => geom.dispose(), [geom]);
   if (!tex) return null;
   return (
-    <mesh geometry={geom} renderOrder={-10}>
+    <mesh geometry={geom} renderOrder={counted ? -10 : -11}>
       <meshBasicMaterial map={tex} transparent={opacity < 1} opacity={opacity} depthWrite={false} side={THREE.DoubleSide} toneMapped={false} />
     </mesh>
   );
@@ -86,32 +123,57 @@ export function SatelliteGround({floorZ}: {floorZ: number | null}) {
   const layers = useMission(s => s.layers);
   const world = useMission(s => s.world);
   const layer = layers.find(l => l.id === "esri_world_imagery") ?? layers[0];
-  const tiles = useMemo(() => {
-    if (!geo || !layer || !world?.bounds) return [];
+  // detail: the map's area (+ margin) at the finest zoom that stays within the tile budget
+  const {tiles, detailZ} = useMemo(() => {
+    if (!geo || !layer || !world?.bounds) return {tiles: [], detailZ: 0};
     const b = world.bounds;
     const box = {min: [b[0] - MARGIN_M, b[1] - MARGIN_M], max: [b[2] + MARGIN_M, b[3] + MARGIN_M]};
     const zmax = layer.zmax ?? 19;
     const z = pickZoom(geo, box, zmax, Math.max(layer.zmin ?? 12, 10));
-    const all = tilesForBox(geo, box, z) ?? [];
     // offline: only what the cache can have (its manifest's box), no 404 storm
-    const bb = layer.bbox_lonlat;
-    if (layer.live || !bb) return all;
-    const [x0, y1] = lonLatToTile(bb[0], bb[1], z);
-    const [x1, y0] = lonLatToTile(bb[2], bb[3], z);
-    return all.filter(q => q.x >= Math.floor(x0) && q.x <= Math.floor(x1) && q.y >= Math.floor(y0) && q.y <= Math.floor(y1));
+    return {tiles: servable(tiles_(geo, box, z), layer, z), detailZ: z};
   }, [geo, layer, world]);
+  // context: the ground in view (zoomed out: beyond the map), coarser than the detail
+  const camera = useThree(s => s.camera);
+  const [view, setView] = useState<{min: number[]; max: number[]} | null>(null);
+  const lastView = useRef("");
+  const frame = useRef(0);
+  const zPlane = (floorZ ?? geo?.anchor.z0 ?? 0) - 0.3;
+  useFrame(() => {
+    if (!on || !geo || (frame.current++ & 15)) return; // every 16th frame is plenty
+    const f = viewFootprint(camera, zPlane);
+    // snap to a grid a tenth of the view size, so small moves re-render nothing
+    const step = Math.max(25, Math.max(f.max[0] - f.min[0], f.max[1] - f.min[1]) / 10);
+    const q = (v: number, up: boolean) => (up ? Math.ceil(v / step) : Math.floor(v / step)) * step;
+    const snapped = {min: [q(f.min[0], false), q(f.min[1], false)], max: [q(f.max[0], true), q(f.max[1], true)]};
+    const k = snapped.min.concat(snapped.max).join(",");
+    if (k !== lastView.current) {
+      lastView.current = k;
+      setView(snapped);
+    }
+  });
+  const context = useMemo(() => {
+    if (!geo || !layer || !view || !detailZ) return [];
+    const zmin = layer.live ? 10 : Math.max(layer.zmin ?? 12, 10);
+    const z = pickZoom(geo, view, Math.max(zmin, detailZ - 1), zmin, CONTEXT_TILES);
+    return servable(tiles_(geo, view, z, CONTEXT_TILES), layer, z);
+  }, [geo, layer, view, detailZ]);
   const shown = on && !!layer;
   useEffect(() => {
     imageryWant(shown ? tiles.map(q => q.key) : []);
   }, [shown, tiles]);
   useEffect(() => () => imageryWant([]), []);
-  if (!on || !layer || !tiles.length) return null;
-  const z = (floorZ ?? geo?.anchor.z0 ?? 0) - 0.3;
+  if (!on || !layer || (!tiles.length && !context.length)) return null;
   return (
     <group>
+      {context.map(q => (
+        <Tile key={`c${q.key}`} q={q} layer={layer.id} z={zPlane - 0.05} opacity={opacity} counted={false} />
+      ))}
       {tiles.map(q => (
-        <Tile key={q.key} q={q} layer={layer.id} z={z} opacity={opacity} />
+        <Tile key={q.key} q={q} layer={layer.id} z={zPlane} opacity={opacity} />
       ))}
     </group>
   );
 }
+
+const tiles_ = (g: Parameters<typeof tilesForBox>[0], box: {min: number[]; max: number[]}, z: number, max?: number) => tilesForBox(g, box, z, max) ?? [];
