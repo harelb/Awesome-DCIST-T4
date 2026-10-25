@@ -571,6 +571,10 @@ select.input {
   gap: 12px;
 }
 .toggle {
+  /* the hidden input below is laid out inside the label: without this its containing
+     block is the page's scroll container, and focusing a toggle low in a scrolled side
+     panel scrolled the whole page (the map went off screen, e.g. Layers > Grid) */
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 9px;
