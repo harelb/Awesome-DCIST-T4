@@ -25,3 +25,22 @@ describe("frame browser", () => {
     expect(keyframeTracks(pts, [], [{key: "a", start: 0}])).toEqual([]);
   });
 });
+
+import {shortcutOf} from "../src/viewer/shortcuts";
+import {enterMapFull, exitMapFull, toggleMapFull, useMapFull} from "../src/viewer/mapFull";
+
+describe("full map", () => {
+  it("M toggles it (not while typing); the body class follows", () => {
+    const key = (k: string, target: EventTarget | null = null) => ({key: k, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, target});
+    expect(shortcutOf(key("m"))).toBe("fullmap");
+    expect(shortcutOf(key("m", document.createElement("input")))).toBeNull();
+    enterMapFull();
+    expect(useMapFull.getState().on).toBe(true);
+    expect(document.body.classList.contains("map-full")).toBe(true);
+    toggleMapFull();
+    expect(useMapFull.getState().on).toBe(false);
+    expect(document.body.classList.contains("map-full")).toBe(false);
+    exitMapFull(); // idempotent
+    expect(useMapFull.getState().on).toBe(false);
+  });
+});

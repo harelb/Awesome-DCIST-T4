@@ -37,6 +37,7 @@ import {DetectionToast, ImageViewer, MissionPanel} from "./MissionPanel";
 import {fitMission, loadGeo, onMapClick, useMission} from "../stores/mission";
 import {enterMissionView, leaveMissionView} from "../stores/missionView";
 import {useMapShortcuts} from "./shortcuts";
+import {exitMapFull, toggleMapFull, useMapFull} from "./mapFull";
 import {editLayerOf} from "../lib/mapEdit";
 import {idlePickMode, onEditClick, pickIntoSelection} from "../stores/mapEdit";
 import {finishDrawing, useActiveTool} from "../stores/tools";
@@ -599,6 +600,26 @@ export default function ViewerPage({mode = "viewer"}: {mode?: "viewer" | "missio
   useEffect(() => {
     if (!focused && useViewer.getState().driveFull) useViewer.getState().set({driveFull: false});
   }, [focused]);
+  // full map (mapFull.ts): the panes close while it is on and come back as they were
+  const mapFull = useMapFull(s => s.on);
+  const panesBefore = useRef<{left: boolean; right: boolean} | null>(null);
+  useEffect(() => {
+    if (mapFull) {
+      panesBefore.current = {left: leftOpen, right: rightOpen};
+      setLeftOpenRaw(false);
+      setRightOpenRaw(false);
+    } else if (panesBefore.current) {
+      setLeftOpenRaw(panesBefore.current.left);
+      setRightOpenRaw(panesBefore.current.right);
+      panesBefore.current = null;
+    }
+  }, [mapFull]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => exitMapFull(), []);
+  const mapFullBtn = (
+    <button className={`btn btn-sm panel-btn ${mapFull ? "on" : ""}`} onClick={toggleMapFull} aria-pressed={mapFull} title={mapFull ? "Leave the full-screen map (M or Esc)" : "Map only, full screen: hides the navigation, top bar and side panels (M)"} data-testid="map-full">
+      {mapFull ? "⤡ Exit full map" : narrow ? "⛶" : "⛶ Full map"}
+    </button>
+  );
   const fullBtn =
     drive && focused && (isPhone || coarse) ? (
       <button
@@ -722,6 +743,7 @@ export default function ViewerPage({mode = "viewer"}: {mode?: "viewer" | "missio
               {camera}
               {!narrow && <ScreenshotButton onDone={setToast} />}
               {!narrow && <ControlsHelpButton mode={v.topDown ? "top" : "3d"} withLayout={wide} mission={missionMode} />}
+              {!isPhone && mapFullBtn}
               {narrow && (
                 <ToolbarMore>
                   <RobotFocusPicker />

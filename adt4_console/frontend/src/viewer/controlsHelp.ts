@@ -111,6 +111,7 @@ export const MISSION_HELP: HelpSection = {
     {keys: "Delete", does: "Remove the edit selection (undoable)"},
     {keys: "Ctrl / ⌘ + Z", does: "Undo the newest of: your last start move, your last map edit (this browser)"},
     {keys: "F", does: "Fit the open mission in view"},
+    {keys: "M", does: "Full map: the map alone, full screen (M / Esc to leave)"},
     {keys: "Space", does: "Simulate · pause / resume the simulation"},
   ],
 };

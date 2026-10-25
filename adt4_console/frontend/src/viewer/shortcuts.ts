@@ -1,7 +1,8 @@
 // Mission planner / map-edit keyboard shortcuts (listed in the "?" help,
 // controlsHelp.ts MISSION_HELP): Ctrl/Cmd+Z undoes the newest start move or map
 // edit (stores/tools.ts undoLatest), Delete removes the edit selection (like its
-// Remove button: undoable from the toast / Ctrl+Z), F fits the mission, Space
+// Remove button: undoable from the toast / Ctrl+Z), F fits the mission, M toggles
+// the full-screen map (mapFull.ts), Space
 // plays / pauses the simulation. The drawing keys (Enter / Backspace / Esc) are
 // ToolBanner's. None of them fire while typing in a field; Space also leaves a
 // focused button alone (it presses it).
@@ -9,13 +10,14 @@ import {useEffect} from "react";
 import {fitMission, simCmd, useMission} from "../stores/mission";
 import {deleteSelection, useMapEdit} from "../stores/mapEdit";
 import {undoLatest, undoTarget} from "../stores/tools";
+import {toggleMapFull} from "./mapFull";
 
 export const isTyping = (t: EventTarget | null) => {
   const el = t as HTMLElement | null;
   return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
 };
 
-export type Shortcut = "undo" | "delete" | "fit" | "play";
+export type Shortcut = "undo" | "delete" | "fit" | "play" | "fullmap";
 
 /** The shortcut a key press asks for (null: not one of ours, or typing). */
 export function shortcutOf(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target">): Shortcut | null {
@@ -25,6 +27,7 @@ export function shortcutOf(e: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" 
   if (mod || e.altKey) return null;
   if (e.key === "Delete") return "delete";
   if (e.key === "f" || e.key === "F") return "fit";
+  if (e.key === "m" || e.key === "M") return "fullmap";
   if (e.key === " " && !(e.target instanceof HTMLButtonElement)) return "play";
   return null;
 }
@@ -63,6 +66,9 @@ export function runShortcut(s: Shortcut): boolean {
     }
     case "fit":
       return fitMission();
+    case "fullmap":
+      toggleMapFull();
+      return true;
     case "play": {
       const {current, run} = useMission.getState();
       if (!current || run?.kind === "live") return false;

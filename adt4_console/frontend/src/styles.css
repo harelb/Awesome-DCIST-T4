@@ -205,6 +205,17 @@ code,
   justify-content: center;
   padding: 10px 0;
 }
+/* full map (viewer/mapFull.ts): only the viewer is left on the screen */
+body.map-full .sidenav,
+body.map-full .topbar,
+body.map-full .tabbar,
+body.map-full .banner {
+  display: none;
+}
+body.map-full .shell,
+body.map-full .shell.nav-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
 .topbar {
   display: flex;
   align-items: center;
@@ -2960,16 +2971,19 @@ input[type="checkbox"] {
   font-size: 9px;
   opacity: 0.9;
 }
-/* areas: heavier, upper-case, on a dark pill, so they read apart from object labels */
+/* areas: heavier, upper-case, white on a near-opaque dark pill (whatever the
+   background), so they read apart from object labels and over any imagery */
 .viz-text-rooms {
   font-size: 13px;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 9px;
-  background: rgba(10, 14, 20, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  background: rgba(8, 12, 18, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   text-shadow: none;
 }
 
