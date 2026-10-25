@@ -70,7 +70,10 @@ ground robot against an orthophoto. Its trajectory can stand in for `gps.csv`:
    --sigma 1.5 --camera-offset X,Y,Z --altitude H` (camera in base_link: Spot 0.521,0.087,0.141;
    Husky 0.303,0.071,0.371), fuse with `--gps-lever 0 0 0`. Meridian's z is in each session's own
    odometry frame, so the altitude written is a constant (base_link height above the ground, Spot
-   0.5, Husky 0.15); with meridian z the sessions ended up on different levels (~10 m apart at Penn).
+   0.512 from its gpe frame, Husky A200 0.132 from clearpath_platform_description); with meridian z
+   the sessions ended up on different levels (~10 m apart at Penn). On a flat site also pass
+   `--altitude-sigma 0.5` and fuse with `use_altitude: true`: odometry height drift otherwise leaves
+   sessions 2-3 m apart (Penn: within 0.15 m with it; sessions without meridian fixes ~1.5 m).
 5. Only use sessions Meridian reports as localized (`incremental/results.txt`: `Final state: POST`);
    leave the others to the loop-closure alignment (an unlocalized Penn session was 42 m off).
    More than 8 sessions is not possible (kimera_pgmo robot prefixes a-h); with 8, use `-s 0`.

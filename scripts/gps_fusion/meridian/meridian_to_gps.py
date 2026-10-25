@@ -21,6 +21,9 @@ p.add_argument("--altitude", type=float, default=0.0,
                help="altitude to write: meridian's z is in each session's own odometry frame, "
                "not an altitude, so a constant (base_link height above the ground) keeps "
                "sessions on one ground plane")
+p.add_argument("--altitude-sigma", type=float, default=None,
+               help="altitude sigma to write (default 10x --sigma); a small one with the fusion's "
+               "use_altitude holds every session to the ground plane in a flat area")
 a = p.parse_args()
 
 data = np.loadtxt(a.trajectory, delimiter=",", comments="#", ndmin=2)
@@ -39,8 +42,9 @@ for i in range(1, len(t)):
         keep.append(i)
 lon, lat = Transformer.from_crs(a.epsg, 4326, always_xy=True).transform(xyz[keep, 0], xyz[keep, 1])
 var = a.sigma ** 2
+var_z = (a.altitude_sigma if a.altitude_sigma is not None else 10 * a.sigma) ** 2
 with open(a.out, "w") as f:
     f.write("timestamp_ns,latitude,longitude,altitude,status,cov_xx,cov_yy,cov_zz\n")
     for k, la, lo in zip(keep, lat, lon):
-        f.write(f"{int(round(t[k] * 1e9))},{la:.9f},{lo:.9f},{a.altitude:.3f},0,{var},{var},{100 * var}\n")
+        f.write(f"{int(round(t[k] * 1e9))},{la:.9f},{lo:.9f},{a.altitude:.3f},0,{var},{var},{var_z}\n")
 print(f"{a.out}: {len(keep)} fixes over {t[keep[-1]] - t[keep[0]]:.0f} s")
