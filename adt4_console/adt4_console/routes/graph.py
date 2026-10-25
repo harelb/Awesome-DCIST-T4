@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 
 from .. import image_render
+from ..graph_service import trajectory_payload
 from ..mesh_lod import etag_of, gzip_bytes
 from . import services
 
@@ -124,6 +125,7 @@ async def image(
 
 @router.get("/{src}/trajectory")
 def trajectory(src: str, request: Request):
-    raw = json.dumps({"points": services(request).graph.get(src).trajectory()}, separators=(",", ":"),
+    source = services(request).graph.get(src)
+    raw = json.dumps(trajectory_payload(source.trajectory(), source.trajectory_sources()), separators=(",", ":"),
                      allow_nan=False).encode()
     return blob_response(request, gzip_bytes(raw), len(raw), etag_of(raw), "application/json")

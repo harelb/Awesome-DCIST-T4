@@ -501,6 +501,10 @@ class Source:
     def trajectory(self) -> list:
         return _records_trajectory(self.loaded())
 
+    def trajectory_sources(self) -> dict:
+        """Robot prefix -> {session, robot, bag} where the source knows them."""
+        return {}
+
     # -- shared ------------------------------------------------------------
     def loaded(self) -> Loaded:
         v = self.version()
@@ -735,26 +739,64 @@ def _graph_loaded(G, version: int, extra=None) -> Loaded:
     )
 
 
+# consecutive keyframes of one robot are ~1 m apart: a longer step is a stretch the
+# robot's map has no keyframes for, drawn as a break rather than a straight line
+TRAJECTORY_GAP_M = 4.0
+
+
+def trajectory_payload(rows: list, sources: dict | None = None) -> dict:
+    """``rows`` = [t, x, y, z, robot prefix]: ``points`` [t, x, y, z] ordered by robot then
+    t; ``breaks``, the indices where a new polyline starts (another robot, or a gap); and
+    ``robots``, each robot's first index with its session / robot / bag when known."""
+    rows = sorted(rows, key=lambda r: (str(r[4]), r[0]))
+    breaks, robots = [], []
+    for i, r in enumerate(rows):
+        if i == 0 or r[4] != rows[i - 1][4]:
+            robots.append({"key": str(r[4]), "start": i, **(sources or {}).get(str(r[4]), {})})
+        if i and (r[4] != rows[i - 1][4] or math.dist(rows[i - 1][1:3], r[1:3]) > TRAJECTORY_GAP_M):
+            breaks.append(i)
+    return {"points": [r[:4] for r in rows], "breaks": breaks, "robots": robots}
+
+
+def _spark_trajectory_sources(G) -> dict:
+    """Robot prefix -> {session, robot, bag}: the session from its agent nodes' metadata
+    (hydra_multi: the input's session.txt), robot and bag from the graph's ``sessions``
+    metadata ({session: {robot, bag}}, written when a fused map is prepared)."""
+    try:
+        sessions = (G.metadata.get() or {}).get("sessions") or {}
+    except Exception:  # noqa: BLE001
+        sessions = {}
+    out = {}
+    for L in G.layer_partitions:
+        part = getattr(L, "partition", None)
+        if getattr(L, "id", None) != AGENT_LAYER or part in (None, 0):
+            continue
+        for node in L.nodes:
+            md = getattr(node.attributes, "metadata", None)
+            session = (md.get() if md is not None else {}).get("session")
+            if session:
+                out[chr(part)] = {"session": session, **{k: v for k, v in (sessions.get(session) or {}).items() if k in ("robot", "bag")}}
+            break
+    return out
+
+
 def _records_trajectory(loaded: Loaded) -> list:
     pts = []
     for rec in loaded.records.values():
-        if rec.layer == AGENT_LAYER and rec.part == AGENT_PART:
+        if is_agent_record(rec):
             try:
                 idx = parse_symbol(rec.sym)[1]
             except ValueError:
                 continue
-            pts.append([float(idx), *rec.pos])
-    pts.sort(key=lambda p: p[0])
+            pts.append([float(idx), *rec.pos, chr(rec.part)])
     return pts
 
 
 def _spark_trajectory(G) -> list:
     pts = []
     for L in G.layer_partitions:
-        if (
-            getattr(L, "id", None) != AGENT_LAYER
-            or getattr(L, "partition", None) != AGENT_PART
-        ):
+        part = getattr(L, "partition", None)
+        if getattr(L, "id", None) != AGENT_LAYER or part in (None, 0):
             continue
         for node in L.nodes:
             a = node.attributes
@@ -764,8 +806,9 @@ def _spark_trajectory(G) -> list:
                 if isinstance(ts, datetime.timedelta)
                 else float(ts or 0)
             )
-            pts.append([t, *(float(v) for v in a.position)])
-    pts.sort(key=lambda p: p[0])
+            if not hasattr(a, "external_key"):  # agent (keyframe) nodes only
+                continue
+            pts.append([t, *(float(v) for v in a.position), chr(part)])
     return pts
 
 
@@ -824,7 +867,7 @@ class FileSource(Source):
         except ImportError as e:
             raise GraphUnavailable(f"spark_dsg unavailable: {e}") from None
         G = dsg.DynamicSceneGraph.load(str(self.dsg_path))
-        return _graph_loaded(G, version, {"trajectory": _spark_trajectory(G)})
+        return _graph_loaded(G, version, {"trajectory": _spark_trajectory(G), "trajectory_sources": _spark_trajectory_sources(G)})
 
     def mesh_file(self):
         ply = self.dsg_path.parent / "mesh.ply"
@@ -866,6 +909,9 @@ class FileSource(Source):
 
     def trajectory(self):
         return self.loaded().extra.get("trajectory", [])
+
+    def trajectory_sources(self) -> dict:
+        return self.loaded().extra.get("trajectory_sources", {})
 
 
 def _neo4j_image(r: dict) -> NodeImage:
@@ -1227,27 +1273,35 @@ class Neo4jSource(Source):
             if c is None:
                 continue
             t = (r["t"] or 0) / 1e9
-            pts.append([t, float(c[0]), float(c[1]), float(c[2])])
+            pts.append([t, float(c[0]), float(c[1]), float(c[2]), (r["s"] or "?")[0]])
         return pts or self._source_file_trajectory()
+
+    def trajectory_sources(self) -> dict:
+        self._source_file_trajectory()
+        return self._traj_cache[2]
 
     def _source_file_trajectory(self) -> list:
         """heracles skips keyframes without image folders; fall back to the source DSG."""
         v = self.version()
         if getattr(self, "_traj_cache", (None,))[0] == v:
             return self._traj_cache[1]
-        pts = []
+        pts, sources = [], {}
         rec = self.query(
             "MATCH (m:_GraphMetadata {key: 'source'}) RETURN m.file_path AS p"
         )
         path = rec[0]["p"] if rec else None
+        if path and path.endswith("dsg_with_mesh.json"):  # same graph without the mesh: much faster to load
+            small = os.path.join(os.path.dirname(path), "dsg.json")
+            path = small if os.path.isfile(small) else path
         if path and os.path.isfile(path):
             try:
                 import spark_dsg as dsg
 
-                pts = _spark_trajectory(dsg.DynamicSceneGraph.load(path))
+                G = dsg.DynamicSceneGraph.load(path)
+                pts, sources = _spark_trajectory(G), _spark_trajectory_sources(G)
             except Exception as e:  # noqa: BLE001
                 log.warning("trajectory from %s failed: %s", path, e)
-        self._traj_cache = (v, pts)
+        self._traj_cache = (v, pts, sources)
         return pts
 
 
