@@ -94,6 +94,7 @@ export function EditOverlay() {
   const graphText = useViewer(s => s.showText);
   const pos = usePositions(src);
   const model = useViewer(s => (src ? s.sources[src]?.model : null));
+  const srcOn = useViewer(s => (src ? !!s.sources[src]?.enabled : false));
   const rev = useViewer(s => (src ? s.sources[src]?.rev : 0));
   const ground = useMemo(() => {
     let z = Infinity;
@@ -128,14 +129,16 @@ export function EditOverlay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusRoot, model, rev, pos]);
 
-  if (!src) return null;
+  // nothing of a map whose source is switched off (its areas, selection, members)
+  if (!src || !srcOn) return null;
   const z = ground + 0.15;
   return (
     <group name="map-edit-overlay">
       <FocusDimmer src={src} on={!!focusRoot} />
       {showRegions &&
         regions.map((r, i) =>
-          r.polygon && r.polygon.length >= 3 ? (
+          // areas derived from their places are drawn by the graph layer (Area boundaries)
+          r.polygon && r.polygon.length >= 3 && r.polygon_source !== "members" ? (
             <group key={r.symbol}>
               <Line points={[...r.polygon, r.polygon[0]].map(p => [p[0], p[1], z] as V3)} color={regionColor(i)} lineWidth={2.5} dashed dashSize={0.8} gapSize={0.4} depthTest={false} renderOrder={ORDER} />
               {!graphText && (

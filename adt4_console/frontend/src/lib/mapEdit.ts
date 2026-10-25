@@ -75,6 +75,8 @@ export interface Region {
   class: string | null;
   center: number[] | null;
   polygon: number[][] | null;
+  /** "drawn": the area's own boundary; "members": the ground its places cover (drawn by the graph layer) */
+  polygon_source?: "drawn" | "members" | null;
   source: string | null;
   members: Record<string, number>;
 }
