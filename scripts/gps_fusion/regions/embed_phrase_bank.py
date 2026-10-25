@@ -8,21 +8,18 @@ import argparse, os
 import numpy as np
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 import sys; sys.path.insert(0, os.path.dirname(__file__))
-from embed_prompts import MODEL, TEMPLATES
+from embed_prompts import TEMPLATES
+import vlm_models
 
 ap = argparse.ArgumentParser(); ap.add_argument("--phrases", nargs="+", required=True); ap.add_argument("--out", required=True)
+ap.add_argument("--model", default="siglip2", choices=["siglip2", "clip"])
 a = ap.parse_args()
-import torch
-from transformers import AutoModel, AutoProcessor
-model = AutoModel.from_pretrained(MODEL).to("cuda").eval(); proc = AutoProcessor.from_pretrained(MODEL)
+m = vlm_models.load(a.model)
 old = dict(np.load(a.out)) if os.path.exists(a.out) else {}
 bank = {str(k): v for k, v in zip(old.get("phrases", []), old.get("emb", []))}
-with torch.no_grad():
-    for ph in a.phrases:
-        if ph in bank: continue
-        ti = proc(text=[t.format(ph) for t in TEMPLATES], return_tensors="pt", padding="max_length", max_length=64, truncation=True).to("cuda")
-        out = model.get_text_features(**ti); te = (out if isinstance(out, torch.Tensor) else out.pooler_output).float()
-        bank[ph] = (te / te.norm(dim=-1, keepdim=True)).mean(0).cpu().numpy()
-del model; torch.cuda.empty_cache()
+for ph in a.phrases:
+    if ph in bank: continue
+    bank[ph] = vlm_models.embed_texts(m, [t.format(ph) for t in TEMPLATES]).mean(0)
+del m
 np.savez(a.out, phrases=np.array(list(bank)), emb=np.stack(list(bank.values())))
 print(len(bank), "phrases")

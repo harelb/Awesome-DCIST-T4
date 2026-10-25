@@ -39,7 +39,9 @@ for ridx, s in enumerate(sessions):
     st = ImageStore.open(pathlib.Path(a.runs) / s / "image_store")
     for f in st.frames(kind=FrameKind.KEYFRAME):
         fid = fmap.get(f.anchor_node_id)
-        if fid is None or fid not in nodes: continue
+        if fid is None:  # agent layers are re-prefixed per robot (a -> chr(97 + r)), not in the node map
+            fid = (ord(chr(97 + ridx)) << 56) | (f.anchor_node_id & ((1 << 56) - 1))
+        if fid not in nodes: continue
         dist, k = tree.query(nodes[fid]["attributes"]["position"][:2])
         if dist < 4.0: by_region[parent[pids[k]]].append(f.rgb_path)
 rows = [r for r in sorted(regions, key=lambda r: regions[r]["attributes"]["name"])

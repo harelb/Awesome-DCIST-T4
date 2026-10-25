@@ -36,30 +36,24 @@ def main():
     ap.add_argument("--image-emb", help="npz with emb (N, D) to print score statistics")
     ap.add_argument("--debias", action="store_true", help="project the mean image embedding out")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--model", default="siglip2", choices=["siglip2", "clip"],
+                    help="clip = OpenCLIP ViT-H-14 laion2b (vlm_models.py); same templates")
     args = ap.parse_args()
 
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-    import torch
-    from transformers import AutoModel, AutoProcessor
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import vlm_models
 
-    model = AutoModel.from_pretrained(MODEL).to(args.device).eval()
-    proc = AutoProcessor.from_pretrained(MODEL)
+    m = vlm_models.load(args.model, args.device)
     vecs = []
     names = [p.split("=", 1)[0] for p in args.prompts]
-    with torch.no_grad():
-        for p in args.prompts:
-            # "name=phrase a|phrase b": the name's embedding averages all phrases x templates
-            phrases = p.split("=", 1)[1].split("|") if "=" in p else [p]
-            texts = [t.format(ph) for ph in phrases for t in TEMPLATES]
-            ti = proc(text=texts, return_tensors="pt", padding="max_length", max_length=64,
-                      truncation=True).to(args.device)
-            out = model.get_text_features(**ti)
-            te = (out if isinstance(out, torch.Tensor) else out.pooler_output).float()
-            te = te / te.norm(dim=-1, keepdim=True)
-            m = te.mean(0)
-            vecs.append((m / m.norm()).cpu().numpy())
-    del model
-    torch.cuda.empty_cache()
+    for p in args.prompts:
+        # "name=phrase a|phrase b": the name's embedding averages all phrases x templates
+        phrases = p.split("=", 1)[1].split("|") if "=" in p else [p]
+        te = vlm_models.embed_texts(m, [t.format(ph) for ph in phrases for t in TEMPLATES])
+        v = te.mean(0)
+        vecs.append(v / np.linalg.norm(v))
+    del m
     E = np.stack(vecs).astype(np.float32)
     if args.debias:
         I = np.load(args.image_emb)["emb"].astype(np.float64)
