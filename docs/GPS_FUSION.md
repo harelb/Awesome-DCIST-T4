@@ -78,10 +78,23 @@ ground robot against an orthophoto. Its trajectory can stand in for `gps.csv`:
    leave the others to the loop-closure alignment (an unlocalized Penn session was 42 m off).
    More than 8 sessions is not possible (kimera_pgmo robot prefixes a-h); with 8, use `-s 0`.
 
+Sessions Meridian does not localize can still be held to the ground plane: write their gps.csv
+with `--sigma 1000 --altitude H --altitude-sigma 0.5` and fuse with `--gps-altitude-max-sigma 1.0`
+(altitude-only priors plus gravity priors; never used for alignment). Meridian's gate-2
+`rot_constrained_consistent_lc_frac` 0.5 -> 0.4 localized Penn euclid (6.0 -> 3.9 m vs GT); check any
+newly localized session against GT (the same change "localized" lewis 70 m off).
+
+Mesh places: ADT4 runs keep region-growing traversability places in `MESH_PLACES`; `offline_gps.yaml`
+updates them with `UpdateRegionGrowingTraversabilityFunctor` (the per-robot backend's functor).
+`Update2dPlacesFunctor` leaves them behind the pose-graph correction (Penn courtyard: 2.8 m off the mesh).
+
+Inter-robot loop closures on Penn are mostly wrong (0-19% correct per pair vs GT), so keep the 5 m gate.
+
 Cross-session loop closures for many runs: `cross_session_loop_closures.py ... --shard K/N` in N
 processes, then once without `--shard` to collect (finished pairs are reused).
 
 Results (meridian vs RTK / GT, median): West Point alpha 1.1-4.2 m (3 of 4 sessions localized);
 fused with loop closures, every session within 1-7 m. Penn (courtyard + slam_hard, 8 sessions,
-5 localized): fused 2.5-6.4 m, of which ~4.1 m is a common offset of the satellite imagery
-(0.5-3.5 m after removing it). Outputs: `/data/dcist/penn_2025_meridian/`.
+6 localized after the gate-2 change, lewis + gauss_2 altitude-only): fused 2.5-4.8 m, of which
+~4.1 m is a common offset of the satellite imagery (0.8-2.7 m after removing it); every session's
+ground within 0.15 m of the others. Outputs: `/data/dcist/penn_2025_meridian/`.
