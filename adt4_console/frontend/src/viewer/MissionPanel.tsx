@@ -108,7 +108,7 @@ function Roster() {
             <div className="roster-main">
               <span className="roster-id">
                 <span className="swatch" style={{background: colors[a.id]}} />
-                <input className="input input-xs mono" value={a.id} aria-label="Agent id" onChange={e => updateAgent(a.id, {id: e.target.value.replace(/[^A-Za-z0-9_-]/g, "")})} />
+                <AgentIdInput id={a.id} taken={roster.map(r => r.id)} />
                 {inMission.has(a.id) && <Badge tone="info">in mission</Badge>}
                 <span className="grow" />
                 <button className="btn btn-xs" aria-label={`Remove ${a.id}`} onClick={() => removeAgent(a.id)}>
@@ -520,6 +520,36 @@ function CursorReadout() {
         </>
       )}
     </div>
+  );
+}
+
+/** An agent's id, renamed on Enter / blur (Escape reverts). Edited as a draft: the
+ *  roster rows are keyed by id, so renaming on every keystroke remounted the row,
+ *  dropped the focus after one letter and sent the next keys to the map shortcuts. */
+export function AgentIdInput({id, taken}: {id: string; taken: string[]}) {
+  const [draft, setDraft] = useState(id);
+  useEffect(() => setDraft(id), [id]);
+  const commit = () => {
+    const next = draft.trim();
+    if (next && next !== id && !taken.includes(next)) updateAgent(id, {id: next});
+    else setDraft(id);
+  };
+  return (
+    <input
+      className="input input-xs mono"
+      value={draft}
+      aria-label="Agent id"
+      title="Rename: Enter or click away to apply, Esc to cancel"
+      onChange={e => setDraft(e.target.value.replace(/[^A-Za-z0-9_-]/g, ""))}
+      onBlur={commit}
+      onKeyDown={e => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        else if (e.key === "Escape") {
+          setDraft(id);
+          requestAnimationFrame(() => (e.target as HTMLInputElement).blur());
+        }
+      }}
+    />
   );
 }
 
