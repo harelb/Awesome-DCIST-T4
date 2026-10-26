@@ -67,6 +67,9 @@ export async function request(path: string, init: RequestInit = {}): Promise<Res
   try {
     res = await fetch(path, {...init, headers: headers(init.headers)});
   } catch (e) {
+    // a request its caller cancelled (selection changed, panel closed) says
+    // nothing about the server: rethrow it without marking the backend down
+    if (init.signal?.aborted || (e as {name?: string} | null)?.name === "AbortError") throw e;
     const err = new ApiError(0, "Backend unreachable");
     notify(false, err);
     throw err;
@@ -176,7 +179,7 @@ export async function getMsgpackIfChanged(
     if (etag) h["If-None-Match"] = etag;
     res = await fetch(path, {signal, headers: headers(h), cache: "no-store"});
   } catch (e) {
-    if (signal?.aborted) throw e;
+    if (signal?.aborted || (e as {name?: string} | null)?.name === "AbortError") throw e;
     const err = new ApiError(0, "Backend unreachable");
     notify(false, err);
     throw err;
