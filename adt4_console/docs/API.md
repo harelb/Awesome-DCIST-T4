@@ -917,6 +917,7 @@ fixes against the Hydra trajectory by `scripts/geo/anchor_from_gps.py`. The scri
   map-frame corners, just under the lowest graph point.
   * Zoom: the highest one, at or below the layer's `zmax`, that keeps the map extent + 60 m under
     160 tiles.
+  * Zoomed in past that, the ground in view also gets close-up tiles, up to `zmax` (≤ 64 tiles).
   * Offline, only tiles inside the manifest's `bbox_lonlat` are requested.
 
 ## 15. Missions (multi-agent, chat-first; simulate, then execute)

@@ -16,6 +16,9 @@ const MARGIN_M = 60;
 const CONTEXT_TILES = 48;
 // how far out the view footprint reaches (rays toward the horizon are cut here), metres
 const CONTEXT_MAX_M = 4000;
+// close-up imagery: zoomed in past the map-wide detail zoom, the ground in view at up to the
+// layer's zmax, at most this many tiles
+const CLOSEUP_TILES = 64;
 
 /** The map-frame box of the ground (plane ``z``) the camera sees: its four view
  *  corners cast onto the plane, rays that miss it (or reach past ``maxM``) cut at
@@ -67,7 +70,7 @@ function imageryGot(key: string) {
   if (imagery.got.size >= imagery.want.size) endTask(IMAGERY_TASK);
 }
 
-function Tile({q, layer, z, opacity, counted = true}: {q: TileQuad; layer: string; z: number; opacity: number; counted?: boolean}) {
+function Tile({q, layer, z, opacity, counted = true, order}: {q: TileQuad; layer: string; z: number; opacity: number; counted?: boolean; order?: number}) {
   const invalidate = useThree(s => s.invalidate);
   const [tex, setTex] = useState<THREE.Texture | null>(null);
   useEffect(() => {
@@ -110,7 +113,7 @@ function Tile({q, layer, z, opacity, counted = true}: {q: TileQuad; layer: strin
   useEffect(() => () => geom.dispose(), [geom]);
   if (!tex) return null;
   return (
-    <mesh geometry={geom} renderOrder={counted ? -10 : -11}>
+    <mesh geometry={geom} renderOrder={order ?? (counted ? -10 : -11)}>
       <meshBasicMaterial map={tex} transparent={opacity < 1} opacity={opacity} depthWrite={false} side={THREE.DoubleSide} toneMapped={false} />
     </mesh>
   );
@@ -158,6 +161,12 @@ export function SatelliteGround({floorZ}: {floorZ: number | null}) {
     const z = pickZoom(geo, view, Math.max(zmin, detailZ - 1), zmin, CONTEXT_TILES);
     return servable(tiles_(geo, view, z, CONTEXT_TILES), layer, z);
   }, [geo, layer, view, detailZ]);
+  const closeup = useMemo(() => {
+    const zmax = layer?.zmax ?? 19;
+    if (!geo || !layer || !view || !detailZ || zmax <= detailZ) return [];
+    const z = pickZoom(geo, view, zmax, detailZ, CLOSEUP_TILES);
+    return z > detailZ ? servable(tiles_(geo, view, z, CLOSEUP_TILES), layer, z) : [];
+  }, [geo, layer, view, detailZ]);
   const shown = on && !!layer;
   useEffect(() => {
     imageryWant(shown ? tiles.map(q => q.key) : []);
@@ -171,6 +180,9 @@ export function SatelliteGround({floorZ}: {floorZ: number | null}) {
       ))}
       {tiles.map(q => (
         <Tile key={q.key} q={q} layer={layer.id} z={zPlane} opacity={opacity} />
+      ))}
+      {closeup.map(q => (
+        <Tile key={`f${q.key}`} q={q} layer={layer.id} z={zPlane + 0.02} opacity={opacity} counted={false} order={-9} />
       ))}
     </group>
   );
