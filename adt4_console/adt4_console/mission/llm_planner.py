@@ -118,6 +118,103 @@ TOOL = {
 }
 
 
+PLAN_PROMPT = """\
+plan_ground_mission (omniplanner): for ground robots (spot, husky) only, give the mission as a PDDL \
+goal and the planner assigns each unassigned task to a robot and orders every robot's stops by real \
+path length (metres on the traversable graph), keeping out of no-go zones. Prefer it to \
+propose_mission for ground-only missions of visits, inspections and end positions, above all \
+"visit / inspect these things with these robots"; use propose_mission when a quad, a search, a \
+wait/handoff or a hold is involved. The goal is (and ...) / (or ...) of these predicates; symbols are \
+lower case without parentheses (object O12 / O(12) -> o12, mesh place T4826 / t(4826) -> t4826, \
+region r3 -> r3) and robots are the agent ids in lower case:
+- (visited-object o12), (visited-place t40): some robot goes there (the planner picks which).
+- (visited-object-by spot1 o12), (visited-place-by spot1 t40), (inspected-by spot1 o12): that robot \
+does it. Use the -by forms whenever the operator says which robot does a task.
+- (safe o12): some robot inspects o12 (the console's inspect: go there and look).
+- (at-object spot1 o12), (at-place spot1 t40): spot1 ends there.
+- (visited-region r3): some robot enters region r3; (explored-region r3): every place of r3 is visited.
+constraints: {predicate: 'forbidden-poi', symbols: ['o14']} keeps routes away from o14; \
+{predicate: 'forbidden-edge', symbols: ['t1', 't2']} closes the passage between two places.
+"""
+
+PLAN_FORCED = """\
+The operator asked for omniplanner: plan this request with plan_ground_mission (look the symbols up \
+first); do not use propose_mission. If it cannot be expressed as such a goal, say so in one line.
+"""
+
+PLAN_TOOL = {
+    "name": "plan_ground_mission",
+    "description": "Plan a ground-robot mission with omniplanner from a PDDL goal: it assigns robots "
+    "and orders their stops by path length, then the mission is validated and previewed like "
+    "propose_mission's (a card the operator simulates, edits and executes). The result says how far "
+    "each robot drives, or why the goal cannot be planned.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "short title"},
+            "goal": {"type": "string", "description": "the operator's request in one sentence, in their words"},
+            "pddl_goal": {"type": "string", "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'"},
+            "constraints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge"]},
+                        "symbols": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["predicate", "symbols"],
+                },
+            },
+            "revise": {"type": "boolean", "description": "true: replace the current mission"},
+            "assumptions": {"type": "array", "items": {"type": "string"},
+                            "description": "every substitution or interpretation you made; [] if none"},  # fmt: skip
+        },
+        "required": ["pddl_goal", "assumptions"],
+    },
+}
+
+
+def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, message: str, history=None):
+    """``plan_ground_mission``: (events, result for the model)."""
+    from . import omni_planner
+
+    ctx = ctx or {}
+    goal = str(args.get("pddl_goal") or "").strip()
+    if not goal:
+        return [], {"error": "empty pddl_goal"}
+    assumptions = [str(a).strip() for a in args.get("assumptions") or [] if str(a).strip()][:12]
+    cur = ctx.get("mission")
+    revising = bool(cur and args.get("revise"))
+    roster = [dict(a) for a in ctx.get("roster") or [] if isinstance(a, dict) and a.get("id")]
+    if not roster and revising:
+        roster = [dict(a) for a in cur.get("agents") or []]
+    agents = [a for a in roster if a.get("kind", "spot") != "quad"]
+    if not agents:
+        return [], {"error": "no ground agents in the roster: ask the operator to add a spot or husky"}
+    geofences = (cur.get("geofences") if revising else None) or no_go_zones(ctx)
+    text = str(args.get("goal") or "").strip() or request_text(history, message)
+    try:
+        m, planned = omni_planner.plan_pddl(goal, agents, src, service, args.get("constraints"), geofences,
+                                            text=text, name=str(args.get("name") or ""))  # fmt: skip
+    except omni_planner.OmniUnavailable as e:
+        return [], {"error": f"omniplanner is not available here ({e}); use propose_mission"}
+    except ValueError as e:
+        fd = getattr(e, "fast_downward", None)
+        # the operator sees the failure (with Fast Downward's log) as a tool card
+        card = {"type": "tool", "name": PLAN_TOOL["name"],
+                "args": {"pddl_goal": goal, "constraints": args.get("constraints") or []},
+                "result": {"error": str(e), "fast_downward": fd}}  # fmt: skip
+        for_model = {"error": f"omniplanner could not plan {goal}: {e}. Check the symbols (run_cypher) and "
+                              "the robot names, or use propose_mission."}  # fmt: skip
+        if fd:
+            for_model["fast_downward"] = {"digest": fd.get("digest"), "log_tail": fd.get("log", [])[-12:]}
+        return [card], for_model
+    if revising:
+        m = m.model_copy(update={"id": cur["id"], "parent": cur["id"]})
+    planned["pddl_goal"] = goal
+    return mission_card(m, service.put(m), assumptions, planned)
+
+
 def _area_lookup(regions, ctx: dict | None = None) -> dict:
     """symbol / lower-case name -> area with a polygon: map areas (Room nodes) and
     the operator's mission-only areas (``ctx["areas"]``)."""
@@ -174,6 +271,10 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
     """The mission part of the system prompt."""
     ctx = ctx or {}
     parts = [PROMPT.format(max_agents=MAX_AGENTS)]
+    if ctx.get("omniplanner"):  # set by the chat when omniplanner can plan here
+        parts.append(PLAN_PROMPT)
+        if ctx.get("planner") == "omniplanner":
+            parts.append(PLAN_FORCED)
     roster = ctx.get("roster") or []
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))
@@ -213,7 +314,9 @@ def request_text(history, message: str) -> str:
     ("[operator] ...") are not requests."""
     users = []
     for it in history or []:
-        if it.get("role") == "assistant" and any(c.get("name") == TOOL["name"] for c in it.get("calls") or []):
+        if it.get("role") == "assistant" and any(
+            c.get("name") in (TOOL["name"], PLAN_TOOL["name"]) for c in it.get("calls") or []
+        ):
             users = []
         elif it.get("role") == "user":
             t = str(it.get("text") or "").strip()
@@ -272,7 +375,12 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
         m = Mission.model_validate(body)
     except Exception as e:  # noqa: BLE001 — pydantic errors go back to the model
         return [], {"error": f"invalid mission: {e}"}
-    out = service.put(m)
+    return mission_card(m, service.put(m), assumptions)
+
+
+def mission_card(m: Mission, out: dict, assumptions: list[str], planned: dict | None = None):
+    """(the ``mission`` card for the operator, the result for the model) of a stored mission.
+    ``planned``: what omniplanner reported (metres per agent, planning time)."""
     pv = out["preview"]
     issues = pv["issues"]
     card = {
@@ -287,6 +395,7 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
         "assumptions": assumptions,
         "makespan": pv.get("makespan"),
         "map": pv.get("map"),
+        "planner": m.planner,
     }
     for_model = {
         "mission_id": m.id,
@@ -299,4 +408,9 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
         "note": "Shown to the operator as a card (with your assumptions). Fix errors with another "
         "propose_mission (revise=true).",
     }
+    if planned is not None:
+        card["planned"] = planned
+        for_model["omniplanner"] = planned
+        for_model["note"] = ("Shown to the operator as a card (with your assumptions). To change it, call "
+                             "plan_ground_mission again with the updated goal (revise=true).")  # fmt: skip
     return [card], for_model

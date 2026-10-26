@@ -5,7 +5,8 @@
 // map tool the next click goes to (stores/tools.ts arms one tool at a time).
 // Satellite display lives here too (§14).
 import {create} from "zustand";
-import {deleteJSON, errorText, getJSON, postJSON, putJSON} from "../lib/api";
+import {ApiError, deleteJSON, errorText, getJSON, postJSON, putJSON} from "../lib/api";
+import {fastDownwardOf, type FastDownwardInfo} from "../lib/fastDownward";
 import type {GeoInfo, TileLayer} from "../lib/geo";
 import {roundXY, startLockReason, type StartDrag} from "../lib/agentStart";
 import {ws} from "../ws";
@@ -221,6 +222,8 @@ interface MissionStore {
   preview: Preview | null;
   run: RunState | null;
   error: string | null;
+  /** Fast Downward's account of the last failed omniplanner plan */
+  errorFd: FastDownwardInfo | null;
   busy: string | null;
   /** the image open in the detection viewer */
   openImage: {mission: string; image: string; candidate?: string} | null;
@@ -253,6 +256,7 @@ export const useMission = create<MissionStore>(set => ({
   preview: null,
   run: null,
   error: null,
+  errorFd: null,
   busy: null,
   openImage: null,
   drag: null,
@@ -502,15 +506,21 @@ export async function abort(): Promise<void> {
 
 export async function planWithOmniplanner(text: string): Promise<void> {
   const s = st();
-  st().set({busy: "omni", error: null});
+  st().set({busy: "omni", error: null, errorFd: null});
   try {
-    const r = await postJSON<{mission: Mission; preview: Preview}>("api/missions/plan/omniplanner", {text, agents: s.roster, src: s.world?.src ?? null});
+    // the chat's model writes the PDDL goal (Cypher lookups), omniplanner plans it (API.md §15.5)
+    const r = await postJSON<{mission: Mission; preview: Preview}>("api/missions/plan/omniplanner", {
+      text,
+      agents: s.roster,
+      areas: missionContext().areas,
+      src: s.world?.src ?? null,
+    });
     st().set({current: r.mission, preview: r.preview, run: null});
     follow(r.mission.id);
     fitMission();
     void refreshList();
   } catch (e) {
-    st().set({error: `omniplanner: ${errorText(e)}`});
+    st().set({error: `omniplanner: ${errorText(e)}`, errorFd: e instanceof ApiError ? fastDownwardOf(e.body) : null});
   } finally {
     st().set({busy: null});
   }

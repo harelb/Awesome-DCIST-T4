@@ -997,7 +997,8 @@ A **mission** (`mission/model.py`) is up to 5 agents and a task DAG:
 | `GET /api/missions/{id}/image/{img}` | the stamped image (JPEG): the live quad's, or rendered from the satellite cache for the simulator |
 | `POST /api/missions/{id}/execute` · `abort` | live run (§15.4) · pause it (ground robots: executor pause) |
 | `GET /api/missions/{id}/export` | mission JSON download |
-| `POST /api/missions/plan/omniplanner {text, agents, src}` | planner B (§15.5) → `{mission, preview}`; 503 when omniplanner, Fast Downward or the key is missing |
+| `POST /api/missions/plan/omniplanner {text \| pddl_goal, agents, src, constraints?, areas?}` | planner B (§15.5) → `{mission, preview, planned}`; `text` goes through the chat in omniplanner mode, `pddl_goal` plans directly; 400 with the reason (or the chat's question), 503 when omniplanner or Fast Downward is missing |
+| `POST /api/missions/plan/preview_pddl {pddl_goal, robots: [{name, start?}], constraints?, src}` | what planner B would do with a robot-chat PDDL goal: `{routes: {robot: [[x,y,z]...]}, driven_m, actions, robots, ground_s, solve_s, pois}`; no `start` = the robot's live pose |
 
 **Run state**: WS topic `mission/<id>`, latest-value, about 5 Hz:
 `{mission, kind: sim|live, revision, t, finished, playing, speed, agents: {id: {pos, yaw, task,
@@ -1064,15 +1065,34 @@ events (last 40), images}`.
 
 ### 15.5 Planner B: omniplanner in-process (`mission/omni_planner.py`)
 
-* Uses the language plugin's own pieces: a dsg_pddl domain (default `GotoObjectDomain`), the
-  `llm_config.yaml` of `dcist_launch_system/config/default`, and the nlu_interface prompt. It runs
-  `full_planning_pipeline` on the mission's graph and turns each `goto-*` action into a `goto` task.
-* Ground robots only.
-* The prompt knows only euclid / hamilton / hilbert, so mission agents are aliased onto those
-  names for the call and mapped back.
-* Fast Downward must be on `PATH`.
-* Saved maps have place-graph islands. When the start or a target snaps to one, the problem is
-  unsolvable (the error says so); the chat planner routes around islands.
+omniplanner's multi-robot PDDL domain (plan repair v4's,
+`RegionObjectRearrangementDomain_MultiRobot_FD_Explore`) in its goal-relevant scope: only the goal's
+points of interest, joined by shortest paths in metres over the mesh places, so Fast Downward
+assigns robots and orders their stops by real travel (well under a second on a fused
+multi-session map; an anytime search improves the routes for up to `OMNIPLANNER_FD_ANYTIME_S`).
+Needs omniplanner with that grounding and Fast Downward on `PATH` (`available()` says why not).
+
+* **Goal**: PDDL over map symbols in lower case without parentheses (`O12` → `o12`, mesh place
+  `t4826`, region `r3`), robots = the agent ids in lower case: `visited-object` /
+  `visited-place` (any robot), `visited-object-by` / `visited-place-by` / `inspected-by` (that
+  robot), `safe` (some robot inspects it), `at-object` / `at-place` (where a robot ends),
+  `visited-region`, `explored-region`, under `and` / `or`. Optional constraints
+  `forbidden-poi` / `forbidden-edge`; the mission's no-go zones become `forbidden-poi` on the
+  places inside them.
+* **Mission**: each `goto-poi` → a `goto` task, a goto followed by an `inspect` of its target → one
+  `inspect` task (`planner: omniplanner`, the PDDL action in `note`). Ground agents only; a plan
+  that needs `pick-object` / `place-object` is refused (no executor can do them).
+* **Mission chat**: the `plan_ground_mission` tool (offered when omniplanner can plan here) takes
+  `{pddl_goal, constraints?, name?, goal?, revise?, assumptions}`; the model looks symbols up
+  with Cypher and writes the goal. The card carries `planned: {driven_m, planning_s,
+  points_of_interest, pddl_goal}`. `mission_ctx.planner = "omniplanner"` (the planner's
+  "omniplanner (ground)" tab, through `POST /plan/omniplanner {text}`) offers only this tool.
+* **Robot chat**: a `pddl` goal card's **Preview** plans it here (`POST /plan/preview_pddl`) for
+  the connected robots (their live poses), else the mission planner's ground agents, and draws
+  each robot's route dashed on the map (`stores/planPreview`, Scene's `PreviewOverlay`) until
+  hidden. Sending the goal is unchanged (the robots' omniplanner plans it).
+* An object farther than 5 m from every place the robots can reach (another component, or
+  behind a closed area) cannot be reached; the error says so.
 
 ## 16. Penn quadrotor link (`quad/`)
 

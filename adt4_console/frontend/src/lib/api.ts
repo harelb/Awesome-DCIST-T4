@@ -8,10 +8,13 @@ import {transfer} from "../stores/loading";
 export class ApiError extends Error {
   status: number; // 0 = network error / backend down
   detail: string;
-  constructor(status: number, detail: string) {
+  /** the parsed JSON error body, for routes that say more than `detail` */
+  body: unknown;
+  constructor(status: number, detail: string, body: unknown = null) {
     super(detail || `HTTP ${status}`);
     this.status = status;
     this.detail = detail;
+    this.body = body;
   }
   get kind(): "down" | "ros" | "unavailable" | "auth" | "notfound" | "other" {
     if (this.status === 0 || this.status === 502 || this.status === 504) return "down";
@@ -43,10 +46,12 @@ function headers(extra?: HeadersInit): Headers {
 
 async function errorFrom(res: Response): Promise<ApiError> {
   let detail = "";
+  let body: unknown = null;
   try {
     const text = await res.text();
     try {
       const j = JSON.parse(text);
+      body = j;
       detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail ?? j);
     } catch {
       detail = text.slice(0, 300);
@@ -54,7 +59,7 @@ async function errorFrom(res: Response): Promise<ApiError> {
   } catch {
     /* ignore */
   }
-  return new ApiError(res.status, detail || res.statusText);
+  return new ApiError(res.status, detail || res.statusText, body);
 }
 
 export async function request(path: string, init: RequestInit = {}): Promise<Response> {

@@ -51,6 +51,7 @@ import {AreasSection, MockObjects} from "./AreaTools";
 import {StartEditor, type CoordMode} from "./StartEditor";
 import {startLockReason} from "../lib/agentStart";
 import type {ChatItem} from "./ChatPanel";
+import {FastDownwardDetails} from "./FastDownward";
 import type {TranscriptItem} from "../lib/chatTranscript";
 
 const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼"};
@@ -661,9 +662,10 @@ export function MissionPanel() {
         {error && (
           <div className="msg msg-err small" role="alert">
             {error}{" "}
-            <button className="btn btn-xs" onClick={() => s.set({error: null})}>
+            <button className="btn btn-xs" onClick={() => s.set({error: null, errorFd: null})}>
               ×
             </button>
+            <FastDownwardDetails fd={s.errorFd} />
           </div>
         )}
         {current && preview ? (

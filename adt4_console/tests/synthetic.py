@@ -54,6 +54,9 @@ def build_run(root: pathlib.Path) -> pathlib.Path:
     for k, t in enumerate((30.0, 10.0, 20.0)):  # inserted out of time order
         ag = dsg.AgentNodeAttributes()
         ag.position = np.array([t, 0.0, 0.0])
+        # spark_dsg leaves a new agent's orientation uninitialised: a NaN there is
+        # saved as null and the file no longer loads (it depended on test order)
+        ag.world_R_body = dsg.Quaternion(1.0, 0.0, 0.0, 0.0)
         ag.timestamp = datetime.timedelta(seconds=t)
         G.add_node(2, dsg.NodeSymbol("a", k), ag, 97)
     G.insert_edge(dsg.NodeSymbol("P", 0), dsg.NodeSymbol("P", 1))

@@ -12,6 +12,10 @@ import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
 import {chatAbort, clearChat, storable, useChat} from "../stores/chat";
 import {closeMission, fitMission, missionContext, openMission, saveCurrent, simCmd, useMission} from "../stores/mission";
+import {clearPreview, previewPddl, PreviewError, usePlanPreview, type PddlPreview} from "../stores/planPreview";
+import {FastDownwardDetails} from "./FastDownward";
+import type {FastDownwardInfo} from "../lib/fastDownward";
+import {useRobots} from "../stores/robots";
 import {decideMapEdit, MapEditCard, mapEditNote, statusOf, toMapEditItem, type MapEditItem} from "./MapEditCard";
 import {refreshEdit} from "../stores/mapEdit";
 import {candidateNote, candidateOrdinals, cellText, cypherErrorShort, fmtLeft, lookupSummary, mergeTargetsAfterCommit, scrollAnchor, toolGroups, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
@@ -40,6 +44,8 @@ export interface MissionCardItem {
   /** what the assistant interpreted or substituted (shown in amber) */
   assumptions: string[];
   makespan: number | null;
+  /** omniplanner's report when it planned the mission (plan_ground_mission) */
+  planned?: {driven_m: Record<string, number>; planning_s: number; points_of_interest: number; pddl_goal?: string; fast_downward?: FastDownwardInfo | null} | null;
 }
 
 /** A database change the assistant proposed; runs only when approved. */
@@ -104,6 +110,7 @@ export function toChatItem(o: Record<string, unknown>): ChatItem | null {
         issues: Array.isArray(o.issues) ? (o.issues as MissionCardItem["issues"]) : [],
         assumptions: Array.isArray(o.assumptions) ? o.assumptions.map(String).filter(Boolean) : [],
         makespan: typeof o.makespan === "number" ? o.makespan : null,
+        planned: o.planned && typeof o.planned === "object" ? (o.planned as MissionCardItem["planned"]) : null,
       };
     case "cypher_write":
       return {type: "cypher_write", id: String(o.id), query: String(o.query ?? ""), summary: String(o.summary ?? ""), src: typeof o.src === "string" ? o.src : null};
@@ -544,7 +551,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
           if (it.type === "images") return <ImagesCard key={i} it={it} />;
           if (it.type === "tool") return <ToolCard key={i} it={it} />;
           if (it.type === "mission") return <MissionCard key={i} it={it} />;
-          return <GoalCard key={i} it={it} robot={it.robot ?? planRobot} onSend={() => void sendProposal(i)} />;
+          return <GoalCard key={i} it={it} robot={it.robot ?? planRobot} src={src ?? null} onSend={() => void sendProposal(i)} />;
         })}
         {busy && <Spinner label="thinking" />}
       </div>
@@ -610,6 +617,16 @@ export function MissionCard({it}: {it: MissionCardItem}) {
           </li>
         ))}
       </ul>
+      {it.planned && (
+        <div className="small muted" data-testid="mission-planned">
+          omniplanner:{" "}
+          {Object.entries(it.planned.driven_m)
+            .map(([a, m]) => `${a} ${Math.round(m)} m`)
+            .join(" · ")}{" "}
+          · planned in {it.planned.planning_s.toFixed(1)} s{it.planned.pddl_goal && <pre className="mono small">{it.planned.pddl_goal}</pre>}
+          <FastDownwardDetails fd={it.planned.fast_downward} />
+        </div>
+      )}
       {(it.assumptions ?? []).length > 0 && (
         <div className="mission-assumptions small" data-testid="mission-assumptions">
           <b>Assumed</b>
@@ -683,6 +700,18 @@ function LookupGroup({tools}: {tools: ToolItem[]}) {
 }
 
 function ToolCard({it}: {it: Extract<ChatItem, {type: "tool"}>}) {
+  if (it.name === "plan_ground_mission") {
+    // only failures are tool cards (a plan is a mission card)
+    const a = (it.args ?? {}) as {pddl_goal?: string};
+    const r = (it.result ?? {}) as {error?: string; fast_downward?: FastDownwardInfo | null};
+    return (
+      <div className="msg msg-tool msg-err" data-testid="omniplanner-failure">
+        <Badge tone="err">omniplanner</Badge> <span className="small">{r.error ?? "no plan"}</span>
+        {a.pddl_goal && <pre className="mono small">{a.pddl_goal}</pre>}
+        <FastDownwardDetails fd={r.fast_downward} />
+      </div>
+    );
+  }
   if (it.name === "run_cypher") {
     const q = String((it.args as {query?: string})?.query ?? "");
     const r = (it.result ?? {}) as {columns?: string[]; rows?: Record<string, unknown>[]; row_count?: number; truncated?: boolean; error?: string};
@@ -812,18 +841,50 @@ function ImagesCard({it}: {it: ImagesItem}) {
   );
 }
 
-function GoalCard({it, robot, onSend}: {it: Extract<ChatItem, {type: "goal"}>; robot: string | null; onSend: () => void}) {
+/** The robots a goal preview plans for: the connected ones (their live poses) and
+ *  the goal's robot; with none connected, the mission planner's ground agents. */
+function previewRobots(robot: string | null): {name: string; start?: number[] | null}[] {
+  const live = Object.keys(useRobots.getState().state);
+  if (live.length > 0) return [...new Set([...live, ...(robot ? [robot] : [])])].map(name => ({name}));
+  return useMission
+    .getState()
+    .roster.filter(a => a.kind !== "quad" && (a.start || a.binding))
+    .map(a => ({name: a.id, start: a.start ?? null}));
+}
+
+function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"}>; robot: string | null; src: string | null; onSend: () => void}) {
   const b = it.body as {goal?: string; points?: string[]; command?: string; constraints?: {predicate: string; symbols: string[]}[]};
   const sent = it.sent;
+  const [pv, setPv] = useState<{busy?: boolean; err?: string; fd?: FastDownwardInfo | null; p?: PddlPreview} | null>(null);
+  const shown = usePlanPreview(s => s.goal !== null && s.goal === b.goal);
+  const preview = async () => {
+    if (!b.goal) return;
+    if (shown) return clearPreview();
+    const robots = previewRobots(robot);
+    if (robots.length === 0) return setPv({err: "no robot poses: connect the robots, or add agents with starts in the mission planner"});
+    setPv({busy: true});
+    try {
+      setPv({p: await previewPddl(b.goal, robots, src, b.constraints)});
+    } catch (e) {
+      setPv({err: errorText(e), fd: e instanceof PreviewError ? e.fd : null});
+    }
+  };
   return (
     <div className="msg msg-goal">
       <div className="row gap between">
         <span>
           <Badge tone="info">{it.kind}</Badge> goal proposal
         </span>
-        <button className="btn btn-sm btn-primary" disabled={Boolean(sent && sent.tone !== "err")} onClick={onSend}>
-          Send to {robot ?? "robot"}
-        </button>
+        <span className="row gap-sm">
+          {it.kind === "pddl" && b.goal && (
+            <button className="btn btn-sm" disabled={pv?.busy} onClick={() => void preview()} title="Plan it here with omniplanner and draw each robot's route on the map">
+              {pv?.busy ? "planning…" : shown ? "Hide preview" : "Preview"}
+            </button>
+          )}
+          <button className="btn btn-sm btn-primary" disabled={Boolean(sent && sent.tone !== "err")} onClick={onSend}>
+            Send to {robot ?? "robot"}
+          </button>
+        </span>
       </div>
       {b.goal && <pre className="mono small">{b.goal}</pre>}
       {b.points && <div className="mono small">{b.points.join(" → ")}</div>}
@@ -836,6 +897,20 @@ function GoalCard({it, robot, onSend}: {it: Extract<ChatItem, {type: "goal"}>; r
               ({c.predicate} {c.symbols.join(" ")})
             </span>
           ))}
+        </div>
+      )}
+      {pv?.err && (
+        <div className="small tone-err">
+          preview: {pv.err}
+          <FastDownwardDetails fd={pv.fd} />
+        </div>
+      )}
+      {pv?.p && shown && (
+        <div className="small muted" data-testid="goal-preview">
+          {Object.entries(pv.p.driven_m)
+            .map(([r, m]) => `${r} ${Math.round(m)} m`)
+            .join(" · ") || "no driving"}{" "}
+          · {pv.p.actions.length} actions · planned in {(pv.p.ground_s + pv.p.solve_s).toFixed(1)} s
         </div>
       )}
       {sent && <div className={`small tone-${sent.tone}`}>{sent.text}</div>}

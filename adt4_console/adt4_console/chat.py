@@ -290,6 +290,9 @@ class ChatService:
         ``mission_ctx``: ``{roster, areas, mission, planted}`` from the mission
         planner (enables ``propose_mission``)."""
         src = self._default_src(src)
+        if mission_ctx is not None and self.missions is not None:
+            # omniplanner's plan_ground_mission is offered (and prompted) when it can plan here
+            mission_ctx = {**mission_ctx, "omniplanner": self._omniplanner_ok()}
         self._ctx.value = mission_ctx if self.missions is not None else None
         history = clean_history(history)
         self._ctx.history = history  # propose_mission: the request the thread started with
@@ -476,7 +479,10 @@ class ChatService:
         "description": "Propose a robot goal for the operator to approve and send. kind='pddl' "
         "(preferred) sends pddl_goal through the plan-repair goal manager, e.g. "
         "'(and (visited-object o12) (visited-object o7))' (lower case, no parentheses in "
-        "symbols); optional constraints keep the planner away from places or edges: "
+        "symbols); with several robots, name who does what with the -by forms, e.g. "
+        "'(and (visited-object-by hamilton o12) (inspected-by euclid o7))' (unnamed tasks go to "
+        "whichever robot is closer); (at-place r t40) ends robot r there; optional constraints "
+        "keep the planner away from places or edges: "
         "{predicate: 'forbidden-poi', symbols: ['o14']} or {predicate: 'forbidden-edge', "
         "symbols: ['p1', 'p2']}. kind='goto' / 'tsp' visit node symbols (points) in order / in "
         "the best order. kind='language' passes a command to the robot's language planner.",
@@ -531,11 +537,26 @@ class ChatService:
         else:
             tools = [self._T_FIND_OBJECTS, self._T_SHOW_IMAGES, self._T_SEARCH_IMAGES,
                      self._T_PROPOSE_GOAL]  # fmt: skip
-        if self._mission_ctx() is not None:
+        ctx = self._mission_ctx()
+        if ctx is not None:
             from .mission import llm_planner
 
-            tools.append(llm_planner.TOOL)
+            if ctx.get("planner") != "omniplanner":
+                tools.append(llm_planner.TOOL)
+            if ctx.get("omniplanner"):
+                tools.append(llm_planner.PLAN_TOOL)
         return tools
+
+    def _omniplanner_ok(self) -> bool:
+        """Whether omniplanner can plan in this process (checked once)."""
+        if getattr(self, "_omni_ok", None) is None:
+            from .mission import omni_planner
+
+            why = omni_planner.available()
+            if why:
+                log.info("plan_ground_mission off: %s", why)
+            self._omni_ok = why is None
+        return self._omni_ok
 
     def _mission_prompt(self, src) -> str:
         ctx = self._mission_ctx()
@@ -664,6 +685,11 @@ class ChatService:
                     regions = None
             return llm_planner.run_tool(args, self._mission_ctx(), self.missions, src, message, regions,
                                         getattr(self._ctx, "history", None))  # fmt: skip
+        if name == "plan_ground_mission" and self.missions is not None:
+            from .mission import llm_planner
+
+            return llm_planner.run_plan_tool(args, self._mission_ctx(), self.missions, src, message,
+                                             getattr(self._ctx, "history", None))  # fmt: skip
         return [], {"error": f"unknown tool {name}"}
 
     def _show_images(self, symbols, src):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from ..mission.model import Mission
@@ -151,24 +152,87 @@ def export(mid: str, request: Request):
 
 
 class OmniBody(BaseModel):
-    text: str
+    text: str = ""
     agents: list[dict]
     src: str | None = None
+    # a PDDL goal plans directly; without one the chat's model writes it from ``text``
+    pddl_goal: str | None = None
+    constraints: list[dict] | None = None
+    areas: list[dict] | None = None
 
 
 @router.post("/plan/omniplanner")
 def plan_omniplanner(body: OmniBody, request: Request):
-    """Plan a ground-robot command with omniplanner's LLM→PDDL in-process."""
+    """Plan ground robots with omniplanner's multi-robot planner (API.md §15.5)."""
+    from ..mission import llm_planner, omni_planner
+
+    svc = _svc(request)
+    src = body.src or svc._default_src()
+    why = omni_planner.available()
+    if why:
+        raise HTTPException(503, why)
+    if body.pddl_goal:
+        try:
+            m, planned = omni_planner.plan_pddl(body.pddl_goal, body.agents, src, svc, body.constraints,
+                                                text=body.text)  # fmt: skip
+        except ValueError as e:
+            return _planning_failed(e)
+        out = svc.put(m)
+        out["planned"] = planned
+        return out
+    if not body.text.strip():
+        raise HTTPException(400, "give a command (text) or a pddl_goal")
+    # the chat's model looks the symbols up and writes the goal (plan_ground_mission only)
+    ctx = {"roster": body.agents, "areas": body.areas or [], "planner": "omniplanner"}
+    said, errors, card, fd = [], [], None, None
+    for ev in services(request).chat.stream(body.text, None, src, None, None, ctx):
+        if ev.get("type") == "mission":
+            card = ev
+        elif ev.get("type") == "text":
+            said.append(str(ev.get("text") or ""))
+        elif ev.get("type") == "error":
+            errors.append(str(ev.get("text") or ""))
+        elif ev.get("type") == "tool" and ev.get("name") == llm_planner.PLAN_TOOL["name"]:
+            res = ev.get("result") or {}
+            if isinstance(res, dict) and res.get("error"):
+                errors.append(res["error"])
+                fd = res.get("fast_downward") or fd
+    if card is None:
+        msg = " ".join(errors or said).strip() or "omniplanner produced no mission"
+        return JSONResponse(status_code=400, content={"detail": msg, "fast_downward": fd})
+    m = svc.get(card["id"])
+    return {"mission": m.model_dump(), "preview": svc.preview(m), "planned": card.get("planned"),
+            "assumptions": card.get("assumptions") or []}  # fmt: skip
+
+
+class PddlPreviewBody(BaseModel):
+    pddl_goal: str
+    constraints: list[dict] | None = None
+    # [{name, start?}]: no start = the robot's live pose
+    robots: list[dict]
+    src: str | None = None
+
+
+@router.post("/plan/preview_pddl")
+def preview_pddl(body: PddlPreviewBody, request: Request):
+    """What omniplanner would plan for a PDDL goal, drawn before it is sent (API.md §15.5)."""
     from ..mission import omni_planner
 
     svc = _svc(request)
+    why = omni_planner.available()
+    if why:
+        raise HTTPException(503, why)
     try:
-        m = omni_planner.plan(body.text, body.agents, body.src or svc._default_src(), svc)
-    except omni_planner.OmniUnavailable as e:
-        raise HTTPException(503, str(e)) from None
+        return omni_planner.preview(body.pddl_goal, body.robots, body.src or svc._default_src(), svc,
+                                    body.constraints)  # fmt: skip
     except ValueError as e:
-        raise HTTPException(400, str(e)) from None
-    return svc.put(m)
+        return _planning_failed(e)
+
+
+def _planning_failed(e: ValueError) -> JSONResponse:
+    """400 with the reason, and Fast Downward's account when it ran (API.md §15.5)."""
+    return JSONResponse(status_code=400, content={"detail": str(e),
+                                                  "fast_downward": getattr(e, "fast_downward", None)})  # fmt: skip
 
 
 @router.post("/{mid}/rebase")

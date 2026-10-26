@@ -12,7 +12,7 @@ import {GraphLayers, pickRegistry} from "./GraphLayers";
 import {pickBox, type BoxSet} from "../lib/bboxPick";
 import {MeshTiles, type TileStats} from "./MeshTiles";
 import {DETAIL_LEVEL} from "../lib/meshPlan";
-import {currentActionIndex} from "./planUtil";
+import {currentActionIndex, distinctPoints} from "./planUtil";
 import {LiveOverlays} from "./LiveOverlays";
 import {useViewStyle} from "../stores/viewStyle";
 import {contrastFor, defaultBackground, STYLE_BACKGROUND, type ColorOpts} from "./style";
@@ -25,9 +25,10 @@ import {usePlatform} from "./usePlatform";
 import {robotModelFor} from "../lib/robotModel";
 import {PoseTrack} from "../lib/gait";
 import {SatelliteGround} from "./SatelliteGround";
-import {MapHover, MissionOverlay} from "./MissionOverlay";
+import {agentColors, MapHover, MissionOverlay} from "./MissionOverlay";
 import {pickRadius, TapTracker} from "../lib/tap";
 import {useMission} from "../stores/mission";
+import {usePlanPreview} from "../stores/planPreview";
 import {EditOverlay} from "./EditOverlay";
 import {fitTopView} from "../lib/fitView";
 
@@ -312,6 +313,8 @@ function RobotGlyphs() {
 // solid and widest, pending ones dashed; a ring marks where the plan ends.
 const PLAN_Z = 0.25;
 const PLAN_ORDER = 20;
+// above the mission overlay (30..): a preview is looked at while it is shown
+const PREVIEW_ORDER = 45;
 function PlanOverlay() {
   const plans = useRobots(s => s.plan);
   const robotColor = useRobotColor3D();
@@ -322,7 +325,7 @@ function PlanOverlay() {
         const cur = currentActionIndex(plan);
         const color = robotColor(r);
         const paths = plan.plan.actions.map(a =>
-          ((a.path ?? []).filter(p => p && p.length >= 3) as [number, number, number][]).map(p => [p[0], p[1], p[2] + PLAN_Z] as [number, number, number]),
+          distinctPoints(((a.path ?? []).filter(p => p && p.length >= 3) as [number, number, number][]).map(p => [p[0], p[1], p[2] + PLAN_Z] as [number, number, number])),
         );
         const lastPath = [...paths].reverse().find(p => p.length > 0);
         const end = lastPath?.[lastPath.length - 1];
@@ -367,6 +370,66 @@ function PlanOverlay() {
               </mesh>
             )}
           </DimGroup>
+        );
+      })}
+    </>
+  );
+}
+
+// A previewed PDDL plan (not sent yet): each robot's route dashed and thinner
+// than a live plan, a hollow ring where it ends; flat on the ground like the
+// mission overlay's routes.
+function PreviewOverlay({bounds}: {bounds: {min: number[]; max: number[]} | null}) {
+  const preview = usePlanPreview(s => s.preview);
+  const robotColor = useRobotColor3D();
+  const roster = useMission(s => s.roster);
+  const live = useRobots(s => s.state);
+  const z0 = useMission(s => s.geo?.anchor.z0);
+  // the mission overlay's route height
+  const z = (z0 ?? (bounds ? bounds.min[2] : 0)) + 0.35;
+  const invalidate = useThree(s => s.invalidate);
+  useEffect(() => invalidate(), [preview, invalidate]); // the canvas renders on demand
+  // stable point arrays: drei's Line rebuilds (and disposes) its geometry and
+  // material whenever `points` is a new array
+  const routes = useMemo(
+    () =>
+      Object.entries(preview?.routes ?? {})
+        .map(([r, route]) => [r, distinctPoints(route.filter(p => p.length >= 2).map(p => [p[0], p[1], z] as [number, number, number]))] as const)
+        .filter(([, pts]) => pts.length >= 2),
+    [preview, z],
+  );
+  // the robot's colour when it is connected, else its mission agent's (as the
+  // mission overlay draws it), else one of the overlay's palette
+  const colors = useMemo(
+    () =>
+      // the roster first: the palette goes by position, as the mission overlay's does
+      agentColors(
+        [
+          ...roster,
+          ...routes
+            .filter(([r]) => !roster.some(a => a.id === r))
+            .map(([r]) => ({id: r, kind: "spot" as const, binding: live[r] ? r : null})),
+        ],
+        robotColor,
+      ),
+    [routes, roster, live, robotColor],
+  );
+  if (!preview) return null;
+  return (
+    <>
+      {routes.map(([r, pts]) => {
+        const color = colors[r];
+        return (
+          <group key={r}>
+            {/* a light halo: the routes cross dense, dark graph edges */}
+            <Line points={pts} color="#ffffff" lineWidth={11} transparent opacity={0.8} depthTest={false} renderOrder={PREVIEW_ORDER} />
+            {/* transparent too, so it is drawn after the halo (same pass, higher order) */}
+            <Line points={pts} color={color} lineWidth={6} dashed dashSize={1.2} gapSize={0.6} transparent opacity={1} depthTest={false} renderOrder={PREVIEW_ORDER + 1} />
+            <mesh position={pts[pts.length - 1]} renderOrder={PREVIEW_ORDER + 2}>
+              <ringGeometry args={[0.8, 1.3, 32]} />
+              <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.9} side={THREE.DoubleSide} />
+            </mesh>
+          </group>
         );
       })}
     </>
@@ -642,6 +705,7 @@ export function Scene({sources, bounds, cb}: {sources: SourceView[]; bounds: {mi
       <LiveOverlays />
       <RobotGlyphs />
       <PlanOverlay />
+      <PreviewOverlay bounds={bounds} />
       <MissionLayer bounds={bounds} />
       <EditOverlay />
       <Markers />
