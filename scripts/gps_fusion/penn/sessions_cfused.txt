@@ -1,0 +1,12 @@
+# Fusion with the city-imagery (C) meridian priors, 2026-10-25. Robot ids = row order (from 0).
+# Dropped: lewis (meridian fails with both Esri and city imagery: 46 m off, 3 inliers).
+# 9 sessions: needs kimera_pgmo with 15 robot prefixes (harelb feature/gps-fusion, 2026-10-25).
+courtyard_euclid euclid dense_coverage_scene_graphs/bags/courtyard-alleyways
+hamilton hamilton slam_hard/bags/hard_robot_2_hamilton/recorded_data
+euclid euclid slam_hard/bags/hard_robot_4_euclid/recorded_data
+pascal_1 pascal slam_hard/bags/hard_robot_1_pascal/recorded_data
+pascal_2 pascal slam_hard/bags/hard_robot_1_pascal_2/recorded_data
+gauss_1 gauss slam_hard/bags/hard_robot_5_gauss/recorded_data
+gauss_2 gauss slam_hard/bags/hard_robot_5_gauss_2/recorded_data
+fence_parking euclid dense_coverage_scene_graphs/bags/fence-area-and-parking-lot
+single_traj euclid dense_coverage_scene_graphs/bags/single-trajectory

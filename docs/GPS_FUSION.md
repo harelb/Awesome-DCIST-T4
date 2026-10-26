@@ -137,6 +137,23 @@ Console caches are keyed by fused frame id (`session << 48 | frame`): after drop
 sessions run `rekey_caches.py OLD NEW CACHE_DIR`, and renumber loop closures with `remap_lc.py`.
 kimera_pgmo prefixes now cover 15 robots (ids 0-14).
 
+Fused map with these priors (`fusion/final_cfused`, 9 sessions incl. the dense bags fence_parking +
+single_traj; **lewis dropped** because Meridian cannot localize it): every session within 1.0-1.6 m
+median of GT (was 2.5-4.5 m), 0.15-0.6 m after a rigid alignment (courtyard 1.4 m: GPS-only GT).
+
+| session | live map (Esri priors) | final_cfused |
+|---|---|---|
+| courtyard_euclid | 3.54 m | 1.30 m |
+| hamilton | 4.53 m | 1.32 m |
+| euclid | 3.49 m | 1.04 m |
+| pascal_2 | 4.21 m | 1.43 m |
+| gauss_2 | 2.48 m | 1.43 m |
+| fence_parking (RTK) | - | 1.43 m |
+| single_traj (RTK) | - | 1.64 m |
+
+The GPS-frame origin (`backend/gps_origin_utm.yaml`) moves with the priors (2.9 m here), so a console's
+`geo_anchor.json` must take its translation from each fusion's origin, not from the previous console.
+
 ## Open-vocabulary regions (offline, no bag replay)
 
 Regions are `OpenVocabRegionsUpdateFunctor` nodes in the regions layer (ROOMS, `r(i)`), parents of the
