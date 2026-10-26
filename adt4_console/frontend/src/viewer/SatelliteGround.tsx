@@ -122,7 +122,7 @@ export function SatelliteGround({floorZ}: {floorZ: number | null}) {
   const opacity = useMission(s => s.satOpacity);
   const layers = useMission(s => s.layers);
   const world = useMission(s => s.world);
-  const layer = layers.find(l => l.id === "esri_world_imagery") ?? layers[0];
+  const layer = layers.find(l => l.default) ?? layers.find(l => l.id === "esri_world_imagery") ?? layers[0];
   // detail: the map's area (+ margin) at the finest zoom that stays within the tile budget
   const {tiles, detailZ} = useMemo(() => {
     if (!geo || !layer || !world?.bounds) return {tiles: [], detailZ: 0};

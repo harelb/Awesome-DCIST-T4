@@ -149,22 +149,32 @@ class TileCache:
         self.root = pathlib.Path(os.path.expanduser(str(root)))
         self.live = live
         self.urls = dict(LAYER_URLS, **(urls or {}))
+        # a layer's manifest may name its own source (``url``), e.g. a city's aerial tile service
+        for name, m in self._manifests().items():
+            if m.get("url"):
+                self.urls.setdefault(name, m["url"])
         self._fetch = fetch or _http_get
         self._lock = threading.Lock()
         self._failed: dict[str, float] = {}  # url -> time, so a dead link is not hammered
 
+    def _manifests(self) -> dict[str, dict]:
+        """``tiles.json`` of every layer dir under the root ({} for a dir without one)."""
+        out = {}
+        if self.root.is_dir():
+            for d in self.root.iterdir():
+                if d.is_dir():
+                    try:
+                        out[d.name] = json.loads((d / "tiles.json").read_text())
+                    except (OSError, ValueError):
+                        out[d.name] = {}
+        return out
+
     def layers(self) -> list[dict]:
         out = []
-        names = set(self.urls) if self.live else set()
-        if self.root.is_dir():
-            names |= {p.name for p in self.root.iterdir() if p.is_dir()}
+        manifests = self._manifests()
+        names = set(manifests) | (set(self.urls) if self.live else set())
         for name in sorted(names):
-            d = self.root / name
-            manifest = {}
-            try:
-                manifest = json.loads((d / "tiles.json").read_text())
-            except (OSError, ValueError):
-                pass
+            manifest = manifests.get(name, {})
             out.append(
                 {
                     "id": name,
@@ -174,6 +184,7 @@ class TileCache:
                     "bbox_lonlat": manifest.get("bbox_lonlat"),
                     "cached": manifest.get("count"),
                     "live": self.live and name in self.urls,
+                    "default": bool(manifest.get("default")),
                 }
             )
         return out

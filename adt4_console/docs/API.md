@@ -902,8 +902,11 @@ fixes against the Hydra trajectory by `scripts/geo/anchor_from_gps.py`. The scri
     `lonlat_to_map` as 2×3 rows, plus `max_err_m` (millimetres at this scale).
   * The browser uses it to place tiles and for the cursor's lat/lon readout, so it needs no
     projection library.
-* `GET /api/geo/layers` → `{layers: [{id, attribution, zmin, zmax, bbox_lonlat, cached, live}]}`.
+* `GET /api/geo/layers` → `{layers: [{id, attribution, zmin, zmax, bbox_lonlat, cached, live, default}]}`.
   The values come from each layer's `tiles.json` manifest.
+  * A manifest may also name the layer's source, `url` (an XYZ template with `{z}/{x}/{y}`), so a
+    layer other than Esri can be fetched live by adding only `<tiles-dir>/<layer>/tiles.json`.
+  * `default: true` makes it the layer drawn under the map (otherwise Esri, else the first layer).
 * `GET /api/geo/tiles/{layer}/{z}/{x}/{y}` → the tile (XYZ / slippy-map numbering).
   * Tiles are served from `--tiles-dir` (`<dir>/<layer>/{z}/{x}/{y}.jpg`, written by
     `scripts/geo/fetch_tiles.py`).

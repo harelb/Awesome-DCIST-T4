@@ -138,6 +138,24 @@ def test_tile_cache_offline_and_live(tmp_path):
         off.path("../etc", 1, 1, 1)
 
 
+def test_tile_cache_manifest_layer(tmp_path):
+    import json
+
+    from adt4_console.geo import TileCache
+
+    (tmp_path / "city").mkdir()
+    (tmp_path / "city" / "tiles.json").write_text(
+        json.dumps({"url": "https://city.example/tile/{z}/{y}/{x}", "zmax": 21, "default": True})
+    )
+    calls = []
+    live = TileCache(tmp_path, live=True, fetch=lambda url: calls.append(url) or b"\xff\xd8city")
+    assert live.get("city", 21, 5, 7) == b"\xff\xd8city"
+    assert calls == ["https://city.example/tile/21/7/5"]
+    layers = {l["id"]: l for l in live.layers()}
+    assert layers["city"]["default"] and layers["city"]["zmax"] == 21 and layers["city"]["live"]
+    assert not layers["esri_world_imagery"]["default"]
+
+
 def test_geo_routes(mission_settings, tmp_path):
     (tmp_path / "tiles" / "esri_world_imagery" / "18" / "3").mkdir(parents=True)
     (tmp_path / "tiles" / "esri_world_imagery" / "18" / "3" / "4.jpg").write_bytes(b"\xff\xd8x")

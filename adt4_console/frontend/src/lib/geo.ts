@@ -31,6 +31,7 @@ export interface TileLayer {
   bbox_lonlat: number[] | null;
   cached: number | null;
   live: boolean;
+  default: boolean; // the manifest's pick for the map's ground
 }
 
 const apply = (m: number[][], a: number, b: number): [number, number] => [m[0][0] * a + m[0][1] * b + m[0][2], m[1][0] * a + m[1][1] * b + m[1][2]];
