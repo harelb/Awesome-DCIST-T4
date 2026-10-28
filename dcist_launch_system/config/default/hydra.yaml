@@ -63,6 +63,7 @@ frontend:
         child_layers:
           - {layer: OBJECTS}
   graph_updater:
+    mark_active: false
     layer_updates:
       OBJECTS:
         prefix: O
