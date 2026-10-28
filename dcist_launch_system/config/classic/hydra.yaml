@@ -77,7 +77,6 @@ frontend:
     layer_updates:
       OBJECTS:
         prefix: O
-        archive_missing: true
         matcher: {type: IoUNodeMatcher, min_same_iou: 0.2, min_cross_iou: 0.5}
   surface_places:
     type: place_2d
