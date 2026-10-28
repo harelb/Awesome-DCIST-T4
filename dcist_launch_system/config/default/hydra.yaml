@@ -6,7 +6,7 @@ odom_frame: $<env ADT4_ROBOT_NAME>/odom
 robot_frame: $<env ADT4_ROBOT_NAME>/base_link
 map_window: {type: spatial, max_radius_m: 14.0}
 labelspace: {type: from_msg}
-image_store: {max_images_per_object: 1, jpeg_quality: 90, write_depth: true, on_existing: rotate, session_artifacts_dir: $<env ADT4_OUTPUT_DIR>/hydra}
+image_store: {path: $<env ADT4_OUTPUT_DIR>/image_store, on_existing: rotate, max_images_per_object: 1, jpeg_quality: 90, write_depth: true, session_artifacts_dir: $<env ADT4_OUTPUT_DIR>/hydra}
 input:
   type: RosInput
   max_receiver_queue_size: 1
@@ -38,7 +38,6 @@ active_window:
     min_object_reconstruction_observations: 10
     object_reconstruction_resolution: -0.05
     visualizer_classification: false
-    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
     projective_integrator:
       num_threads: 8
   khronos_sinks:
@@ -53,8 +52,6 @@ frontend:
   type: GraphBuilder
   agent_extractor:
     type: AgentImageExtractor
-    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   frame_anchor_max_dist_m: 2.0
   enable_mesh_objects: false
   serialize_dsg_mesh: true
@@ -89,7 +86,6 @@ frontend:
       - type: TraversabilityVisualizer
 sub_keyframe:
   type: SubKeyframeModule
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   sensor_name: camera
   gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
   tf_lookup: {wait_duration_s: 0.1, buffer_size_s: 30.0, max_tries: 5}
@@ -105,7 +101,6 @@ backend:
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   optimize_every_update: false
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects:
