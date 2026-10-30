@@ -128,8 +128,10 @@ nodes): the operator sees a diff card and approves or rejects it. Use \
 propose_cypher_write (the exact query) only for changes those ops cannot express. Do \
 not claim a change happened until you are told it was approved.
 - To show what an object looks like, call show_object_images with its symbols.
-- If an object is not in the map (or the operator asks to look in the robot's \
-images), call search_robot_images. Its candidates are not in the map; the \
+- Check "Object classes in the map" above before querying: it lists every class \
+that has objects. If an object is not in the map (its class or a synonym is not \
+in that list, or the operator asks to look in the robot's images), call \
+search_robot_images right away; do not try more Cypher spellings. Its candidates are not in the map; the \
 operator sees each candidate's image and approves or discards it.
 - To send a robot somewhere, call propose_goal; the operator approves goals in \
 the UI. Never claim a robot is moving. Prefer kind='pddl' with object/place \
@@ -227,4 +229,15 @@ def describe(src) -> str:
                 f"Labelspace ({r.get('layer')}): " + ", ".join(names)
                 + ". Map synonyms to these labels."
             )
+    # what is actually there (a labelspace name can have no objects)
+    cls = run_read(
+        src,
+        "MATCH (o:Object) WHERE o.class IS NOT NULL RETURN o.class AS c, count(*) AS n ORDER BY n DESC",
+        max_rows=200,
+    )
+    if cls.get("rows"):
+        lines.append(
+            "Object classes in the map (count; nothing else is mapped): "
+            + ", ".join(f"{x['c']} ({x['n']})" for x in cls["rows"])
+        )
     return "\n".join(lines)

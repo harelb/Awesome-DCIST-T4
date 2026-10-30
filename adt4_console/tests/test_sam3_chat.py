@@ -377,3 +377,23 @@ def test_transfer_rejects_compression_without_images(client):
         json={"src": "local", "dst": "euclid", "experiment": "x", "images": "none", "compression": "fast"},
     )
     assert r.status_code in (400, 404)
+
+
+def test_openai_last_round_answers_without_tools(svc_client, monkeypatch):
+    """A model that keeps calling tools gets a last round without them: it reports
+    what it found instead of the chat stopping silently."""
+    from adt4_console import chat as chat_mod
+
+    client, svc = svc_client
+    monkeypatch.setenv("ADT4_OPENAI_API_KEY", "sk-test")
+    svc.settings.llm = True
+    n = chat_mod.MAX_TOOL_ROUNDS
+    looping = [NS(content=None, tool_calls=[_call(str(i), "find_objects", {"query": "hydrant"})]) for i in range(n - 1)]
+    fake = NS(chat=NS(completions=FakeCompletions(looping + [NS(content="No hydrant in the map.", tool_calls=None)])))
+    svc.chat._client, svc.chat._client_provider = fake, "openai"
+    out = _chat(client, "find a fire hydrant", src="file:syn")
+    calls = fake.chat.completions.calls
+    assert len(calls) == n
+    assert [c["tool_choice"] for c in calls] == ["auto"] * (n - 1) + ["none"]
+    assert "Tool budget for this message is used up" in calls[-1]["messages"][0]["content"]
+    assert out[-3] == {"type": "text", "text": "No hydrant in the map."}

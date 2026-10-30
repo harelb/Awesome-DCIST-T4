@@ -47,6 +47,13 @@ ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 OPENAI_MODELS = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini"]
 ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 MAX_TOOL_ROUNDS = 8
+# mission planning looks up several things, may search the images, then plans
+MISSION_TOOL_ROUNDS = 16
+# the last round has no tools, so the model reports instead of stopping silently
+LAST_ROUND_NOTE = (
+    "[console] Tool budget for this message is used up: answer now without tools. Say what "
+    "you found, what is still missing, and what the operator can do next."
+)
 HISTORY_ITEMS = 60  # transcript items kept from earlier turns
 TOOL_CONTENT_CHARS = 6000  # a tool result as kept in the transcript
 WRITE_TTL_S = 3600.0  # an unapproved write proposal expires
@@ -528,6 +535,9 @@ class ChatService:
     def _mission_ctx(self):
         return getattr(self._ctx, "value", None)
 
+    def _tool_rounds(self) -> int:
+        return MISSION_TOOL_ROUNDS if self._mission_ctx() is not None else MAX_TOOL_ROUNDS
+
     def _tools(self, src) -> list[dict]:
         if self._cypher_src(src) is not None:
             tools = [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
@@ -846,15 +856,17 @@ class ChatService:
         origin = self._robot_pos(robot)
         tools = self._tools(src)
         system = self._system(src, robot)
+        rounds = self._tool_rounds()
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for i in range(rounds):
                 if self.ledger.remaining() <= 0:
                     yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
                     return
+                last = i == rounds - 1
                 kwargs = dict(
                     model=model,
                     max_tokens=4000,
-                    system=system,
+                    system=system + ("\n\n" + LAST_ROUND_NOTE if last else ""),
                     tools=tools,
                     messages=to_anthropic(list(history) + turn),
                     # server-side refusal fallback; the installed SDK predates the
@@ -862,6 +874,8 @@ class ChatService:
                     betas=["server-side-fallback-2026-07-01"],
                     extra_body={"output_config": {"effort": "low"}, "fallbacks": "default"},
                 )
+                if last:
+                    kwargs["tool_choice"] = {"type": "none"}
                 try:
                     resp = client.beta.messages.create(**kwargs)
                 except anthropic.APIStatusError as e:
@@ -923,17 +937,20 @@ class ChatService:
         origin = self._robot_pos(robot)
         tools = self._openai_tools(src)
         system = self._system(src, robot)
+        rounds = self._tool_rounds()
         try:
-            for _ in range(MAX_TOOL_ROUNDS):
+            for i in range(rounds):
                 if self.ledger.remaining() <= 0:
                     yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
                     return
+                last = i == rounds - 1
                 try:
                     resp = client.chat.completions.create(
                         model=model,
-                        messages=[{"role": "system", "content": system}]
+                        messages=[{"role": "system", "content": system + ("\n\n" + LAST_ROUND_NOTE if last else "")}]
                         + to_openai(list(history) + turn),
                         tools=tools,
+                        tool_choice="none" if last else "auto",
                         temperature=0.2,
                         max_tokens=4000 if self._mission_ctx() is not None else 1500,
                     )

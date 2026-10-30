@@ -44,7 +44,11 @@ area called 'courtyard': draw it on the map, or pick one of: A1, North lot." Wha
 what, a default you chose) goes in propose_mission's `assumptions`, one short line each; the \
 operator sees them on the card.
 Work in one go: look things up and call propose_mission in this same turn (unless you are asking \
-a clarifying question or image candidates await approval); never stop after announcing what you will do next.
+a clarifying question or image candidates await approval); never stop after announcing what you will do next. \
+Tool rounds are limited. First read "Object classes in the map" (above) to see which requested \
+things exist; then look up everything at once (one Cypher query over all the classes and areas, or \
+several tool calls in one reply), not one thing per reply. A thing whose class is not in that list \
+goes straight to search_robot_images, in the same reply as the other lookups.
 """
 
 TOOL = {
