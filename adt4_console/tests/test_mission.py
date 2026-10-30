@@ -738,6 +738,8 @@ def test_chat_context_merges_both_area_scopes():
     assert "Named areas" in text and '"scope":"map"' in text and '"name":"A1"' in text and "No-go zones" in text
     assert "Never substitute silently" in text and "assumptions" in text
     assert "Work in one go" in text  # kept
+    # an object the map lacks: SAM3 over the robot images before asking the operator
+    assert "call search_robot_images with their words first" in text
     lk = llm_planner._area_lookup(regions, ctx)
     assert lk["R0"] is lk["courtyard"] and lk["a1"]["polygon"] == [[10, 0], [14, 0], [14, 4]]
     assert "assumptions" in llm_planner.TOOL["input_schema"]["required"]
