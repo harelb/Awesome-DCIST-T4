@@ -56,6 +56,8 @@ export interface Mission {
   text: string;
   src: string | null;
   planner: string;
+  /** omniplanner's goal: a replan plans it again from the agents' starts */
+  goal?: {pddl: string; constraints: unknown[]} | null;
   agents: Agent[];
   tasks: Task[];
   geofences: Polygon[];
@@ -356,6 +358,21 @@ export async function rebaseMission(id: string): Promise<void> {
     st().set({current: r.mission, preview: r.preview, error: null});
   } catch (e) {
     st().set({error: errorText(e)});
+  }
+}
+
+/** Plan the mission's omniplanner goal again from its agents' current starts
+ *  (robots reassigned, stops reordered): a new revision (API.md §15.5). */
+export async function replanMission(id: string): Promise<void> {
+  st().set({busy: "replan", error: null, errorFd: null});
+  try {
+    const r = await postJSON<{mission: Mission; preview: Preview}>(`api/missions/${enc(id)}/replan`, {});
+    st().set({current: r.mission, preview: r.preview, run: null});
+    void refreshList();
+  } catch (e) {
+    st().set({error: `replan: ${errorText(e)}`, errorFd: e instanceof ApiError ? fastDownwardOf(e.body) : null});
+  } finally {
+    st().set({busy: null});
   }
 }
 

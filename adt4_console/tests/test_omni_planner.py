@@ -134,6 +134,31 @@ def test_route_plans_a_pddl_goal(svc):
     assert body["planned"]["driven_m"] and body["preview"]["issues"] is not None
 
 
+def test_replan_keeps_the_goal_and_reassigns_from_new_starts(svc):
+    client, _ = svc
+    r = client.post("/api/missions/plan/omniplanner", json={"pddl_goal": "(visited-object o0)", "agents": [SPOT1, SPOT2]})
+    m = r.json()["mission"]
+    assert m["goal"] == {"pddl": "(visited-object o0)", "constraints": []}
+    assert [t["agent"] for t in m["tasks"]] == ["spot2"]  # spot2 starts next to O(0)
+    # spot2 moves behind the wall's far end, spot1 next to O(0): spot1 takes it now
+    r = client.post(f"/api/missions/{m['id']}/replan", json={"starts": {"spot1": [17.0, 2.0], "spot2": [0.0, 0.0]}})
+    assert r.status_code == 200, r.text
+    new = r.json()["mission"]
+    assert new["id"] == m["id"] and new["revision"] == m["revision"] + 1 and new["goal"] == m["goal"]
+    assert [t["agent"] for t in new["tasks"]] == ["spot1"]
+    assert {a["id"]: a["start"] for a in new["agents"]} == {"spot1": [17.0, 2.0], "spot2": [0.0, 0.0]}
+    assert r.json()["planned"]["driven_m"]
+    # no body: the mission's own (now moved) starts
+    assert client.post(f"/api/missions/{m['id']}/replan", json={}).json()["mission"]["revision"] == new["revision"] + 1
+
+
+def test_replan_needs_a_kept_goal(svc):
+    client, _ = svc
+    m = client.post("/api/missions", json={"agents": [SPOT1], "tasks": []}).json()["mission"]
+    r = client.post(f"/api/missions/{m['id']}/replan", json={})
+    assert r.status_code == 400 and "kept its goal" in r.json()["detail"]
+
+
 def test_route_text_goes_through_the_chat_in_omniplanner_mode(svc, monkeypatch):
     """Without a goal, the chat's model writes it (here: a stand-in that calls the tool)."""
     client, service = svc

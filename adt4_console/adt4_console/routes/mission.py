@@ -229,6 +229,41 @@ def preview_pddl(body: PddlPreviewBody, request: Request):
         return _planning_failed(e)
 
 
+class ReplanBody(BaseModel):
+    # agent id -> a new start [x, y] (null: the bound robot's live pose); others keep theirs
+    starts: dict[str, list[float] | None] | None = None
+
+
+@router.post("/{mid}/replan")
+def replan(mid: str, body: ReplanBody, request: Request):
+    """The mission's omniplanner goal planned again from the agents' current (or
+    given) starts: robots reassigned and stops reordered, as a new revision (API.md §15.5)."""
+    from ..mission import omni_planner
+
+    svc = _svc(request)
+    m = _get(svc.get, mid)
+    goal = (m.goal or {}).get("pddl")
+    if m.planner != "omniplanner" or not goal:
+        raise HTTPException(400, "only an omniplanner mission that kept its goal can be replanned "
+                                 "(one planned before goals were kept: plan it again)")  # fmt: skip
+    why = omni_planner.available()
+    if why:
+        raise HTTPException(503, why)
+    agents = [a.model_dump() for a in m.agents]
+    for a in agents:
+        if body.starts and a["id"] in body.starts:
+            a["start"] = body.starts[a["id"]]
+    try:
+        new, planned = omni_planner.plan_pddl(goal, agents, m.src, svc, m.goal.get("constraints"), m.geofences,
+                                              text=m.text, name=m.name)  # fmt: skip
+    except ValueError as e:
+        return _planning_failed(e)
+    new = new.model_copy(update={"id": m.id, "parent": m.id, "saved": m.saved, "chat": m.chat, "planted": m.planted})
+    out = svc.put(new)
+    out["planned"] = planned
+    return out
+
+
 def _planning_failed(e: ValueError) -> JSONResponse:
     """400 with the reason, and Fast Downward's account when it ran (API.md §15.5)."""
     return JSONResponse(status_code=400, content={"detail": str(e),

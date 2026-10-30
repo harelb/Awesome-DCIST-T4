@@ -107,6 +107,8 @@ class Mission(BaseModel):
     text: str = ""  # the operator's command
     src: str | None = None  # graph source planned on
     planner: Literal["llm", "omniplanner", "manual"] = "llm"
+    # omniplanner's goal ({pddl, constraints}): a replan plans it again from new starts
+    goal: dict | None = None
     agents: list[Agent] = Field(default_factory=list)
     tasks: list[Task] = Field(default_factory=list)
     geofences: list[Geofence] = Field(default_factory=list)

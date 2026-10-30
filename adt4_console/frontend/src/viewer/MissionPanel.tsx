@@ -23,6 +23,7 @@ import {
   planWithOmniplanner,
   rebaseMission,
   refreshList,
+  replanMission,
   removeAgent,
   replanText,
   rosterDiff,
@@ -688,6 +689,17 @@ export function MissionPanel() {
               {(current.decisions?.length ?? 0) > 0 && (
                 <button className="btn btn-xs" title="Simulate it again with the saved approvals applied at the same times" onClick={() => void simCmd("replay")}>
                   ↻ Replay saved run
+                </button>
+              )}
+              {current.planner === "omniplanner" && current.goal?.pddl && (
+                <button
+                  className="btn btn-xs"
+                  disabled={s.busy === "replan"}
+                  title={`Plan the same goal again from the agents' current starts (move them on the map or in Agents first); robots are reassigned and stops reordered.\n${current.goal.pddl}`}
+                  onClick={() => void replanMission(current.id)}
+                  data-testid="replan-mission"
+                >
+                  {s.busy === "replan" ? <Spinner /> : "↻ Replan from starts"}
                 </button>
               )}
               <UpdateFromRoster mission={current} />

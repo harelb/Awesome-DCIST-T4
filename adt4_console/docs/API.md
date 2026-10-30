@@ -999,6 +999,7 @@ A **mission** (`mission/model.py`) is up to 5 agents and a task DAG:
 | `GET /api/missions/{id}/export` | mission JSON download |
 | `POST /api/missions/plan/omniplanner {text \| pddl_goal, agents, src, constraints?, areas?}` | planner B (§15.5) → `{mission, preview, planned}`; `text` goes through the chat in omniplanner mode, `pddl_goal` plans directly; 400 with the reason (or the chat's question), 503 when omniplanner or Fast Downward is missing |
 | `POST /api/missions/plan/preview_pddl {pddl_goal, robots: [{name, start?}], constraints?, src}` | what planner B would do with a robot-chat PDDL goal: `{routes: {robot: [[x,y,z]...]}, driven_m, actions, robots, ground_s, solve_s, pois}`; no `start` = the robot's live pose |
+| `POST /api/missions/{id}/replan {starts?: {agent: [x,y] \| null}}` | planner B again on the mission's kept `goal` (`{pddl, constraints}`, stored by planner B) from the agents' current starts, or the given ones (null = live pose): robots reassigned, stops reordered, a new revision → `{mission, preview, planned}`; 400 for a mission without a kept goal or a goal that no longer plans |
 
 **Run state**: WS topic `mission/<id>`, latest-value, about 5 Hz:
 `{mission, kind: sim|live, revision, t, finished, playing, speed, agents: {id: {pos, yaw, task,

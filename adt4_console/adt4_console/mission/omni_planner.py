@@ -174,7 +174,7 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
 
     src = src or service._default_src()
     m0 = Mission(text=text or goal, name=name, src=src, agents=agents, planner="omniplanner",
-                 geofences=geofences or [])  # fmt: skip
+                 geofences=geofences or [], goal={"pddl": goal, "constraints": list(constraints or [])})  # fmt: skip
     ground = [a for a in m0.agents if a.is_ground]
     if not ground:
         raise ValueError("omniplanner plans ground robots (spot, husky) only")
