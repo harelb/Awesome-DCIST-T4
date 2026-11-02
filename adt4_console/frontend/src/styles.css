@@ -4572,3 +4572,180 @@ input[type="checkbox"] {
   max-height: 160px;
   overflow: auto;
 }
+
+/* ---------------------------------------------------------------- experiment runs (API.md §18) */
+.banner-warn {
+  background: var(--warn-bg);
+  color: var(--text);
+  border-color: var(--warn);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.banner-warn strong {
+  color: var(--warn);
+}
+.banner-err .btn,
+.banner-warn .btn {
+  margin-left: 8px;
+}
+.rec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rec-chip .rec-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.rec-chip .rec-time {
+  font-weight: 500;
+  opacity: 0.85;
+}
+.rec-ok .rec-dot {
+  background: var(--err); /* the universal "recording" red dot */
+  box-shadow: 0 0 0 3px var(--err-bg);
+}
+.rec-ok {
+  border-color: var(--ok);
+}
+.rec-warn {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+.rec-warn .rec-dot {
+  background: var(--warn);
+}
+.rec-err {
+  border-color: var(--err);
+  background: var(--err-bg);
+}
+.rec-err .rec-dot {
+  background: var(--err);
+}
+.rec-pulse {
+  animation: rec-pulse 1s ease-in-out infinite;
+}
+@keyframes rec-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--err-bg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rec-pulse {
+    animation: none;
+  }
+}
+.rec-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.rec-run-head {
+  align-items: center;
+}
+.rec-instr {
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-logging {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.text-ok {
+  color: var(--ok);
+}
+.text-warn {
+  color: var(--warn);
+}
+.text-err {
+  color: var(--err);
+}
+.data-page .card + .card {
+  margin-top: 12px;
+}
+.data-form,
+.data-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.data-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.chip-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.runs-table tr.selected td {
+  background: var(--accent-bg, var(--ok-bg));
+}
+.run-detail {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr));
+  gap: 8px;
+}
+.kv-cell {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  min-width: 0;
+}
+.event-list {
+  max-height: 420px;
+  overflow: auto;
+}
+.event-data {
+  word-break: break-all;
+}
+.sanity-machine + .sanity-machine {
+  margin-top: 8px;
+}
+.end-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.rec-chip .rec-short {
+  display: none;
+}
+@media (max-width: 640px) {
+  .rec-chip .rec-label {
+    display: none;
+  }
+  .rec-chip .rec-short {
+    display: inline;
+  }
+  .intervention-btn {
+    display: none; /* in the recording panel on phones */
+  }
+}

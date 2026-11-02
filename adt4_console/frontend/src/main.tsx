@@ -8,6 +8,7 @@ import {bindJobs, useJobs} from "./stores/jobs";
 import {bindRobots} from "./stores/robots";
 import {bindRobotColors} from "./stores/robotColors";
 import {bindTheme} from "./stores/theme";
+import {bindExperiment} from "./stores/experiment";
 import "./styles.css";
 import "./theme.css";
 
@@ -17,6 +18,7 @@ bindFleet();
 bindJobs();
 bindRobots();
 bindRobotColors();
+bindExperiment();
 ws.start();
 void useFleet.getState().load();
 void useJobs.getState().load();

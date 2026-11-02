@@ -5,6 +5,7 @@ import {useFleet} from "../stores/fleet";
 import {isActive, useJobs} from "../stores/jobs";
 import {onBackendState} from "../lib/api";
 import {JobConfirmHost, JobsDrawer} from "./Jobs";
+import {ExperimentBanners, ExperimentHosts, InterventionButton, RecChip} from "./ExperimentRun";
 import {Dot, Sheet} from "./ui";
 import {useTheme} from "../stores/theme";
 
@@ -14,6 +15,7 @@ const P = {
   maps: "M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15",
   viewer: "M12 2l9 5v10l-9 5-9-5V7zM12 12l9-5M12 12v10M12 12L3 7",
   mission: "M12 21s-6-5.6-6-10a6 6 0 0112 0c0 4.4-6 10-6 10zM12 13a2 2 0 100-4 2 2 0 000 4zM3 21h18",
+  data: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6",
   network: "M12 20a2 2 0 100-4 2 2 0 000 4zM7.5 13.5a6.5 6.5 0 019 0M4.5 10.5a11 11 0 0115 0M1.5 7.5a15.5 15.5 0 0121 0",
   config: "M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M14 4v4M8 10v4M16 16v4",
   jobs: "M4 5h16M4 10h16M4 15h10M4 20h7",
@@ -41,6 +43,7 @@ const NAV: {to: string; label: string; short?: string; icon: keyof typeof P}[] =
   {to: "/maps", label: "Maps", icon: "maps"},
   {to: "/viewer", label: "Robot viewer", short: "Viewer", icon: "viewer"},
   {to: "/mission", label: "Mission planner", short: "Mission", icon: "mission"},
+  {to: "/data", label: "Data", icon: "data"},
   {to: "/network", label: "Network", icon: "network"},
   {to: "/config", label: "Config", icon: "config"},
 ];
@@ -162,6 +165,8 @@ function TopBar() {
         ))}
       </div>
       <HealthButton items={items} />
+      <RecChip />
+      <InterventionButton />
       <ThemeToggle />
       <button className={`btn jobs-btn ${waiting ? "attention" : ""}`} onClick={() => (drawerOpen ? close() : open())} aria-label="Jobs">
         <Icon name="jobs" size={16} />
@@ -280,6 +285,7 @@ export function Shell() {
             Not authorised: open the console with <span className="mono">?token=...</span> (the server has a token configured).
           </div>
         )}
+        <ExperimentBanners />
         <div className="content">
           <Outlet />
         </div>
@@ -287,6 +293,7 @@ export function Shell() {
       <TabBar />
       <JobsDrawer />
       <JobConfirmHost />
+      <ExperimentHosts />
     </div>
   );
 }

@@ -62,7 +62,39 @@ async function errorFrom(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail || res.statusText, body);
 }
 
+/** The console refused to send a goal because an experiment run records and a
+ *  machine's bag recorder is not up (HTTP 409 ``recording_not_ready``, API.md §18).
+ *  The handler (RecordingBlockedHost) asks the operator; "retry" re-sends the
+ *  very same request, "cancel" lets the 409 through to the caller. */
+export interface RecordingBlocked {
+  detail: string;
+  machines: {machine: string; state: string; error: string | null}[];
+}
+type BlockedHandler = (info: RecordingBlocked) => Promise<"retry" | "cancel">;
+let blockedHandler: BlockedHandler | null = null;
+export function setRecordingBlockedHandler(h: BlockedHandler | null) {
+  blockedHandler = h;
+}
+
 export async function request(path: string, init: RequestInit = {}): Promise<Response> {
+  const res = await requestOnce(path, init);
+  if (res.status === 409 && blockedHandler) {
+    let body: {recording_not_ready?: boolean; detail?: string; machines?: RecordingBlocked["machines"]} | null = null;
+    try {
+      body = await res.clone().json();
+    } catch {
+      body = null;
+    }
+    if (body?.recording_not_ready) {
+      const choice = await blockedHandler({detail: body.detail ?? "recording is not running", machines: body.machines ?? []});
+      if (choice === "retry") return request(path, init);
+    }
+  }
+  if (!res.ok) throw await errorFrom(res);
+  return res;
+}
+
+async function requestOnce(path: string, init: RequestInit): Promise<Response> {
   let res: Response;
   try {
     res = await fetch(path, {...init, headers: headers(init.headers)});
@@ -73,6 +105,10 @@ export async function request(path: string, init: RequestInit = {}): Promise<Res
     const err = new ApiError(0, "Backend unreachable");
     notify(false, err);
     throw err;
+  }
+  if (res.status === 409) {
+    notify(true);
+    return res; // request() decides (recording_not_ready) and throws
   }
   if (!res.ok) {
     const err = await errorFrom(res);

@@ -7,6 +7,7 @@ import {LaunchPage} from "./pages/Launch";
 import {MapsPage} from "./pages/Maps";
 import {NetworkPage} from "./pages/Network";
 import {ConfigPage} from "./pages/Config";
+import {DataPage} from "./pages/Data";
 
 const ViewerPage = lazy(() => import("./viewer/ViewerPage"));
 
@@ -35,6 +36,7 @@ const router = createHashRouter([
           </Suspense>
         ),
       },
+      {path: "data", element: <DataPage />},
       {path: "network", element: <NetworkPage />},
       {path: "config", element: <ConfigPage />},
       {path: "*", element: <Navigate to="/fleet" replace />},
