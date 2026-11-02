@@ -4598,3 +4598,75 @@ input[type="checkbox"] {
   flex-wrap: wrap;
   min-width: 0;
 }
+
+/* GoalImages: each robot's goals as images in the chat's plan previews */
+.goal-images {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+  min-width: 0;
+}
+.goal-images-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.goal-images-robot {
+  flex: none;
+  width: 58px;
+  font: 600 11px var(--mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.goal-images-strip {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  min-width: 0;
+  padding-bottom: 2px;
+}
+.goal-thumb {
+  position: relative;
+  flex: none;
+  width: 72px;
+  height: 54px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--bg-3);
+  cursor: pointer;
+}
+.goal-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.goal-thumb-tag {
+  position: absolute;
+  left: 2px;
+  bottom: 1px;
+  font-size: 9px;
+  color: #fff;
+  text-shadow: 0 0 2px #000, 0 0 2px #000;
+}
+.goal-thumb-empty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  color: var(--muted, #888);
+}
+.chat-engine {
+  padding: 2px 8px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.engine-pick label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}

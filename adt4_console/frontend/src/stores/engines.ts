@@ -22,11 +22,28 @@ interface EnginesStore {
 
 export const ENGINE_LABEL: Record<EngineId, string> = {fast_downward: "Fast Downward", grstaps: "GRSTAPS-X"};
 
+const ENGINE_KEY = "adt4.omniplanner.engine";
+
+function loadEngine(): EngineId {
+  try {
+    return localStorage.getItem(ENGINE_KEY) === "grstaps" ? "grstaps" : "fast_downward";
+  } catch {
+    return "fast_downward";
+  }
+}
+
 export const useEngines = create<EnginesStore>(set => ({
   engines: [],
-  engine: "fast_downward",
+  engine: loadEngine(),
   loaded: false,
-  setEngine: engine => set({engine}),
+  setEngine: engine => {
+    try {
+      localStorage.setItem(ENGINE_KEY, engine);
+    } catch {
+      /* the choice just isn't remembered */
+    }
+    set({engine});
+  },
 }));
 
 /** (Re)load the engines and whether each can plan here (a license copied in later turns GRSTAPS-X on). */

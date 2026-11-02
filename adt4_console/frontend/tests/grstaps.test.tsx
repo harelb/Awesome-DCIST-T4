@@ -117,3 +117,49 @@ describe("engine picker", () => {
     expect(useEngines.getState().engine).toBe("fast_downward");
   });
 });
+
+describe("goal images", () => {
+  it("shows each robot's goals and a full view whose mask toggles", async () => {
+    const {GoalImages, _resetGoalImageCache} = await import("../src/viewer/GoalImages");
+    const {useViewer} = await import("../src/stores/viewer");
+    _resetGoalImageCache();
+    useViewer.setState({sources: {"neo4j:penn": {kind: "neo4j", enabled: true}} as never, order: ["neo4j:penn"]});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.includes("/node/O(3)")) return json({images: ["/api/graph/neo4j:penn/image/O(3)/0", "/api/graph/neo4j:penn/image/O(3)/1"], masks: [true, false], label_name: "chair"});
+      return json({images: []});
+    });
+    const el = render(<GoalImages goals={{spot1: ["O(3)"], spot2: ["t100"]}} />);
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 0));
+    });
+    expect([...el.querySelectorAll(".goal-images-robot")].map(e => e.textContent)).toEqual(["spot1", "spot2"]);
+    const thumb = el.querySelector<HTMLButtonElement>('[data-testid="goal-thumb"]')!;
+    expect(thumb.querySelector("img")!.getAttribute("src")).toContain("mask=1");
+    expect(el.textContent).toContain("t100"); // a place: no image, its symbol only
+    act(() => thumb.click());
+    const full = () => document.querySelector<HTMLImageElement>('[data-testid="goal-image-full"]')!;
+    expect(full().src).toContain("mask=1");
+    const mask = () => document.querySelector<HTMLInputElement>('.toggle input[type="checkbox"]')!;
+    act(() => mask().click());
+    expect(full().src).not.toContain("mask=1");
+    act(() => mask().click());
+    expect(full().src).toContain("mask=1");
+    act(() => [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Next")!.click());
+    expect(full().src).toContain("/O(3)/1");
+    expect(full().src).not.toContain("mask=1"); // that view has no mask
+  });
+
+  it("collects a mission's goal symbols per agent", async () => {
+    const {missionGoals} = await import("../src/viewer/ChatPanel");
+    expect(
+      missionGoals([
+        {agent: "spot1", type: "goto", target: "O(3)"},
+        {agent: "spot1", type: "inspect", target: "O(3)"},
+        {agent: "spot2", type: "goto", target: [1, 2]},
+        {agent: "quad1", type: "goto", target: "$found:crate"},
+        {agent: "spot2", type: "place", target: "t598"},
+      ]),
+    ).toEqual({spot1: ["O(3)"], spot2: ["t598"]});
+  });
+});

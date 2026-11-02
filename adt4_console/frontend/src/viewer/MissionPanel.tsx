@@ -54,7 +54,9 @@ import {startLockReason} from "../lib/agentStart";
 import type {ChatItem} from "./ChatPanel";
 import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule, type PlannerScheduleData} from "./PlannerSchedule";
-import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
+import {ENGINE_LABEL, type EngineId} from "../stores/engines";
+import {EnginePicker} from "./EnginePicker";
+export {EnginePicker};
 import type {TranscriptItem} from "../lib/chatTranscript";
 
 const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼", pick: "✋", place: "⤓"};
@@ -589,32 +591,6 @@ export function AgentIdInput({id, taken}: {id: string; taken: string[]}) {
         }
       }}
     />
-  );
-}
-
-/** Which omniplanner engine plans: Fast Downward or GRSTAPS-X (greyed out, with
- *  the reason, when it cannot plan here, e.g. no Gurobi license). */
-export function EnginePicker({compact = false}: {compact?: boolean}) {
-  const {engines, engine, setEngine, loaded} = useEngines();
-  useEffect(() => {
-    if (!loaded) void refreshEngines();
-  }, [loaded]);
-  if (!engines.length) return null;
-  return (
-    <div className="engine-pick small" data-testid="engine-picker">
-      {!compact && <span className="muted">planner</span>}
-      {engines.map(e => (
-        <label key={e.id} className={e.available ? "" : "muted"} title={e.available ? `${e.label}${e.id === "grstaps" ? ": task allocation with a timed schedule, joint inspections, before-ordering, moving objects" : ": shortest routes"}` : `${e.label} cannot plan here: ${e.reason}`}>
-          <input type="radio" name={compact ? "engine-c" : "engine"} disabled={!e.available} checked={engine === e.id} onChange={() => setEngine(e.id as EngineId)} /> {e.label}
-          {!e.available && " ⚠"}
-        </label>
-      ))}
-      {engines.some(e => !e.available) && (
-        <button className="btn btn-xs" title="Check again (e.g. after copying a Gurobi license in)" onClick={() => void refreshEngines()}>
-          ↻
-        </button>
-      )}
-    </div>
   );
 }
 

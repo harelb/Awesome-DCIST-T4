@@ -15,6 +15,10 @@ import {closeMission, fitMission, missionContext, openMission, saveCurrent, simC
 import {clearPreview, previewPddl, PreviewError, usePlanPreview, type PddlPreview} from "../stores/planPreview";
 import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule} from "./PlannerSchedule";
+import {EnginePicker} from "./EnginePicker";
+import {GoalImages} from "./GoalImages";
+import {agentColors} from "./MissionOverlay";
+import {useRobotColor3D} from "./background";
 import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
 import type {FastDownwardInfo} from "../lib/fastDownward";
 import {useRobots} from "../stores/robots";
@@ -529,6 +533,11 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
           {missionMode ? "Clear" : "New chat"}
         </button>
       </div>
+      {missionMode && (
+        <div className="chat-engine">
+          <EnginePicker label="planner" />
+        </div>
+      )}
       <div className="chat-log" ref={scroller}>
         {items.length === 0 && (
           <div className="muted small pad">
@@ -584,6 +593,17 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   );
 }
 
+/** {agent: [node symbol, ...]}: where each agent's tasks go (map symbols only, in order). */
+export function missionGoals(tasks: {agent: string; type: string; target?: unknown}[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const t of tasks) {
+    if (typeof t.target !== "string" || t.target.startsWith("$") || !/^[A-Za-z]+\(?\d+\)?$/.test(t.target)) continue;
+    const l = (out[t.agent] ??= []);
+    if (!l.includes(t.target)) l.push(t.target);
+  }
+  return out;
+}
+
 export function MissionCard({it}: {it: MissionCardItem}) {
   const mine = useMission(s => s.current?.id === it.id);
   // the newest revision: the open mission's, else the mission list's
@@ -604,6 +624,9 @@ export function MissionCard({it}: {it: MissionCardItem}) {
     }
   };
   const byAgent = it.agents.map(a => ({a, tasks: it.tasks.filter(t => t.agent === a.id)}));
+  const robotColor = useRobotColor3D();
+  const colors = agentColors(it.agents as Parameters<typeof agentColors>[0], robotColor);
+  const goals = missionGoals(it.tasks);
   return (
     <div className={`card chat-card mission-card ${superseded ? "superseded" : ""}`}>
       <div className="row gap">
@@ -621,6 +644,7 @@ export function MissionCard({it}: {it: MissionCardItem}) {
           </li>
         ))}
       </ul>
+      <GoalImages goals={goals} colors={colors} />
       {it.planned && (
         <div className="small muted" data-testid="mission-planned">
           omniplanner{it.planned.engine ? ` (${ENGINE_LABEL[it.planned.engine as EngineId] ?? it.planned.engine})` : ""}:{" "}
@@ -933,6 +957,7 @@ function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"
           {pv.p.schedule ? ` · makespan ${Math.round(pv.p.schedule.makespan)} s` : ""}
         </div>
       )}
+      {pv?.p?.goals && shown && <GoalImages goals={pv.p.goals} src={src} />}
       {pv?.p?.schedule && shown && <PlannerSchedule schedule={pv.p.schedule} compact />}
       {sent && <div className={`small tone-${sent.tone}`}>{sent.text}</div>}
     </div>

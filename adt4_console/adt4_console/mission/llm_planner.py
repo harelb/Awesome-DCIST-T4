@@ -321,6 +321,12 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             parts.append(PLAN_FORCED)
             if ctx.get("engine") == "grstaps":
                 parts.append(PLAN_GRSTAPS_FORCED)
+        elif ctx.get("engine") == "fast_downward" or (ctx.get("engine") == "grstaps" and ctx.get("grstaps")):
+            # the planner the operator picked in the chat window
+            name = "GRSTAPS-X" if ctx["engine"] == "grstaps" else "Fast Downward"
+            parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
+                         f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
+                         "in one line instead of switching.")
     roster = ctx.get("roster") or []
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))

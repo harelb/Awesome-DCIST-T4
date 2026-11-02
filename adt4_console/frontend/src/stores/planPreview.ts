@@ -18,6 +18,8 @@ export interface PddlPreview {
   engine?: string;
   planner_log?: FastDownwardInfo | null;
   schedule?: PlannerScheduleData | null;
+  /** each robot's goals as node symbols, in order (the chat shows their images) */
+  goals?: Record<string, string[]>;
 }
 
 /** A failed preview: the reason, and Fast Downward's account when it ran. */

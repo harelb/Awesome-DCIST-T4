@@ -316,6 +316,31 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
     return Mission.model_validate(m0.model_dump()), info
 
 
+def _goals_by_robot(out: dict, G) -> dict[str, list[str]]:
+    """{robot: [node symbol, ...]}: where each robot's plan goes, in order (the chat
+    shows each goal's image). GRSTAPS-X steps already name nodes; Fast Downward's
+    goto / inspect name PDDL symbols."""
+    goals: dict[str, list[str]] = {}
+
+    def add(robot, sym):
+        lst = goals.setdefault(robot, [])
+        if sym and sym not in lst:
+            lst.append(sym)
+
+    if "steps" in out:
+        for s in out["steps"]:
+            add(s["robot"], s["target"])
+        return goals
+    to_node = _modules()["to_node"]
+    for robot, act, _ in out["actions"]:
+        if act[0] in ("goto-poi", "inspect") and len(act) > 2:
+            try:
+                add(robot, str(to_node(G, act[-1])))
+            except Exception:  # noqa: BLE001 — a symbol the graph does not know: no image
+                pass
+    return goals
+
+
 def preview(goal: str, robots: list[dict], src: str | None, service, constraints=None,
             engine: str = DEFAULT_ENGINE) -> dict:
     """What omniplanner would do with ``goal`` for these robots, without a mission:
@@ -338,6 +363,7 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
         raise ValueError("no robot has a pose: connect the robots, or add agents with starts in the mission planner")
     out = solve(goal, starts, world.graph.G, constraints, engine=engine)
     return {
+        "goals": _goals_by_robot(out, world.graph.G),
         "engine": check_engine(engine),
         "schedule": out.get("schedule"),
         "planner_log": out.get("planner_log"),

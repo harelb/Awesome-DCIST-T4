@@ -313,6 +313,8 @@ export function missionContext() {
     no_go: s.fences.map(f => ({name: f.id, polygon: f.polygon})),
     planted: s.planted,
     mission: s.current,
+    // the planner picked in the chat window / omniplanner tab (plan_ground_mission's engine)
+    engine: useEngines.getState().engine,
   };
 }
 

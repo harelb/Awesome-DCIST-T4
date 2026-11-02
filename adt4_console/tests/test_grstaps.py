@@ -209,3 +209,21 @@ def test_schedule_message_to_dict():
         NS(robot_name="spot2", action="inspect-object", target="o4", start_time=3.0, finish_time=13.0)])
     d = schedule_from_msg(msg)
     assert d["makespan"] == 42.12 and [r["robot"] for r in d["rows"]] == ["spot1", "spot2"]
+
+
+def test_preview_names_each_robots_goals(svc):
+    client, _ = svc
+    for engine in ("fast_downward", "grstaps"):
+        r = client.post("/api/missions/plan/preview_pddl",
+                        json={"pddl_goal": "(visited-object-by spot1 o0)", "engine": engine,
+                              "robots": [{"name": "spot1", "start": [0, 0]}, {"name": "spot2", "start": [20, 10]}]})  # fmt: skip
+        assert r.status_code == 200, r.text
+        assert r.json()["goals"] == {"spot1": ["O(0)"]}, engine
+
+
+def test_chat_window_planner_choice_reaches_the_prompt():
+    from adt4_console.mission.llm_planner import context_text
+
+    assert "picked the GRSTAPS-X planner" in context_text({"omniplanner": True, "grstaps": True, "engine": "grstaps"})
+    assert "picked the GRSTAPS-X planner" not in context_text({"omniplanner": True, "grstaps": False, "engine": "grstaps"})
+    assert "picked the Fast Downward planner" in context_text({"omniplanner": True, "engine": "fast_downward"})
