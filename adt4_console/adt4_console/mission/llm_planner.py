@@ -139,7 +139,8 @@ region r3 -> r3) and robots are the agent ids in lower case:
 does it. Use the -by forms whenever the operator says which robot does a task.
 - (safe o12): some robot inspects o12 (the console's inspect: go there and look).
 - (at-object spot1 o12), (at-place spot1 t40): spot1 ends there.
-- (visited-region r3): some robot enters region r3; (explored-region r3): every place of r3 is visited.
+- (visited-region r3): some robot enters region r3 (its core, not a stray edge); (explored-region r3): every \
+place of r3 is visited. (visited-region-by spot1 r3), (explored-region-by spot1 r3): that robot does it.
 constraints: {predicate: 'forbidden-poi', symbols: ['o14']} keeps routes away from o14; \
 {predicate: 'forbidden-edge', symbols: ['t1', 't2']} closes the passage between two places.
 """

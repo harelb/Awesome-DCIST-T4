@@ -1077,7 +1077,7 @@ Needs omniplanner with that grounding and Fast Downward on `PATH` (`available()`
   `t4826`, region `r3`), robots = the agent ids in lower case: `visited-object` /
   `visited-place` (any robot), `visited-object-by` / `visited-place-by` / `inspected-by` (that
   robot), `safe` (some robot inspects it), `at-object` / `at-place` (where a robot ends),
-  `visited-region`, `explored-region`, under `and` / `or`. Optional constraints
+  `visited-region`, `explored-region` (and their `-by` forms: that robot), under `and` / `or`. Optional constraints
   `forbidden-poi` / `forbidden-edge`; the mission's no-go zones become `forbidden-poi` on the
   places inside them.
 * **Mission**: each `goto-poi` → a `goto` task, a goto followed by an `inspect` of its target → one
