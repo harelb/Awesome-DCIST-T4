@@ -10,7 +10,7 @@ import re
 import threading
 import time
 
-from .model import Mission
+from .model import NOT_LIVE, Mission
 from .paths import PlaceGraph
 from .planning import World, preview
 from .sim import SimRunner
@@ -435,6 +435,10 @@ class MissionService:
         errors = [i for i in pv["issues"] if i["level"] == "error"]
         if errors:
             raise ValueError("fix the mission first: " + "; ".join(i["msg"] for i in errors))
+        manip = sorted({t.type for t in m.tasks if t.type in NOT_LIVE})
+        if manip:
+            raise ValueError(f"the console cannot run {' / '.join(manip)} on a robot: send this goal to the robots "
+                             "with Send to robot (their omniplanner executor picks and places)")  # fmt: skip
         bound = [a for a in m.agents if a.binding]
         if not bound:
             raise ValueError("no agent is bound to a real robot; simulate it instead")

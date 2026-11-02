@@ -159,6 +159,27 @@ class OmniBody(BaseModel):
     pddl_goal: str | None = None
     constraints: list[dict] | None = None
     areas: list[dict] | None = None
+    # which omniplanner engine plans it: fast_downward (default) or grstaps (GRSTAPS-X)
+    engine: str | None = None
+
+
+def _engine_or_503(omni_planner, engine):
+    try:
+        engine = omni_planner.check_engine(engine)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    why = omni_planner.available(engine)
+    if why:
+        raise HTTPException(503, f"{omni_planner.ENGINES[engine]}: {why}")
+    return engine
+
+
+@router.get("/plan/engines")
+def plan_engines():
+    """The omniplanner engines and whether each can plan here (API.md §15.5)."""
+    from ..mission import omni_planner
+
+    return {"engines": omni_planner.engines(), "default": omni_planner.DEFAULT_ENGINE}
 
 
 @router.post("/plan/omniplanner")
@@ -168,13 +189,11 @@ def plan_omniplanner(body: OmniBody, request: Request):
 
     svc = _svc(request)
     src = body.src or svc._default_src()
-    why = omni_planner.available()
-    if why:
-        raise HTTPException(503, why)
+    engine = _engine_or_503(omni_planner, body.engine)
     if body.pddl_goal:
         try:
             m, planned = omni_planner.plan_pddl(body.pddl_goal, body.agents, src, svc, body.constraints,
-                                                text=body.text)  # fmt: skip
+                                                text=body.text, engine=engine)  # fmt: skip
         except ValueError as e:
             return _planning_failed(e)
         out = svc.put(m)
@@ -183,8 +202,8 @@ def plan_omniplanner(body: OmniBody, request: Request):
     if not body.text.strip():
         raise HTTPException(400, "give a command (text) or a pddl_goal")
     # the chat's model looks the symbols up and writes the goal (plan_ground_mission only)
-    ctx = {"roster": body.agents, "areas": body.areas or [], "planner": "omniplanner"}
-    said, errors, card, fd = [], [], None, None
+    ctx = {"roster": body.agents, "areas": body.areas or [], "planner": "omniplanner", "engine": engine}
+    said, errors, card, fd, plog = [], [], None, None, None
     for ev in services(request).chat.stream(body.text, None, src, None, None, ctx):
         if ev.get("type") == "mission":
             card = ev
@@ -197,9 +216,11 @@ def plan_omniplanner(body: OmniBody, request: Request):
             if isinstance(res, dict) and res.get("error"):
                 errors.append(res["error"])
                 fd = res.get("fast_downward") or fd
+                plog = res.get("planner_log") or plog
     if card is None:
         msg = " ".join(errors or said).strip() or "omniplanner produced no mission"
-        return JSONResponse(status_code=400, content={"detail": msg, "fast_downward": fd})
+        return JSONResponse(status_code=400, content={"detail": msg, "fast_downward": fd, "planner_log": plog or (
+            {"planner": omni_planner.ENGINES["fast_downward"], **fd} if fd else None)})
     m = svc.get(card["id"])
     return {"mission": m.model_dump(), "preview": svc.preview(m), "planned": card.get("planned"),
             "assumptions": card.get("assumptions") or []}  # fmt: skip
@@ -211,6 +232,7 @@ class PddlPreviewBody(BaseModel):
     # [{name, start?}]: no start = the robot's live pose
     robots: list[dict]
     src: str | None = None
+    engine: str | None = None
 
 
 @router.post("/plan/preview_pddl")
@@ -219,12 +241,10 @@ def preview_pddl(body: PddlPreviewBody, request: Request):
     from ..mission import omni_planner
 
     svc = _svc(request)
-    why = omni_planner.available()
-    if why:
-        raise HTTPException(503, why)
+    engine = _engine_or_503(omni_planner, body.engine)
     try:
         return omni_planner.preview(body.pddl_goal, body.robots, body.src or svc._default_src(), svc,
-                                    body.constraints)  # fmt: skip
+                                    body.constraints, engine=engine)  # fmt: skip
     except ValueError as e:
         return _planning_failed(e)
 
@@ -232,6 +252,8 @@ def preview_pddl(body: PddlPreviewBody, request: Request):
 class ReplanBody(BaseModel):
     # agent id -> a new start [x, y] (null: the bound robot's live pose); others keep theirs
     starts: dict[str, list[float] | None] | None = None
+    # plan it with another engine this time (default: the one it was planned with)
+    engine: str | None = None
 
 
 @router.post("/{mid}/replan")
@@ -246,16 +268,14 @@ def replan(mid: str, body: ReplanBody, request: Request):
     if m.planner != "omniplanner" or not goal:
         raise HTTPException(400, "only an omniplanner mission that kept its goal can be replanned "
                                  "(one planned before goals were kept: plan it again)")  # fmt: skip
-    why = omni_planner.available()
-    if why:
-        raise HTTPException(503, why)
+    engine = _engine_or_503(omni_planner, body.engine or (m.goal or {}).get("engine"))
     agents = [a.model_dump() for a in m.agents]
     for a in agents:
         if body.starts and a["id"] in body.starts:
             a["start"] = body.starts[a["id"]]
     try:
         new, planned = omni_planner.plan_pddl(goal, agents, m.src, svc, m.goal.get("constraints"), m.geofences,
-                                              text=m.text, name=m.name)  # fmt: skip
+                                              text=m.text, name=m.name, engine=engine)  # fmt: skip
     except ValueError as e:
         return _planning_failed(e)
     new = new.model_copy(update={"id": m.id, "parent": m.id, "saved": m.saved, "chat": m.chat, "planted": m.planted})
@@ -265,9 +285,11 @@ def replan(mid: str, body: ReplanBody, request: Request):
 
 
 def _planning_failed(e: ValueError) -> JSONResponse:
-    """400 with the reason, and Fast Downward's account when it ran (API.md §15.5)."""
+    """400 with the reason, and the planner's account when it ran (API.md §15.5):
+    ``planner_log`` for any engine, ``fast_downward`` for Fast Downward's."""
     return JSONResponse(status_code=400, content={"detail": str(e),
-                                                  "fast_downward": getattr(e, "fast_downward", None)})  # fmt: skip
+                                                  "fast_downward": getattr(e, "fast_downward", None),
+                                                  "planner_log": getattr(e, "planner_log", None)})  # fmt: skip
 
 
 @router.post("/{mid}/rebase")

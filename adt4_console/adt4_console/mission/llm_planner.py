@@ -144,6 +144,26 @@ constraints: {predicate: 'forbidden-poi', symbols: ['o14']} keeps routes away fr
 {predicate: 'forbidden-edge', symbols: ['t1', 't2']} closes the passage between two places.
 """
 
+PLAN_GRSTAPS = """\
+plan_ground_mission can also plan with engine 'grstaps' (GRSTAPS-X): it allocates tasks to robots and \
+SCHEDULES them in time (start/finish per task, a makespan), and it plans what Fast Downward cannot:
+- ordering: constraint {predicate: 'before', symbols: ['o4', 'o8']} = everything at o4 finishes before \
+anything at o8 starts (one entry per pair; never both directions). Use it for "first", "then", "after".
+- joint inspection: (safe o4) / (not (suspicious o4)) is ONE task two robots do together (they meet \
+there and look); (inspected-by spot1 o4) puts spot1 on that team.
+- relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
+have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
+GRSTAPS-X does NOT take or, at-place / at-object, holding, visited-region / explored-region, or any \
+other not: visit the last stop and order it last with before instead of at-*. Use engine 'grstaps' \
+when the request needs ordering, a joint inspection, moving an object, or a schedule; otherwise \
+'fast_downward' (the default, shortest routes). A relocation runs only via Send to robot, not the \
+console's executor.
+"""
+
+PLAN_GRSTAPS_FORCED = """\
+The operator chose the GRSTAPS-X engine: call plan_ground_mission with engine 'grstaps'.
+"""
+
 PLAN_FORCED = """\
 The operator asked for omniplanner: plan this request with plan_ground_mission (look the symbols up \
 first); do not use propose_mission. If it cannot be expressed as such a goal, say so in one line.
@@ -161,12 +181,15 @@ PLAN_TOOL = {
             "name": {"type": "string", "description": "short title"},
             "goal": {"type": "string", "description": "the operator's request in one sentence, in their words"},
             "pddl_goal": {"type": "string", "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'"},
+            "engine": {"type": "string", "enum": ["fast_downward", "grstaps"],
+                       "description": "fast_downward (default): shortest routes; grstaps: GRSTAPS-X, a timed "
+                       "schedule, joint inspections, before-ordering, object-in-place"},
             "constraints": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge"]},
+                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge", "before"]},
                         "symbols": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["predicate", "symbols"],
@@ -200,21 +223,32 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
         return [], {"error": "no ground agents in the roster: ask the operator to add a spot or husky"}
     geofences = (cur.get("geofences") if revising else None) or no_go_zones(ctx)
     text = str(args.get("goal") or "").strip() or request_text(history, message)
+    engine = args.get("engine") or ctx.get("engine") or omni_planner.DEFAULT_ENGINE
+    if engine not in omni_planner.ENGINES:
+        return [], {"error": f"unknown engine {engine!r}: fast_downward or grstaps"}
+    why = omni_planner.available(engine)
+    if why:
+        return [], {"error": f"{omni_planner.ENGINES[engine]} cannot plan here ({why})"
+                             + ("; use engine fast_downward" if engine == "grstaps" else "; use propose_mission")}
     try:
         m, planned = omni_planner.plan_pddl(goal, agents, src, service, args.get("constraints"), geofences,
-                                            text=text, name=str(args.get("name") or ""))  # fmt: skip
+                                            text=text, name=str(args.get("name") or ""), engine=engine)  # fmt: skip
     except omni_planner.OmniUnavailable as e:
         return [], {"error": f"omniplanner is not available here ({e}); use propose_mission"}
     except ValueError as e:
         fd = getattr(e, "fast_downward", None)
-        # the operator sees the failure (with Fast Downward's log) as a tool card
+        plog = getattr(e, "planner_log", None)
+        # the operator sees the failure (with the planner's log) as a tool card
         card = {"type": "tool", "name": PLAN_TOOL["name"],
-                "args": {"pddl_goal": goal, "constraints": args.get("constraints") or []},
-                "result": {"error": str(e), "fast_downward": fd}}  # fmt: skip
-        for_model = {"error": f"omniplanner could not plan {goal}: {e}. Check the symbols (run_cypher) and "
-                              "the robot names, or use propose_mission."}  # fmt: skip
+                "args": {"pddl_goal": goal, "constraints": args.get("constraints") or [], "engine": engine},
+                "result": {"error": str(e), "fast_downward": fd, "planner_log": plog}}  # fmt: skip
+        for_model = {"error": f"omniplanner could not plan {goal} with {omni_planner.ENGINES[engine]}: {e}. Check the symbols "
+                              "(run_cypher) and the robot names, or use propose_mission."}  # fmt: skip
         if fd:
             for_model["fast_downward"] = {"digest": fd.get("digest"), "log_tail": fd.get("log", [])[-12:]}
+        elif plog:
+            for_model["planner_log"] = {"planner": plog.get("planner"), "digest": plog.get("digest"),
+                                        "log_tail": (plog.get("log") or [])[-12:]}  # fmt: skip
         return [card], for_model
     if revising:
         m = m.model_copy(update={"id": cur["id"], "parent": cur["id"]})
@@ -280,8 +314,12 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
     parts = [PROMPT.format(max_agents=MAX_AGENTS)]
     if ctx.get("omniplanner"):  # set by the chat when omniplanner can plan here
         parts.append(PLAN_PROMPT)
+        if ctx.get("grstaps"):  # and GRSTAPS-X too
+            parts.append(PLAN_GRSTAPS)
         if ctx.get("planner") == "omniplanner":
             parts.append(PLAN_FORCED)
+            if ctx.get("engine") == "grstaps":
+                parts.append(PLAN_GRSTAPS_FORCED)
     roster = ctx.get("roster") or []
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))

@@ -18,6 +18,7 @@ from .model import FOUND_PREFIX, Mission, Task
 
 DWELL_INSPECT_S = 10.0
 DWELL_IMAGE_S = 2.0
+DWELL_MANIPULATE_S = 10.0  # GRSTAPS-X's nominal pick / place duration
 DECONFLICT_M = 2.0
 DECONFLICT_DT_S = 1.0
 # robots parked side by side and both still at their starts this early are pulling
@@ -163,6 +164,8 @@ def task_motion(mission: Mission, world: World, t: Task, pos) -> Motion:
             goal = _standoff(pos, xy, float(t.params.get("standoff_m", 1.5)))
     elif t.type == "request_image":
         dwell = DWELL_IMAGE_S
+    elif t.type in ("pick", "place"):
+        dwell = float(t.params.get("dwell_s", DWELL_MANIPULATE_S))
     path, off = leg_path(mission, world, agent, pos, goal)
     short = False
     if off and agent.is_ground and not t.found_query() and len(path) > 2:
@@ -217,6 +220,8 @@ def preview(mission: Mission, world: World) -> dict:
         agent = mission.agent(t.agent)
         if agent.is_ground and t.type in ("explore_area",):
             issues.append({"level": "error", "task": t.id, "msg": f"{agent.kind} cannot explore_area (quads only)"})
+        if not agent.is_ground and t.type in ("pick", "place"):
+            issues.append({"level": "error", "task": t.id, "msg": f"a {agent.kind} cannot {t.type} (ground robots with an arm)"})
         try:
             m = task_motion(mission, world, t, pos[t.agent])
         except P.NoPath as e:

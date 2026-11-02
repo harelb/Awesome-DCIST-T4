@@ -138,7 +138,7 @@ def test_replan_keeps_the_goal_and_reassigns_from_new_starts(svc):
     client, _ = svc
     r = client.post("/api/missions/plan/omniplanner", json={"pddl_goal": "(visited-object o0)", "agents": [SPOT1, SPOT2]})
     m = r.json()["mission"]
-    assert m["goal"] == {"pddl": "(visited-object o0)", "constraints": []}
+    assert m["goal"] == {"pddl": "(visited-object o0)", "constraints": [], "engine": "fast_downward"}
     assert [t["agent"] for t in m["tasks"]] == ["spot2"]  # spot2 starts next to O(0)
     # spot2 moves behind the wall's far end, spot1 next to O(0): spot1 takes it now
     r = client.post(f"/api/missions/{m['id']}/replan", json={"starts": {"spot1": [17.0, 2.0], "spot2": [0.0, 0.0]}})

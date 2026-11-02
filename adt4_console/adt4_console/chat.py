@@ -299,7 +299,9 @@ class ChatService:
         src = self._default_src(src)
         if mission_ctx is not None and self.missions is not None:
             # omniplanner's plan_ground_mission is offered (and prompted) when it can plan here
-            mission_ctx = {**mission_ctx, "omniplanner": self._omniplanner_ok()}
+            ok = self._omniplanner_ok()
+            # GRSTAPS-X is checked every turn: a license copied in later turns it on
+            mission_ctx = {**mission_ctx, "omniplanner": ok, "grstaps": ok and self._grstaps_ok()}
         self._ctx.value = mission_ctx if self.missions is not None else None
         history = clean_history(history)
         self._ctx.history = history  # propose_mission: the request the thread started with
@@ -491,7 +493,10 @@ class ChatService:
         "whichever robot is closer); (at-place r t40) ends robot r there; optional constraints "
         "keep the planner away from places or edges: "
         "{predicate: 'forbidden-poi', symbols: ['o14']} or {predicate: 'forbidden-edge', "
-        "symbols: ['p1', 'p2']}. kind='goto' / 'tsp' visit node symbols (points) in order / in "
+        "symbols: ['p1', 'p2']}. engine='grstaps' (GRSTAPS-X, when the robots run it) also takes "
+        "{predicate: 'before', symbols: ['o4', 'o8']} (o4 done before o8), joint inspections "
+        "(safe o4) and relocation (object-in-place o4 t598), and returns a timed schedule; it does "
+        "not take or / at-* / holding. kind='goto' / 'tsp' visit node symbols (points) in order / in "
         "the best order. kind='language' passes a command to the robot's language planner.",
         "input_schema": {
             "type": "object",
@@ -499,12 +504,13 @@ class ChatService:
                 "kind": {"type": "string", "enum": ["pddl", "goto", "tsp", "language"]},
                 "robot": {"type": "string", "description": "the robot to send; default: the selected robot"},
                 "pddl_goal": {"type": "string"},
+                "engine": {"type": "string", "enum": ["fast_downward", "grstaps"]},
                 "constraints": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge"]},
+                            "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge", "before"]},
                             "symbols": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["predicate", "symbols"],
@@ -567,6 +573,15 @@ class ChatService:
                 log.info("plan_ground_mission off: %s", why)
             self._omni_ok = why is None
         return self._omni_ok
+
+    def _grstaps_ok(self) -> bool:
+        from .mission import omni_planner
+
+        why = omni_planner.available("grstaps")
+        if why and why != getattr(self, "_grstaps_why", None):
+            log.info("GRSTAPS-X off: %s", why)
+        self._grstaps_why = why
+        return why is None
 
     def _mission_prompt(self, src) -> str:
         ctx = self._mission_ctx()
@@ -676,6 +691,8 @@ class ChatService:
                 body = {"goal": args.get("pddl_goal", "")}
                 if args.get("constraints"):
                     body["constraints"] = list(args["constraints"])
+                if args.get("engine"):
+                    body["engine"] = args["engine"]
             else:
                 body = {"points": list(args.get("points") or [])}
             target = str(args.get("robot") or "").strip() or robot
