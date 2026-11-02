@@ -16,6 +16,20 @@
 /${ADT4_ROBOT_NAME}/livox/imu
 /${ADT4_ROBOT_NAME}/tx_rx_usage
 /${ADT4_ROBOT_NAME}/spot_executor_node/takeover
-/euclid/omniplanner_node/compiled_plan_out
-/hamilton/omniplanner_node/compiled_plan_out
-/gauss/omniplanner_node/compiled_plan_out
+/euclid/omniplanner_node/compiled_plan_out  # optional
+/hamilton/omniplanner_node/compiled_plan_out  # optional
+/gauss/omniplanner_node/compiled_plan_out  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/compiled_plan_out
+
+# --- experiment metrics (executor / planner / operator) ---
+/${ADT4_ROBOT_NAME}/spot_executor_node/action_result
+/${ADT4_ROBOT_NAME}/spot_executor_node/runtime_guards
+/${ADT4_ROBOT_NAME}/spot_executor_node/teleop_state
+/${ADT4_ROBOT_NAME}/spot_executor_node/cmd_vel  # optional
+/${ADT4_ROBOT_NAME}/spot_executor_node/pause  # optional
+/${ADT4_ROBOT_NAME}/spot_executor_node/resume  # optional
+/${ADT4_ROBOT_NAME}/spot_executor_node/stop  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/plan_visited_pois  # optional
+/action_done  # optional
+/plan_progress  # optional
+/${ADT4_ROBOT_NAME}/hydra/backend/dsg  # optional

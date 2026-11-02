@@ -17,6 +17,14 @@
 /${ADT4_ROBOT_NAME}/tx_rx_usage
 /${ADT4_ROBOT_NAME}/platform/cmd_vel
 /${ADT4_ROBOT_NAME}/joy_teleop/cmd_vel
-/euclid/omniplanner_node/compiled_plan_out
-/hamilton/omniplanner_node/compiled_plan_out
-/gauss/omniplanner_node/compiled_plan_out
+/euclid/omniplanner_node/compiled_plan_out  # optional
+/hamilton/omniplanner_node/compiled_plan_out  # optional
+/gauss/omniplanner_node/compiled_plan_out  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/compiled_plan_out
+
+# --- experiment metrics (planner / operator / safety) ---
+/${ADT4_ROBOT_NAME}/manual_mode  # optional
+/${ADT4_ROBOT_NAME}/platform/emergency_stop  # optional
+/${ADT4_ROBOT_NAME}/platform/safety_stop  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/plan_visited_pois  # optional
+/${ADT4_ROBOT_NAME}/hydra/backend/dsg  # optional

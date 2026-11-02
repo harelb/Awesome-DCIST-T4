@@ -1,0 +1,19 @@
+# Light profile: navigation + metrics + compressed RGB, no raw depth / lidar.
+/tf
+/tf_static
+/${ADT4_ROBOT_NAME}/tf
+/${ADT4_ROBOT_NAME}/tf_static
+/${ADT4_ROBOT_NAME}/dlio/odom_node/odom
+/${ADT4_ROBOT_NAME}/fix  # optional
+/${ADT4_ROBOT_NAME}/${ADT4_ROBOT_NAME}_zed/rgb/image_rect_color/compressed  # optional
+/${ADT4_ROBOT_NAME}/${ADT4_ROBOT_NAME}_zed/rgb/camera_info  # optional
+/${ADT4_ROBOT_NAME}/tx_rx_usage  # optional
+/${ADT4_ROBOT_NAME}/platform/cmd_vel  # optional
+/${ADT4_ROBOT_NAME}/joy_teleop/cmd_vel  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/compiled_plan_out
+
+# --- experiment metrics (planner / operator / safety) ---
+/${ADT4_ROBOT_NAME}/manual_mode  # optional
+/${ADT4_ROBOT_NAME}/platform/emergency_stop  # optional
+/${ADT4_ROBOT_NAME}/platform/safety_stop  # optional
+/${ADT4_ROBOT_NAME}/omniplanner_node/plan_visited_pois  # optional
