@@ -1,0 +1,119 @@
+// GRSTAPS-X, the second omniplanner engine (API.md §15.5): the planner's account
+// in failures, the schedule Gantt, the engine picker, and the engine a goal is sent with.
+import {afterEach, describe, expect, it, vi} from "vitest";
+import {act} from "react";
+import {createRoot, type Root} from "react-dom/client";
+import {fastDownwardOf} from "../src/lib/fastDownward";
+import {FastDownwardDetails} from "../src/viewer/FastDownward";
+import {PlannerSchedule} from "../src/viewer/PlannerSchedule";
+import {EnginePicker} from "../src/viewer/MissionPanel";
+import {refreshEngines, useEngines} from "../src/stores/engines";
+
+(globalThis as unknown as {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
+
+let root: Root | null = null;
+let host: HTMLDivElement | null = null;
+function render(el: React.ReactElement) {
+  host = document.createElement("div");
+  document.body.appendChild(host);
+  root = createRoot(host);
+  act(() => root!.render(el));
+  return host;
+}
+afterEach(() => {
+  act(() => root?.unmount());
+  host?.remove();
+  root = null;
+  host = null;
+  vi.restoreAllMocks();
+  useEngines.setState({engines: [], engine: "fast_downward", loaded: false});
+});
+
+const json = (body: unknown) => new Response(JSON.stringify(body), {status: 200, headers: {"Content-Type": "application/json"}});
+
+describe("planner account", () => {
+  it("prefers planner_log and falls back to fast_downward", () => {
+    expect(fastDownwardOf({planner_log: {planner: "GRSTAPS-X", digest: "no license"}, fast_downward: null})?.planner).toBe("GRSTAPS-X");
+    expect(fastDownwardOf({fast_downward: {digest: "unreachable"}})?.digest).toBe("unreachable");
+    expect(fastDownwardOf({detail: "x"})).toBeNull();
+  });
+
+  it("names the planner that failed", () => {
+    const el = render(<FastDownwardDetails fd={{planner: "GRSTAPS-X", digest: "No Gurobi license", log: ["[error] GRBException"], problem_file: "/w/itags_input.json"}} />);
+    const d = el.querySelector('[data-testid="fast-downward"]')!;
+    expect(d.textContent).toContain("GRSTAPS-X: No Gurobi license");
+    expect(d.textContent).toContain("itags_input.json");
+  });
+
+  it("still says Fast Downward for its own account", () => {
+    const el = render(<FastDownwardDetails fd={{digest: "solved"}} />);
+    expect(el.textContent).toContain("Fast Downward: solved");
+  });
+});
+
+describe("PlannerSchedule", () => {
+  const schedule = {
+    makespan: 40,
+    rows: [
+      {robot: "spot1", action: "inspect-object", target: "O(4)", start: 10, finish: 20, coalition: ["spot1", "spot2"]},
+      {robot: "spot2", action: "inspect-object", target: "O(4)", start: 10, finish: 20, coalition: ["spot1", "spot2"]},
+      {robot: "spot2", action: "visit-location", target: "O(8)", start: 30, finish: 40, coalition: ["spot2"]},
+    ],
+  };
+
+  it("draws one row per robot, a bar per task, joint tasks marked", () => {
+    const el = render(<PlannerSchedule schedule={schedule} />);
+    expect(el.querySelectorAll(".tl-row")).toHaveLength(2);
+    const bars = [...el.querySelectorAll<HTMLElement>('[data-testid="schedule-bar"]')];
+    expect(bars).toHaveLength(3);
+    expect(bars.filter(b => b.classList.contains("tl-joint"))).toHaveLength(2);
+    expect(bars[0].title).toContain("together with spot2");
+    expect(bars[2].style.left).toBe("75%");
+    expect(el.textContent).toContain("makespan 40 s");
+  });
+
+  it("renders nothing without a schedule", () => {
+    const el = render(<PlannerSchedule schedule={null} />);
+    expect(el.querySelector('[data-testid="planner-schedule"]')).toBeNull();
+  });
+});
+
+describe("engine picker", () => {
+  it("offers GRSTAPS-X greyed out with the reason when it cannot plan", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      json({
+        default: "fast_downward",
+        engines: [
+          {id: "fast_downward", label: "Fast Downward", available: true, reason: null},
+          {id: "grstaps", label: "GRSTAPS-X", available: false, reason: "no Gurobi license at /x"},
+        ],
+      }),
+    );
+    await refreshEngines();
+    const el = render(<EnginePicker />);
+    const radios = [...el.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+    expect(radios.map(r => r.disabled)).toEqual([false, true]);
+    expect(el.querySelector("label.muted")!.getAttribute("title")).toContain("no Gurobi license");
+  });
+
+  it("switches to GRSTAPS-X and falls back when it goes away", async () => {
+    const engines = (ok: boolean) =>
+      json({
+        default: "fast_downward",
+        engines: [
+          {id: "fast_downward", label: "Fast Downward", available: true, reason: null},
+          {id: "grstaps", label: "GRSTAPS-X", available: ok, reason: ok ? null : "gone"},
+        ],
+      });
+    const f = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(engines(true));
+    await refreshEngines();
+    const el = render(<EnginePicker />);
+    act(() => el.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1].click());
+    expect(useEngines.getState().engine).toBe("grstaps");
+    f.mockResolvedValueOnce(engines(false));
+    await act(async () => {
+      await refreshEngines();
+    });
+    expect(useEngines.getState().engine).toBe("fast_downward");
+  });
+});

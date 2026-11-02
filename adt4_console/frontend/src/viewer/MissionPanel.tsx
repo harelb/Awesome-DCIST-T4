@@ -53,9 +53,11 @@ import {StartEditor, type CoordMode} from "./StartEditor";
 import {startLockReason} from "../lib/agentStart";
 import type {ChatItem} from "./ChatPanel";
 import {FastDownwardDetails} from "./FastDownward";
+import {PlannerSchedule, type PlannerScheduleData} from "./PlannerSchedule";
+import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
 import type {TranscriptItem} from "../lib/chatTranscript";
 
-const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼"};
+const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼", pick: "✋", place: "⤓"};
 
 function fmtS(s: number | null | undefined): string {
   if (s == null) return "–";
@@ -156,6 +158,16 @@ function Roster() {
       )}
     </section>
   );
+}
+
+/** The solver's own schedule of a GRSTAPS-X mission (the Timeline above is the console's simulation of it). */
+function MissionSchedule() {
+  const {current} = useMission();
+  const robotColor = useRobotColor3D();
+  const colors = useMemo(() => agentColors(current?.agents ?? [], robotColor), [current, robotColor]);
+  const sched = current?.goal?.schedule as PlannerScheduleData | undefined;
+  if (!sched) return null;
+  return <PlannerSchedule schedule={sched} colors={colors} title="GRSTAPS-X schedule (as planned)" compact />;
 }
 
 function Timeline({run}: {run: RunState | null}) {
@@ -580,6 +592,32 @@ export function AgentIdInput({id, taken}: {id: string; taken: string[]}) {
   );
 }
 
+/** Which omniplanner engine plans: Fast Downward or GRSTAPS-X (greyed out, with
+ *  the reason, when it cannot plan here, e.g. no Gurobi license). */
+export function EnginePicker({compact = false}: {compact?: boolean}) {
+  const {engines, engine, setEngine, loaded} = useEngines();
+  useEffect(() => {
+    if (!loaded) void refreshEngines();
+  }, [loaded]);
+  if (!engines.length) return null;
+  return (
+    <div className="engine-pick small" data-testid="engine-picker">
+      {!compact && <span className="muted">planner</span>}
+      {engines.map(e => (
+        <label key={e.id} className={e.available ? "" : "muted"} title={e.available ? `${e.label}${e.id === "grstaps" ? ": task allocation with a timed schedule, joint inspections, before-ordering, moving objects" : ": shortest routes"}` : `${e.label} cannot plan here: ${e.reason}`}>
+          <input type="radio" name={compact ? "engine-c" : "engine"} disabled={!e.available} checked={engine === e.id} onChange={() => setEngine(e.id as EngineId)} /> {e.label}
+          {!e.available && " ⚠"}
+        </label>
+      ))}
+      {engines.some(e => !e.available) && (
+        <button className="btn btn-xs" title="Check again (e.g. after copying a Gurobi license in)" onClick={() => void refreshEngines()}>
+          ↻
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function MissionPanel() {
   const s = useMission();
   const {current, preview, run, list, error, geo, layers, satellite, satOpacity} = s;
@@ -653,12 +691,15 @@ export function MissionPanel() {
             and areas below.
           </div>
         ) : (
+          <>
+          <EnginePicker />
           <div className="row gap">
             <input className="input input-sm grow" placeholder="e.g. spot1 go to the nearest tree, spot2 visit the sign" value={omniText} onChange={e => setOmniText(e.target.value)} aria-label="omniplanner command" />
             <button className="btn btn-sm" disabled={!omniText.trim() || s.busy === "omni"} onClick={() => void planWithOmniplanner(omniText.trim())}>
               {s.busy === "omni" ? <Spinner /> : "Plan"}
             </button>
           </div>
+          </>
         )}
         {error && (
           <div className="msg msg-err small" role="alert">
@@ -674,7 +715,7 @@ export function MissionPanel() {
             <div className="row gap wrap small">
               <b title={current.text || undefined}>{current.name || current.text.slice(0, 60) || current.id}</b>
               <Badge tone="info">r{current.revision}</Badge>
-              <Badge tone="off">{current.planner}</Badge>
+              <Badge tone="off">{current.planner}{current.goal?.engine ? ` · ${ENGINE_LABEL[current.goal.engine as EngineId] ?? current.goal.engine}` : ""}</Badge>
               <span className="muted">~{fmtS(preview.makespan)}</span>
               <span className="grow" />
               {current.chat && (
@@ -706,6 +747,7 @@ export function MissionPanel() {
             </div>
             <Transport run={run} />
             <Timeline run={run} />
+            <MissionSchedule />
             {preview.map?.stale && (
               <div className="mission-stale small" role="status" data-testid="mission-map-stale">
                 <span>

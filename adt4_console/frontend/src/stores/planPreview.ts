@@ -3,6 +3,7 @@
 import {create} from "zustand";
 import {ApiError, errorText, postJSON} from "../lib/api";
 import {fastDownwardOf, type FastDownwardInfo} from "../lib/fastDownward";
+import type {PlannerScheduleData} from "../viewer/PlannerSchedule";
 
 export interface PddlPreview {
   routes: Record<string, number[][]>;
@@ -13,6 +14,10 @@ export interface PddlPreview {
   solve_s: number;
   pois: number;
   fast_downward?: FastDownwardInfo | null;
+  /** which engine planned it, its account, and GRSTAPS-X's timed schedule */
+  engine?: string;
+  planner_log?: FastDownwardInfo | null;
+  schedule?: PlannerScheduleData | null;
 }
 
 /** A failed preview: the reason, and Fast Downward's account when it ran. */
@@ -47,9 +52,10 @@ export async function previewPddl(
   robots: {name: string; start?: number[] | null}[],
   src: string | null,
   constraints?: {predicate: string; symbols: string[]}[],
+  engine?: string,
 ): Promise<PddlPreview> {
   try {
-    const p = await postJSON<PddlPreview>("api/missions/plan/preview_pddl", {pddl_goal: goal, robots, src, constraints});
+    const p = await postJSON<PddlPreview>("api/missions/plan/preview_pddl", {pddl_goal: goal, robots, src, constraints, engine});
     usePlanPreview.getState().set(goal, p);
     return p;
   } catch (e) {

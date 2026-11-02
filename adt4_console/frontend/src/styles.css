@@ -4572,3 +4572,29 @@ input[type="checkbox"] {
   max-height: 160px;
   overflow: auto;
 }
+
+/* GRSTAPS-X schedule (PlannerSchedule): the solver's own start/finish per task */
+.planner-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+  min-width: 0;
+}
+.planner-schedule .mission-timeline {
+  cursor: default;
+}
+.planner-schedule.compact .tl-row {
+  height: 18px;
+}
+.tl-joint {
+  opacity: 0.85;
+  border: 1px dashed var(--fg, #fff);
+}
+.engine-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}

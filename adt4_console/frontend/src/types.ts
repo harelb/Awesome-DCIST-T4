@@ -456,6 +456,8 @@ export interface RobotPlan {
   /** persistent constraints sent with every goal_manager goal */
   constraints?: ConstraintFact[];
   lease?: LeaseInfo | null;
+  /** GRSTAPS-X's last fleet schedule that gives this robot work (omniplanner_node/task_schedule) */
+  schedule?: {plan_id: string; makespan: number; t: number; rows: {robot: string; action: string; target: string; start: number; finish: number}[]} | null;
 }
 
 /** GET /api/plan/repair */
