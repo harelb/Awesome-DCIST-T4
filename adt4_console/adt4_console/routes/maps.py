@@ -256,7 +256,9 @@ def list_remote(svc, m: dict, pending: set | None = None) -> list[dict]:
 
 
 @router.get("")
-def list_maps(request: Request):
+def list_maps(request: Request, local: bool = False):
+    """Runs on every online machine; ``local=true``: this machine only (no ssh scans,
+    for the viewer's live-map picker)."""
     svc = services(request)
     h = svc.helpers
     out: dict = {}
@@ -265,7 +267,7 @@ def list_maps(request: Request):
         remotes = [
             dict(m)
             for m in svc.fleet.runtime_config.values()
-            if m.get("online") and not m.get("local")
+            if m.get("online") and not m.get("local") and not local
         ]
 
     def fetch(m):
@@ -1047,3 +1049,42 @@ def register(body: RegisterBody, request: Request):
         raise HTTPException(400, str(e)) from None
     svc.graph.notify_version(src.id, "registered")
     return src.info()
+
+
+# --- the live map: which run the console's Neo4j holds, and switching it (API.md §6.7) ----
+
+
+@router.get("/active")
+def active_map(request: Request, target: str | None = None):
+    """The live map and its load stages: {target, run, name, ready, stages: [...]}."""
+    from ..graph_service import NotFound
+
+    try:
+        return services(request).maps.status(target)
+    except NotFound as e:
+        raise HTTPException(404, str(e)) from None
+
+
+class ActivateBody(BaseModel):
+    # a run dir (with hydra/backend) or a dsg file on this machine
+    path: str
+    target: str | None = None
+    # load it again even when the live Neo4j already holds it
+    force: bool = False
+
+
+@router.post("/activate")
+def activate_map(body: ActivateBody, request: Request):
+    """Load a run into the live Neo4j as the console's map, in stages: planning works
+    once the graph stage is done; images, features, keyframes and SAM3 follow (§6.7)."""
+    from ..graph_service import NotFound
+    from ..map_loader import Busy
+
+    try:
+        return services(request).maps.activate(body.path, body.target, force=body.force)
+    except NotFound as e:
+        raise HTTPException(404, str(e)) from None
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e)) from None
+    except Busy as e:
+        raise HTTPException(409, {"detail": str(e), "job_id": e.job_id}) from None

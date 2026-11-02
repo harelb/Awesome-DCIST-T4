@@ -35,6 +35,12 @@ def parse_args(argv=None):
     p.add_argument(
         "--prior-neo4j", metavar="NAME", help="which --neo4j target holds the prior"
     )
+    p.add_argument("--sam3-neo4j", metavar="NAME",
+                   help="the --neo4j target the SAM3 server reads (a live-map load reloads SAM3 only "
+                   "when it loads into it)")  # fmt: skip
+    p.add_argument("--live-neo4j", metavar="NAME",
+                   help="the --neo4j target that maps are loaded into when picked in the viewer "
+                   "(default: the only / first --neo4j)")  # fmt: skip
     p.add_argument("--map", action="append", metavar="NAME=RUN_DIR",
                    help="file graph source: run dir containing hydra/backend")  # fmt: skip
     p.add_argument("--no-ros", action="store_true")
@@ -128,6 +134,8 @@ def settings_from_args(args):
     neo4j = _pairs(args.neo4j, "--neo4j")
     if args.prior_neo4j and args.prior_neo4j not in neo4j:
         raise SystemExit(f"--prior-neo4j {args.prior_neo4j} is not a --neo4j target")
+    if args.live_neo4j and args.live_neo4j not in neo4j:
+        raise SystemExit(f"--live-neo4j {args.live_neo4j} is not a --neo4j target")
     return Settings(
         host=args.host,
         port=args.port,
@@ -138,6 +146,8 @@ def settings_from_args(args):
         live_store_root=args.live_store_root,
         neo4j=neo4j,
         prior_neo4j=args.prior_neo4j,
+        live_neo4j=args.live_neo4j,
+        sam3_neo4j=args.sam3_neo4j,
         maps=_pairs(args.map, "--map"),
         ros=not args.no_ros,
         fleetlink=not args.no_fleetlink,

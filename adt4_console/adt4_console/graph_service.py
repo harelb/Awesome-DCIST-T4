@@ -1133,6 +1133,15 @@ class Neo4jSource(Source):
         self._db_key_seen = None
         self._version = (self._version or 0) + 1
 
+    def reset_map(self) -> None:
+        """The DB now holds another map (map_loader): drop the image store and place
+        keyframe index opened for the old one, and bump the version."""
+        with self._store_lock:
+            self._store = None
+        with self._pk_lock:
+            self._pk = None
+        self.invalidate()
+
     def poll(self) -> bool:
         """Re-read the DB key; True (and a new version) if it changed."""
         key = self._db_key()

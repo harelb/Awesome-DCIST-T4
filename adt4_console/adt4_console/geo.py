@@ -251,6 +251,10 @@ class GeoService:
         self._explicit = dict(getattr(settings, "geo_anchors", {}) or {})
         self._cache: dict[str, GeoAnchor | None] = {}
 
+    def forget(self, src_id: str) -> None:
+        """The source now holds another map: look its anchor up again."""
+        self._cache.pop(src_id, None)
+
     def anchor(self, src_id: str | None) -> GeoAnchor | None:
         if not src_id:
             return self.default_anchor()

@@ -19,6 +19,11 @@ class Settings:
     output_root: str = "~/adt4_output"
     neo4j: dict[str, str] = field(default_factory=dict)  # name -> uri
     prior_neo4j: str | None = None
+    # the target maps picked in the viewer are loaded into (map_loader); None: the first
+    live_neo4j: str | None = None
+    # the --neo4j target the SAM3 server reads its keyframes from: a live-map load
+    # reloads SAM3 only when it loads into that target
+    sam3_neo4j: str | None = None
     neo4j_user: str = field(
         default_factory=lambda: os.environ.get("HERACLES_NEO4J_USERNAME", "neo4j")
     )

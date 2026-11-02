@@ -182,6 +182,24 @@ Maps:
   cache; nothing is recomputed). 409 when the database records no map or it no longer exists.
   ~15-17 min for the fused Penn map.
 * `POST /api/maps/register` `{name, path}` → adds a `file:<name>` source at runtime
+* **Live map** (`map_loader.py`; the viewer's **Map** picker and Maps › **Make live**). The console
+  works on one map: the run its *live* Neo4j holds (`--live-neo4j NAME`, default the only / first
+  `--neo4j`). `GET /api/maps/active` → `{target, run, name, dsg, nodes, has_images, has_features,
+  ready, job_id, stages: [{id, label, state, pct, detail}]}`; the same object is pushed on the
+  `maps/active` channel at every step. `POST /api/maps/activate {path, target?, force?}` (a run dir
+  or dsg file on this machine) → `{job_id, ...status}`, or `{already: true}` when the live Neo4j
+  holds that dsg (unless `force`); 409 `{detail, job_id}` while another load runs; 400 for a path
+  without a scene graph. The job asks before wiping only when the live map has added objects or
+  map edits (`detail: {added_objects, map_edits, nodes}`), then loads in stages, each 0-100 on the
+  job's `progress` and on `maps/active`:
+  `graph` (wipe; agents, objects, places, mesh places, rooms, buildings, edges, labelspaces, mesh
+  path, source; version bump → **`ready: true`**: the chat, both omniplanner engines and map edits
+  work from here), then with an image store only `images` (keyframe paths, Observations,
+  SubKeyframes, CameraCalibs, observation → frame links), `features` (when
+  `semantic_features.npz` exists), `keyframes` (the place x keyframe index), `sam3` (when a SAM3
+  server reads this target: `--sam3-neo4j NAME`). Stages a run lacks are `skipped`. Each stage ends with a version bump,
+  so the viewer reloads what changed; on `ready` it switches to the live source (other maps'
+  file sources go off) and drops plan previews.
 
 Graph sources (all served from the same `fleetlink.codec` formats):
 * `GET /api/graph/sources` → `[{id, kind: "neo4j"|"file"|"live", label, version, nodes}]`
