@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import gzip
 import json
+import pathlib
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response
 
 from .. import image_render
-from ..graph_service import trajectory_payload
+from ..graph_service import NodeImage, trajectory_payload
 from ..mesh_lod import etag_of, gzip_bytes
 from . import services
 
@@ -153,6 +154,62 @@ async def keyframe_image(
     headers = {"Cache-Control": "public, max-age=3600"}
     if not w or not image_render.available():
         return FileResponse(img.path, headers=headers)
+    key = image_render.variant_key(src, img, w, False, False)
+    data = _renders.get(key)
+    if data is None:
+        data = await run_in_threadpool(image_render.render, img, w, False, False)
+        _renders.put(key, data)
+    return Response(data, media_type="image/jpeg", headers=headers)
+
+
+def _near_query(x, y, yaw, n):
+    return {"x": round(float(x), 2), "y": round(float(y), 2), **({"yaw": round(float(yaw), 3)} if yaw is not None else {}),
+            "n": n}  # fmt: skip
+
+
+@router.get("/{src}/near")
+async def frames_near(
+    src: str,
+    request: Request,
+    x: float,
+    y: float,
+    yaw: float | None = Query(None, description="heading (rad) to prefer frames facing that way"),
+    n: int = Query(6, ge=1, le=24),
+):
+    """The keyframes / sub-keyframes taken closest to map point (x, y) (API.md §15.5):
+    a region or place goal's image is the view nearest to where the plan ends there."""
+    from urllib.parse import urlencode
+
+    source = services(request).graph.get(src)
+    frames = await run_in_threadpool(source.frames_near, x, y, yaw, n)
+    q = _near_query(x, y, yaw, n)
+    return {"src": src, "frames": [
+        {"image": f"/api/graph/{src}/near/image?{urlencode({**q, 'i': i})}", "kind": f.kind, "dist_m": f.dist_m,
+         "yaw_deg": f.yaw_deg, "frame_id": f.frame_id, "anchor": f.anchor}
+        for i, f in enumerate(frames)]}  # fmt: skip
+
+
+@router.get("/{src}/near/image")
+async def frame_near_image(
+    src: str,
+    request: Request,
+    x: float,
+    y: float,
+    i: int = Query(0, ge=0, le=23),
+    yaw: float | None = None,
+    n: int = Query(6, ge=1, le=24),
+    w: int | None = Query(None, ge=1, le=4096, description="downscale to this width"),
+):
+    """The i-th frame of :func:`frames_near` (same query), as a JPEG."""
+    source = services(request).graph.get(src)
+    frames = await run_in_threadpool(source.frames_near, x, y, yaw, n)
+    if i >= len(frames):
+        raise HTTPException(404, f"only {len(frames)} frame(s) near ({x:.1f}, {y:.1f})")
+    path = pathlib.Path(frames[i].path)
+    headers = {"Cache-Control": "public, max-age=600"}
+    if not w or not image_render.available():
+        return FileResponse(path, headers=headers)
+    img = NodeImage(path, kind=frames[i].kind, frame_id=frames[i].frame_id)
     key = image_render.variant_key(src, img, w, False, False)
     data = _renders.get(key)
     if data is None:

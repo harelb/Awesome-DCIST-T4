@@ -170,6 +170,33 @@ class AgentFrameIndex:
         return cls(rows, node_pose)
 
     # -- query ----------------------------------------------------------------
+    def nearest(self, xy, yaw=None, limit: int = 6, exists=os.path.isfile) -> list[AgentFrame]:
+        """The frames (keyframes and sub-keyframes) taken closest to map point ``xy``,
+        ground distance first, heading as a tiebreak when ``yaw`` (rad) is given: a
+        frame facing the way the robot faces there ranks first among near ones."""
+        if not len(self):
+            return []
+        d = np.hypot(self.pos[:, 0] - float(xy[0]), self.pos[:, 1] - float(xy[1]))
+        dy = (
+            _wrap_deg(np.degrees(self.yaw - yaw))
+            if yaw is not None
+            else np.full(len(self), math.nan)
+        )
+        score = d + np.nan_to_num(dy, nan=0.0) / YAW_DEG_PER_M
+        out = []
+        for i in np.argsort(score, kind="stable"):
+            i = int(i)
+            if exists is not None and not exists(self.paths[i]):
+                continue
+            out.append(AgentFrame(
+                path=self.paths[i], kind=self.kinds[i], own=False, dist_m=round(float(d[i]), 3),
+                yaw_deg=None if math.isnan(dy[i]) else round(float(dy[i]), 1),
+                frame_id=self.frame_ids[i], anchor=self.anchors[i],
+            ))  # fmt: skip
+            if len(out) >= limit:
+                break
+        return out
+
     def select(self, sym: str, pos=None, yaw=None, near_m: float = NEAR_M,
                limit: int = MAX_AGENT_IMAGES, exists=os.path.isfile) -> list[AgentFrame]:  # fmt: skip
         """Frames for agent ``sym``: its own keyframe first, else the nearest frame

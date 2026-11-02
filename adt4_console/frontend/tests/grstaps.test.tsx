@@ -163,3 +163,39 @@ describe("goal images", () => {
     ).toEqual({spot1: ["O(3)"], spot2: ["t598"]});
   });
 });
+
+describe("goal images for places and regions", () => {
+  it("show the frame nearest to where the plan ends, without a mask toggle", async () => {
+    const {GoalImages, _resetGoalImageCache} = await import("../src/viewer/GoalImages");
+    const {useViewer} = await import("../src/stores/viewer");
+    _resetGoalImageCache();
+    useViewer.setState({sources: {"neo4j:penn": {kind: "neo4j", enabled: true}} as never, order: ["neo4j:penn"]});
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.includes("/near?"))
+        return json({
+          frames: [
+            {image: "/api/graph/neo4j:penn/near/image?x=5&y=6&n=6&i=0", kind: "subkeyframe", dist_m: 0.4, yaw_deg: 12},
+            {image: "/api/graph/neo4j:penn/near/image?x=5&y=6&n=6&i=1", kind: "keyframe", dist_m: 1.3, yaw_deg: null},
+          ],
+        });
+      return json({images: []}); // a place: no images of its own
+    });
+    const el = render(<GoalImages goals={{gauss: [{sym: "t4826", xy: [5, 6], yaw: 1.5}]}} />);
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 0));
+    });
+    const near = calls.find(u => u.includes("/near?"))!;
+    expect(near).toContain("x=5") && expect(near).toContain("yaw=1.5");
+    const thumb = el.querySelector<HTMLButtonElement>('[data-testid="goal-thumb"]')!;
+    expect(thumb.textContent).toContain("t4826 ⌖");
+    expect(thumb.title).toContain("sub-keyframe 0.4 m from where the plan ends");
+    act(() => thumb.click());
+    expect(document.querySelector(".toggle")).toBeNull();
+    expect(document.body.textContent).toContain("nearest view to where the plan ends");
+    act(() => [...document.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Next")!.click());
+    expect(document.querySelector<HTMLImageElement>('[data-testid="goal-image-full"]')!.src).toContain("i=1");
+  });
+});

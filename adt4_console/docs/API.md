@@ -1138,6 +1138,18 @@ mission tab's planner choice, the robot-chat goal card and the mission chat use 
   else the default config. `/<planner_ns>/omniplanner_node/task_schedule` (TaskScheduleMsg) →
   `plan.schedule` of every robot in it, drawn in the robot's plan panel.
 
+#### 15.5.2 Goal images
+
+Mission previews (`GET /api/missions/{id}/preview`, the mission card) and `POST /plan/preview_pddl`
+carry `goals = {agent: [{sym, xy, yaw}]}`: each map symbol an agent's plan goes to, where its path
+there ends and the heading it arrives with. The mission tab, the chat's mission card and the goal
+card's Preview show them per robot (`GoalImages`): an object its own views (cropped, mask drawn;
+click: full size, Previous / Next, a Mask toggle); a place or region goal the keyframes /
+sub-keyframes taken nearest to that end point, ranked by ground distance plus heading difference
+(90° weighs like 1 m): `GET /api/graph/{src}/near?x&y&yaw?&n` →
+`{frames: [{image, kind, dist_m, yaw_deg, frame_id, anchor}]}`, each `image` =
+`/api/graph/{src}/near/image?…&i=k(&w=)`.
+
 ## 16. Penn quadrotor link (`quad/`)
 
 **Waypoints.** This is exactly heracles_agents `tools/penn_integration_tool.py`

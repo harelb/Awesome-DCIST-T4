@@ -114,6 +114,8 @@ export interface Preview {
   geo: unknown;
   /** the map it was planned on vs now (API.md §17.7); null: not an editable Neo4j map */
   map?: MapStatus | null;
+  /** each agent's goals with where its path there ends (GoalImages) */
+  goals?: Record<string, {sym: string; xy?: number[] | null; yaw?: number | null}[]>;
 }
 
 export interface MapStatus {

@@ -46,6 +46,8 @@ export interface MissionCardItem {
   name: string;
   agents: {id: string; kind: string; binding?: string | null}[];
   tasks: {id: string; agent: string; type: string; target?: unknown; depends_on?: string[]}[];
+  /** each agent's goals with where its path there ends (the mission preview's) */
+  goals?: Record<string, {sym: string; xy?: number[] | null; yaw?: number | null}[]> | null;
   issues: {level: string; msg: string}[];
   /** what the assistant interpreted or substituted (shown in amber) */
   assumptions: string[];
@@ -626,7 +628,7 @@ export function MissionCard({it}: {it: MissionCardItem}) {
   const byAgent = it.agents.map(a => ({a, tasks: it.tasks.filter(t => t.agent === a.id)}));
   const robotColor = useRobotColor3D();
   const colors = agentColors(it.agents as Parameters<typeof agentColors>[0], robotColor);
-  const goals = missionGoals(it.tasks);
+  const goals = it.goals ?? missionGoals(it.tasks);
   return (
     <div className={`card chat-card mission-card ${superseded ? "superseded" : ""}`}>
       <div className="row gap">

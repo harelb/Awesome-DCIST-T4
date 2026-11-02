@@ -320,24 +320,32 @@ def _goals_by_robot(out: dict, G) -> dict[str, list[str]]:
     """{robot: [node symbol, ...]}: where each robot's plan goes, in order (the chat
     shows each goal's image). GRSTAPS-X steps already name nodes; Fast Downward's
     goto / inspect name PDDL symbols."""
-    goals: dict[str, list[str]] = {}
+    from .planning import end_pose
 
-    def add(robot, sym):
+    goals: dict[str, list[dict]] = {}
+    last: dict[str, tuple] = {}
+
+    def add(robot, sym, path):
+        xy, yaw = end_pose(path, (last.get(robot) or (None, None))[1])
+        if xy is None:
+            xy, yaw = last.get(robot, (None, yaw))
+        last[robot] = (xy, yaw)
         lst = goals.setdefault(robot, [])
-        if sym and sym not in lst:
-            lst.append(sym)
+        if sym and all(g["sym"] != sym for g in lst):
+            lst.append({"sym": sym, "xy": xy, "yaw": yaw})
 
-    if "steps" in out:
-        for s in out["steps"]:
-            add(s["robot"], s["target"])
+    if "steps" in out:  # GRSTAPS-X: one action per step, in the same order
+        for s, (_, _, path) in zip(out["steps"], out["actions"]):
+            add(s["robot"], s["target"], path)
         return goals
     to_node = _modules()["to_node"]
-    for robot, act, _ in out["actions"]:
+    for robot, act, path in out["actions"]:
         if act[0] in ("goto-poi", "inspect") and len(act) > 2:
             try:
-                add(robot, str(to_node(G, act[-1])))
-            except Exception:  # noqa: BLE001 — a symbol the graph does not know: no image
-                pass
+                sym = str(to_node(G, act[-1]))
+            except Exception:  # noqa: BLE001 — a symbol the graph does not know
+                sym = None
+            add(robot, sym, path)
     return goals
 
 

@@ -313,7 +313,41 @@ def preview(mission: Mission, world: World) -> dict:
     issues += planted_unmatched(mission)
     issues += deconflict(mission, out_tasks)
     makespan = max([r["t_end"] for r in out_tasks.values()], default=0.0)
-    return {"tasks": out_tasks, "agents": agents_out, "issues": issues, "makespan": round(makespan, 1)}
+    return {"tasks": out_tasks, "agents": agents_out, "issues": issues, "makespan": round(makespan, 1),
+            "goals": goal_points(mission, out_tasks)}  # fmt: skip
+
+
+def end_pose(path, yaw=None):
+    """([x, y], heading rad) where a path ends: the last point and the direction of
+    its last move (``yaw`` when the path does not move)."""
+    import math
+
+    pts = [p[:2] for p in path or []]
+    if not pts:
+        return None, yaw
+    for a in reversed(pts[:-1]):
+        if math.dist(a, pts[-1]) > 0.05:
+            yaw = math.atan2(pts[-1][1] - a[1], pts[-1][0] - a[0])
+            break
+    return [round(float(pts[-1][0]), 2), round(float(pts[-1][1]), 2)], (None if yaw is None else round(yaw, 3))
+
+
+def goal_points(mission: Mission, out_tasks: dict) -> dict:
+    """{agent: [{sym, xy, yaw}]}: each map symbol an agent's tasks go to, with where
+    its path there ends and the heading it arrives with (the chat and the mission tab
+    show an image per goal: the object's own, else the view nearest to that point)."""
+    goals: dict = {}
+    yaw: dict = {}
+    for t in mission.tasks:
+        rec = out_tasks.get(t.id) or {}
+        xy, yaw[t.agent] = end_pose(rec.get("path"), yaw.get(t.agent))
+        sym = t.target if isinstance(t.target, str) and not t.target.startswith(FOUND_PREFIX) else None
+        if not sym or xy is None:
+            continue
+        lst = goals.setdefault(t.agent, [])
+        if all(g["sym"] != sym for g in lst):
+            lst.append({"sym": sym, "xy": xy, "yaw": yaw[t.agent]})
+    return goals
 
 
 def search_queries(mission: Mission) -> list[str]:

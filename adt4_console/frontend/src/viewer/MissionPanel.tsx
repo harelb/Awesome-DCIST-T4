@@ -54,6 +54,7 @@ import {startLockReason} from "../lib/agentStart";
 import type {ChatItem} from "./ChatPanel";
 import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule, type PlannerScheduleData} from "./PlannerSchedule";
+import {GoalImages} from "./GoalImages";
 import {ENGINE_LABEL, type EngineId} from "../stores/engines";
 import {EnginePicker} from "./EnginePicker";
 export {EnginePicker};
@@ -160,6 +161,15 @@ function Roster() {
       )}
     </section>
   );
+}
+
+/** Each agent's goals as images: the object's own, else the view nearest to where its path ends. */
+function MissionGoalImages() {
+  const {current, preview} = useMission();
+  const robotColor = useRobotColor3D();
+  const colors = useMemo(() => agentColors(current?.agents ?? [], robotColor), [current, robotColor]);
+  if (!current || !preview?.goals) return null;
+  return <GoalImages goals={preview.goals} src={current.src} colors={colors} />;
 }
 
 /** The solver's own schedule of a GRSTAPS-X mission (the Timeline above is the console's simulation of it). */
@@ -724,6 +734,7 @@ export function MissionPanel() {
             <Transport run={run} />
             <Timeline run={run} />
             <MissionSchedule />
+            <MissionGoalImages />
             {preview.map?.stale && (
               <div className="mission-stale small" role="status" data-testid="mission-map-stale">
                 <span>

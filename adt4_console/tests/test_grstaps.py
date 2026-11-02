@@ -218,7 +218,11 @@ def test_preview_names_each_robots_goals(svc):
                         json={"pddl_goal": "(visited-object-by spot1 o0)", "engine": engine,
                               "robots": [{"name": "spot1", "start": [0, 0]}, {"name": "spot2", "start": [20, 10]}]})  # fmt: skip
         assert r.status_code == 200, r.text
-        assert r.json()["goals"] == {"spot1": ["O(0)"]}, engine
+        goals = r.json()["goals"]
+        assert list(goals) == ["spot1"] and [g["sym"] for g in goals["spot1"]] == ["O(0)"], engine
+        # where the route there ends (a mesh place near O(0) at (18, 2)), and the heading it arrives with
+        g = goals["spot1"][0]
+        assert abs(g["xy"][0] - 18) <= 2 and abs(g["xy"][1] - 2) <= 2 and g["yaw"] is not None, (engine, g)
 
 
 def test_chat_window_planner_choice_reaches_the_prompt():
@@ -227,3 +231,35 @@ def test_chat_window_planner_choice_reaches_the_prompt():
     assert "picked the GRSTAPS-X planner" in context_text({"omniplanner": True, "grstaps": True, "engine": "grstaps"})
     assert "picked the GRSTAPS-X planner" not in context_text({"omniplanner": True, "grstaps": False, "engine": "grstaps"})
     assert "picked the Fast Downward planner" in context_text({"omniplanner": True, "engine": "fast_downward"})
+
+
+def test_nearest_frames_rank_by_distance_then_heading(tmp_path):
+    import math
+
+    from adt4_console.agent_images import AgentFrameIndex
+
+    files = []
+    for k in range(4):
+        f = tmp_path / f"f{k}.jpg"
+        f.write_bytes(b"x")
+        files.append(str(f))
+    idx = AgentFrameIndex([
+        (files[0], "keyframe", "A(1)", 1, [0.0, 0.0, 0.0], 0.0),
+        (files[1], "subkeyframe", "A(1)", 2, [1.0, 0.0, 0.0], math.pi),  # 1 m, facing back
+        (files[2], "subkeyframe", "A(2)", 3, [1.2, 0.0, 0.0], 0.0),  # 1.2 m, facing the same way
+        (files[3], "keyframe", "A(3)", 4, [30.0, 0.0, 0.0], 0.0),
+    ])  # fmt: skip
+    assert [f.frame_id for f in idx.nearest((1.05, 0.0), limit=2)] == [2, 3]
+    # heading: 180 deg weighs like 2 m, so the frame facing the robot's way wins
+    near = idx.nearest((1.05, 0.0), yaw=0.0, limit=3)
+    assert [f.frame_id for f in near] == [3, 1, 2] and near[0].kind == "subkeyframe"
+    assert near[0].yaw_deg == 0.0 and near[0].dist_m == 0.15
+
+
+def test_mission_preview_has_goal_end_points(svc):
+    _, service = svc
+    m, _ = omni.plan_pddl("(safe o0)", [SPOT1, SPOT2], None, service, engine="grstaps")
+    goals = service.preview(m)["goals"]
+    assert set(goals) == {"spot1", "spot2"}
+    for g in goals.values():
+        assert g[0]["sym"] == "O(0)" and len(g[0]["xy"]) == 2

@@ -446,6 +446,7 @@ def mission_card(m: Mission, out: dict, assumptions: list[str], planned: dict | 
         "issues": issues,
         "assumptions": assumptions,
         "makespan": pv.get("makespan"),
+        "goals": pv.get("goals"),
         "map": pv.get("map"),
         "planner": m.planner,
     }
