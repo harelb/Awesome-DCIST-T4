@@ -21,7 +21,7 @@ machines:
     role: robot
     color: "#42d4f4"
     addresses:
-      mit_wifi: 10.29.236.1
+      mit_wifi: 10.31.179.108
       silvus: 192.168.100.2
       penn_wifi: 192.168.129.210
     platform_id: topaz
@@ -70,7 +70,7 @@ machines:
   willow:
     role: base_station
     addresses:
-      mit_wifi: 10.31.132.194
+      mit_wifi: 10.31.144.217
       silvus: 192.168.100.100
     desc: RRG base station
   sequia:
