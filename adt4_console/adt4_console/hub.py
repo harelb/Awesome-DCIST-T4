@@ -24,13 +24,14 @@ from __future__ import annotations
 import asyncio
 import collections
 import itertools
+import logging
 import threading
 import time
 
 import msgpack
 
 # Topics whose frames carry the full current value: only the newest matters.
-LATEST_VALUE_PREFIXES = ("fleet/", "jobs", "job/", "robot/", "link/", "grid/", "mission/")
+LATEST_VALUE_PREFIXES = ("fleet/", "jobs", "job/", "robot/", "link/", "grid/", "mission/", "experiment/")
 LATEST_VALUE_SUFFIXES = ("/version",)
 VIDEO_PREFIX = "video/"
 
@@ -184,6 +185,7 @@ class Hub:
         # called with a video topic when some client starts waiting for a key frame
         self.on_video_starved = None
         self._lock = threading.Lock()
+        self._taps: list = []
 
     def add_client(self, loop=None) -> Client:
         client = Client(self.client_queue, loop)
@@ -212,11 +214,24 @@ class Hub:
                 for frame, key, _t, _n in frames:
                     client.push_video(topic, frame, key)
 
+    def add_tap(self, prefix: str, fn) -> None:
+        """Call ``fn(topic, data)`` (synchronously, on the publisher's thread)
+        for every published topic starting with ``prefix``: server-side
+        observers such as the experiment run logger.  Keep ``fn`` quick."""
+        with self._lock:
+            self._taps.append((prefix, fn))
+
     def publish(self, topic: str, data) -> int:
         with self._lock:
             self._seq[topic] += 1
             seq = self._seq[topic]
             clients = list(self._clients.values())
+            taps = [fn for p, fn in self._taps if topic.startswith(p)] if self._taps else ()
+        for fn in taps:
+            try:
+                fn(topic, data)
+            except Exception:  # noqa: BLE001 — an observer never breaks publishing
+                logging.getLogger(__name__).exception("hub tap for %s", topic)
         frame = encode_frame(topic, seq, data)
         if is_latest_value(topic):
             with self._lock:

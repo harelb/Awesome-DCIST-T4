@@ -307,6 +307,12 @@ class RosBridge:
         # robot -> the console's teleop STOP latch (TeleopService.stopped; the
         # app binds it) so every teleop view, hub pushes included, carries it
         self.teleop_latch = None
+        # experiment runs (experiment/service.py): observers get
+        # (kind, robot, data) for goals sent, plans, results, guards, teleop and
+        # operator commands; send_gate(robot, kind, fields) runs before a goal is
+        # published and may raise (recording not ready) to refuse it
+        self.observers: list = []
+        self.send_gate = None
         self._calls: queue.Queue = queue.Queue()
         self._pubs: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -668,6 +674,25 @@ class RosBridge:
             1,
         )
 
+    def _notify(self, kind: str, robot: str, data) -> None:
+        for fn in list(self.observers):
+            try:
+                fn(kind, robot, data)
+            except Exception:  # noqa: BLE001 — an observer never breaks the bridge
+                log.exception("ros observer %s", kind)
+
+    def ros_now(self) -> float | None:
+        """The console node's ROS clock (sim time in a sim), seconds."""
+        if not self.available or self.node is None:
+            return None
+        return self.node.get_clock().now().nanoseconds / 1e9
+
+    def publish_event(self, text: str, topic: str = "/adt4_console/experiment_events") -> None:
+        """Fire-and-forget std_msgs/String (the experiment event mirror)."""
+        if not self.available:
+            raise RosUnavailable(self.error or "ROS is off")
+        self.publish_now(topic, "std_msgs/msg/String", {"data": text})
+
     def _on_teleop_state(self, robot, msg) -> None:
         from .teleop_service import parse_teleop_state
 
@@ -675,11 +700,13 @@ class RosBridge:
         if st is None:
             return
         self._plan[robot].teleop = st
+        self._notify("teleop_state", robot, st)
         if self.hub is not None:
             self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
 
     def _on_manual_mode(self, robot, msg) -> None:
         self._plan[robot].manual_mode = {"value": bool(msg.data), "t": time.time()}
+        self._notify("manual_mode", robot, {"value": bool(msg.data)})
         if self.hub is not None:
             self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
 
@@ -709,10 +736,12 @@ class RosBridge:
 
     def _on_plan(self, robot, msg) -> None:
         self._plan[robot].plan = action_sequence_to_dict(msg)
+        self._notify("plan", robot, self._plan[robot].plan)
         self._publish_plan(robot)
 
     def _on_path_plan(self, robot, msg) -> None:
         self._plan[robot].plan = path_to_dict(msg, robot)
+        self._notify("plan", robot, self._plan[robot].plan)
         self._publish_plan(robot)
 
     def _on_repair_alert(self, default_robot, kind: str, text: str) -> None:
@@ -722,6 +751,7 @@ class RosBridge:
         self._plan[robot].repair_alerts.append(
             {"t": time.time(), "kind": kind, "text": str(text), "seq": next(self._status_seq)}
         )
+        self._notify("repair_alert" if kind == "alert" else "plan_failed", robot, {"text": str(text)})
         self._publish_plan(robot)
 
     def _on_plan_status(self, default_robot, msg) -> None:
@@ -732,11 +762,17 @@ class RosBridge:
         robot = st.get("robot") or self._last_goal_robot or default_robot
         st["seq"] = next(self._status_seq)
         self._plan[robot].status.append(st)
+        self._notify("plan_status", robot, st)
         self._publish_plan(robot)
 
     def _on_guards(self, robot, msg) -> None:
         st = self._plan[robot]
         new = lease_from_guards(msg)
+        self._notify("guards", robot, {
+            "estop_pressed": bool(getattr(msg, "estop_pressed", False)),
+            "estop_known": bool(getattr(msg, "estop_known", False)),
+            "lease_owned": new.get("owned"), "lease_known": new.get("known"), "lease_owner": new.get("owner"),
+        })  # fmt: skip
         old = st.lease
         st.lease = new
         same = old is not None and all(
@@ -753,16 +789,19 @@ class RosBridge:
         self._publish_plan(robot)
 
     def _on_result(self, robot, msg) -> None:
-        self._plan[robot].results.append(
-            {
-                "plan_id": msg.plan_id,
-                "action_index": int(msg.action_index),
-                "action_type": msg.action_type,
-                "status": msg.status,
-                "detail": msg.detail,
-                "t": _stamp(msg.header),
-            }
-        )
+        entry = {
+            "plan_id": msg.plan_id,
+            "action_index": int(msg.action_index),
+            "action_type": msg.action_type,
+            "status": msg.status,
+            "detail": msg.detail,
+            "t": _stamp(msg.header),
+        }
+        # subscribed under two spellings: the same result can arrive twice
+        if entry in self._plan[robot].results:
+            return
+        self._plan[robot].results.append(entry)
+        self._notify("action_result", robot, entry)
         self._publish_plan(robot)
 
     def _publish_plan(self, robot) -> None:
@@ -802,6 +841,8 @@ class RosBridge:
         return self._send(robot, plugin["kind"], topic, plugin["msg_type"], fields)
 
     def _send(self, robot, kind, topic, msg_type, fields, extra=None) -> dict:
+        if self.send_gate is not None:
+            self.send_gate(robot, kind, fields)  # may raise: the goal is not sent
         self.ensure_robot(robot)
         subs = self.publish(topic, msg_type, fields)
         self._last_goal_robot = robot
@@ -812,6 +853,7 @@ class RosBridge:
             if out.get(k):
                 entry[k] = out[k]
         self._plan[robot].goals.append(entry)
+        self._notify("goal_sent", robot, {"goal_kind": kind, **{k: v for k, v in out.items() if k != "ok"}})
         self._publish_plan(robot)
         return out
 
@@ -896,9 +938,15 @@ class RosBridge:
         message = str(res.get("message") or "")
         if not ok and not message:
             message = "no answer from the executor (relayed call failed or timed out)"
+        self._notify("lease_takeover", robot, {"ok": ok, "message": message})
         return {"ok": ok, "message": message, "service": name}
 
     def executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
+        out = self._executor_cmd(robot, cmd, deliver_timeout)
+        self._notify("operator_cmd", robot, {"cmd": cmd, "ok": bool(out.get("ok")), "error": out.get("error")})
+        return out
+
+    def _executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
         """Stop / Pause / Resume the robot's plan execution, per platform.
 
         Spot: publish on the executor's ``~/<cmd>``.  Router mode: ``subscribers``

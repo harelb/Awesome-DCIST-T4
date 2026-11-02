@@ -259,6 +259,9 @@ def replan(mid: str, body: ReplanBody, request: Request):
     except ValueError as e:
         return _planning_failed(e)
     new = new.model_copy(update={"id": m.id, "parent": m.id, "saved": m.saved, "chat": m.chat, "planted": m.planted})
+    exps = getattr(svc, "experiments", None)
+    if exps is not None:
+        exps.on_mission("replan", m.id, revision=new.revision, starts=body.starts or None)
     out = svc.put(new)
     out["planned"] = planned
     return out

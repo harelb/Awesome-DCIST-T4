@@ -1310,6 +1310,195 @@ add object) without switching tabs.
   area's polygon), and a map area's symbol is a goto/inspect target (its centre).
 
 
+## 18. Experiment runs + data management (`experiment/`, `routes/experiment.py`)
+
+For paper experiments: **mapping → map editing → language-to-mission trials**, multi-robot.
+An *experiment* groups *runs* (trials).  Each run is one folder on the base station:
+
+```
+<output_root>/experiments/<exp>/experiment.json
+<output_root>/experiments/<exp>/runs/<run>/{run.json, events.jsonl, poses.jsonl, metrics.json, sanity.json, offload_manifest.json}
+~/adt4_output/experiments/<exp>/<run>/bags/<seg>/        on every robot + the base (ros2 bag, mcap)
+~/adt4_output/experiments/<exp>/<run>/bags/<seg>.{topics.txt,record.sh,log}
+```
+
+**18.1 Lifecycle.** With an experiment active, the first goal the console sends opens a run.
+Any send path triggers this: chat "Send to", robot panel, mission Execute, omniplanner missions.
+Every goal goes through `RosBridge._send` → `ExperimentService.gate`.
+- When the experiment records (`auto_record` and not `test_mode`), the gate starts a bag on every
+  run robot and on the base station, and waits for each to be up (≤15 s) **before** the goal is
+  published.
+- If a recorder is not up, the goal is **not sent**: HTTP 409
+  `{detail, recording_not_ready: true, machines: [{machine, state, error}]}`.
+- The frontend (`lib/api.ts` `setRecordingBlockedHandler` + `RecordingBlockedHost`) then offers:
+  - "Restart recorder & send": `run/recorders/<m>/restart`, then the same request again;
+  - "Send without <m>": `run/accept_missing`, then the request again;
+  - Cancel: the 409 reaches the caller.
+- Mission execute gates every bound robot up front.
+- Bags are **never** stopped automatically. When every robot that was sent a goal has reached it
+  (or failed), the run gets a `prompt`. Reached means one of:
+  - the last action of its compiled plan returned SUCCESS;
+  - an empty plan;
+  - phoenix `phoenix_progress.done`;
+  - the live mission finished.
+- The operator answers the prompt with **End run** or **Continue** (keeps recording, re-arms; any
+  new goal also re-arms).
+- Ending the run (`run/end`, a job) does three things:
+  - SIGINTs every recorder (tmux `C-c`) and waits for rosbag2 to finalize;
+  - computes the final metrics;
+  - runs the sanity check.
+
+**18.2 Recorders.** These reuse `dcist_launch_system/recording/*_topics.txt` and
+`record_topics.record_command`, the same tooling as `run-adt4 -r`.
+- **Topic file selection:**
+  - robots: `<platform>_topics.txt` (`full`) or `<platform>_light_topics.txt` (`light`);
+  - base: `base_station_experiment_topics.txt`.
+- **Topic file syntax:**
+  - `# optional` marks topics a bag may lack;
+  - `${ADT4_EACH_ROBOT}` repeats a line per run robot.
+- **On each machine:**
+  - The topic list and a zsh record script are written next to the bag. A robot with an older
+    checkout therefore records exactly the console's list.
+  - The script runs in tmux session `adt4_rec`.
+- **ROS environment:**
+  - The script imports the ROS environment (`ROS_*`, `RMW_*`, `ZENOH_*`, `ADT4_*`) of the running
+    `adt4_system` session.
+  - The base recorder gets the console's own environment.
+- **Status probe:** the `RecorderMonitor` probes every 3 s with one ssh per machine: process alive,
+  bag size, files, free disk. Its states are:
+  - `starting`, then `recording` (alive with a bag file open);
+  - `stalled`: no growth for max(60 s, 3× the longest write gap seen), or nothing written in 120 s.
+    rosbag2 writes in bursts: the `light` profile uses a 2 MB cache and the base a 256 KB cache.
+  - `unreachable`, `failed`, `stopping`, `stopped`;
+  - `disabled`: the operator chose to continue without it.
+
+  Each change is logged as an event.
+
+**18.3 Event log.** `events.jsonl` holds one JSON object per line. Every line carries `t` (wall),
+`ros_t` and `clock_offset_ms` (per robot, from fleetlink) for alignment with robot bags. When ROS is
+up, each event is mirrored as JSON on `/adt4_console/experiment_events` (std_msgs/String), which the
+base bag records. Console-only actions therefore end up in the bag as well.
+
+Event kinds:
+
+| Group | Kinds |
+|---|---|
+| Run | `run_start`, `run_auto_opened`, `run_end`, `outcome`, `sanity` |
+| Recorders | `recorder_starting`, `recorder_started`, `recorder_stalled`, `recorder_recovered`, `recorder_died`, `recorder_unreachable`, `recorder_stopped`, `recorder_restart`, `recorder_skipped`, `goal_refused` |
+| Planning | `planned` (omniplanner: `planning_s`, ok/error), `llm_usage` (model, tokens, `cost_usd`), `plan_sent`, `plan_received`, `plan_status`, `plan_failed`, `repair_alert`, `mission_execute`, `mission_replan`, `mission_abort`, `mission_finished` |
+| Execution | `action_result`, `robot_reached`, `robot_failed`, `all_reached`, `prompt_continue`, `continue` |
+| Operator / robot | `teleop` (active on/off), `estop` (pressed), `lease`, `lease_takeover`, `operator_cmd` (pause/stop/resume), `manual_mode`, `map_edit` (mid-run) / `map_edit_setup` |
+| Comms | `link` (fleetlink connected) |
+| Manual | `intervention` (category, note), `event_retracted` (`target_seq`) |
+
+- Events from before the run opened (planning, LLM calls, map edits) are buffered and written into
+  the run with `pre_run: true`.
+- `poses.jsonl` samples each robot's fleetlink pose at 2 Hz.
+
+**18.4 Metrics** (`metrics.compute`, live and final).
+- **Per run:**
+  - `mission_time_s` (first plan sent → all reached), `run_time_s`, `wall_time_s`;
+  - `planning_s`, `plans_sent`, `replans`, `plan_failures`;
+  - `interventions`, `interventions_by_type`, `intervention_s`;
+  - `total_path_m`, `robots_reached`;
+  - `llm_calls`, `llm_cost_usd`, `llm_tokens`;
+  - outcome and failure category.
+- **Per robot:**
+  - `path_m` (jumps over 5 m and frame changes are skipped), `moving_s`, `idle_s`,
+    `time_to_first_move_s`;
+  - actions by type, `goals_sent`;
+  - `interventions`, `intervention_s`, `link_outage_s`.
+- **How interventions are counted:**
+  - Intervals: teleop active, e-stop pressed, operator pause/stop → resume, phoenix manual mode.
+  - Points: manual log, lease takeover, mission abort, mid-run map edit.
+  - Retracted events are dropped.
+
+**18.5 Sanity check** (`sanity.py`, job). It runs on each machine with ROS sourced and reads
+`metadata.yaml` plus a `rosbag2_py` pass over the odom topics for gaps.
+
+| Level | Condition |
+|---|---|
+| err | not finalized; key topic (odom / tf) empty; machine unreachable |
+| warn | required topic empty; rate below minimum (odom / tf 5 Hz, camera 1 Hz); gap > 2 s; duration off the recording window by more than max(10%, 5 s); < 10 GB free |
+
+**18.6 Offload** (job). Copies runs to a target.
+- **Targets:**
+  - an external disk on the base (`lsblk` removable / hotplug / USB mounts, or `disk:<any dir>`);
+  - a network target `user@host:/path` (saved in `~/.adt4_console/offload_targets.json`).
+- **Destination layout:** `<target>/<exp>/<run>/{run/, bags/}`.
+- **Verification:** size + md5 per file, source vs destination.
+- **Deletion:** optional "delete from robots after verify", behind a typed confirmation (`delete`).
+  It deletes only the verified machines' bags, never the base run folder.
+
+**18.7 Endpoints** (`/api` prefix).
+
+Experiments:
+
+| Method | Path | Body / notes |
+|---|---|---|
+| GET | `/experiments` | `{experiments, active, profiles, outcomes, failure_categories, intervention_categories}` |
+| POST | `/experiments` | `{name, robots, bag_profile, auto_record, notes, activate}` |
+| PATCH | `/experiments/{id}` | `{name?, notes?, robots?, bag_profile?, auto_record?, test_mode?}` |
+| POST | `/experiments/activate` | `{id \| null}` (409 while a run is open) |
+| POST | `/experiments/phase` | `{phase: mapping \| editing, note, source}` |
+| GET | `/experiments/status` | Full status; also hub topic `experiment/status`, latest value |
+| GET | `/experiments/recording` | Recorder + logging status only |
+
+The open run:
+
+| Method | Path | Body / notes |
+|---|---|---|
+| POST | `/experiments/run/open` | `{labels: {condition, instruction_id, tags}, instruction, robots, record?, profile?}` |
+| POST | `/experiments/run/end` | `{stop_bags, outcome?}` → `{job_id}` |
+| POST | `/experiments/run/prompt` | `{action: continue \| dismiss}` |
+| POST | `/experiments/run/record` | `{enabled}` (the testing banner's "Enable recording") |
+| POST | `/experiments/run/recorders/{machine}/{restart \| stop}` | |
+| POST | `/experiments/run/accept_missing` | `{machines}` |
+| POST | `/experiments/run/intervention` | `{robot, category, note}` |
+| POST | `/experiments/run/retract` | `{seq, reason}` |
+
+Past runs:
+
+| Method | Path | Body / notes |
+|---|---|---|
+| GET | `/experiments/{exp}/runs` | |
+| GET | `/experiments/{exp}/runs/{run}` | `{run, events, metrics, sanity, recording}` |
+| POST | `/experiments/{exp}/runs/{run}/outcome` | `{label, failure_category, notes}` |
+| POST | `/experiments/{exp}/runs/{run}/check` | → `{job_id}` |
+| POST | `/experiments/{exp}/runs/{run}/offload` | `{target, delete_after}` → `{job_id}` |
+| GET | `/experiments/{exp}/export.csv` | `?table=runs \| robots&include_test=` (test runs left out by default) |
+
+Data management:
+
+| Method | Path | Body / notes |
+|---|---|---|
+| GET | `/data/targets` | |
+| POST | `/data/targets` | `{spec, name}` |
+| DELETE | `/data/targets/{id}` | |
+| GET | `/data/disks` | Free disk + experiment data per machine |
+
+**18.8 UI.**
+- **Top bar REC chip** (every page):
+  - green: all writing;
+  - amber: starting, stalled or low disk;
+  - red, pulsing: a recorder failed;
+  - "NOT RECORDING" in testing mode.
+
+  Clicking it opens the recording panel, with per-machine state, elapsed, size, rate, last write,
+  segments, disk free and time left, plus Restart / Stop, and the event-log status.
+- **Banners:** an amber "TESTING MODE: bags are NOT recording [Enable recording]" banner and a red
+  "Recording FAILED on …" banner.
+- **Dialogs:**
+  - the all-reached prompt;
+  - the end-run form (outcome, failure category, notes, intervention review with "Not one");
+  - "+ Intervention".
+- **The Data page:**
+  - experiment create / select / settings and phases;
+  - the current run;
+  - the runs table, with drill-down to summary, events and sanity, plus outcome editing and offload;
+  - CSV export;
+  - storage targets and machine disks.
+
 ## Deviations
 
 ### fleetlink (§8)

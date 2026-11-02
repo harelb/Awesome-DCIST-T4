@@ -169,7 +169,27 @@ def solve(goal: str, starts: dict, G, constraints=None, geofences=None) -> dict:
 
 def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constraints=None,
               geofences=None, text: str = "", name: str = "") -> tuple[Mission, dict]:  # fmt: skip
-    """A mission for the ground agents that achieves ``goal`` (see :func:`solve`)."""
+    """A mission for the ground agents that achieves ``goal`` (see :func:`solve`);
+    an active experiment logs the planning time and outcome (``planned``)."""
+    import time as _time
+
+    t0 = _time.time()
+    exps = getattr(service, "experiments", None)
+    try:
+        m, info = _plan_pddl(goal, agents, src, service, constraints, geofences, text, name)
+    except ValueError as e:
+        if exps is not None:
+            exps.emit("planned", planner="omniplanner", ok=False, error=str(e)[:500], goal=goal, text=text or None,
+                      planning_s=round(_time.time() - t0, 3))  # fmt: skip
+        raise
+    if exps is not None:
+        exps.emit("planned", planner="omniplanner", ok=True, goal=goal, text=text or None, mission=m.id,
+                  planning_s=round(_time.time() - t0, 3), driven_m=info.get("driven_m") if isinstance(info, dict) else None)  # fmt: skip
+    return m, info
+
+
+def _plan_pddl(goal: str, agents: list[dict], src: str | None, service, constraints=None,
+               geofences=None, text: str = "", name: str = "") -> tuple[Mission, dict]:  # fmt: skip
     from .planning import start_of
 
     src = src or service._default_src()

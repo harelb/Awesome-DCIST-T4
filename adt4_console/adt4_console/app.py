@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import pathlib
 from dataclasses import dataclass, field
 
@@ -73,6 +74,7 @@ class Services:
     missions: object = None  # mission.service.MissionService
     quad: object = None  # quad.link.QuadLink
     edits: object = None  # edit_service.EditService
+    experiments: object = None  # experiment.service.ExperimentService
 
 
     def start(self) -> None:
@@ -87,9 +89,11 @@ class Services:
             self.quad.start()
         self.graph.start()
         self.graph.warm()
+        if self.experiments is not None:
+            self.experiments.start()
 
     def stop(self) -> None:
-        for svc in (self.missions, self.quad, self.teleop, self.live, self.ros, self.graph, self.fleet):
+        for svc in (self.experiments, self.missions, self.quad, self.teleop, self.live, self.ros, self.graph, self.fleet):
             if svc is None:
                 continue
             try:
@@ -148,6 +152,15 @@ def build_services(
                             launch_state=lambda: svc.launch_state.get() if svc.launch_state else None)  # fmt: skip
     chat.edits = svc.edits
     svc.missions.edits = svc.edits
+    from .experiment.service import ExperimentService
+
+    svc.experiments = ExperimentService(
+        settings, hub, jobs, fleet, ros, live, helpers=lambda: svc.helpers, edits=svc.edits,
+        root=os.path.expanduser(settings.experiments_dir) if settings.experiments_dir else None,
+    )  # fmt: skip
+    svc.experiments.launch_state = lambda: svc.launch_state.get() if svc.launch_state else None
+    svc.experiments.attach(hub, ros, chat)
+    svc.missions.experiments = svc.experiments
     return svc
 
 
@@ -181,6 +194,14 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     async def _graph_unavailable(request: Request, exc: GraphUnavailable):
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
+    from .experiment.service import RecordingNotReady
+
+    @app.exception_handler(RecordingNotReady)
+    async def _recording_not_ready(request: Request, exc: RecordingNotReady):
+        # the goal was NOT sent: the UI offers retry / send without / cancel
+        return JSONResponse({"detail": str(exc), "recording_not_ready": True, "machines": exc.machines},
+                            status_code=409)  # fmt: skip
+
     @app.exception_handler(RosUnavailable)
     async def _ros_unavailable(request: Request, exc: RosUnavailable):
         return JSONResponse({"detail": f"ROS unavailable: {exc}"}, status_code=503)
@@ -188,6 +209,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     from .routes import (
         chat,
         edit,
+        experiment,
         fleet,
         geo,
         graph,
@@ -206,7 +228,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     )
 
     for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal,
-                geo, mission, quad, edit, ws):  # fmt: skip
+                geo, mission, quad, edit, experiment, ws):  # fmt: skip
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 

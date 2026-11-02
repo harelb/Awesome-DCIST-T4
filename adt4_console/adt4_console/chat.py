@@ -75,6 +75,7 @@ class UsageLedger:
         self.path = pathlib.Path(os.path.expanduser(path))
         self.budget_usd = budget_usd
         self.lock = threading.Lock()
+        self.on_record = None  # (model, input_tokens, output_tokens, cost) -> None
         self.data = {
             "spent_usd": 0.0,
             "calls": 0,
@@ -108,6 +109,11 @@ class UsageLedger:
                 self.path.write_text(json.dumps(d))
             except OSError as e:
                 log.warning("could not persist LLM usage: %s", e)
+        if self.on_record is not None:
+            try:
+                self.on_record(model, int(input_tokens), int(output_tokens), cost)
+            except Exception:  # noqa: BLE001
+                log.exception("LLM usage observer")
         return cost
 
 

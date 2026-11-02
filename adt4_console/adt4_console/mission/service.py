@@ -440,6 +440,13 @@ class MissionService:
             raise ValueError("no agent is bound to a real robot; simulate it instead")
         if any(a.kind == "quad" for a in bound) and (self.quad is None or not self.quad.configured):
             raise ValueError("a quad is bound but the quad link is not configured (--quad-cmd-uri)")
+        exps = getattr(self, "experiments", None)
+        if exps is not None:
+            # experiment run: open it and start every robot's bag before any goal goes out
+            for a in bound:
+                if a.kind != "quad":
+                    exps.gate(a.binding, "mission")
+            exps.on_mission("execute", mid, robots=[a.binding for a in bound], revision=m.revision)
         io = LiveIO(
             send_goto=self._send_goto,
             robot_pose=self.robot_pose,
@@ -470,6 +477,9 @@ class MissionService:
         if run is None:
             raise KeyError(mid)
         run.control("pause")
+        exps = getattr(self, "experiments", None)
+        if exps is not None and run.kind == "live":
+            exps.on_mission("abort", mid)
         if run.kind == "live" and self.ros is not None:
             for a in run.mission.agents:
                 if a.binding and a.kind != "quad":

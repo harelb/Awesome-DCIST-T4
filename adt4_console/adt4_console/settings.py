@@ -80,6 +80,10 @@ class Settings:
     # "auto": stage edits while a launch is active, apply immediately otherwise;
     # "staged" / "immediate" force one behaviour
     map_edit_mode: str = "auto"
+    # experiment runs (API.md §18): None -> <output_root>/experiments
+    experiments_dir: str | None = None
+    # saved network offload targets; None -> memory only (tests)
+    offload_targets_path: str | None = None
     # Penn quad (heracles_agents penn_integration_tool): PUSH-bind waypoints, REQ images
     quad_cmd_uri: str | None = None
     quad_image_uri: str | None = None

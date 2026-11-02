@@ -160,6 +160,7 @@ def settings_from_args(args):
         quad_images_dir="~/.adt4_console/quad_images",
         snapshots_dir="~/.adt4_console/snapshots",
         mesh_cache_dir="~/.adt4_console/mesh_cache",
+        offload_targets_path="~/.adt4_console/offload_targets.json",
         map_edit_mode=args.map_edits,
         quad_cmd_uri=args.quad_cmd_uri,
         quad_image_uri=args.quad_image_uri,
