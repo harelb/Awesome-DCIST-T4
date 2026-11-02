@@ -43,7 +43,13 @@ LABEL = "GRSTAPS-X"
 # What a Spot fleet can field: every Spot here carries an arm, and an
 # inspection takes two ground robots (the default ground+air team needs a UAV).
 ROBOT_TYPE_SPECIES = {"spot": "spot_arm", "simulated-spot": "spot_arm"}
-INSPECT_REQUIREMENT = {"ground": 2, "sensor": 2}
+# An inspection is one robot looking (as with Fast Downward); naming several robots
+# with inspected-by makes it a joint inspection by all of them. (The field config,
+# grstaps_repair, asks for two ground robots per inspection instead.)
+INSPECT_REQUIREMENT = {"ground": 1, "sensor": 1}
+# console agent kind -> GRSTAPS-X robot type; a husky is left out of GRSTAPS-X plans
+# (its executor does not wait on ordering or partners)
+KIND_TYPE = {"spot": "spot", "husky": "husky", "quad": "uav"}
 SOLVER_TIMEOUT_S = float(os.environ.get("ADT4_GRSTAPS_TIMEOUT_S", "60"))
 LOG_TAIL = 40
 
@@ -211,8 +217,12 @@ def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | Non
     g = gp.GrstapsGoal(
         goal_points=found["visit"], inspect_points=found["inspect"], manipulate_points=found["manipulate"],
         manipulate_destinations=found["destinations"], robot_bound=found["bound"], robot_id=first,
-        constraints=list(facts), robot_types=dict(robot_types or {r: "spot" for r in robots}),
+        constraints=list(facts), robot_types={r: KIND_TYPE.get((robot_types or {}).get(r, "spot"), "spot") for r in robots},
     )  # fmt: skip
+    left_out = sorted(r for r in robots if (robot_types or {}).get(r) == "husky")
+    if left_out and len(left_out) == len(robots):
+        raise GrstapsFailed("GRSTAPS-X does not plan huskies (their executor does not wait on ordering or partners)",
+                            {"planner": LABEL, "digest": "only huskies", "log": [], "problem_file": None})  # fmt: skip
     t0 = time.perf_counter()
     try:
         out = om["pipeline"](om["PlanRequest"](domain=domain, goal=g, robot_states=robots), G)

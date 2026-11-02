@@ -165,19 +165,24 @@ def _height_lookup(G):
         return lambda x, y: float(pos[np.argmin(np.hypot(pos[:, 0] - x, pos[:, 1] - y)), 2])
 
 
-def _solve_grstaps(goal, starts, G, constraints, geofences) -> dict:
+def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None) -> dict:
     from dsg_pddl.pddl_grounding import ConstraintFact
 
     from . import grstaps_engine
 
     facts = _constraint_facts(constraints, ConstraintFact) + _geofence_constraints(G, geofences, ConstraintFact)
     try:
-        return grstaps_engine.solve(goal, starts, G, facts, _height_lookup(G))
+        out = grstaps_engine.solve(goal, starts, G, facts, _height_lookup(G), robot_types=kinds)
     except grstaps_engine.GrstapsFailed as e:
         raise PlanningFailed(str(e), planner_log=e.planner_log, engine="grstaps") from None
+    huskies = sorted(r for r, k in (kinds or {}).items() if k == "husky")
+    if huskies:
+        out["left_out"] = huskies
+    return out
 
 
-def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: str = DEFAULT_ENGINE) -> dict:
+def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: str = DEFAULT_ENGINE,
+          kinds: dict | None = None) -> dict:
     """Plan ``goal`` for robots at ``starts`` ({pddl robot name: [x, y]}).
 
     Returns {actions: [(robot, action tuple, path [[x, y, z], ...])], routes:
@@ -186,7 +191,7 @@ def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: 
     Raises ValueError for a goal that cannot be planned (the reason in words).
     """
     if check_engine(engine) == "grstaps":
-        return _solve_grstaps(goal, starts, G, constraints, geofences)
+        return _solve_grstaps(goal, starts, G, constraints, geofences, kinds)
     om = _modules()
     if any(c["predicate"] == "before" for c in constraints or []):
         raise ValueError("Fast Downward cannot order targets (before): plan it with GRSTAPS-X")
@@ -274,7 +279,8 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
             raise ValueError(f"{a.id} has no start (give it one, or bind it to a robot with a pose)")
         starts[pddl_name(a.id)] = s[:2]
         back[pddl_name(a.id)] = a.id
-    out = solve(goal, starts, G, constraints, m0.geofences, engine=engine)
+    kinds = {pddl_name(a.id): a.kind for a in ground}
+    out = solve(goal, starts, G, constraints, m0.geofences, engine=engine, kinds=kinds)
     if engine == "grstaps":
         m0.tasks = _grstaps_tasks(out["steps"], back)
         if not m0.tasks:
@@ -283,7 +289,8 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
         m0.goal["schedule"] = {**sched, "rows": [{**r, "robot": back.get(r["robot"], r["robot"])} for r in sched["rows"]]}
         info = {"driven_m": {back.get(r, r): round(v, 1) for r, v in out["driven_m"].items()},
                 "planning_s": round(out["solve_s"], 2), "points_of_interest": out["pois"], "engine": engine,
-                "makespan_s": sched["makespan"], "planner_log": out["planner_log"], "fast_downward": None}  # fmt: skip
+                "makespan_s": sched["makespan"], "planner_log": out["planner_log"], "fast_downward": None,
+                "left_out": [back.get(r, r) for r in out.get("left_out", [])]}  # fmt: skip
         return Mission.model_validate(m0.model_dump()), info
     unsupported = sorted({act[0] for _, act, _ in out["actions"] if act[0] not in SUPPORTED})
     if unsupported:
@@ -357,7 +364,7 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
     from .planning import start_of
 
     src = src or service._default_src()
-    m0 = Mission(src=src, agents=[{"id": r["name"], "kind": "spot", "binding": r["name"],
+    m0 = Mission(src=src, agents=[{"id": r["name"], "kind": r.get("kind") or "spot", "binding": r["name"],
                                    "start": r.get("start")} for r in robots])  # fmt: skip
     world = service.world(m0)
     if world.graph is None or world.graph.G is None:
@@ -369,7 +376,8 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
             starts[pddl_name(a.id)] = s[:2]
     if not starts:
         raise ValueError("no robot has a pose: connect the robots, or add agents with starts in the mission planner")
-    out = solve(goal, starts, world.graph.G, constraints, engine=engine)
+    kinds = {pddl_name(a.id): a.kind for a in m0.agents}
+    out = solve(goal, starts, world.graph.G, constraints, engine=engine, kinds=kinds)
     return {
         "goals": _goals_by_robot(out, world.graph.G),
         "engine": check_engine(engine),

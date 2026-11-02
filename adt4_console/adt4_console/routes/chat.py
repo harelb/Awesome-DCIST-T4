@@ -23,6 +23,8 @@ class ChatBody(BaseModel):
     model: str | None = None
     # the mission planner's context: {roster, areas, mission, planted} (API.md §15.2)
     mission_ctx: dict | None = None
+    # GPT-5 / 6 reasoning effort: fast (default) | low | medium | high
+    reasoning: str | None = None
 
 
 @router.post("/chat")
@@ -31,7 +33,7 @@ def chat(body: ChatBody, request: Request):
 
     def lines():
         for item in chat_svc.stream(body.message, body.robot, body.src, body.history, body.model,
-                                   body.mission_ctx):
+                                   body.mission_ctx, reasoning=body.reasoning):
             yield json.dumps(item, default=str) + "\n"
 
     return StreamingResponse(

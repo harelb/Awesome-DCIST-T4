@@ -45,6 +45,62 @@ OPENAI_DEFAULT_MODEL = "gpt-4.1"
 ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5"
 # what the chat's model picker offers per provider (``settings.llm_model`` is added)
 OPENAI_MODELS = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini"]
+# the picker also lists every chat model the OpenAI key can use (GET /v1/models, cached):
+# GPT-4.1 / 4o / 5 / 6 families, newest first, without dated snapshots or the
+# codex / search / audio / realtime / image / pro variants (not chat-completions models)
+OPENAI_LIST_TTL_S = 3600.0
+_CHAT_MODEL = re.compile(r"^gpt-(4\.1|4o|5|6)([.\d]*)(-[a-z]+)?$")
+_NOT_CHAT = ("codex", "search", "audio", "realtime", "transcribe", "tts", "image", "pro", "chat-latest")
+
+
+def openai_chat_models(ids) -> list[str]:
+    """The chat models among an OpenAI key's model ids, newest family first."""
+    keep = [m for m in ids if _CHAT_MODEL.match(m) and not any(x in m for x in _NOT_CHAT)]
+
+    def key(m):
+        nums = [int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", m[4:]) if x.replace("o", "").isdigit() or x.isdigit()]
+        return ([-n for n in nums] + [0] * 3)[:3], len(m), m
+
+    return sorted(set(keep), key=key)
+
+
+def is_reasoning_model(model: str) -> bool:
+    """GPT-5 / 6 (and o-series) take max_completion_tokens, no temperature, and a reasoning effort."""
+    return bool(re.match(r"^(gpt-[5-9]|o\d)", model or ""))
+
+
+# the chat's reasoning picker (GPT-5 / 6): "fast" = the lowest effort the model takes with
+# tools (chat completions); the others go through /v1/responses, which takes them with tools
+REASONING_LEVELS = ("fast", "low", "medium", "high")
+
+
+def uses_responses_api(model: str) -> bool:
+    """GPT-6 calls tools only through /v1/responses (chat completions refuse tools
+    with any reasoning effort it supports)."""
+    return bool(re.match(r"^gpt-([6-9]|\d\d)", model or ""))
+
+
+def chat_reasoning_effort(model: str) -> str:
+    """The lowest effort chat completions accept WITH tools: 'none' for GPT-5.1+,
+    'minimal' for the original gpt-5 / -mini / -nano."""
+    return "minimal" if re.match(r"^gpt-5(-mini|-nano)?$", model or "") else "none"
+
+
+def to_responses(items: list[dict]) -> list[dict]:
+    """Chat items -> /v1/responses input: messages, function_call and function_call_output items."""
+    out = []
+    for it in items:
+        if it["role"] == "user":
+            out.append({"role": "user", "content": it["text"]})
+        elif it["role"] == "assistant":
+            if it.get("text"):
+                out.append({"role": "assistant", "content": it["text"]})
+            for c in it.get("calls") or []:
+                out.append({"type": "function_call", "call_id": c["id"], "name": c["name"],
+                            "arguments": json.dumps(c["args"])})  # fmt: skip
+        else:
+            out.append({"type": "function_call_output", "call_id": it["id"], "output": it["content"]})
+    return out
 ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 MAX_TOOL_ROUNDS = 8
 # mission planning looks up several things, may search the images, then plans
@@ -248,15 +304,34 @@ class ChatService:
         if prov is None:
             return []
         out = list(OPENAI_MODELS if prov == "openai" else ANTHROPIC_MODELS)
+        if prov == "openai":
+            out = [m for m in self._openai_listed() if m not in out] + out
         if self.settings.llm_model and self.settings.llm_model not in out:
             out.insert(0, self.settings.llm_model)
         return out
+
+    def _openai_listed(self) -> list[str]:
+        """The key's chat models (openai_chat_models), refreshed hourly; [] when unreachable."""
+        now = time.monotonic()
+        cached = getattr(self, "_openai_models", None)
+        if cached is not None and now - cached[0] < OPENAI_LIST_TTL_S:
+            return cached[1]
+        try:
+            client = self.llm_client()
+            ids = [m.id for m in client.models.list()] if client is not None else []
+            listed = openai_chat_models(ids)
+        except Exception as e:  # noqa: BLE001 — offline / no permission: the fixed list
+            log.info("OpenAI model list unavailable: %s", e)
+            listed = []
+        self._openai_models = (now, listed)
+        return listed
 
     def usage(self) -> dict:
         return {
             "provider": self.provider(),
             "model": self.model(),
             "models": self.models(),
+            "reasoning_levels": list(REASONING_LEVELS),
             "budget_usd": self.ledger.budget_usd,
             **self.ledger.data,
         }
@@ -290,6 +365,7 @@ class ChatService:
         history: list | None = None,
         model: str | None = None,
         mission_ctx: dict | None = None,
+        reasoning: str | None = None,
     ):
         """One chat turn.  ``history``: the transcript items of earlier turns
         (the client keeps them; each turn ends with a ``transcript`` event
@@ -303,6 +379,8 @@ class ChatService:
             # GRSTAPS-X is checked every turn: a license copied in later turns it on
             mission_ctx = {**mission_ctx, "omniplanner": ok, "grstaps": ok and self._grstaps_ok()}
         self._ctx.value = mission_ctx if self.missions is not None else None
+        # GPT-5 / 6 reasoning effort from the picker (REASONING_LEVELS; None / "fast": the lowest)
+        self._ctx.reasoning = reasoning if reasoning in REASONING_LEVELS else None
         history = clean_history(history)
         self._ctx.history = history  # propose_mission: the request the thread started with
         try:
@@ -962,15 +1040,30 @@ class ChatService:
                     return
                 last = i == rounds - 1
                 try:
-                    resp = client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "system", "content": system + ("\n\n" + LAST_ROUND_NOTE if last else "")}]
-                        + to_openai(list(history) + turn),
-                        tools=tools,
-                        tool_choice="none" if last else "auto",
-                        temperature=0.2,
-                        max_tokens=4000 if self._mission_ctx() is not None else 1500,
-                    )
+                    budget = 4000 if self._mission_ctx() is not None else 1500
+                    sys_text = system + ("\n\n" + LAST_ROUND_NOTE if last else "")
+                    effort = getattr(self._ctx, "reasoning", None) or "fast"
+                    if is_reasoning_model(model) and (uses_responses_api(model) or effort != "fast"):
+                        resp = _ResponsesReply(client.responses.create(
+                            model=model, instructions=sys_text, input=to_responses(list(history) + turn),
+                            tools=[{"type": "function", **t["function"]} for t in tools],
+                            tool_choice="none" if last else "auto",
+                            max_output_tokens=budget * (8 if effort in ("medium", "high") else 4),
+                            reasoning={"effort": "low" if effort == "fast" else effort}, store=False,
+                        ))  # fmt: skip
+                    else:
+                        if is_reasoning_model(model):
+                            # reasoning tokens count against the completion budget
+                            knobs = {"max_completion_tokens": budget * 4, "reasoning_effort": chat_reasoning_effort(model)}
+                        else:
+                            knobs = {"temperature": 0.2, "max_tokens": budget}
+                        resp = client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "system", "content": sys_text}] + to_openai(list(history) + turn),
+                            tools=tools,
+                            tool_choice="none" if last else "auto",
+                            **knobs,
+                        )
                 except openai.APIStatusError as e:
                     yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
                     return
@@ -1009,6 +1102,24 @@ class ChatService:
                                  "content": _clip(json.dumps(out, default=str))})  # fmt: skip
         finally:
             yield {"type": "transcript", "items": turn}
+
+
+class _ResponsesReply:
+    """A /v1/responses result in the shape the chat loop reads from chat completions
+    (``model``, ``usage.prompt_tokens`` / ``completion_tokens``, ``choices[0].message``)."""
+
+    def __init__(self, r):
+        from types import SimpleNamespace as NS
+
+        u = getattr(r, "usage", None)
+        self.model = getattr(r, "model", None)
+        self.usage = NS(prompt_tokens=u.input_tokens, completion_tokens=u.output_tokens) if u is not None else None
+        calls = [
+            NS(id=o.call_id, function=NS(name=o.name, arguments=o.arguments))
+            for o in getattr(r, "output", None) or []
+            if getattr(o, "type", "") == "function_call"
+        ]
+        self.choices = [NS(message=NS(content=getattr(r, "output_text", "") or "", tool_calls=calls))]
 
 
 class WriteProposals:

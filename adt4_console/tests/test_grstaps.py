@@ -98,9 +98,25 @@ def test_ordering_becomes_dependencies_and_a_schedule(svc):
     assert pv["tasks"][first.id]["t_end"] <= pv["tasks"][last.id]["t_start"]
 
 
-def test_joint_inspection_waits_for_both_robots(svc):
+def test_an_inspection_is_one_robot_unless_several_are_named(svc):
     _, service = svc
     m, _ = omni.plan_pddl("(safe o0)", [SPOT1, SPOT2], None, service, engine="grstaps")
+    assert [t.type for t in m.tasks] == ["goto", "inspect"] and len({t.agent for t in m.tasks}) == 1
+
+
+def test_a_husky_is_left_out(svc):
+    _, service = svc
+    husky = {"id": "gauss", "kind": "husky", "start": [17.0, 2.0]}  # right next to O(0)
+    m, planned = omni.plan_pddl("(safe o0)", [SPOT1, husky], None, service, engine="grstaps")
+    assert {t.agent for t in m.tasks} == {"spot1"} and planned["left_out"] == ["gauss"]
+    with pytest.raises(ValueError, match="huskies"):
+        omni.plan_pddl("(safe o0)", [husky], None, service, engine="grstaps")
+
+
+def test_joint_inspection_waits_for_both_robots(svc):
+    _, service = svc
+    m, _ = omni.plan_pddl("(and (inspected-by spot1 o0) (inspected-by spot2 o0))", [SPOT1, SPOT2], None, service,
+                          engine="grstaps")  # fmt: skip
     gotos = {t.agent: t for t in m.tasks if t.type == "goto"}
     looks = [t for t in m.tasks if t.type == "inspect"]
     assert set(gotos) == {"spot1", "spot2"} and len(looks) == 2
@@ -162,7 +178,7 @@ def test_unknown_engine_is_a_400(svc):
 def test_preview_returns_the_schedule(svc):
     client, _ = svc
     r = client.post("/api/missions/plan/preview_pddl",
-                    json={"pddl_goal": "(safe o0)", "engine": "grstaps",
+                    json={"pddl_goal": "(and (inspected-by spot1 o0) (inspected-by spot2 o0))", "engine": "grstaps",
                           "robots": [{"name": "spot1", "start": [0, 0]}, {"name": "spot2", "start": [20, 10]}]})  # fmt: skip
     assert r.status_code == 200, r.text
     body = r.json()
@@ -174,7 +190,8 @@ def test_preview_returns_the_schedule(svc):
 def test_replan_keeps_the_engine(svc):
     client, _ = svc
     r = client.post("/api/missions/plan/omniplanner",
-                    json={"pddl_goal": "(safe o0)", "agents": [SPOT1, SPOT2], "engine": "grstaps"})  # fmt: skip
+                    json={"pddl_goal": "(and (inspected-by spot1 o0) (inspected-by spot2 o0))", "agents": [SPOT1, SPOT2],
+                          "engine": "grstaps"})  # fmt: skip
     assert r.status_code == 200, r.text
     mid = r.json()["mission"]["id"]
     r = client.post(f"/api/missions/{mid}/replan", json={"starts": {"spot1": [5.0, 5.0]}})
@@ -258,7 +275,8 @@ def test_nearest_frames_rank_by_distance_then_heading(tmp_path):
 
 def test_mission_preview_has_goal_end_points(svc):
     _, service = svc
-    m, _ = omni.plan_pddl("(safe o0)", [SPOT1, SPOT2], None, service, engine="grstaps")
+    m, _ = omni.plan_pddl("(and (inspected-by spot1 o0) (inspected-by spot2 o0))", [SPOT1, SPOT2], None, service,
+                          engine="grstaps")  # fmt: skip
     goals = service.preview(m)["goals"]
     assert set(goals) == {"spot1", "spot2"}
     for g in goals.values():

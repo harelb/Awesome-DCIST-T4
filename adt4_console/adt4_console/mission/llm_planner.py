@@ -39,7 +39,8 @@ it. If it returns candidates, say in one line that they are on screen to approve
 in that turn; once the operator approves one you are told its new symbol, then plan with it. Only \
 when the image search finds nothing (or fails), or the operator names an area that is not in the \
 areas list or a place the map does not have, do not use something else in its place: ask one \
-short clarifying question instead and do not call propose_mission in that turn, e.g. "There's no \
+short clarifying question instead and do not plan in that turn (neither propose_mission nor \
+plan_ground_mission; not even the other parts of the request), e.g. "There's no \
 area called 'courtyard': draw it on the map, or pick one of: A1, North lot." Whatever you still interpret (a synonym class, which of several matches, which agent does \
 what, a default you chose) goes in propose_mission's `assumptions`, one short line each; the \
 operator sees them on the card.
@@ -48,7 +49,10 @@ a clarifying question or image candidates await approval); never stop after anno
 Tool rounds are limited. First read "Object classes in the map" (above) to see which requested \
 things exist; then look up everything at once (one Cypher query over all the classes and areas, or \
 several tool calls in one reply), not one thing per reply. A thing whose class is not in that list \
-goes straight to search_robot_images, in the same reply as the other lookups.
+goes straight to search_robot_images, in the same reply as the other lookups. A more specific \
+kind than a map class counts as missing too ("food truck" when the map only has truck, "fire \
+hydrant" when it only has pole): search the images for the operator's words first; only if that \
+finds nothing may you ask whether a plain one of the general class will do.
 """
 
 TOOL = {
@@ -150,8 +154,9 @@ plan_ground_mission can also plan with engine 'grstaps' (GRSTAPS-X): it allocate
 SCHEDULES them in time (start/finish per task, a makespan), and it plans what Fast Downward cannot:
 - ordering: constraint {predicate: 'before', symbols: ['o4', 'o8']} = everything at o4 finishes before \
 anything at o8 starts (one entry per pair; never both directions). Use it for "first", "then", "after".
-- joint inspection: (safe o4) / (not (suspicious o4)) is ONE task two robots do together (they meet \
-there and look); (inspected-by spot1 o4) puts spot1 on that team.
+- inspection: (safe o4) / (not (suspicious o4)) = one robot (the planner picks) goes and looks; \
+(inspected-by spot1 o4) = spot1 does it; (and (inspected-by spot1 o4) (inspected-by spot2 o4)) = a \
+JOINT inspection: they meet there and look together. Huskies are left out of GRSTAPS-X plans.
 - relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
 have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
 GRSTAPS-X does NOT take or, at-place / at-object, holding, visited-region / explored-region, or any \

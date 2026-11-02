@@ -1119,7 +1119,7 @@ mission tab's planner choice, the robot-chat goal card and the mission chat use 
   internet). Problem / solution files go to `ADT4_GRSTAPS_WORK_DIR` (else
   `$ADT4_OUTPUT_DIR/grstaps`); a solve is stopped after `ADT4_GRSTAPS_TIMEOUT_S` (60 s).
 * **Goals**: `visited-object` / `visited-place`, the `-by` forms, `safe` / `(not (suspicious o))`
-  (a **joint** inspection: two Spots together), `inspected-by` (that robot on the team),
+  (one robot looks), `inspected-by` (that robot does; several `inspected-by` on one object = a **joint** inspection), huskies left out,
   `(object-in-place o p)` (relocation: pick, carry, place; every Spot counts as armed). No `or`,
   `at-*`, `holding`, region predicates or other negation. Constraints add `before`
   (`["before", "o4", "o8"]`: everything at o4 finishes before anything at o8 starts);

@@ -185,6 +185,18 @@ export function looksTabular(text: string): boolean {
 }
 
 const MODEL_KEY = "adt4.chat.model";
+const REASONING_KEY = "adt4.chat.reasoning";
+export const REASONING_LEVELS = ["fast", "low", "medium", "high"] as const;
+/** GPT-5 / 6 (and o-series) take a reasoning effort. */
+export const isReasoningModel = (m: string | null | undefined) => /^(gpt-[5-9]|o\d)/.test(m ?? "");
+const loadReasoning = () => {
+  try {
+    const v = localStorage.getItem(REASONING_KEY);
+    return (REASONING_LEVELS as readonly string[]).includes(v ?? "") ? (v as string) : "fast";
+  } catch {
+    return "fast";
+  }
+};
 const loadModel = () => {
   try {
     return localStorage.getItem(MODEL_KEY) ?? "";
@@ -241,6 +253,15 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [model, setModelRaw] = useState(loadModel);
+  const [reasoning, setReasoningRaw] = useState(loadReasoning);
+  const setReasoning = (r: string) => {
+    setReasoningRaw(r);
+    try {
+      localStorage.setItem(REASONING_KEY, r);
+    } catch {
+      /* private window */
+    }
+  };
   const scroller = useRef<HTMLDivElement>(null);
   // how many items the log last scrolled for (0: scroll to the end on mount)
   const shown = useRef(0);
@@ -319,6 +340,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
         history: trimTranscript(transcript.current),
         model: chosenModel,
         mission_ctx: withMission ? missionContext() : undefined,
+        reasoning: isReasoningModel(chosenModel ?? defaultModel) ? reasoning : undefined,
       };
       const res = await fetch("api/chat", {method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal});
       if (!res.ok || !res.body) {
@@ -499,6 +521,22 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
                   {m}
                 </option>
               ))}
+          </select>
+        )}
+        {isReasoningModel(chosenModel ?? defaultModel) && (
+          <select
+            className="input input-sm"
+            value={reasoning}
+            onChange={e => setReasoning(e.target.value)}
+            aria-label="Reasoning effort"
+            title="How hard the model thinks before answering: fast = the least it allows (quickest); high = slowest, best for hard lookups and plans"
+            data-testid="reasoning-effort"
+          >
+            {REASONING_LEVELS.map(r => (
+              <option key={r} value={r}>
+                {r === "fast" ? "reasoning: fast" : `reasoning: ${r}`}
+              </option>
+            ))}
           </select>
         )}
         <span className="grow" />
