@@ -172,6 +172,15 @@ Maps:
   `hydra/backend/dsg.json` (fall back to `dsg_with_mesh.json`); typed confirm `required_text="wipe"`
   showing current node count of the target; `heracles.utils.load_dsg_to_db`; `store_mesh_path(<run>/hydra/backend/mesh.ply)`;
   `bump_version`; broadcast `graph/neo4j:<name>/version`. Result `{nodes, edges, seconds}`.
+* **Reset** (Maps page, "Map databases": one button per Neo4j target). `GET /api/maps/reset?target=NAME`
+  → `{target, source, run, nodes, added_objects, map_edits}`: the map the database was loaded from
+  (`_GraphMetadata {key: 'source'}`) and what a reset undoes (objects the chat / live-image SAM3 tab /
+  an operator added: `source` or `sam3_created` set; GraphMutation map edits). `POST /api/maps/reset
+  {target}` → job: one Reset / Cancel confirm, then wipe + ingest that map (as `/ingest`), the place /
+  room SigLIP2 features from `hydra/backend/semantic_features.npz`, a version bump, and `POST
+  <sam3_url>/reload` so the SAM3 server re-reads the keyframes (their embeddings come back from its
+  cache; nothing is recomputed). 409 when the database records no map or it no longer exists.
+  ~15-17 min for the fused Penn map.
 * `POST /api/maps/register` `{name, path}` → adds a `file:<name>` source at runtime
 
 Graph sources (all served from the same `fleetlink.codec` formats):

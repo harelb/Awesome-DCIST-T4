@@ -4670,3 +4670,23 @@ input[type="checkbox"] {
   gap: 4px;
   white-space: nowrap;
 }
+
+/* Maps page: one-click reset of a map database */
+.db-reset {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.db-reset-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.db-reset-info {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

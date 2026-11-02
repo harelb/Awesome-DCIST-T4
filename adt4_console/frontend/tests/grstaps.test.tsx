@@ -199,3 +199,24 @@ describe("goal images for places and regions", () => {
     expect(document.querySelector<HTMLImageElement>('[data-testid="goal-image-full"]')!.src).toContain("i=1");
   });
 });
+
+describe("map database reset", () => {
+  it("shows what a reset undoes and starts it in one click", async () => {
+    const {DatabaseReset} = await import("../src/pages/Maps");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      json({target: "pennfused", source: "/d/fused_cfused/hydra/backend/dsg_with_mesh.json", run: "/d/fused_cfused", nodes: 18535, added_objects: 2, map_edits: 1}),
+    );
+    const start = vi.fn(async () => "job1");
+    const el = render(<DatabaseReset targets={[{name: "pennfused", uri: "neo4j://127.0.0.1:7699", prior: false}]} onStart={start} />);
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 0));
+    });
+    const row = el.querySelector('[data-testid="db-reset-row"]')!;
+    expect(row.textContent).toContain("fused_cfused");
+    expect(row.textContent).toContain("2 added object(s), 1 map edit(s)");
+    await act(async () => {
+      el.querySelector<HTMLButtonElement>('[data-testid="db-reset"]')!.click();
+    });
+    expect(start).toHaveBeenCalledWith("pennfused", "Reset neo4j:pennfused to fused_cfused");
+  });
+});
