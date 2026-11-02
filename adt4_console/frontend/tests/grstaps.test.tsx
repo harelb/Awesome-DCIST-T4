@@ -220,3 +220,11 @@ describe("map database reset", () => {
     expect(start).toHaveBeenCalledWith("pennfused", "Reset neo4j:pennfused to fused_cfused");
   });
 });
+
+describe("mission card goals", () => {
+  it("keep the server's goal end points (places need them for the nearest view)", async () => {
+    const {toChatItem} = await import("../src/viewer/ChatPanel");
+    const it = toChatItem({type: "mission", id: "m1", revision: 1, agents: [], tasks: [], issues: [], goals: {topaz: [{sym: "t(10376)", xy: [48, 41], yaw: 1.2}]}});
+    expect((it as {goals: unknown}).goals).toEqual({topaz: [{sym: "t(10376)", xy: [48, 41], yaw: 1.2}]});
+  });
+});

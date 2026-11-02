@@ -119,6 +119,7 @@ export function toChatItem(o: Record<string, unknown>): ChatItem | null {
         assumptions: Array.isArray(o.assumptions) ? o.assumptions.map(String).filter(Boolean) : [],
         makespan: typeof o.makespan === "number" ? o.makespan : null,
         planned: o.planned && typeof o.planned === "object" ? (o.planned as MissionCardItem["planned"]) : null,
+        goals: o.goals && typeof o.goals === "object" ? (o.goals as MissionCardItem["goals"]) : null,
       };
     case "cypher_write":
       return {type: "cypher_write", id: String(o.id), query: String(o.query ?? ""), summary: String(o.summary ?? ""), src: typeof o.src === "string" ? o.src : null};
@@ -666,7 +667,10 @@ export function MissionCard({it}: {it: MissionCardItem}) {
   const byAgent = it.agents.map(a => ({a, tasks: it.tasks.filter(t => t.agent === a.id)}));
   const robotColor = useRobotColor3D();
   const colors = agentColors(it.agents as Parameters<typeof agentColors>[0], robotColor);
-  const goals = it.goals ?? missionGoals(it.tasks);
+  // where each goal's path ends (places get the nearest view): the card's, else the open
+  // mission's preview of this revision (cards from before goals were sent), else symbols only
+  const openGoals = useMission(s => (s.current?.id === it.id && s.current.revision === it.revision ? s.preview?.goals : null));
+  const goals = it.goals ?? openGoals ?? missionGoals(it.tasks);
   return (
     <div className={`card chat-card mission-card ${superseded ? "superseded" : ""}`}>
       <div className="row gap">
