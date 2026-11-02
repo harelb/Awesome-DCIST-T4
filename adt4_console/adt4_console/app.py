@@ -186,6 +186,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         return JSONResponse({"detail": f"ROS unavailable: {exc}"}, status_code=503)
 
     from .routes import (
+        change_detection,
         chat,
         edit,
         fleet,
@@ -206,7 +207,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     )
 
     for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal,
-                geo, mission, quad, edit, ws):  # fmt: skip
+                geo, mission, quad, edit, change_detection, ws):  # fmt: skip
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 

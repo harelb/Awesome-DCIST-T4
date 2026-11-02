@@ -1310,6 +1310,34 @@ add object) without switching tabs.
   area's polygon), and a map area's symbol is a goto/inspect target (its centre).
 
 
+## 19. Active window change detection (`routes/change_detection.py`)
+
+khronos' `RosChangeDetectionController` (Awesome-DCIST-T4 #355, khronos #54) serves
+`/<robot>/change_detection/{start,stop,reset}` (std_srvs/Trigger) and latches `~/state`
+(`running` / `paused` / `reset`, transient_local). The `relocalize_awcd` configs start it paused
+(`start_enabled: false`): **start it once the robot is relocalized**.
+
+Fleetlink relays the three services (down, C0, ttl 5 s) and the state topic (up, C1,
+transient_local). In router mode they are plain ROS.
+
+| Method | Path | Body / notes |
+|---|---|---|
+| GET | `/robots/{robot}/change_detection` | `{robot, state, t, relocalized: {ok, reason}}` |
+| POST | `/robots/{robot}/change_detection/{start \| stop \| reset \| reset_start}` | `{override}` → `{ok, results: [{cmd, ok, message \| error}], override, state, relocalized}` |
+| POST | `/change_detection/clear` | `{robots: [] = all}`: AWCD base station `clear_robots` (discovered, base-local) |
+
+- **Gate:** start and reset_start return **409** `{detail, not_relocalized: true, reason}` unless the
+  robot is relocalized or `override` is set. Stop and reset are never gated.
+- **What "relocalized" means on the server** (`relocalized()`):
+  - `frame_align.ok` with a global parent;
+  - at least one ROMAN prior-map match (`reloc.prior_lcs`), when the agent reports it;
+  - fewer than 2 big `map -> odom` jumps (> 3 m or 30°).
+- **UI:** the Live panel shows each robot's state badge and Start / Stop / Reset. Start
+  (reset + start) is enabled only when the legend's relocalization status is **ok**. That status
+  also checks the distance to a shown prior map. "Start anyway…" asks for confirmation and sends
+  `override: true`.
+- Hub topic: `robot/{robot}/change_detection` (`{robot, state, t}`).
+
 ## Deviations
 
 ### fleetlink (§8)

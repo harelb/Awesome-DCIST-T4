@@ -95,6 +95,13 @@ DEFAULT_PLUGINS = {
 }
 
 
+# khronos RosChangeDetectionController (Awesome-DCIST-T4 #355, khronos #54):
+# /<robot>/change_detection/{start,stop,reset} (std_srvs/Trigger) + ~/state
+CHANGE_DETECTION_NS = "change_detection"
+CHANGE_DETECTION_CMDS = ("start", "stop", "reset")
+CHANGE_DETECTION_TIMEOUT_S = 10.0
+
+
 class RosUnavailable(Exception):
     """ROS is disabled or failed to start (→ 503)."""
 
@@ -249,6 +256,8 @@ class RobotPlanState:
         self.lease: dict | None = None  # from the executor's runtime guards
         self.teleop: dict | None = None  # the executor's ~/teleop_state
         self.manual_mode: dict | None = None  # phoenix ~/manual_mode {value, t}
+        # khronos RosChangeDetectionController ~/state: running / paused / reset
+        self.change_detection: dict | None = None  # {state, t}
 
     def to_dict(self) -> dict:
         return {
@@ -578,6 +587,14 @@ class RosBridge:
         string = import_type("std_msgs/msg/String")
         n = self.node
         spot = self.platform(robot) == "spot"
+        # active window change detection (khronos, every platform): latched state
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+        n.create_subscription(
+            string, f"/{robot}/{CHANGE_DETECTION_NS}/state",
+            lambda m: self._on_change_detection(robot, m),
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )  # fmt: skip
         # omniplanner compiles a Spot plan to an ActionSequenceMsg and a phoenix
         # plan to a nav_msgs/Path (relay.yaml carries each platform's type)
         if spot:
@@ -677,6 +694,54 @@ class RosBridge:
         self._plan[robot].teleop = st
         if self.hub is not None:
             self.hub.publish(f"robot/{robot}/teleop", self.teleop(robot))
+
+    def _on_change_detection(self, robot, msg) -> None:
+        self._plan[robot].change_detection = {"state": str(msg.data), "t": time.time()}
+        if self.hub is not None:
+            self.hub.publish(f"robot/{robot}/change_detection", self.change_detection(robot))
+
+    def change_detection(self, robot: str) -> dict:
+        """The robot's change detector as last reported: ``state`` running /
+        paused / reset, or None before any report (detector not running, or
+        a khronos without RosChangeDetectionController)."""
+        cd = self._plan[robot].change_detection or {}
+        return {"robot": robot, "state": cd.get("state"), "t": cd.get("t")}
+
+    def change_detection_cmd(self, robot: str, cmd: str) -> dict:
+        """``/<robot>/change_detection/<cmd>`` (std_srvs/Trigger; start / stop /
+        reset).  In fleetlink mode the bridge serves the relayed service; one
+        relay.yaml does not carry fails at once."""
+        if cmd not in CHANGE_DETECTION_CMDS:
+            raise ValueError(f"unknown change detection command {cmd}")
+        name = f"/{robot}/{CHANGE_DETECTION_NS}/{cmd}"
+        out = {"ok": False, "service": name, "cmd": cmd}
+        link = self.link_status(robot)
+        if link is not None:
+            out.update(via="fleetlink", link=self.link_summary(link))
+            if name not in (link.get("services") or {}):
+                out["error"] = "service not relayed (fleetlink relay.yaml)"
+                return out
+        try:
+            res = self.call_service(name, "std_srvs/srv/Trigger", {}, timeout=CHANGE_DETECTION_TIMEOUT_S)
+        except TimeoutError as e:
+            out["error"] = f"{e} (is change detection running on {robot}?)"
+            return out
+        out["ok"] = bool(res.get("success"))
+        out["message"] = str(res.get("message") or "")
+        if not out["ok"] and not out["message"]:
+            out["error"] = "no answer from the robot (relayed call failed or timed out)"
+        return out
+
+    def clear_change_detection(self, robots: list[str] | None = None) -> dict:
+        """Drop the robots' (all: empty) cached changes at the AWCD base station
+        (``<ns>/awcd_base_station/clear_robots``, discovered; base-local)."""
+        names = self.run(lambda: self.node.get_service_names_and_types())
+        svc = next((n for n, _ in names if n.endswith("/awcd_base_station/clear_robots")), None)
+        if svc is None:
+            return {"ok": False, "error": "no awcd_base_station clear_robots service on the base station"}
+        res = self.call_service(svc, "dcist_launch_system_msgs/srv/ClearRobots", {"robot_names": list(robots or [])},
+                                timeout=CHANGE_DETECTION_TIMEOUT_S)  # fmt: skip
+        return {"ok": bool(res.get("success")), "message": str(res.get("message") or ""), "service": svc}
 
     def _on_manual_mode(self, robot, msg) -> None:
         self._plan[robot].manual_mode = {"value": bool(msg.data), "t": time.time()}

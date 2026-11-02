@@ -4572,3 +4572,14 @@ input[type="checkbox"] {
   max-height: 160px;
   overflow: auto;
 }
+
+/* change detection (API.md §19) */
+.cd-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+.cd-gate {
+  align-items: center;
+}
