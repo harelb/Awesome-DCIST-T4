@@ -733,7 +733,7 @@ def test_chat_context_merges_both_area_scopes():
                      {"name": "courtyard", "polygon": [[0, 0], [1, 0], [1, 1]], "scope": "mission"}],
            "no_go": [{"name": "No-go 1", "polygon": [[5, 5], [6, 5], [6, 6]]}]}  # fmt: skip
     areas = llm_planner.merged_areas(ctx, regions)
-    assert [(a["name"], a["scope"], a.get("symbol")) for a in areas] == [("Courtyard", "map", "R0"), ("A1", "mission", None)]
+    assert [(a["name"], a["scope"], a.get("symbol")) for a in areas] == [("Courtyard", "map", "R0"), ("A1", "mission", "area1")]
     text = llm_planner.context_text(ctx, None, regions)
     assert "Named areas" in text and '"scope":"map"' in text and '"name":"A1"' in text and "No-go zones" in text
     assert "Never substitute silently" in text and "assumptions" in text

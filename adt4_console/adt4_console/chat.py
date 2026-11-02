@@ -573,8 +573,10 @@ class ChatService:
         "{predicate: 'forbidden-poi', symbols: ['o14']} or {predicate: 'forbidden-edge', "
         "symbols: ['p1', 'p2']}. engine='grstaps' (GRSTAPS-X, when the robots run it) also takes "
         "{predicate: 'before', symbols: ['o4', 'o8']} (o4 done before o8), joint inspections "
-        "(safe o4) and relocation (object-in-place o4 t598), and returns a timed schedule; it does "
-        "not take or / at-* / holding. kind='goto' / 'tsp' visit node symbols (points) in order / in "
+        "(safe o4), relocation (object-in-place o4 t598) and map regions -- (visited-region r3) is one "
+        "visit in r3's core, (explored-region r3) covers r3 at waypoints about 8 m apart, with -by "
+        "forms -- and returns a timed schedule; it does not take or / at-* / holding, nor a drawn "
+        "mission area (area1: those are planned in the mission planner). kind='goto' / 'tsp' visit node symbols (points) in order / in "
         "the best order. kind='language' passes a command to the robot's language planner.",
         "input_schema": {
             "type": "object",

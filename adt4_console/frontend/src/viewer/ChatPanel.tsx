@@ -12,7 +12,7 @@ import {goalSendMessage, type SendTone} from "./PlanRepair";
 import {LeaseRefusalNotice} from "./LeaseControl";
 import {chatAbort, clearChat, storable, useChat} from "../stores/chat";
 import {closeMission, fitMission, missionContext, openMission, saveCurrent, simCmd, useMission} from "../stores/mission";
-import {clearPreview, previewPddl, PreviewError, usePlanPreview, type PddlPreview} from "../stores/planPreview";
+import {clearPreview, previewPddl, PreviewError, previewRobots, usePlanPreview, type PddlPreview} from "../stores/planPreview";
 import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule} from "./PlannerSchedule";
 import {EnginePicker} from "./EnginePicker";
@@ -21,7 +21,6 @@ import {agentColors} from "./MissionOverlay";
 import {useRobotColor3D} from "./background";
 import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
 import type {FastDownwardInfo} from "../lib/fastDownward";
-import {useRobots} from "../stores/robots";
 import {decideMapEdit, MapEditCard, mapEditNote, statusOf, toMapEditItem, type MapEditItem} from "./MapEditCard";
 import {refreshEdit} from "../stores/mapEdit";
 import {candidateNote, candidateOrdinals, cellText, cypherErrorShort, fmtLeft, lookupSummary, mergeTargetsAfterCommit, scrollAnchor, toolGroups, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
@@ -914,16 +913,6 @@ function ImagesCard({it}: {it: ImagesItem}) {
   );
 }
 
-/** The robots a goal preview plans for: the connected ones (their live poses) and
- *  the goal's robot; with none connected, the mission planner's ground agents. */
-function previewRobots(robot: string | null): {name: string; start?: number[] | null}[] {
-  const live = Object.keys(useRobots.getState().state);
-  if (live.length > 0) return [...new Set([...live, ...(robot ? [robot] : [])])].map(name => ({name}));
-  return useMission
-    .getState()
-    .roster.filter(a => a.kind !== "quad" && (a.start || a.binding))
-    .map(a => ({name: a.id, start: a.start ?? null}));
-}
 
 function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"}>; robot: string | null; src: string | null; onSend: () => void}) {
   const b = it.body as {goal?: string; points?: string[]; command?: string; engine?: string; constraints?: {predicate: string; symbols: string[]}[]};

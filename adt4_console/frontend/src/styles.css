@@ -4218,9 +4218,24 @@ input[type="checkbox"] {
 }
 .area-list li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+/* a search area's GRSTAPS-X Visit / Explore preview: its own line under the row */
+.area-list .area-goal {
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 16px;
+}
+.area-list .area-goal > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .area-list .swatch {
   width: 10px;

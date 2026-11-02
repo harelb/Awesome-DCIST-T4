@@ -1120,10 +1120,27 @@ mission tab's planner choice, the robot-chat goal card and the mission chat use 
   `$ADT4_OUTPUT_DIR/grstaps`); a solve is stopped after `ADT4_GRSTAPS_TIMEOUT_S` (60 s).
 * **Goals**: `visited-object` / `visited-place`, the `-by` forms, `safe` / `(not (suspicious o))`
   (one robot looks), `inspected-by` (that robot does; several `inspected-by` on one object = a **joint** inspection), huskies left out,
-  `(object-in-place o p)` (relocation: pick, carry, place; every Spot counts as armed). No `or`,
-  `at-*`, `holding`, region predicates or other negation. Constraints add `before`
-  (`["before", "o4", "o8"]`: everything at o4 finishes before anything at o8 starts);
+  `(object-in-place o p)` (relocation: pick, carry, place; every Spot counts as armed),
+  `visited-region` / `explored-region` and their `-by` forms. No `or`, `at-*`, `holding` or
+  other negation. Constraints add `before` (`["before", "o4", "o8"]`: everything at o4
+  finishes before anything at o8 starts; a region in `before` stands for all its tasks);
   Fast Downward refuses `before`.
+* **Regions**: an ITAGS task is one graph vertex, so omniplanner expands a region goal into
+  place visits (`expand_regions`): `visited-region` = one visit at the place of the region's
+  core (the inner half, as Fast Downward) nearest the robots that may take it;
+  `explored-region` = visits at coverage waypoints no two closer than
+  `OMNIPLANNER_GRSTAPS_EXPLORE_SPACING_M` (8 m), at most `OMNIPLANNER_GRSTAPS_EXPLORE_MAX`
+  (15; the spacing grows to fit), split between robots by the allocator. Only places a robot
+  can reach count. **Drawn mission areas**: the operator's mission-only areas are regions too,
+  named `area1`, `area2`, ... in the mission's order (the mission chat's Named areas list shows
+  the symbols): `areas: [{name, polygon}]` goes with `POST /plan/omniplanner` and
+  `/plan/preview_pddl`, and a mission keeps the ones its goal names in `goal.areas` (a replan
+  plans the same polygons). Fast Downward refuses an `area*` symbol, and so does sending a goal
+  to the robots (`POST /robots/{robot}/goal/pddl`, 400): they plan Room nodes, not the
+  console's polygons. A region goal's step is a `goto` with `params.region`; schedule rows add
+  `region` and `label` (`visit r6`, `explore r6 · 3/9`); `planned.regions` / the preview's
+  `regions` = `{region: {kind, places, total, spacing_m}}` (the waypoints still to do), and
+  `planner_log.digest` says how many waypoints at what spacing.
 * **Mission**: visit → `goto`; joint inspection → a `goto` and an `inspect` per member, each
   `inspect` depending on every member's `goto` (they look together); relocation → `pick` (the
   object) + `place` (`target` = destination, `params.object`); the solver's precedence →

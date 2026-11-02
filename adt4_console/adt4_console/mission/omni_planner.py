@@ -24,6 +24,7 @@ Fast Downward one is also kept under its old name ``fast_downward``.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import time
 
@@ -134,6 +135,39 @@ def pddl_name(agent_id: str) -> str:
     return agent_id.lower()
 
 
+# Operator-drawn mission areas are named area1, area2, ... in the order the
+# mission lists them (merged_areas shows the model the same symbols). Only
+# GRSTAPS-X plans them: it takes a polygon as a region; Fast Downward's regions
+# are the map's Room nodes.
+AREA_SYMBOL = re.compile(r"\barea\d+\b", re.IGNORECASE)
+
+
+def area_symbols(areas) -> dict[str, dict]:
+    """{area1: {name, polygon}, ...} for drawn areas ([{name, polygon}] or, as a
+    mission keeps them, [{symbol, name, polygon}])."""
+    out, n = {}, 0
+    for a in areas or []:
+        if not isinstance(a, dict) or len(a.get("polygon") or []) < 3:
+            continue
+        n += 1
+        sym = str(a.get("symbol") or f"area{n}").lower()
+        out[sym] = {"name": str(a.get("name") or sym),
+                    "polygon": [[float(x), float(y)] for x, y in a["polygon"]]}  # fmt: skip
+    return out
+
+
+def goal_areas(goal: str, areas) -> dict[str, dict]:
+    """The drawn areas ``goal`` names: {symbol: {name, polygon}}; ValueError for an
+    area symbol no drawn area has."""
+    known = area_symbols(areas)
+    named = sorted({m.lower() for m in AREA_SYMBOL.findall(goal or "")})
+    missing = [s for s in named if s not in known]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} is not a drawn mission area"
+                         + (f" (drawn: {', '.join(known)})" if known else " (none are drawn)"))  # fmt: skip
+    return {s: known[s] for s in named}
+
+
 def _geofence_constraints(G, geofences, ConstraintFact):
     """forbidden-poi for every mesh place inside a no-go polygon."""
     import spark_dsg
@@ -165,14 +199,15 @@ def _height_lookup(G):
         return lambda x, y: float(pos[np.argmin(np.hypot(pos[:, 0] - x, pos[:, 1] - y)), 2])
 
 
-def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None) -> dict:
+def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None, areas=None) -> dict:
     from dsg_pddl.pddl_grounding import ConstraintFact
 
     from . import grstaps_engine
 
     facts = _constraint_facts(constraints, ConstraintFact) + _geofence_constraints(G, geofences, ConstraintFact)
     try:
-        out = grstaps_engine.solve(goal, starts, G, facts, _height_lookup(G), robot_types=kinds)
+        out = grstaps_engine.solve(goal, starts, G, facts, _height_lookup(G), robot_types=kinds,
+                                   region_polygons={s: a["polygon"] for s, a in (areas or {}).items()})  # fmt: skip
     except grstaps_engine.GrstapsFailed as e:
         raise PlanningFailed(str(e), planner_log=e.planner_log, engine="grstaps") from None
     huskies = sorted(r for r, k in (kinds or {}).items() if k == "husky")
@@ -182,16 +217,22 @@ def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None) -> dict:
 
 
 def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: str = DEFAULT_ENGINE,
-          kinds: dict | None = None) -> dict:
+          kinds: dict | None = None, areas=None) -> dict:
     """Plan ``goal`` for robots at ``starts`` ({pddl robot name: [x, y]}).
 
     Returns {actions: [(robot, action tuple, path [[x, y, z], ...])], routes:
     {robot: [[x, y, z], ...]}, driven_m: {robot: m}, ground_s, solve_s, pois};
-    GRSTAPS-X adds ``steps`` (tasks with dependencies) and ``schedule``.
+    GRSTAPS-X adds ``steps`` (tasks with dependencies), ``schedule`` and
+    ``regions``. ``areas``: the operator's drawn mission areas (see
+    :func:`area_symbols`), which a GRSTAPS-X goal may name as regions.
     Raises ValueError for a goal that cannot be planned (the reason in words).
     """
+    named = goal_areas(goal, areas)
     if check_engine(engine) == "grstaps":
-        return _solve_grstaps(goal, starts, G, constraints, geofences, kinds)
+        return _solve_grstaps(goal, starts, G, constraints, geofences, kinds, named)
+    if named:
+        raise ValueError(f"drawn mission areas ({', '.join(named)}) are planned by GRSTAPS-X only: "
+                         "switch the planner, or name a map region (r...)")  # fmt: skip
     om = _modules()
     if any(c["predicate"] == "before" for c in constraints or []):
         raise ValueError("Fast Downward cannot order targets (before): plan it with GRSTAPS-X")
@@ -256,8 +297,10 @@ def _grstaps_tasks(steps, back) -> list[Task]:
 
 def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constraints=None,
               geofences=None, text: str = "", name: str = "",
-              engine: str = DEFAULT_ENGINE) -> tuple[Mission, dict]:  # fmt: skip
-    """A mission for the ground agents that achieves ``goal`` (see :func:`solve`)."""
+              engine: str = DEFAULT_ENGINE, areas=None) -> tuple[Mission, dict]:  # fmt: skip
+    """A mission for the ground agents that achieves ``goal`` (see :func:`solve`).
+    The drawn ``areas`` the goal names are kept with it (``goal.areas``), so a
+    replan plans the same polygons."""
     from .planning import start_of
 
     engine = check_engine(engine)
@@ -265,6 +308,9 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
     m0 = Mission(text=text or goal, name=name, src=src, agents=agents, planner="omniplanner",
                  geofences=geofences or [],
                  goal={"pddl": goal, "constraints": list(constraints or []), "engine": engine})  # fmt: skip
+    named = goal_areas(goal, areas)
+    if named:
+        m0.goal["areas"] = [{"symbol": s, **a} for s, a in named.items()]
     ground = [a for a in m0.agents if a.is_ground]
     if not ground:
         raise ValueError("omniplanner plans ground robots (spot, husky) only")
@@ -280,7 +326,7 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
         starts[pddl_name(a.id)] = s[:2]
         back[pddl_name(a.id)] = a.id
     kinds = {pddl_name(a.id): a.kind for a in ground}
-    out = solve(goal, starts, G, constraints, m0.geofences, engine=engine, kinds=kinds)
+    out = solve(goal, starts, G, constraints, m0.geofences, engine=engine, kinds=kinds, areas=m0.goal.get("areas"))
     if engine == "grstaps":
         m0.tasks = _grstaps_tasks(out["steps"], back)
         if not m0.tasks:
@@ -290,7 +336,8 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
         info = {"driven_m": {back.get(r, r): round(v, 1) for r, v in out["driven_m"].items()},
                 "planning_s": round(out["solve_s"], 2), "points_of_interest": out["pois"], "engine": engine,
                 "makespan_s": sched["makespan"], "planner_log": out["planner_log"], "fast_downward": None,
-                "left_out": [back.get(r, r) for r in out.get("left_out", [])]}  # fmt: skip
+                "left_out": [back.get(r, r) for r in out.get("left_out", [])],
+                "regions": out.get("regions") or {}}  # fmt: skip
         return Mission.model_validate(m0.model_dump()), info
     unsupported = sorted({act[0] for _, act, _ in out["actions"] if act[0] not in SUPPORTED})
     if unsupported:
@@ -357,7 +404,7 @@ def _goals_by_robot(out: dict, G) -> dict[str, list[str]]:
 
 
 def preview(goal: str, robots: list[dict], src: str | None, service, constraints=None,
-            engine: str = DEFAULT_ENGINE) -> dict:
+            engine: str = DEFAULT_ENGINE, areas=None) -> dict:
     """What omniplanner would do with ``goal`` for these robots, without a mission:
     {routes, driven_m, actions, robots, ground_s, solve_s, pois}. ``robots``:
     [{name, start?}] (no start: the robot's live pose)."""
@@ -377,7 +424,7 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
     if not starts:
         raise ValueError("no robot has a pose: connect the robots, or add agents with starts in the mission planner")
     kinds = {pddl_name(a.id): a.kind for a in m0.agents}
-    out = solve(goal, starts, world.graph.G, constraints, engine=engine, kinds=kinds)
+    out = solve(goal, starts, world.graph.G, constraints, engine=engine, kinds=kinds, areas=areas)
     return {
         "goals": _goals_by_robot(out, world.graph.G),
         "engine": check_engine(engine),
@@ -391,4 +438,5 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
         "solve_s": round(out["solve_s"], 3),
         "pois": out["pois"],
         "fast_downward": out.get("fast_downward"),
+        "regions": out.get("regions") or {},
     }

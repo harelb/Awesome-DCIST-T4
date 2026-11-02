@@ -14,6 +14,9 @@ import {useViewer} from "../stores/viewer";
 import {useMedia} from "../lib/media";
 import {ws} from "../ws";
 import {regionColor} from "./EditOverlay";
+import {errorText} from "../lib/api";
+import {clearPreview, previewPddl, previewRobots, usePlanPreview} from "../stores/planPreview";
+import {refreshEngines, useEngines} from "../stores/engines";
 
 export const AREA_BLUE = "#4ea8ff";
 export const NOGO_RED = "#ff4040";
@@ -37,6 +40,73 @@ export function areaRows(areas: {name: string}[], fences: {id: string}[], region
     ...areas.filter(a => !mapNames.has(a.name.trim().toLowerCase())).map((a): AreaRow => ({key: `mission:${a.name}`, name: a.name, purpose: "search", scope: "mission", color: AREA_BLUE})),
     ...fences.map((f): AreaRow => ({key: `nogo:${f.id}`, name: f.id, purpose: "no_go", scope: "mission", color: NOGO_RED})),
   ];
+}
+
+/** A search area's symbol in a GRSTAPS-X goal: a Room's PDDL symbol (R(6) / R6 -> r6),
+ *  or a drawn mission area's area1, area2, ... (its place in the mission's list,
+ *  as the server numbers them, API.md §15.5.1). */
+export function regionGoalSymbol(row: AreaRow, areas: {name: string; polygon: number[][]}[]): string | null {
+  if (row.purpose !== "search") return null;
+  if (row.region) return row.region.symbol.replace(/[()]/g, "").toLowerCase();
+  const drawn = areas.filter(a => a.polygon.length >= 3);
+  const i = drawn.findIndex(a => a.name === row.name);
+  return i < 0 ? null : `area${i + 1}`;
+}
+
+/** "Visit" / "Explore" a search area with GRSTAPS-X: the plan is previewed on the
+ *  map (routes + coverage waypoints) with its makespan; nothing is sent. */
+function RegionGoalButtons({row, src}: {row: AreaRow; src: string | null}) {
+  const areas = useMission(s => s.areas);
+  const grstaps = useEngines(s => s.engines.find(e => e.id === "grstaps"));
+  const loaded = useEngines(s => s.loaded);
+  const shownGoal = usePlanPreview(s => s.goal);
+  const [out, setOut] = useState<{goal: string; busy?: boolean; text?: string; err?: string} | null>(null);
+  useEffect(() => {
+    if (!loaded) void refreshEngines();
+  }, [loaded]);
+  const sym = regionGoalSymbol(row, areas);
+  if (!sym || !grstaps?.available) return null;
+  const run = async (kind: "visited" | "explored") => {
+    const goal = `(${kind}-region ${sym})`;
+    if (shownGoal === goal) {
+      clearPreview();
+      return setOut(null);
+    }
+    const robots = previewRobots(null);
+    if (robots.length === 0) return setOut({goal, err: "no robot poses: connect the robots, or add agents with starts"});
+    setOut({goal, busy: true});
+    try {
+      const p = await previewPddl(goal, robots, src, undefined, "grstaps");
+      const r = p.regions?.[sym];
+      const what = r?.kind === "explore" ? `${r.places.length} waypoint(s)${r.spacing_m ? ` ${r.spacing_m} m apart` : ""}` : (r?.places[0] ?? "");
+      const span = p.schedule?.makespan;
+      setOut({goal, text: `${what}${span != null ? ` · makespan ${span >= 90 ? `${(span / 60).toFixed(1)} min` : `${span.toFixed(0)} s`}` : ""}`});
+    } catch (e) {
+      setOut({goal, err: errorText(e)});
+    }
+  };
+  const on = (kind: string) => shownGoal === `(${kind}-region ${sym})`;
+  return (
+    <div className="area-goal">
+      <span className="muted">GRSTAPS-X</span>
+      <button className={`btn btn-xs ${on("visited") ? "on" : ""}`} onClick={() => void run("visited")} title={`Preview GRSTAPS-X visiting ${row.name} (${sym}): one robot goes into its core`}>
+        Visit
+      </button>
+      <button className={`btn btn-xs ${on("explored") ? "on" : ""}`} onClick={() => void run("explored")} title={`Preview GRSTAPS-X exploring ${row.name} (${sym}): coverage waypoints split between the robots`}>
+        Explore
+      </button>
+      {out && shownGoal === out.goal && (out.text || out.busy) && (
+        <span className="muted" data-testid="region-goal-result">
+          {out.busy ? "planning…" : out.text}
+        </span>
+      )}
+      {out?.err && (
+        <span className="err" data-testid="region-goal-error" title={out.err}>
+          {out.err.length > 80 ? `${out.err.slice(0, 80)}…` : out.err}
+        </span>
+      )}
+    </div>
+  );
 }
 
 /** The map's areas: loaded with the map's edit state and kept current. */
@@ -119,6 +189,7 @@ export function AreasSection() {
               >
                 Remove
               </button>
+              <RegionGoalButtons row={r} src={neo4j} />
             </li>
           ))}
         </ul>

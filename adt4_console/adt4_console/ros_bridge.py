@@ -940,6 +940,12 @@ class RosBridge:
         forwards there, else straight to the Grstaps plugin (constraints go
         with the goal either way); None / "fast_downward" as before.
         """
+        from .mission.omni_planner import AREA_SYMBOL
+
+        if AREA_SYMBOL.search(goal or ""):
+            # a drawn area is a polygon only the console has; the robots plan Room nodes
+            raise ValueError("a drawn mission area (area1, ...) cannot be sent to the robots: plan it in the "
+                             "mission planner (GRSTAPS-X), or name a map region (r...)")  # fmt: skip
         if engine == "grstaps":
             return self._send_grstaps(robot, goal, constraints, route)
         if any(f["predicate"] == "before" for f in normalize_constraints(constraints)):

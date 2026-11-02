@@ -281,3 +281,114 @@ def test_mission_preview_has_goal_end_points(svc):
     assert set(goals) == {"spot1", "spot2"}
     for g in goals.values():
         assert g[0]["sym"] == "O(0)" and len(g[0]["xy"]) == 2
+
+
+# ------------------------------------------------------------- regions
+
+
+@pytest.fixture
+def rooms(svc):
+    """Two Room nodes on the grid: r0 = the far side of the wall (x >= 12, where
+    O(0) is), r1 = the near side (x <= 8). Added to the loaded graph in memory."""
+    import numpy as np
+    import spark_dsg as dsg
+
+    _, service = svc
+    G = _G(service)
+    for r, (cx, keep) in enumerate([(16.0, lambda x: x >= 12), (4.0, lambda x: x <= 8)]):
+        a = dsg.RoomNodeAttributes()
+        a.position = np.array([cx, 5.0, 0.0])
+        G.add_node(dsg.DsgLayers.ROOMS, dsg.NodeSymbol("R", r).value, a)
+        for node in G.get_layer(dsg.DsgLayers.MESH_PLACES).nodes:
+            x, y = node.attributes.position[:2]
+            if keep(x) and y <= 10:
+                G.insert_edge(dsg.NodeSymbol("R", r).value, node.id.value)
+    return svc
+
+
+def _xy(G, target):
+    import spark_dsg as dsg
+
+    for node in G.get_layer(dsg.DsgLayers.MESH_PLACES).nodes:
+        if str(node.id) == target or node.id.str(True) == target:
+            return tuple(float(v) for v in node.attributes.position[:2])
+    raise KeyError(target)
+
+
+def test_a_region_visit_is_one_goto_into_its_core(rooms):
+    _, service = rooms
+    G = _G(service)
+    m, planned = omni.plan_pddl("(visited-region r0)", [SPOT1, SPOT2], None, service, engine="grstaps")
+    (t,) = m.tasks
+    assert t.type == "goto" and t.params["region"] == "r0" and "visit r0" in t.note
+    x, y = _xy(G, t.target)
+    assert x >= 12 and abs(x - 16) <= 3 and abs(y - 5) <= 3  # in the core, not a stray edge
+    assert t.agent == "spot2"  # the robot on that side
+    (row,) = m.goal["schedule"]["rows"]
+    assert row["region"] == "r0" and row["label"] == "visit r0"
+    assert planned["regions"]["r0"]["kind"] == "visit"
+
+
+def test_an_explore_spreads_waypoints_and_orders_with_before(rooms, monkeypatch):
+    monkeypatch.setenv("OMNIPLANNER_GRSTAPS_EXPLORE_SPACING_M", "4")
+    _, service = rooms
+    G = _G(service)
+    m, planned = omni.plan_pddl("(and (explored-region-by spot1 r1) (visited-object o0))", [SPOT1, SPOT2], None,
+                                service, constraints=[{"predicate": "before", "symbols": ["r1", "o0"]}],
+                                engine="grstaps")  # fmt: skip
+    explore = [t for t in m.tasks if (t.params or {}).get("region") == "r1"]
+    assert len(explore) >= 4 and {t.agent for t in explore} == {"spot1"}
+    assert all(_xy(G, t.target)[0] <= 8 for t in explore)
+    o0 = next(t for t in m.tasks if t.target == "O(0)")
+    assert {t.id for t in explore} <= set(o0.depends_on)  # all of r1 before o0
+    labels = sorted(r["label"] for r in m.goal["schedule"]["rows"] if r.get("region"))
+    assert labels[0].startswith("explore r1 · 1/")
+    r = planned["regions"]["r1"]
+    assert r["kind"] == "explore" and r["spacing_m"] >= 4 and len(r["places"]) == len(explore)
+    assert "waypoint(s)" in planned["planner_log"]["digest"]
+
+
+DRAWN = [{"name": "Loading bay", "polygon": [[13, 0], [20, 0], [20, 6], [13, 6]]}]
+
+
+def test_a_drawn_area_is_a_region_for_grstaps_only(rooms):
+    client, service = rooms
+    G = _G(service)
+    m, _ = omni.plan_pddl("(visited-region area1)", [SPOT1, SPOT2], None, service, engine="grstaps", areas=DRAWN)
+    (t,) = m.tasks
+    x, y = _xy(G, t.target)
+    assert 13 <= x <= 20 and 0 <= y <= 6
+    assert m.goal["areas"] == [{"symbol": "area1", "name": "Loading bay",
+                                "polygon": [[13.0, 0.0], [20.0, 0.0], [20.0, 6.0], [13.0, 6.0]]}]  # fmt: skip
+    # a replan plans the same polygon (the areas are kept with the goal)
+    mid = service.put(m)["mission"]["id"]
+    r = client.post(f"/api/missions/{mid}/replan", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["mission"]["goal"]["areas"][0]["symbol"] == "area1"
+    with pytest.raises(ValueError, match="GRSTAPS-X only"):
+        omni.plan_pddl("(visited-region area1)", [SPOT1, SPOT2], None, service, areas=DRAWN)
+    with pytest.raises(ValueError, match="area2 is not a drawn mission area"):
+        omni.plan_pddl("(visited-region area2)", [SPOT1], None, service, engine="grstaps", areas=DRAWN)
+    # the preview takes the areas too
+    r = client.post("/api/missions/plan/preview_pddl",
+                    json={"pddl_goal": "(explored-region area1)", "engine": "grstaps", "areas": DRAWN,
+                          "robots": [{"name": "spot1", "start": [0, 0]}, {"name": "spot2", "start": [20, 10]}]})  # fmt: skip
+    assert r.status_code == 200, r.text
+    assert r.json()["regions"]["area1"]["kind"] == "explore"
+
+
+def test_a_drawn_area_is_not_sent_to_the_robots():
+    from adt4_console.ros_bridge import RosBridge
+
+    with pytest.raises(ValueError, match="drawn mission area"):
+        RosBridge.send_pddl_goal(NS(), "spot1", "(explored-region area1)", engine="grstaps")
+
+
+def test_prompts_offer_regions_to_grstaps():
+    from adt4_console.mission import llm_planner
+
+    text = llm_planner.context_text({"omniplanner": True, "grstaps": True, "engine": "grstaps",
+                                     "areas": DRAWN})  # fmt: skip
+    assert "cannot visit or explore regions" not in text and "(explored-region area1)" in text
+    assert "husky / regions" not in text
+    assert '"symbol":"area1"' in text

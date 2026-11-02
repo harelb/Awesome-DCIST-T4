@@ -414,9 +414,20 @@ function PreviewOverlay({bounds}: {bounds: {min: number[]; max: number[]} | null
       ),
     [routes, roster, live, robotColor],
   );
+  // GRSTAPS-X region goals: where each visit goes (an explore's coverage waypoints)
+  const waypoints = useMemo(
+    () => Object.values(preview?.regions ?? {}).flatMap(r => r.points.map(p => [p[0], p[1], z] as [number, number, number])),
+    [preview, z],
+  );
   if (!preview) return null;
   return (
     <>
+      {waypoints.map((p, i) => (
+        <mesh key={`wp${i}`} position={p} rotation={[0, 0, Math.PI / 4]} renderOrder={PREVIEW_ORDER + 2} data-testid="region-waypoint">
+          <ringGeometry args={[1.1, 1.9, 4]} />
+          <meshBasicMaterial color="#ffb020" depthTest={false} transparent opacity={0.95} side={THREE.DoubleSide} />
+        </mesh>
+      ))}
       {routes.map(([r, pts]) => {
         const color = colors[r];
         return (

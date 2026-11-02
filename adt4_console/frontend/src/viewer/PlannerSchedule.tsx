@@ -10,6 +10,9 @@ export interface ScheduleRow {
   start: number;
   finish: number;
   coalition?: string[];
+  /** a region goal's visit (API.md §15.5.1): its region and "explore r6 · 3/9" */
+  region?: string;
+  label?: string;
 }
 export interface PlannerScheduleData {
   makespan: number;
@@ -71,9 +74,9 @@ export function PlannerSchedule({
                       className={`tl-bar tl-planned${joint ? " tl-joint" : ""}`}
                       data-testid="schedule-bar"
                       style={{left: pct(r.start), width: `max(4px, ${pct(Math.max(0, r.finish - r.start))})`, background: colors?.[robot]}}
-                      title={`${r.action} ${r.target} · ${fmt(r.start)}–${fmt(r.finish)}${joint ? ` · together with ${r.coalition!.filter(c => c !== robot).join(", ")}` : ""}`}
+                      title={`${r.label ? `${r.label} at ${r.target}` : `${r.action} ${r.target}`} · ${fmt(r.start)}–${fmt(r.finish)}${joint ? ` · together with ${r.coalition!.filter(c => c !== robot).join(", ")}` : ""}`}
                     >
-                      {ACTION_ICON[r.action] ?? "•"}
+                      {r.label?.startsWith("explore") ? "⬚" : (ACTION_ICON[r.action] ?? "•")}
                       {joint ? "⛓" : ""}
                     </div>
                   );
