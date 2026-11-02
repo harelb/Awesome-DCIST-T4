@@ -96,18 +96,6 @@ def test_pane_scripts_parse_in_zsh(path):
         ("base_station_web-default", "console", "console", 0),
         ("base_station_web_repair-default", "console_neo4j", "console", 0),
         ("base_station_web_repair-default", "sam3_query", "sam3_query", 0),
-        (
-            "spot_no_relocalize-relocalize",
-            "transform_publishers",
-            "transform_publishers",
-            0,
-        ),
-        (
-            "spot_no_relocalize-relocalize",
-            "transform_publishers",
-            "transform_publishers",
-            1,
-        ),
         ("spot-default", "fleetlink", "fleetlink", 0),
     ],
 )
@@ -280,8 +268,7 @@ def test_web_repair_session_windows():
     assert "--neo4j" not in plain_console["panes"][0]["shell"]
 
 
-RVIZ_ONLY = ("launch_rviz:=true", "launch_hydra_visualizer:=true",
-             "launch_mesh_publisher:=true", "launch_awcd_visualizer:=true")  # fmt: skip
+RVIZ_ONLY = ("launch_rviz:=true", "launch_hydra_visualizer:=true", "launch_mesh_publisher:=true")
 
 
 @pytest.mark.parametrize("name", ["base_station_web-default", "base_station_web_repair-default"])

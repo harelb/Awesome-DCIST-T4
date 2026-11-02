@@ -1,6 +1,5 @@
 nodes_to_monitor:
   tf_network: {}
-  dsg_saver: {}
   hydra:
     external_monitor:
       type: JsonMonitor
@@ -30,7 +29,7 @@ environment:
   ADT4_TF_NETWORK_MODE: $ADT4_TF_NETWORK_MODE
   ADT4_FLEET_LINK: $ADT4_FLEET_LINK
   ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
-  ADT4_MONITOR_CONFIG: '{nodes_to_track: {depth_correction: {}, dsg_saver: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, semantic_inference: {external_monitor: {type: JsonMonitor}}, tf_network: {}}}'
+  ADT4_MONITOR_CONFIG: '{nodes_to_track: {depth_correction: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, semantic_inference: {external_monitor: {type: JsonMonitor}}, tf_network: {}}}'
   ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
   config: indoor
   logging_key: spot_bag-indoor
@@ -55,9 +54,8 @@ windows:
   layout: tiled
   panes:
   - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_instance_segmentation:=true; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_instance_segmentation:=true'"'"' exec zsh'
-  - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true labelspace_name:=instance_seg; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true labelspace_name:=instance_seg'"'"' exec zsh'
+  - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true'"'"' exec zsh'
   - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra_visualizer:=true; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra_visualizer:=true'"'"' exec zsh'
-  - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_saver:=true; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_dsg_saver:=true'"'"' exec zsh'
   - shell: zsh -ic 'source ${ADT4_WS}/install/setup.zsh && ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_static_map_to_robot_map:=true; z="${ADT4_WS}/src/awesome_dcist_t4/dcist_launch_system/config_generation/pane_shell"; [[ -r $z/.zshrc ]] && export _ADT4_ZDOTDIR="${ZDOTDIR-}" ZDOTDIR=$z; ADT4_PANE_CMD='"'"'ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_static_map_to_robot_map:=true'"'"' exec zsh'
 - window_name: roman
   layout: tiled
