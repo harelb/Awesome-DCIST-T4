@@ -1,9 +1,10 @@
 """C6 live image-store mirror: robot store -> fleetlink -> base store (API.md §13).
 
-Exercises the real hydra_image_store writer/codec (skipped without it): resume
-across agent and console restarts with nothing lost or duplicated, gap repair on
-a lossy link, store rotation (new Hydra session), and that the mirrored store
-loads with agentic_navigation's SAM3 keyframe loader.
+Exercises the real hydra_image_store writer and the fleetlink.image_transfer
+codec (skipped without hydra_image_store): resume across agent and console
+restarts with nothing lost or duplicated, gap repair on a lossy link, store
+rotation (new Hydra session), and that the mirrored store loads with
+agentic_navigation's SAM3 keyframe loader.
 """
 
 import os
@@ -13,7 +14,8 @@ import sys
 import numpy as np
 import pytest
 
-transfer = pytest.importorskip("hydra_image_store.transfer")
+pytest.importorskip("hydra_image_store")
+pytest.importorskip("zstandard")
 cv2 = pytest.importorskip("cv2")
 from hydra_image_store import FrameKind, ImageStore  # noqa: E402
 

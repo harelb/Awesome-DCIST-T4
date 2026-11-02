@@ -134,7 +134,7 @@ graph; the image-store mirror only uses what is left.
 
 `store_mirror.py`. The agent tails the robot's hydra image store read-only (`store_path`, default
 `$ADT4_OUTPUT_DIR/image_store`) and, **only while sending is on**, sends each new frame (`store_frames`: `keyframes` | `all`)
-encoded with `hydra_image_store.transfer.encode_frame` (`store_compression`: `none` | `lossless` |
+encoded with `fleetlink.image_transfer.encode_frame` (`store_compression`: `none` | `lossless` |
 `fast`) within the C6 budget. The console's receiver writes them into
 `<live_store_root>/<robot>/<store_id>/image_store` (default `~/adt4_output/live/...`), a valid store
 SAM3 can search. The base tells the agent its watermark (C0 `store {id, after}`) on first contact,
