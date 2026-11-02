@@ -35,6 +35,10 @@ full-resolution calibration unchanged.
 Optional dependencies: ``zstandard`` (``lossless`` / ``fast``) and ``opencv-python``
 (``cv2``) or Pillow for JPEG re-encoding and PNG decoding. Missing ones raise
 :class:`MissingDependency` naming the package.
+
+Frames arrive from another machine, so :func:`decoded_paths` treats the header as
+untrusted: ids and timestamps must be integers and every path must stay inside the
+destination store (:class:`UnsafeFrame` otherwise).
 """
 
 from __future__ import annotations
@@ -48,8 +52,18 @@ from collections.abc import Iterable
 
 import numpy as np
 
-from hydra_image_store.codec import transform_to_blob
+from hydra_image_store.codec import SEQ_MASK, transform_to_blob
 from hydra_image_store.store import _FRAME_COLS, Frame, ImageStore, ImageStoreWriter
+
+try:
+    from hydra_image_store.store import frame_stem
+except ImportError:  # hydra_image_store before frame_stem()
+
+    def frame_stem(timestamp_ns: int, sensor_id: int) -> str:
+        """Hydra's C++ image file stem: ``<ts>``, or ``<ts>_s<seq>`` for sensor seq > 0."""
+        seq = int(sensor_id) & SEQ_MASK
+        return f"{int(timestamp_ns)}_s{seq}" if seq else str(int(timestamp_ns))
+
 
 MAGIC = b"HISF"
 VERSION = 1
@@ -62,6 +76,10 @@ _HEADER = struct.Struct("<4sBI")
 
 class MissingDependency(ImportError):
     pass
+
+
+class UnsafeFrame(ValueError):
+    """An encoded frame whose header would write outside the destination store."""
 
 
 # --- optional dependencies -------------------------------------------------------------
@@ -456,23 +474,47 @@ _RGB_EXT = {"jpeg": ".jpg", "png": ".png"}
 
 
 def _safe_rel(rel: str | None) -> str | None:
-    if not rel:
+    if not rel or not isinstance(rel, str) or "\\" in rel or "\0" in rel:
         return None
     p = pathlib.PurePosixPath(rel)
-    if p.is_absolute() or ".." in p.parts:
+    if p.is_absolute() or ".." in p.parts or p.name in ("", ".", ".."):
         return None
     return str(p)
+
+
+def _int_field(meta: dict, key: str) -> int:
+    """``meta[key]`` as an int; rejects strings, floats and bools (untrusted header)."""
+    value = meta.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UnsafeFrame(f"frame header {key} must be an integer, got {value!r}")
+    return value
+
+
+def _inside(root: pathlib.Path, rel: str) -> pathlib.Path:
+    """``root / rel``, provided it resolves inside ``root`` (no ``..``, absolute paths
+    or symlinked directories leading out)."""
+    base = os.path.realpath(root)
+    dst = os.path.realpath(os.path.join(base, rel))
+    if os.path.commonpath([base, dst]) != base or dst == base:
+        raise UnsafeFrame(f"frame path {rel!r} leaves the store {root}")
+    return pathlib.Path(dst)
 
 
 def decoded_paths(decoded: dict) -> tuple[str | None, str | None]:
     """Store-relative paths the decoded images are written to.
 
     The source paths are kept when they are safe relative paths (same layout as the
-    source store), else ``frames/r<robot>/<ts>_{rgb,depth}<ext>``. The RGB extension
-    follows the transmitted format; depth is always written as a 16-bit PNG.
+    source store), else ``frames/r<robot>/<stem>_{rgb,depth}<ext>`` with the C++
+    writer's stem (``<ts>``, or ``<ts>_s<seq>`` for the robot's other sensors). The RGB
+    extension follows the transmitted format; depth is always written as a 16-bit PNG.
+    ``robot_id``, ``sensor_id`` and ``timestamp_ns`` must be integers
+    (:class:`UnsafeFrame`).
     """
     meta = decoded["meta"]
-    base = f"frames/r{meta['robot_id']}/{meta['timestamp_ns']}"
+    robot = _int_field(meta, "robot_id")
+    ts = _int_field(meta, "timestamp_ns")
+    sensor = _int_field(meta, "sensor_id")
+    base = f"frames/r{robot}/{frame_stem(ts, sensor)}"
     rgb_rel = depth_rel = None
     if decoded.get("rgb") is not None:
         ext = _RGB_EXT.get(decoded["rgb_format"], ".bin")
@@ -502,15 +544,17 @@ def write_decoded_images(
 ) -> tuple[str | None, str | None]:
     """Write a decoded frame's images under the store directory ``root``; returns the
     relative ``(rgb_path, depth_path)``. Downscaled depth is restored to full resolution
-    (see :func:`restore_depth`), so the store's single sensor calibration stays valid."""
+    (see :func:`restore_depth`), so the store's single sensor calibration stays valid.
+    Raises :class:`UnsafeFrame` (writing nothing) when a path would leave ``root``."""
     root = pathlib.Path(root)
     rgb_rel, depth_rel = decoded_paths(decoded)
-    if rgb_rel is not None:
-        dst = root / rgb_rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(dst, decoded["rgb"])
-    if depth_rel is not None:
-        dst = root / depth_rel
+    rgb_dst = None if rgb_rel is None else _inside(root, rgb_rel)
+    depth_dst = None if depth_rel is None else _inside(root, depth_rel)
+    if rgb_dst is not None:
+        rgb_dst.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(rgb_dst, decoded["rgb"])
+    if depth_dst is not None:
+        dst = depth_dst
         dst.parent.mkdir(parents=True, exist_ok=True)
         if (
             decoded.get("depth_png") is not None
@@ -616,6 +660,7 @@ __all__ = [
     "COMPRESSION_MODES",
     "FRAME_SELECTIONS",
     "MissingDependency",
+    "UnsafeFrame",
     "decode_frame",
     "decode_header",
     "decoded_paths",

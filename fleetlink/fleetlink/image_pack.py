@@ -387,6 +387,10 @@ def unpack_store(
                         raise ValueError(
                             f"archive version {manifest['version']} is newer than {FORMAT_VERSION}"
                         )
+                elif manifest is None:
+                    raise ValueError(
+                        f"not a hydra-image-store pack archive ({name!r} before {MANIFEST})"
+                    )
                 elif name.startswith("frames/") and name.endswith(".hisf"):
                     transfer.write_decoded_images(staging, transfer.decode_frame(data))
                     stats["frames"] += 1
@@ -394,7 +398,7 @@ def unpack_store(
                         progress(stats["frames"], int(manifest.get("frame_count", 0)))
                 elif name.startswith("files/"):
                     rel = name[len("files/") :]
-                    out = staging / _safe_member(rel)
+                    out = transfer._inside(staging, _safe_member(rel))
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(data)
                     stats["files"] += 1
@@ -445,6 +449,22 @@ def _progress_printer(label: str):
     return progress
 
 
+def _archive_errors() -> tuple[type[BaseException], ...]:
+    """Exceptions a corrupt, truncated or foreign archive raises while unpacking."""
+    errors: list[type[BaseException]] = [
+        tarfile.TarError,
+        EOFError,
+        json.JSONDecodeError,
+    ]
+    try:
+        import zstandard
+
+        errors.append(zstandard.ZstdError)
+    except ImportError:
+        pass
+    return tuple(errors)
+
+
 def _cmd_pack(args) -> int:
     try:
         stats = pack_store(
@@ -475,7 +495,20 @@ def _cmd_unpack(args) -> int:
             dsg=args.dsg,
             progress=None if args.quiet else _progress_printer("unpacked"),
         )
-    except (RuntimeError, FileExistsError, ValueError) as exc:
+    except _archive_errors() as exc:
+        print(
+            f"unpack failed: not a readable pack archive (corrupt or truncated?): "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    except (
+        RuntimeError,
+        OSError,
+        ValueError,
+        sqlite3.Error,
+        transfer.MissingDependency,
+    ) as exc:
         print(f"unpack failed: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(stats, indent=1, default=str))

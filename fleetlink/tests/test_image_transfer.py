@@ -3,6 +3,7 @@ pack/unpack); moved here from hydra_image_store.transfer / .pack."""
 
 import io
 import json
+import struct
 import tarfile
 
 import numpy as np
@@ -355,6 +356,120 @@ def test_cli_pack_unpack(run, tmp_path, capsys):
     )
     stats = json.loads(capsys.readouterr().out)
     assert stats["check"]["ok"] and check_store(tmp_path / "dest")["ok"]
+
+
+def _frame_blob(meta: dict, rgb: bytes = b"\xff\xd8\xffpixels") -> bytes:
+    header = {
+        "meta": meta,
+        "parts": [{"name": "rgb", "codec": "jpeg", "size": len(rgb)}],
+    }
+    hdr = json.dumps(header).encode()
+    return struct.pack("<4sBI", b"HISF", 1, len(hdr)) + hdr + rgb
+
+
+def _evil_archive(meta: dict) -> io.BytesIO:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in (
+            (
+                "manifest.json",
+                json.dumps({"format": "hydra-image-store-pack", "version": 1}).encode(),
+            ),
+            ("frames/1.hisf", _frame_blob(meta)),
+        ):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    buf.seek(0)
+    return buf
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"timestamp_ns": "/../../../pwned"},
+        {"timestamp_ns": "1/../../../../pwned"},
+        {"robot_id": "../../.."},
+        {"timestamp_ns": 1.5},
+        {"sensor_id": True},
+        {"rgb_path": "../../../pwned.jpg"},
+        {"rgb_path": "/tmp/pwned.jpg"},
+    ],
+)
+def test_unpack_rejects_frame_headers_that_escape_the_store(tmp_path, bad):
+    """Per-frame ids / timestamps / paths come from the other machine; a crafted header
+    must never write outside the staging store."""
+    meta = {
+        "robot_id": 1,
+        "sensor_id": 1 << 48,
+        "timestamp_ns": 5,
+        "rgb_path": None,
+        **bad,
+    }
+    dest = tmp_path / "a" / "b" / "c" / "dest"
+    escaped = "rgb_path" not in bad
+    with pytest.raises(ValueError):
+        unpack_store(_evil_archive(meta), dest)
+    if escaped:  # the header is refused outright
+        with pytest.raises(transfer.UnsafeFrame):
+            transfer.write_decoded_images(
+                dest / "x", {"meta": meta, "rgb": b"x", "rgb_format": "jpeg"}
+            )
+    written = [p for p in tmp_path.rglob("*") if p.is_file() and "pwned" in p.name]
+    assert written == [], written
+    assert not (dest / "image_store").exists()
+
+
+def test_unsafe_source_paths_fall_back_to_the_frame_stem(tmp_path):
+    meta = {
+        "robot_id": 2,
+        "sensor_id": (2 << 48) | 1,
+        "timestamp_ns": 7,
+        "rgb_path": "../x.jpg",
+    }
+    rgb_rel, _ = transfer.write_decoded_images(
+        tmp_path, {"meta": meta, "rgb": b"x", "rgb_format": "jpeg"}
+    )
+    assert (
+        rgb_rel == "frames/r2/7_s1_rgb.jpg"
+        and (tmp_path / rgb_rel).read_bytes() == b"x"
+    )
+
+
+def test_write_refuses_symlinked_directory_out_of_the_store(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "store"
+    (root / "frames").mkdir(parents=True)
+    (root / "frames" / "r1").symlink_to(outside)
+    meta = {"robot_id": 1, "sensor_id": 1 << 48, "timestamp_ns": 5, "rgb_path": None}
+    with pytest.raises(transfer.UnsafeFrame):
+        transfer.write_decoded_images(
+            root, {"meta": meta, "rgb": b"x", "rgb_format": "jpeg"}
+        )
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [b"not a tar archive at all" * 40, b"\x28\xb5\x2f\xfd" + b"garbage" * 50, b""],
+)
+def test_cli_unpack_reports_corrupt_archives(tmp_path, capsys, payload):
+    bad = tmp_path / "bad.tar"
+    bad.write_bytes(payload)
+    assert main(["unpack", str(bad), str(tmp_path / "dest"), "--quiet"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("unpack failed:") and "Traceback" not in err
+
+
+def test_cli_unpack_reports_truncated_archive(run, tmp_path, capsys):
+    archive = tmp_path / "a.tar.zst"
+    pack_store(run["dir"], archive)
+    data = archive.read_bytes()
+    archive.write_bytes(data[: len(data) // 2])
+    assert main(["unpack", str(archive), str(tmp_path / "dest"), "--quiet"]) == 1
+    assert capsys.readouterr().err.startswith("unpack failed:")
+    assert not (tmp_path / "dest" / "image_store").exists()
 
 
 def test_pillow_fallback_without_cv2(run, monkeypatch):
