@@ -156,7 +156,9 @@ SCHEDULES them in time (start/finish per task, a makespan), and it plans what Fa
 anything at o8 starts (one entry per pair; never both directions). Use it for "first", "then", "after".
 - inspection: (safe o4) / (not (suspicious o4)) = one robot (the planner picks) goes and looks; \
 (inspected-by spot1 o4) = spot1 does it; (and (inspected-by spot1 o4) (inspected-by spot2 o4)) = a \
-JOINT inspection: they meet there and look together. Huskies are left out of GRSTAPS-X plans.
+JOINT inspection: they meet there and look together. GRSTAPS-X gives each robot as many tasks as \
+it needs (a robot is not limited to one route), but it leaves huskies out and cannot visit or \
+explore regions.
 - relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
 have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
 GRSTAPS-X does NOT take or, at-place / at-object, holding, visited-region / explored-region, or any \
@@ -331,7 +333,12 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             name = "GRSTAPS-X" if ctx["engine"] == "grstaps" else "Fast Downward"
             parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
                          f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
-                         "in one line instead of switching.")
+                         "in one line instead of switching"
+                         + (": a husky's task or a region goal (visited-region / explored-region) needs Fast "
+                            "Downward, so then say 'this needs the Fast Downward planner (husky / regions): "
+                            "switch the planner above', and do not ask to merge routes." if ctx["engine"] == "grstaps"
+                            else ": ordering (before), a joint inspection or moving an object needs GRSTAPS-X.")  # fmt: skip
+                         )
     roster = ctx.get("roster") or []
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))
