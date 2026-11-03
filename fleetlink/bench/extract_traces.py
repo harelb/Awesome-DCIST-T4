@@ -1,7 +1,7 @@
 """Realistic per-message size traces for the multi-robot bench, from the
 Pennovation bag's real ZED frames:
 
-* image-store mirror (C6): each keyframe as ``hydra_image_store.transfer``
+* image-store mirror (C6): each keyframe as ``fleetlink.image_transfer``
   encodes it in ``fast`` mode (JPEG q75 RGB + half-res delta-zstd depth);
 * live video (C5): the frames through fleetlink's own ffmpeg arguments
   (``video.ffmpeg_args``) at the console presets, split with the same parser.
@@ -54,7 +54,7 @@ def read_frames(bag: str, seconds: float, rgb_topic: str, depth_topic: str):
 
 
 def store_sizes(rgb, depth, kf_hz: float):
-    from hydra_image_store.transfer import FAST_JPEG_QUALITY, delta_zstd_encode, downscale_depth, encode_jpeg
+    from fleetlink.image_transfer import FAST_JPEG_QUALITY, delta_zstd_encode, downscale_depth, encode_jpeg
 
     out, next_t, di = [], 0.0, 0
     for t, img in rgb:
