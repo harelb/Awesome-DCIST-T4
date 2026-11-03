@@ -14,7 +14,7 @@ cv2 = pytest.importorskip("cv2")
 
 
 def _robot_store(root, n):
-    from hydra_image_store import FrameKind, ImageStore
+    from hydra_image_store import FrameKind, ImageStore, make_node_id
 
     src = root.parent / "src"
     src.mkdir(parents=True)
@@ -27,7 +27,10 @@ def _robot_store(root, n):
         cv2.imwrite(str(rp), np.full((24, 32, 3), i * 20, np.uint8))
         cv2.imwrite(str(dp), np.full((24, 32), 1000 + i, np.uint16))
         ids.append(
-            w.add_frame_ref(sid, ts, kind=FrameKind.KEYFRAME, rgb=rp, depth=dp, link="copy")
+            # anchored at its own agent node (identity offset): an own keyframe, which
+            # fleetlink's default keyframes mode sends
+            w.add_frame_ref(sid, ts, kind=FrameKind.KEYFRAME, rgb=rp, depth=dp, link="copy",
+                            anchor_node_id=make_node_id("a", i), anchor_T_body=np.eye(4))
         )
     w.close()
     return ids
