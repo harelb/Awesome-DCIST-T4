@@ -3,13 +3,13 @@
 Robot side, :class:`StoreTail`: tails the robot's hydra image store (sqlite,
 WAL, opened read-only so Hydra keeps writing undisturbed), selects frames
 (``keyframes`` = kind 0, what SAM3 search uses, or ``all``) in ``frame_id``
-order and encodes each with :func:`hydra_image_store.transfer.encode_frame`
+order and encodes each with :func:`fleetlink.image_transfer.encode_frame`
 (``none`` | ``lossless`` | ``fast``).  The frame row carries the sensor
 calibration, so the base can rebuild a valid store from any frame.
 
 Base side, :class:`StoreMirror`: writes every received frame into
 ``<root>/<robot>/<store_id>/image_store`` with
-:func:`hydra_image_store.transfer.write_frame` (source frame / sensor ids
+:func:`fleetlink.image_transfer.write_frame` (source frame / sensor ids
 kept), on a writer thread.
 
 Protocol (nothing lost or duplicated across robot, agent or console restarts):
@@ -48,9 +48,10 @@ COMPRESSION_MODES = ("none", "lossless", "fast")
 
 
 def _transfer():
-    from hydra_image_store import transfer
+    # lazy: image_transfer needs hydra_image_store, which the agent may lack
+    from fleetlink import image_transfer
 
-    return transfer
+    return image_transfer
 
 
 def store_id_of(store_dir: str | os.PathLike, first_ts: int | None) -> str | None:

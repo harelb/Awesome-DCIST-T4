@@ -134,7 +134,7 @@ graph; the image-store mirror only uses what is left.
 
 `store_mirror.py`. The agent tails the robot's hydra image store read-only (`store_path`, default
 `$ADT4_OUTPUT_DIR/image_store`) and, **only while sending is on**, sends each new frame (`store_frames`: `keyframes` | `all`)
-encoded with `hydra_image_store.transfer.encode_frame` (`store_compression`: `none` | `lossless` |
+encoded with `fleetlink.image_transfer.encode_frame` (`store_compression`: `none` | `lossless` |
 `fast`) within the C6 budget. The console's receiver writes them into
 `<live_store_root>/<robot>/<store_id>/image_store` (default `~/adt4_output/live/...`), a valid store
 SAM3 can search. The base tells the agent its watermark (C0 `store {id, after}`) on first contact,
@@ -148,6 +148,42 @@ the state shows the backlog. The console's Live link panel has an "Image store" 
 (C0 `store_send {enable}`). The receiver remembers it and asks again when the robot's state
 disagrees, e.g. after an agent restart. Turning it off drops queued C6 frames and steps the cursor back
 to the last frame sent, so turning it on again continues the chain with nothing lost.
+
+### Image-store codec and prior-map pack / unpack
+
+`fleetlink/image_transfer.py` (moved from `hydra_image_store.transfer`) encodes one store frame
+(row, calibration, RGB, depth) as a self-describing blob: `b"HISF"`, version byte, JSON header,
+payloads. It needs `zstandard` (`lossless` / `fast`) and cv2 or Pillow; a missing one raises
+`image_transfer.MissingDependency`. `hydra_image_store` stays the store reader and writer.
+
+| compression | RGB | depth |
+|---|---|---|
+| `none` | stored bytes | stored PNG bytes |
+| `lossless` | stored bytes | uint16 row-delta + zstd-3 (bit-exact) |
+| `fast` (default) | JPEG q75 (~40% smaller) | half resolution (nearest, exact `fx/2 ...` intrinsics) + row-delta + zstd-3 |
+
+Writing a decoded frame (`write_frame` for the mirror, `write_decoded_images`) restores depth to
+full resolution, keeps safe source-relative paths, and otherwise names files like Hydra's C++ writer
+(`frames/r<robot>/<ts>[_s<seq>]_{rgb,depth}.*`). Headers come from another machine, so ids and
+timestamps must be integers and every path must resolve inside the destination store
+(`image_transfer.UnsafeFrame` otherwise).
+
+`fleetlink/image_pack.py` (moved from `hydra_image_store.pack`) packs a run's store into one tar
+(optionally zstd-wrapped): `manifest.json`, `frames/<id>.hisf`, kept mask PNGs, then a
+`store.sqlite` snapshot with every row (paths of frames not shipped are NULL, as after `gc`).
+`unpack` builds `DEST/image_store.partial`, runs `hydra_image_store.check_store` and only then
+renames it to `DEST/image_store`. The console's Maps -> Transfer streams one into the other:
+
+```
+python -m fleetlink.image_pack pack RUN_DIR OUT.tar[.zst]|- [--frames keyframes|all]
+       [--compression none|lossless|fast] [--zstd-level N] [--no-masks] [--quiet]
+python -m fleetlink.image_pack unpack ARCHIVE|- DEST_RUN_DIR [--overwrite] [--no-check] [--dsg dsg.json]
+hydra-image-store check DEST_RUN_DIR              # the same checks, standalone
+```
+
+(`fleetlink-image-pack` once fleetlink is installed.) Python: `pack_store(run, out_path_or_file, ...)`,
+`unpack_store(path_or_stream, dest, ...)`. A corrupt or truncated archive is reported as
+`unpack failed: ...` (exit 1).
 
 ### Lazy cameras
 

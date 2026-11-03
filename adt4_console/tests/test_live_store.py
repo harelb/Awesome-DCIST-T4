@@ -8,7 +8,8 @@ import pytest
 
 from .conftest import make_client
 
-transfer = pytest.importorskip("hydra_image_store.transfer")
+pytest.importorskip("hydra_image_store")
+pytest.importorskip("zstandard")
 cv2 = pytest.importorskip("cv2")
 
 
