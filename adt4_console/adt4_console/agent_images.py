@@ -29,6 +29,16 @@ MAX_AGENT_IMAGES = 24
 KEYFRAME, SUBKEYFRAME = "keyframe", "subkeyframe"
 
 
+def image_frame_kinds(FrameKind) -> tuple[int, ...]:
+    """Store frame kinds that carry agent images: KEYFRAME, plus SUBKEYFRAME while
+    hydra_image_store still has it (upstream drops it: every keyframe archive becomes a
+    KEYFRAME anchored to its nearest agent node)."""
+    kinds = [int(FrameKind.KEYFRAME)]
+    if hasattr(FrameKind, "SUBKEYFRAME"):
+        kinds.append(int(FrameKind.SUBKEYFRAME))
+    return tuple(kinds)
+
+
 def yaw_of(R) -> float:
     """Heading (rad) of a body rotation matrix (x forward)."""
     return math.atan2(float(R[1][0]), float(R[0][0]))
@@ -98,7 +108,7 @@ class AgentFrameIndex:
 
         frames = [
             f
-            for f in store.frames(kind=(int(FrameKind.KEYFRAME), int(FrameKind.SUBKEYFRAME)))
+            for f in store.frames(kind=image_frame_kinds(FrameKind))
             if f.rgb_path is not None
         ]
         canon = {}
