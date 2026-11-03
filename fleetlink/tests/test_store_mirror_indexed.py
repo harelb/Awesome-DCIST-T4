@@ -225,11 +225,11 @@ def test_pack_indexes_a_run_with_only_raw_logs(tmp_path):
 
 def test_kept_observation_on_a_passed_frame_is_sent_late(tmp_path):
     """A track logged on a keyframe archive's frame after the cursor passed it (the
-    frame was a sub-keyframe, not selected then): the frame goes out of the chain as a
+    frame was not an agent's own keyframe, not selected then): the frame goes out of the chain as a
     late frame and the base gets the object image; an agent restart re-sends it."""
     root = tmp_path / "robot" / "image_store"
     robot = RobotStore(root)
-    (sub,) = robot.add(1, FrameKind.SUBKEYFRAME)
+    (sub,) = robot.add(1, own=False)
     kfs = robot.add(2)
     clock, link, core, rx = _pair(tmp_path, store_cfg={"store_path": str(root)})
     _run(clock, link, core, rx, 3.0)

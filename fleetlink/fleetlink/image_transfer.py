@@ -55,8 +55,8 @@ import numpy as np
 from hydra_image_store.codec import SEQ_MASK, transform_to_blob
 from hydra_image_store.store import _FRAME_COLS, Frame, ImageStore, ImageStoreWriter
 
-try:
-    from hydra_image_store.codec import SAM3_TRACK_BASE
+try:  # track ids from here up belong to writers other than Khronos (SAM3 write-back)
+    from hydra_image_store.codec import EXTERNAL_TRACK_BASE as SAM3_TRACK_BASE
 except ImportError:  # older hydra_image_store
     SAM3_TRACK_BASE = 1 << 40
 
@@ -74,6 +74,30 @@ MAGIC = b"HISF"
 VERSION = 1
 COMPRESSION_MODES = ("none", "lossless", "fast")
 FRAME_SELECTIONS = ("keyframes", "all")
+# "keyframes" = the agent nodes' own keyframes: of hydra_image_store's KEYFRAMEs (every
+# keyframe archive, anchored to the agent node nearest in time) the ones taken at their
+# anchor's stamp, whose anchor_T_body is therefore the identity (what used to be kind 0
+# before the sub-keyframes, now the other keyframes, became KEYFRAMEs too). "all" adds
+# the other keyframes. SQL: needs register_sql_functions(store) on the connection.
+OWN_KEYFRAME_SQL = "(kind = 0 AND own_keyframe(anchor_node_id, anchor_T_body))"
+OWN_KEYFRAME_ATOL = 1e-3
+_EYE = np.eye(4).reshape(-1)
+
+
+def _own_keyframe(anchor_node_id, anchor_T_body) -> int:
+    if anchor_node_id is None:
+        return 0
+    if anchor_T_body is None:
+        return 1
+    a = np.frombuffer(anchor_T_body, dtype="<f8")
+    return int(a.size == 16 and float(np.max(np.abs(a - _EYE))) < OWN_KEYFRAME_ATOL)
+
+
+def register_sql_functions(store) -> None:
+    """Register ``own_keyframe(anchor_node_id, anchor_T_body)`` (see OWN_KEYFRAME_SQL)
+    on the store's sqlite connections (idempotent)."""
+    for db in getattr(store, "_dbs", ()):
+        db.conn.create_function("own_keyframe", 2, _own_keyframe, deterministic=True)
 FAST_JPEG_QUALITY = 75
 ZSTD_LEVEL = 3
 _HEADER = struct.Struct("<4sBI")
@@ -290,7 +314,8 @@ def select_frames(
 ) -> list[Frame]:
     """Frames to send, ordered by ``frame_id`` (the sqlite rowid, so a watermark).
 
-    ``frames``: ``"keyframes"`` (kind 0, what SAM3 search uses) or ``"all"``.
+    ``frames``: ``"keyframes"`` (the agent nodes' own keyframes, see
+    ``OWN_KEYFRAME_SQL``; what SAM3 search uses) or ``"all"``.
     ``after``: only frames with ``frame_id > after`` (resume / tail). Note that frame ids
     are per robot (``robot_id << 48 | seq``), so a watermark is per robot.
     ``include_kept_observations``: with ``"keyframes"``, also the frames of kept object
@@ -301,9 +326,10 @@ def select_frames(
         raise ValueError(f"frames must be one of {FRAME_SELECTIONS}, got {frames!r}")
     where, params = [], []
     if frames == "keyframes":
-        cond = "kind = 0"
+        register_sql_functions(store)
+        cond = OWN_KEYFRAME_SQL
         if include_kept_observations:
-            cond = "(kind = 0 OR frame_id IN (SELECT frame_id FROM observations WHERE kept != 0))"
+            cond = f"({OWN_KEYFRAME_SQL} OR frame_id IN (SELECT frame_id FROM observations WHERE kept != 0))"
         where.append(cond)
     if after is not None:
         where.append("frame_id > ?")
@@ -807,6 +833,7 @@ __all__ = [
     "COMPRESSION_MODES",
     "FRAME_SELECTIONS",
     "MissingDependency",
+    "OWN_KEYFRAME_SQL",
     "UnsafeFrame",
     "decode_frame",
     "decode_header",
@@ -816,6 +843,7 @@ __all__ = [
     "frame_observations",
     "decode_depth_mm",
     "full_res_depth",
+    "register_sql_functions",
     "restore_depth",
     "scale_calib",
     "select_frames",
