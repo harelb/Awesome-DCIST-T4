@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("hydra_image_store")
 pytest.importorskip("zstandard")
 cv2 = pytest.importorskip("cv2")
-from hydra_image_store import FrameKind, ImageStore  # noqa: E402
+from hydra_image_store import FrameKind, ImageStore, make_node_id  # noqa: E402
 
 from fleetlink import codec  # noqa: E402
 from fleetlink.agent import AgentCore  # noqa: E402
@@ -45,7 +45,10 @@ class RobotStore:
         )
         self.ts = 1_000_000_000
 
-    def add(self, n: int, kind=FrameKind.KEYFRAME) -> list[int]:
+    def add(self, n: int, kind=FrameKind.KEYFRAME, own: bool = True) -> list[int]:
+        """``n`` frames; keyframes are anchored, each to its own agent node: ``own`` ones
+        taken at the node (identity offset, ``keyframes`` mode sends them), the others
+        0.3 m off it (only ``all`` mode sends them)."""
         ids = []
         rng = np.random.default_rng(self.ts)
         for _ in range(n):
@@ -58,10 +61,16 @@ class RobotStore:
             cv2.imwrite(str(dp), depth)
             pose = np.eye(4)
             pose[0, 3] = len(ids) * 0.5
+            anchor = aTb = None
+            if kind == FrameKind.KEYFRAME:
+                anchor = make_node_id("a", self.ts // 100_000_000)
+                aTb = np.eye(4)
+                if not own:
+                    aTb[0, 3] = 0.3
             ids.append(
                 self.w.add_frame_ref(
                     self.sensor, self.ts, kind=kind, world_T_body_odom=pose,
-                    rgb=rp, depth=dp, link="copy",
+                    rgb=rp, depth=dp, link="copy", anchor_node_id=anchor, anchor_T_body=aTb,
                 )  # fmt: skip
             )
         return ids
@@ -107,7 +116,7 @@ def _mirror_ids(rx) -> list[int]:
 def test_mirror_keyframes_and_resume_across_restarts(tmp_path):
     robot = RobotStore(tmp_path / "robot" / "image_store")
     kf = robot.add(5)
-    robot.add(3, FrameKind.SUBKEYFRAME)  # keyframes mode skips these
+    robot.add(3, own=False)  # keyframes mode skips these
     clock, link, core, rx = _pair(tmp_path)
     _run(clock, link, core, rx, 6.0)
     assert _mirror_ids(rx) == kf
@@ -190,7 +199,7 @@ def test_mirror_repairs_gaps_on_a_lossy_link(tmp_path):
 
 def test_mirror_respects_c6_budget_and_all_frames_mode(tmp_path):
     robot = RobotStore(tmp_path / "robot" / "image_store")
-    ids = robot.add(3) + robot.add(3, FrameKind.SUBKEYFRAME)
+    ids = robot.add(3) + robot.add(3, own=False)
     clock, link, core, rx = _pair(
         tmp_path,
         store_cfg={"store_frames": "all", "store_compression": "lossless",

@@ -10,10 +10,12 @@ import numpy as np
 import pytest
 
 pytest.importorskip("hydra_image_store")
+pytest.importorskip("hydra_image_store_adt4")
 pytest.importorskip("zstandard")
 PIL = pytest.importorskip("PIL.Image")
 
 from hydra_image_store import FrameKind, ImageStore, check_store, make_node_id  # noqa: E402
+from hydra_image_store_adt4.sam3 import add_sam3_observation  # noqa: E402
 
 from fleetlink import image_transfer as transfer  # noqa: E402
 from fleetlink.image_pack import main, pack_store, unpack_store  # noqa: E402
@@ -61,7 +63,7 @@ def run(tmp_path):
         [
             (FrameKind.KEYFRAME, 100),
             (FrameKind.KEYFRAME, 200),
-            (FrameKind.SUBKEYFRAME, 250),
+            (FrameKind.KEYFRAME, 250),  # not its anchor's own keyframe (offset below)
             (FrameKind.KEYFRAME, 300),
             (FrameKind.OBSERVATION, 320),
         ]
@@ -79,16 +81,17 @@ def run(tmp_path):
                 rgb=rgb,
                 depth=depth,
                 anchor_node_id=anchor,
+                anchor_T_body=make_T(t=(0.4, 0, 0)) if ts == 250 else None,
                 link="copy",
             )
         )
     mask = np.zeros((H, W), bool)
     mask[5:20, 10:30] = True
     obj = make_node_id("O", 7)
-    w.add_sam3_observation(
-        obj, frames[4], mask=mask, score=0.8, kept=True, bbox2d=(10, 5, 29, 19)
+    add_sam3_observation(
+        w, obj, frames[4], mask=mask, score=0.8, kept=True, bbox2d=(10, 5, 29, 19)
     )
-    w.add_sam3_observation(obj, frames[2], mask=mask, score=0.3)
+    add_sam3_observation(w, obj, frames[2], mask=mask, score=0.3)
     w.close()
     return {"dir": run, "frames": frames, "sensor": sid, "obj": obj}
 
@@ -268,7 +271,8 @@ def test_write_frame_mirror_keeps_ids(run, tmp_path):
 def test_pack_unpack_roundtrip(run, tmp_path, mode, frames, suffix):
     archive = tmp_path / f"pack{suffix}"
     stats = pack_store(run["dir"], archive, frames=frames, compression=mode)
-    assert stats["frames"] == (5 if frames == "all" else 4) and stats["masks"] == 1
+    # SAM3 masks are RLE in the sqlite rows (no mask PNG files any more)
+    assert stats["frames"] == (5 if frames == "all" else 4) and stats["masks"] == 0
     assert stats["archive_bytes"] == archive.stat().st_size
     if suffix.endswith(".zst"):
         assert archive.read_bytes()[:4] == b"\x28\xb5\x2f\xfd"
@@ -305,11 +309,7 @@ def test_pack_unpack_roundtrip(run, tmp_path, mode, frames, suffix):
             assert np.array_equal(da, db)
             assert a.rgb_path.read_bytes() == b.rgb_path.read_bytes()
     obs = dst.observations(run["obj"], kept_only=True)
-    assert (
-        len(obs) == 1
-        and obs[0].mask_path.exists()
-        and dst.mask(obs[0]).sum() == 15 * 20
-    )
+    assert len(obs) == 1 and obs[0].mask_rle and dst.mask(obs[0]).sum() == 15 * 20
     # the unpacked store keeps working as a store
     w = ImageStore.open_writer(dest / "image_store", robot_id=3)
     assert (
@@ -498,3 +498,15 @@ def test_missing_zstandard_is_a_clear_error(run, monkeypatch):
     assert transfer.encode_frame(
         store, run["frames"][0], "none"
     )  # none needs no extras
+
+
+def test_own_keyframe_sql_function():
+    """keyframes mode = the agent nodes' own keyframes: anchored, identity offset."""
+    from hydra_image_store.codec import transform_to_blob
+
+    own = transfer._own_keyframe
+    assert own(None, None) == 0  # unanchored (no agent node yet / too far)
+    assert own(5, None) == 1
+    assert own(5, transform_to_blob(np.eye(4))) == 1
+    assert own(5, transform_to_blob(make_T(t=(1e-4, 0, 0)))) == 1
+    assert own(5, transform_to_blob(make_T(t=(0.05, 0, 0)))) == 0
