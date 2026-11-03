@@ -339,7 +339,11 @@ def list_images(store, node_id: int) -> list[NodeImage]:
         if len(out) >= MAX_IMAGES:
             return out
     if not out:
-        for f in store.frames_for_agent(node_id, include_subkeyframes=True):
+        try:
+            frames = store.frames_for_agent(node_id, include_subkeyframes=True)
+        except (TypeError, AttributeError):  # hydra_image_store without sub-keyframes
+            frames = store.frames_for_agent(node_id) if hasattr(store, "frames_for_agent") else []
+        for f in frames:
             add(f.rgb_path)
             if len(out) >= MAX_IMAGES:
                 break
