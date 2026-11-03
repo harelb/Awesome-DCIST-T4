@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Index a run's raw image logs into ``<run>/image_store`` while Hydra writes them.
+
+Hydra/Khronos log keyframe zips (``keyframes/``), object tracks (``tracks/``) and live
+event logs (``events/``); ``hydra-image-store tail`` turns them into the image store
+the console, fleetlink and SAM3 read, and reconciles it with the save-time files once
+Hydra has saved (the store then equals a one-shot ``hydra-image-store index``).
+
+Usage (the hydra tmux window runs it next to hydra)::
+
+    image-store-tail [RUN_DIR]        # default $ADT4_OUTPUT_DIR
+
+The tailer runs detached (own session, log ``<run>/image_store_tail.log``) so the
+Ctrl-C / kill-session of a stack teardown cannot cut its final reconciliation short;
+this process only follows the log. The detached worker stops by itself when
+
+- the run is finalized (Hydra saved, files settled, store reconciled),
+- Hydra (a ``hydra_ros_node`` whose ``ADT4_OUTPUT_DIR`` is this run) has been gone for
+  ``--grace`` seconds without a save (crash / kill): the store stays as tailed and is
+  marked not live, so the next ``ImageStore.open(run)`` re-indexes it from the raw
+  files, using the event logs in place of the missing save-time files,
+- the run directory is removed or replaced (a new run with the same output dir),
+- it gets SIGTERM (``--stop``).
+
+Runs from source in spark_env (like fleetlink-agent); hydra_image_store is taken from
+the installed package, else from ``$ADT4_WS/src/awesome_dcist_t4/hydra/hydra_image_store/src``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+if not os.environ.get("_IMAGE_STORE_TAIL_REEXEC"):
+    _adt4_env = os.environ.get("ADT4_ENV", "")
+    if _adt4_env:
+        _spark_python = pathlib.Path(_adt4_env) / "spark_env" / "bin" / "python3"
+        if _spark_python.exists() and sys.prefix != str(_spark_python.parents[1]):
+            os.environ["_IMAGE_STORE_TAIL_REEXEC"] = "1"
+            os.execv(str(_spark_python), [str(_spark_python)] + sys.argv)
+
+# keyframe zips hold EXR depth; OpenCV only reads EXR with this set before cv2 is imported
+os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+
+LOG_NAME = "image_store_tail.log"
+PID_NAME = ".image_store_tail.pid"
+
+
+def _import_path() -> None:
+    try:
+        import hydra_image_store  # noqa: F401
+        return
+    except ImportError:
+        pass
+    here = pathlib.Path(__file__).resolve()
+    cands = [here.parents[2] / "hydra" / "hydra_image_store" / "src"]
+    ws = os.environ.get("ADT4_WS")
+    if ws:
+        cands.append(pathlib.Path(ws) / "src" / "awesome_dcist_t4" / "hydra" / "hydra_image_store" / "src")
+    for c in cands:
+        if (c / "hydra_image_store").is_dir():
+            sys.path.insert(0, str(c))
+            os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(c), os.environ.get("PYTHONPATH")]))
+            return
+
+
+def _ident(path: pathlib.Path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def hydra_running(run: pathlib.Path) -> bool:
+    """A hydra_ros_node of this run: its environment's ADT4_OUTPUT_DIR is ``run``."""
+    want = os.path.realpath(run)
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read()
+            if b"hydra_ros_node" not in cmd:
+                continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().split(b"\0")
+        except OSError:
+            continue
+        for kv in env:
+            if kv.startswith(b"ADT4_OUTPUT_DIR="):
+                if os.path.realpath(kv.split(b"=", 1)[1].decode(errors="replace")) == want:
+                    return True
+    return False
+
+
+def worker(args) -> int:
+    """The detached tailer + watchdog."""
+    import logging
+
+    _import_path()
+    from hydra_image_store.indexer import tail_active
+    from hydra_image_store.tail import Tailer
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("image-store-tail")
+    run = pathlib.Path(args.run).absolute()
+    ident = _ident(run)
+    store = run / "image_store"
+    if tail_active(store):
+        log.info("another tailer follows %s: nothing to do", store)
+        return 0
+    (run / PID_NAME).write_text(str(os.getpid()))
+    tailer = Tailer(run, settle_s=args.settle, robot_id=args.robot_id)
+    stop_reason: list[str] = []
+
+    def on_term(*_):
+        stop_reason.append("SIGTERM")
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    thread = threading.Thread(target=tailer.run, args=(args.interval,), daemon=True)
+    thread.start()
+    t0 = time.monotonic()
+    seen = last_alive = None
+    while thread.is_alive():
+        now = time.monotonic()
+        if _ident(run) != ident:
+            stop_reason.append("run directory removed or replaced")
+        elif hydra_running(run):
+            seen = seen or now
+            last_alive = now
+        elif seen is not None and now - last_alive > args.grace:
+            stop_reason.append(f"hydra gone for {args.grace:.0f} s without a final save")
+        elif seen is None and now - t0 > args.startup_grace:
+            stop_reason.append(f"no hydra for this run within {args.startup_grace:.0f} s")
+        if stop_reason:
+            log.warning("stopping: %s", stop_reason[0])
+            break
+        time.sleep(1.0)
+    tailer.stop()  # run() returns (and marks the store not live unless finalized)
+    thread.join(60.0)
+    summary = {**tailer.summary(), "final_stats": tailer.final_stats, "stopped": stop_reason[:1]}
+    log.info("tail done: %s", json.dumps(summary))
+    if _ident(run) == ident:
+        try:
+            (run / PID_NAME).unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="image-store-tail", description=__doc__.split("\n\n")[0])
+    p.add_argument("run", nargs="?", default=os.environ.get("ADT4_OUTPUT_DIR"))
+    p.add_argument("--interval", type=float, default=1.0, help="[s] between tail passes")
+    p.add_argument("--settle", type=float, default=3.0, help="[s] save-time files unchanged before finalizing")
+    p.add_argument("--grace", type=float, default=120.0, help="[s] after hydra exits without a save")
+    p.add_argument("--startup-grace", type=float, default=1800.0, help="[s] to wait for hydra to start")
+    p.add_argument("--robot-id", type=int, default=None)
+    p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--no-follow", action="store_true", help="start the worker and return")
+    p.add_argument("--stop", action="store_true", help="stop the worker of RUN (SIGTERM)")
+    args = p.parse_args()
+    if not args.run:
+        p.error("no run directory (pass one or set ADT4_OUTPUT_DIR)")
+    run = pathlib.Path(os.path.expanduser(args.run)).absolute()
+    if args.worker:
+        return worker(args)
+    if args.stop:
+        try:
+            pid = int((run / PID_NAME).read_text())
+            os.kill(pid, signal.SIGTERM)
+            print(f"sent SIGTERM to {pid}")
+        except (OSError, ValueError) as e:
+            print(f"no tailer running for {run}: {e}")
+        return 0
+    run.mkdir(parents=True, exist_ok=True)
+    log_path = run / LOG_NAME
+    argv = [sys.executable, os.path.abspath(__file__), str(run), "--worker",
+            "--interval", str(args.interval), "--settle", str(args.settle),
+            "--grace", str(args.grace), "--startup-grace", str(args.startup_grace)]
+    if args.robot_id is not None:
+        argv += ["--robot-id", str(args.robot_id)]
+    with open(log_path, "ab") as logf:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+                                start_new_session=True, close_fds=True)
+    print(f"image-store tail of {run}: pid {proc.pid}, log {log_path}", flush=True)
+    if args.no_follow:
+        return 0
+    # follow the log until the worker exits (Ctrl-C here leaves the worker running)
+    try:
+        with open(log_path, "rb") as f:
+            while True:
+                chunk = f.read()
+                if chunk:
+                    sys.stdout.write(chunk.decode(errors="replace"))
+                    sys.stdout.flush()
+                elif proc.poll() is not None:
+                    break
+                else:
+                    time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
