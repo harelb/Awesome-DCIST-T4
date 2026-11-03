@@ -1229,8 +1229,8 @@ class AgentCore:
             def payload(fid=fid, prev=prev):
                 return st.encode(fid, prev)
 
-            def sent(n, fid=fid):
-                st.mark_sent(fid, n)
+            def sent(n, fid=fid, late=prev == "late"):
+                st.mark_sent(fid, n, late=late)
 
             self._queue(
                 "store/frame",
