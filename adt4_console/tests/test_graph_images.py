@@ -244,3 +244,36 @@ def test_live_source_opens_only_the_current_mirror(tmp_path):
     live.receiver = None  # no receiver: the most recently written mirror
     src._mirror = None
     assert src.node_detail_extra("O(0)", None) == ({}, [])
+
+
+def test_store_with_sub_keyframes_is_not_opened_nor_modified(tmp_path, caplog):
+    """Stores written before hydra_image_store dropped sub-keyframes (frame kind 1)
+    stay hidden until `hydra-image-store-adt4 convert` ran; the console never writes."""
+    import hashlib
+    import sqlite3
+
+    from hydra_image_store import FrameKind, ImageStore
+
+    from adt4_console.graph_service import needs_convert, open_image_store
+
+    run = tmp_path / "run"
+    img = tmp_path / "x.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xd9")
+    w = ImageStore.open_writer(run / "image_store", robot_id=0)
+    sid = w.add_sensor("cam", 4, 4, 1.0, 1.0, 2.0, 2.0)
+    w.add_frame_ref(sid, 1, kind=FrameKind.KEYFRAME, rgb=img, link="copy")
+    w.add_frame_ref(sid, 2, kind=FrameKind.KEYFRAME, rgb=img, link="copy")
+    w.close()
+    db = run / "image_store" / "store.sqlite"
+    s = open_image_store(run, index=False)
+    assert not needs_convert(run) and s is not None
+    s.close()
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE frames SET kind = 1 WHERE timestamp_ns = 2")
+    files = sorted(p for p in db.parent.glob("store.sqlite*") if not p.name.endswith("-shm"))
+    digest = [hashlib.sha256(p.read_bytes()).hexdigest() for p in files]
+    assert needs_convert(run) and needs_convert(run / "image_store") and needs_convert(db)
+    with caplog.at_level("WARNING"):
+        assert open_image_store(run) is None
+    assert "hydra-image-store-adt4 convert" in caplog.text
+    assert [hashlib.sha256(p.read_bytes()).hexdigest() for p in files] == digest
