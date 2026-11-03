@@ -307,3 +307,27 @@ def test_launch_with_local_prior(settings, fleet):
         assert active["default_sources"][0] == "file:prior:base_map"
         assert active["active"]["prior"]["label"] == "prior: base_map (local)"
         assert c.delete("/api/launch/active").json()["default_sources"] == []
+
+
+def test_packed_transfer_leaves_raw_image_logs_behind(settings, fleet, monkeypatch):
+    """A packed transfer sends the indexed store (fleetlink.image_pack), so the raw
+    keyframe zips / track logs stay on the robot; event logs and the map go. The copy
+    is in sync although it lacks the raw logs (they are not in the manifest)."""
+    run = make_run(fleet.root(HAMILTON_IP), "map_x", robot="hamilton")
+    make_store(run)
+    (run / "keyframes").mkdir()
+    (run / "keyframes" / "1000.zip").write_bytes(b"PK" * 1000)
+    (run / "tracks" / "7").mkdir(parents=True)
+    (run / "tracks" / "7" / "track.json").write_text("{}")
+    (run / "events").mkdir()
+    (run / "events" / "frontend.jsonl").write_text("{}\n")
+    monkeypatch.setattr(maps_route, "pipe_store", lambda *a: (True, "1.0 MB in 0.1s"))
+    c, svc = make_client(settings, helpers=fleet.helpers())
+    with c:
+        _transfer(c, svc, images="keyframes", compression="fast")
+        copy = fleet.root() / "map_x__hamilton"
+        assert (copy / "events" / "frontend.jsonl").is_file()
+        assert (copy / "hydra" / "backend" / "dsg.json").is_file()
+        assert not (copy / "keyframes").exists() and not (copy / "tracks").exists()
+        job = _transfer(c, svc, images="keyframes", compression="fast")
+        assert job["result"]["up_to_date"] is True
