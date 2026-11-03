@@ -303,6 +303,11 @@ class TransferBody(BaseModel):
 
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
 STORE_DIR = "image_store"
+# Hydra/Khronos raw image logs (keyframe InputData zips, per-track logs). A packed
+# transfer sends the indexed store built from them (7x smaller than the zips, no
+# re-index at the destination), so they stay behind; the small event logs and the
+# save-time files (hydra/) still go with the rsync. A plain transfer copies all.
+RAW_LOG_EXCLUDES = ["/keyframes/", "/tracks/", "/hydra/keyframes/", "/hydra/tracks/", "/khronos/tracks/"]
 # Store pack/unpack runs as ``python -m fleetlink.image_pack`` (the reader it uses,
 # hydra_image_store, comes from the same workspace).
 PACK_MODULE = "fleetlink.image_pack"
@@ -676,6 +681,7 @@ def transfer(body: TransferBody, request: Request):
         exclude = [] if body.include_bags else list(BAG_EXCLUDES)
         if not plain:
             exclude.append(f"/{STORE_DIR}/")
+            exclude += RAW_LOG_EXCLUDES
         send_store = not plain and body.images != "none" and (plan["send_store"] or body.force)
         job.log(
             "info",

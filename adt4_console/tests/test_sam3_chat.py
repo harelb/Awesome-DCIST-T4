@@ -332,7 +332,7 @@ def test_store_command_local_and_remote(settings):
     assert "fleetlink.image_pack" in argv[-1] and "/fleetlink:" in argv[-1]
 
 
-def test_pack_args_match_image_store_cli():
+def test_pack_args_match_image_pack_cli():
     pytest.importorskip("hydra_image_store")
     cli = pytest.importorskip("fleetlink.image_pack")
     from adt4_console.routes import maps

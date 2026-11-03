@@ -198,23 +198,57 @@ def spark_attributes(attrs) -> dict:
     return out
 
 
-def open_image_store(*paths):
-    """Open the existing image stores among ``paths`` read-only, else None.
+RAW_LOG_DIRS = ("keyframes", "tracks", "hydra/keyframes", "hydra/tracks", "khronos/tracks")
+
+
+def _has_raw_logs(run: pathlib.Path) -> bool:
+    """Hydra/Khronos raw image logs (keyframe zips / track logs) the indexer builds a
+    store from (hydra_image_store.indexer.has_raw_inputs)."""
+    try:
+        from hydra_image_store.indexer import has_raw_inputs
+
+        return bool(has_raw_inputs(run))
+    except ImportError:
+        return any((run / d).is_dir() for d in RAW_LOG_DIRS)
+
+
+def _store_target(p) -> str | None:
+    """What to hand ``ImageStore.open`` for ``p`` (a store dir, a run dir or a run's
+    ``image_store/``), or None when there is nothing to open."""
+    if not p:
+        return None
+    p = pathlib.Path(str(p)).expanduser()
+    if (p / "store.sqlite").is_file():
+        return str(p)
+    if p.name == "image_store" and _has_raw_logs(p.parent):
+        return str(p.parent)  # never indexed yet: the run's raw logs
+    if (p / "image_store" / "store.sqlite").is_file() or _has_raw_logs(p):
+        return str(p)
+    return None
+
+
+def open_image_store(*paths, index: bool = True):
+    """Open the image stores among ``paths`` read-only, else None.
+
+    A path is a store directory, a run directory or a run's ``image_store/``.
+    ``index=True``: a run whose raw image logs (keyframe zips, track logs, event
+    logs; Hydra/Khronos no longer write the store) were never indexed, or changed
+    since, is indexed first (``ImageStore.open``; skipped while a ``hydra-image-store
+    tail`` keeps the store up to date). ``index=False`` never writes (mirrors).
 
     The reader is the optional ``hydra_image_store`` package; without it (or
-    without a ``store.sqlite``) nodes simply show no images.
+    without a store) nodes simply show no images.
     """
-    found = [
-        str(p)
-        for p in paths
-        if p and (pathlib.Path(str(p)) / "store.sqlite").is_file()
-    ]
+    found = [t for t in (_store_target(p) for p in paths) if t]
     if not found:
         return None
     try:
         from hydra_image_store import ImageStore
 
-        return ImageStore.open(*found)
+        try:
+            return ImageStore.open(*found, index=index)
+        except TypeError:  # hydra_image_store before the indexer
+            return ImageStore.open(*found)
     except Exception as e:  # noqa: BLE001
         log.warning("image store %s unavailable: %s", found, e)
         return None
@@ -322,12 +356,18 @@ def is_agent_record(rec) -> bool:
 
 
 def store_signature(store) -> tuple:
-    """Cheap identity of a store's keyframe/sub-keyframe contents (live stores grow)."""
+    """Cheap identity of a store's keyframe/sub-keyframe contents (live stores grow).
+
+    A tailed store also re-decides anchors in place (provisional anchors of the
+    newest frames, the final reconciliation after Hydra saves), so the anchor
+    column's sum is part of it. Raw SQL on the schema_version 1 ``frames`` table
+    (the same schema the indexer writes); there is no public count API."""
     if store is None:
         return (None,)
     try:
         rows = store._query(  # noqa: SLF001
-            "SELECT count(*), max(frame_id), count(anchor_node_id) FROM frames"
+            "SELECT count(*), max(frame_id), count(anchor_node_id),"
+            " total(anchor_node_id & 4294967295) FROM frames"
             " WHERE kind IN (0, 1) AND rgb_path IS NOT NULL"
         )
         return (id(store), *(tuple(r) for _, r in rows))
@@ -372,7 +412,10 @@ def imaged_store_nodes(store) -> set[str]:
         return set()
     out = set()
     try:
-        rows = store._query(  # noqa: SLF001 (one cheap DISTINCT, no public API for it)
+        # one cheap DISTINCT, no public API for it; valid on indexed stores too: the
+        # indexer writes one track_bindings row per bound track (ended / unbound
+        # tracks get none) and kept observations reference rgb frames
+        rows = store._query(  # noqa: SLF001
             "SELECT DISTINCT b.node_id FROM track_bindings b"
             " JOIN observations o ON o.robot_id = b.robot_id AND o.track_id = b.track_id"
             " JOIN frames f ON f.frame_id = o.frame_id"
@@ -907,7 +950,8 @@ class FileSource(Source):
         self.label = f"{name} ({self.run_dir.name})"
         self._mtime = None
         self._version = 0
-        self._store = None  # <run>/image_store, opened lazily
+        self._store = None  # <run>/image_store, opened (indexed) lazily
+        self._store_tried = -1e9
         self._store_lock = threading.Lock()
 
     @staticmethod
@@ -980,9 +1024,17 @@ class FileSource(Source):
         return spark_attributes(attrs), images
 
     def image_store(self):
+        """``ImageStore.open(run)``: a finished run with raw image logs is indexed on
+        first use (once; again only when its logs change), a run a tailer follows is
+        read as it grows. Retried every 30 s while there is none."""
         with self._store_lock:
-            if self._store is None:
-                self._store = open_image_store(self.run_dir / "image_store")
+            now = time.monotonic()
+            if self._store is None and now - self._store_tried >= 30.0:
+                self._store_tried = now
+                t0 = time.time()
+                self._store = open_image_store(self.run_dir)
+                if self._store is not None and time.time() - t0 > 1.0:
+                    log.info("%s: image store indexed/opened in %.1fs", self.id, time.time() - t0)
             return self._store
 
     def keyframe_pose_lookup(self, loaded):
@@ -1483,18 +1535,39 @@ class LiveSource(Source):
         cur = getattr(self, "_mirror", None)  # (store dirs, store, scanned at)
         if cur is not None and now - cur[2] < 5.0:
             return cur[1]
-        found = sorted(
-            str(p.parent)
-            for p in pathlib.Path(root, self.name).glob("*/image_store/store.sqlite")
-        )
+        found = self._current_mirror(root)
         if cur is not None and cur[0] == found and (cur[1] is not None or not found):
             self._mirror = (found, cur[1], now)
             return cur[1]
         # a new store id (robot restart) or the first frames arrived: reopen; an old
         # handle is left to the GC since a request may still be reading it
-        store = open_image_store(*found) if found else None
+        store = open_image_store(*found, index=False) if found else None
         self._mirror = (found, store, now)
         return store
+
+    def _current_mirror(self, root) -> list[str]:
+        """The mirror of the robot's current store session: the one the receiver writes
+        (else the most recently written). Earlier sessions' mirrors stay on disk but are
+        not opened: node and track ids restart with every Hydra session, so their
+        images would land on the new session's nodes of the same id."""
+        stores = list(pathlib.Path(root, self.name).glob("*/image_store/store.sqlite"))
+        if not stores:
+            return []
+        rx = getattr(self.live, "receiver", None)
+        try:
+            cur = (rx.store_stats(self.name) or {}).get("path") if rx is not None else None
+        except Exception:  # noqa: BLE001
+            cur = None
+        if cur and (pathlib.Path(cur) / "store.sqlite").is_file():
+            return [str(pathlib.Path(cur))]
+
+        def created(p):  # <store_id>/ only gains its image_store/ when the session starts
+            try:
+                return p.parents[1].stat().st_mtime
+            except OSError:
+                return 0.0
+
+        return [str(max(stores, key=created).parent)]
 
     def node_detail_extra(self, sym, loaded):
         try:

@@ -172,3 +172,75 @@ def test_live_source_reads_mirror_store(tmp_path):
     assert src._imaged_syms() == {"O(0)", "O(2)"}
     off = LiveSource("hamilton", type("L", (), {"store_root": None, "receiver": None})())
     assert off.image_store() is None
+
+
+def test_file_source_indexes_a_run_with_only_raw_logs(settings, tmp_path):
+    """Hydra/Khronos write keyframe zips + track logs (no store): the file source opens
+    the run with ImageStore.open(run), which indexes it once, and shows its images."""
+    import os
+    import pathlib
+    import sys
+
+    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+    his = pytest.importorskip("hydra_image_store")
+    pytest.importorskip("hydra_image_store.tail")
+    pytest.importorskip("yaml")
+    pytest.importorskip("cv2")
+    tests = pathlib.Path(his.__file__).resolve().parents[2] / "tests"
+    if not (tests / "raw_logs.py").is_file():
+        pytest.skip("hydra_image_store test writers not found")
+    sys.path.insert(0, str(tests))
+    import raw_logs as R
+
+    run = R.build_run(tmp_path / "raw_run")
+    assert not (run / "image_store").exists()
+    settings.maps = {"raw": str(run)}
+    client, _ = make_client(settings)
+    with client:
+        syms = client.get("/api/graph/file:raw/imaged").json()["syms"]
+        assert syms and (run / "image_store" / "store.sqlite").is_file()
+        from hydra_image_store import ImageStore
+
+        with ImageStore.open(run / "image_store", index=False) as s:
+            expect = {f"O({n & ((1 << 56) - 1)})" for n in s.object_nodes()
+                      if s.observations(n, kept_only=True)}  # fmt: skip
+        assert set(syms) == expect
+        d = client.get(f"/api/graph/file:raw/node/{syms[0]}").json()
+        assert d["n_images"] >= 1
+        assert _img(client.get(f"/api/graph/file:raw/image/{syms[0]}/0")).ndim == 3
+
+
+def test_live_source_opens_only_the_current_mirror(tmp_path):
+    """Node ids restart with every Hydra session: only the store session the receiver
+    mirrors now (else the newest mirror) is read, never an earlier one."""
+    import os
+    import time
+
+    from adt4_console.graph_service import LiveSource
+    from hydra_image_store import ImageStore
+
+    old = tmp_path / "live" / "hamilton" / "old" / "image_store"
+    build_store(old, tmp_path / "imgs_old")
+    new = tmp_path / "live" / "hamilton" / "new" / "image_store"
+    with ImageStore.open_writer(new, robot_id=0) as w:  # current session: no images yet
+        w.add_sensor("cam", W, H, 50.0, 50.0, W / 2, H / 2)
+    t = time.time()
+    os.utime(old.parent, (t - 100, t - 100))  # the older session's mirror dir
+
+    class _Rx:
+        def __init__(self, path):
+            self.path = path
+
+        def store_stats(self, robot):
+            return {"path": str(self.path)} if self.path else {}
+
+    live = type("L", (), {"store_root": str(tmp_path / "live"), "receiver": _Rx(new)})()
+    src = LiveSource("hamilton", live)
+    assert src.node_detail_extra("O(0)", None) == ({}, [])  # old session's O(0) not shown
+    live.receiver = _Rx(old)
+    src._mirror = None
+    _, images = src.node_detail_extra("O(0)", None)
+    assert len(images) == 2
+    live.receiver = None  # no receiver: the most recently written mirror
+    src._mirror = None
+    assert src.node_detail_extra("O(0)", None) == ({}, [])
