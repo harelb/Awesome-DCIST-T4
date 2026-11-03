@@ -39,7 +39,7 @@ def _store(run, tail=None):
         "CREATE TABLE observations (obs_id INTEGER PRIMARY KEY);"
         "INSERT INTO meta VALUES ('schema_version', '1');"
         "INSERT INTO sensors VALUES (1);"
-        "INSERT INTO frames VALUES (1, 1, 0, 5, NULL, NULL), (2, 1, 1, 5, NULL, NULL);"
+        "INSERT INTO frames VALUES (1, 1, 0, 5, NULL, NULL), (2, 1, 2, 5, NULL, NULL);"
     )
     if tail is not None:
         c.execute("INSERT INTO meta VALUES ('indexer.tail', ?)", (json.dumps(tail),))
@@ -60,10 +60,23 @@ def test_indexed_store_counts_and_tail(tmp_path):
     run = _raw_run(tmp_path)
     _store(run, tail={"live": True, "final": False, "heartbeat_wall": 1.0, "session": 42, "polls": 3})
     st = run_scan.scan_run(str(run), measure=False)["image_store"]
-    assert st["indexed"] is True and st["frames"] == {"keyframe": 1, "subkeyframe": 1}
+    assert st["indexed"] is True and st["frames"] == {"keyframe": 1, "object": 1}
     assert st["raw"]["keyframe_archives"] == 3
     assert st["tail"] == {"live": True, "final": False, "heartbeat_wall": 1.0, "session": 42}
     assert st["check"]["ok"], st["check"]
+
+
+def test_store_with_sub_keyframes_needs_convert(tmp_path):
+    run = _raw_run(tmp_path)
+    _store(run)
+    c = sqlite3.connect(str(run / "image_store" / "store.sqlite"))
+    c.execute("UPDATE frames SET kind = 1 WHERE frame_id = 2")
+    c.commit()
+    c.close()
+    st = run_scan.scan_run(str(run), measure=False)["image_store"]
+    assert st["needs_convert"] is True and st["frames"] == {"keyframe": 1, "subkeyframe": 1}
+    assert not st["check"]["ok"]
+    assert "hydra-image-store-adt4 convert" in " ".join(st["check"]["problems"])
 
 
 def test_no_logs_no_store(tmp_path):

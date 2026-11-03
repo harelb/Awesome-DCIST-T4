@@ -39,6 +39,8 @@ DSG_FILES = {
 }
 STORE_DIR = "image_store"
 STORE_DB = "store.sqlite"
+# kind 1 (sub-keyframes) only exists in stores written before hydra_image_store
+# dropped it; such a store needs `hydra-image-store-adt4 convert` before it can be read
 KIND_NAMES = {0: "keyframe", 1: "subkeyframe", 2: "object"}
 # Hydra/Khronos raw image logs (FORMAT.md): keyframe InputData zips and per-track
 # logs, which hydra_image_store indexes into image_store/ (the tailer while Hydra
@@ -209,6 +211,12 @@ def store_info(store_dir, run=None):
         for kind, n in conn.execute("SELECT kind, COUNT(*) FROM frames GROUP BY kind"):
             info["frames"][KIND_NAMES.get(kind, str(kind))] = n
         info["frames_total"] = sum(info["frames"].values())
+        if info["frames"].get(KIND_NAMES[1]):
+            info["needs_convert"] = True
+            problems.append(
+                "sub-keyframes (frame kind 1): convert the store once with "
+                "`hydra-image-store-adt4 convert %s`" % store_dir
+            )
         tail = _tail_state(conn)
         if tail:
             info["tail"] = {k: tail.get(k) for k in ("live", "final", "heartbeat_wall", "session")}
