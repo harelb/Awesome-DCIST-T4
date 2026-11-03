@@ -245,6 +245,18 @@ def open_image_store(*paths, index: bool = True):
     try:
         from hydra_image_store import ImageStore
 
+        old = [t for t in found if needs_convert(t)]
+        if old:
+            # never converted silently: it rewrites a store the user did not ask to modify
+            log.warning(
+                "image store %s has sub-keyframes (frame kind 1, written before "
+                "hydra_image_store dropped them); its images stay hidden until it is "
+                "converted (once, in place): hydra-image-store-adt4 convert %s",
+                old, " ".join(old),
+            )
+            found = [t for t in found if t not in old]
+            if not found:
+                return None
         try:
             return ImageStore.open(*found, index=index)
         except TypeError:  # hydra_image_store before the indexer
@@ -252,6 +264,28 @@ def open_image_store(*paths, index: bool = True):
     except Exception as e:  # noqa: BLE001
         log.warning("image store %s unavailable: %s", found, e)
         return None
+
+
+def needs_convert(target) -> bool:
+    """A store (dir, run dir or ``store.sqlite``) that still has sub-keyframes (frame
+    kind 1), which the current hydra_image_store rejects: older ADT4 stores need
+    ``hydra-image-store-adt4 convert`` first. Read-only check."""
+    p = pathlib.Path(str(target))
+    for db in (p, p / "store.sqlite", p / "image_store" / "store.sqlite"):
+        if db.is_file() and db.name.endswith(".sqlite"):
+            break
+    else:
+        return False
+    try:
+        import sqlite3
+
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
+        try:
+            return con.execute("SELECT 1 FROM frames WHERE kind = 1 LIMIT 1").fetchone() is not None
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001  (no frames table yet, locked, ...)
+        return False
 
 
 def node_id_of(sym: str) -> int:
@@ -272,7 +306,7 @@ class NodeImage:
     mask_rle: str | None = None  # Neo4j Observation.mask_rle (sensor-sized)
     bbox2d: tuple | None = None  # min_x, min_y, max_x, max_y
     # agent frames (see agent_images): which frame, how far from the node's pose
-    kind: str | None = None  # "keyframe" | "subkeyframe" (None: object image)
+    kind: str | None = None  # "keyframe" | "subkeyframe" (Neo4j SubKeyframe) | None (object)
     own: bool = False  # the agent node's own keyframe
     dist_m: float | None = None
     yaw_deg: float | None = None
@@ -322,7 +356,7 @@ class NodeImage:
 
 def list_images(store, node_id: int) -> list[NodeImage]:
     """Existing rgb files for a node: kept object observations (best first), else
-    the keyframe / sub-keyframe frames anchored to an agent node."""
+    the keyframes anchored to an agent node."""
     if store is None:
         return []
     out: list[NodeImage] = []
@@ -339,11 +373,7 @@ def list_images(store, node_id: int) -> list[NodeImage]:
         if len(out) >= MAX_IMAGES:
             return out
     if not out:
-        try:
-            frames = store.frames_for_agent(node_id, include_subkeyframes=True)
-        except (TypeError, AttributeError):  # hydra_image_store without sub-keyframes
-            frames = store.frames_for_agent(node_id) if hasattr(store, "frames_for_agent") else []
-        for f in frames:
+        for f in store.frames_for_agent(node_id):
             add(f.rgb_path)
             if len(out) >= MAX_IMAGES:
                 break
@@ -360,7 +390,7 @@ def is_agent_record(rec) -> bool:
 
 
 def store_signature(store) -> tuple:
-    """Cheap identity of a store's keyframe/sub-keyframe contents (live stores grow).
+    """Cheap identity of a store's keyframe contents (live stores grow).
 
     A tailed store also re-decides anchors in place (provisional anchors of the
     newest frames, the final reconciliation after Hydra saves), so the anchor
@@ -372,7 +402,7 @@ def store_signature(store) -> tuple:
         rows = store._query(  # noqa: SLF001
             "SELECT count(*), max(frame_id), count(anchor_node_id),"
             " total(anchor_node_id & 4294967295) FROM frames"
-            " WHERE kind IN (0, 1) AND rgb_path IS NOT NULL"
+            " WHERE kind = 0 AND rgb_path IS NOT NULL"
         )
         return (id(store), *(tuple(r) for _, r in rows))
     except Exception:  # noqa: BLE001
@@ -381,15 +411,13 @@ def store_signature(store) -> tuple:
 
 def agent_frame_images(index, sym: str, rec=None) -> list[NodeImage]:
     """The agent node's own keyframe, else the nearest frames by pose (agent_images)."""
-    from .agent_images import KEYFRAME
-
     pose = index.node_pose(sym)
     if pose is None:
         pose = (rec.pos, None) if rec is not None else (None, None)
     return [
         NodeImage(
             pathlib.Path(f.path),
-            kind=f.kind if f.kind == KEYFRAME else "subkeyframe",
+            kind=f.kind,
             own=f.own,
             dist_m=f.dist_m,
             yaw_deg=f.yaw_deg,
@@ -398,6 +426,26 @@ def agent_frame_images(index, sym: str, rec=None) -> list[NodeImage]:
         )
         for f in index.select(sym, pos=pose[0], yaw=pose[1])
     ]
+
+
+def spark_agent_stamp(G):
+    """``node id -> stamp ns | None`` from a spark_dsg graph's agent nodes (the binding
+    returns a timedelta, 0 = unset), or None without a graph."""
+    if G is None:
+        return None
+    import datetime
+
+    def stamp(nid):
+        try:
+            if not G.has_node(int(nid)):
+                return None
+            ts = G.get_node(int(nid)).attributes.timestamp
+            ns = int(ts // datetime.timedelta(microseconds=1)) * 1000
+        except Exception:  # noqa: BLE001  (not an agent node / no timestamp)
+            return None
+        return ns if ns > 0 else None
+
+    return stamp
 
 
 def _quat_yaw(w, x, y, z) -> float:
@@ -531,9 +579,10 @@ class Source:
             self._agent_idx = (key, idx)
         return idx
 
-    def store_agent_images(self, store, sym: str, loaded, lookup=None) -> list:
+    def store_agent_images(self, store, sym: str, loaded, lookup=None, stamp=None) -> list:
         """Agent images from an ImageStore; poses from ``lookup`` (node id → 4x4),
-        else from the loaded node records."""
+        else from the loaded node records; ``stamp`` (node id → ns) picks the agents'
+        own keyframes (agent_images.own_keyframes)."""
         from .agent_images import AgentFrameIndex
 
         rec = loaded.records.get(sym)
@@ -545,7 +594,9 @@ class Source:
                 positions = {
                     k: r.pos for k, r in loaded.records.items() if is_agent_record(r)
                 }
-            return AgentFrameIndex.from_store(store, lookup=lookup, positions=positions)
+            return AgentFrameIndex.from_store(
+                store, lookup=lookup, positions=positions, stamp=stamp
+            )
 
         return agent_frame_images(self.agent_index(key, build), sym, rec)
 
@@ -1021,7 +1072,8 @@ class FileSource(Source):
                 from hydra_image_store import as_pose_lookup
 
                 images = self.store_agent_images(
-                    store, sym, loaded, lookup=as_pose_lookup(loaded.G)
+                    store, sym, loaded, lookup=as_pose_lookup(loaded.G),
+                    stamp=spark_agent_stamp(loaded.G),
                 )
             else:
                 images = list_images(store, int(node.id.value))
@@ -1289,13 +1341,14 @@ class Neo4jSource(Source):
         from .agent_images import KEYFRAME, SUBKEYFRAME, AgentFrameIndex
 
         poses: dict[str, tuple] = {}
+        stamps: dict[str, int] = {}
         rows = []
 
         def build():
             for r in self.query(
                 "MATCH (a:Agent) WHERE a.center IS NOT NULL RETURN a.nodeSymbol AS s, "
                 "a.center AS c, a.rot_w AS w, a.rot_x AS x, a.rot_y AS y, "
-                "a.rot_z AS z, a.rgb_path AS p, a.frame_id AS f"
+                "a.rot_z AS z, a.rgb_path AS p, a.frame_id AS f, a.timestamp_ns AS t"
             ):
                 try:
                     s = canonical_symbol(str(r["s"]))
@@ -1308,6 +1361,9 @@ class Neo4jSource(Source):
                     else None
                 )
                 poses[s] = (np.array(xyz), yaw)
+                t = r.get("t") if hasattr(r, "get") else None
+                if t:
+                    stamps[s] = int(t)
                 if r["p"]:
                     rows.append((r["p"], KEYFRAME, s, r["f"], xyz, yaw))
             for r in self.query(
@@ -1346,7 +1402,9 @@ class Neo4jSource(Source):
                 return T
 
             with self._store_lock:
-                return AgentFrameIndex.from_store(store, lookup=lookup)
+                return AgentFrameIndex.from_store(
+                    store, lookup=lookup, stamp=lambda nid: stamps.get(symbol_of(int(nid)))
+                )
 
         idx = self.agent_index(("neo4j", self.version()), build)
         return agent_frame_images(idx, sym, loaded.records.get(sym))
