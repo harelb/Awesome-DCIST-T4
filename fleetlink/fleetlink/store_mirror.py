@@ -30,8 +30,8 @@ Protocol (nothing lost or duplicated across robot, agent or console restarts):
 * the agent's C1 ``state`` carries ``store = {id, active, after, sent, last,
   backlog, ...}``.  ``id`` names the robot's *store session*: the sqlite
   file's inode (run-adt4 clears the run dir, so a new run is a new file) plus,
-  for a tailed store, the Hydra session (meta ``indexer.tail.session``, the
-  ``wall_ns`` of Hydra's newest event-log ``open``), else the first frame's
+  for a tailed store, the Hydra session (the ``wall_ns`` of the frontend event
+  log's newest ``open``, from meta ``indexer.tail``), else the first frame's
   timestamp.  It changes when a new run starts or Hydra restarts;
 * the base answers a state whose store it does not mirror yet, or whose
   ``active`` is false (agent restarted), with the C0 request ``store {id,
