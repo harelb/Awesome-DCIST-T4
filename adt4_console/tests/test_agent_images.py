@@ -1,5 +1,5 @@
-"""Agent-node images: the node's own keyframe, else the nearest sub-keyframe by pose
-(anchored to the node first, then to neighbouring agent nodes), with distances."""
+"""Agent-node images: the node's own keyframe, else the nearest saved keyframe or
+sub-keyframe by pose (whatever agent node it is anchored to), with distances."""
 
 import datetime
 import math
@@ -203,3 +203,19 @@ def test_neo4j_agent_and_subkeyframe_rows(tmp_path):
     i = ims[0].info()
     assert i["kind"] == "subkeyframe" and i["frame_id"] == 42 and i["anchor"] == "a(7)"
     assert i["dist_m"] == pytest.approx(0.5) and i["yaw_deg"] == pytest.approx(0.0)
+
+
+def test_nearest_frame_wins_over_anchored_one():
+    """A neighbour's frame closer to the node beats a farther frame anchored to it."""
+    from adt4_console.agent_images import KEYFRAME, SUBKEYFRAME, AgentFrameIndex
+
+    rows = [
+        ("/x/own_far.jpg", SUBKEYFRAME, "a(1)", 1, (1.8, 0.0, 0.0), 0.0),  # anchored, 0.8 m
+        ("/x/nb_near.jpg", SUBKEYFRAME, "a(2)", 2, (1.1, 0.0, 0.0), 0.0),  # neighbour, 0.1 m
+        ("/x/kf_other.jpg", KEYFRAME, "a(0)", 3, (0.0, 0.0, 0.0), 0.0),  # 1 m
+    ]
+    idx = AgentFrameIndex(rows, node_pose=lambda sym: ((1.0, 0.0, 0.0), 0.0))
+    out = idx.select("a(1)", exists=None)
+    assert [f.frame_id for f in out] == [2, 1, 3]
+    assert not out[0].own and out[0].anchor == "a(2)"
+    assert out[0].dist_m == pytest.approx(0.1, abs=1e-3)

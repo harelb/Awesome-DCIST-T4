@@ -1,11 +1,10 @@
 """Images for agent (trajectory keyframe) nodes.
 
-Hydra saves an agent keyframe image only when the robot moved >= 1 m or turned
->= 30 deg since the last one *and* a camera frame lies within 50 ms of the node,
-so many agent nodes have no image of their own. The denser sub-keyframes
-(0.25 m / 15 deg) are anchored to agent nodes, so for such a node we show the
-frame taken closest to its pose: first among the sub-keyframes anchored to it,
-then among the frames anchored to neighbouring agent nodes within a few metres.
+Agent nodes and saved camera keyframes are chosen independently (Hydra's pose graph
+vs. the keyframe selector / sub-keyframe gate), so many agent nodes have no image
+of their own. For such a node we show the saved keyframe (keyframe or
+sub-keyframe) taken closest to the node's pose, whichever agent node it is
+anchored to, within a few metres.
 
 :class:`AgentFrameIndex` holds every keyframe / sub-keyframe with its world body
 pose (anchor pose composed with ``anchor_T_body``, or the odometric pose when the
@@ -172,10 +171,10 @@ class AgentFrameIndex:
     # -- query ----------------------------------------------------------------
     def select(self, sym: str, pos=None, yaw=None, near_m: float = NEAR_M,
                limit: int = MAX_AGENT_IMAGES, exists=os.path.isfile) -> list[AgentFrame]:  # fmt: skip
-        """Frames for agent ``sym``: its own keyframe first, else the nearest frame
-        anchored to it, else the nearest frame of a neighbouring agent node within
-        ``near_m``; then the other nearby frames by distance. ``pos``/``yaw``
-        (rad) default to :meth:`node_pose`."""
+        """Frames for agent ``sym``: its own keyframe first, else the saved frame
+        nearest to the node's pose (any anchor) within ``near_m``; then the other
+        nearby frames by distance. Without a node pose, the frames anchored to it.
+        ``pos``/``yaw`` (rad) default to :meth:`node_pose`."""
         if pos is None:
             p = self.node_pose(sym)
             if p is not None:
@@ -203,7 +202,8 @@ class AgentFrameIndex:
             near = []
         own = [i for i in anchored if self.kinds[i] == KEYFRAME]
         by_score = lambda idx: sorted(idx, key=lambda i: (score[i], i))  # noqa: E731
-        ordered = by_score(own) + by_score(anchored) + by_score(set(near) | set(anchored))
+        # own keyframe, else simply the nearest saved frame (anchoring no longer matters)
+        ordered = by_score(own) + by_score(set(near) | set(anchored))
         out, seen = [], set()
         for i in ordered:
             if i in seen:
