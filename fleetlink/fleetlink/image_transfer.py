@@ -56,6 +56,11 @@ from hydra_image_store.codec import SEQ_MASK, transform_to_blob
 from hydra_image_store.store import _FRAME_COLS, Frame, ImageStore, ImageStoreWriter
 
 try:
+    from hydra_image_store.codec import SAM3_TRACK_BASE
+except ImportError:  # older hydra_image_store
+    SAM3_TRACK_BASE = 1 << 40
+
+try:
     from hydra_image_store.store import frame_stem
 except ImportError:  # hydra_image_store before frame_stem()
 
@@ -171,6 +176,40 @@ def decode_png16(data: bytes) -> np.ndarray:
             arr = np.asarray(im)
     if arr.ndim == 3:
         arr = arr[..., 0]
+    return np.ascontiguousarray(arr.astype(np.uint16, copy=False))
+
+
+def decode_depth_mm(data: bytes) -> np.ndarray:
+    """uint16 millimetre depth from a stored depth file: a 16-bit PNG (the store's own
+    format), else any image OpenCV decodes (e.g. a float32 EXR in metres, which a raw
+    Hydra InputData archive holds), converted to millimetres."""
+    if _sniff(data) == "png":
+        return decode_png16(data)
+    arr = None
+    if data[:4] == b"\x76\x2f\x31\x01":  # OpenEXR: hydra_image_store's reader needs no env var
+        try:
+            from hydra_image_store.exr import read_exr
+
+            arr = read_exr(data)
+        except Exception:  # noqa: BLE001  (older package / unsupported encoding: OpenCV)
+            arr = None
+    if arr is not None:
+        arr = np.asarray(arr)
+        if arr.ndim == 3:
+            arr = arr[..., 0]
+        mm = np.nan_to_num(arr.astype(np.float64) * 1000.0, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.ascontiguousarray(np.clip(np.rint(mm), 0, 65535).astype(np.uint16))
+    cv2 = _cv2()
+    if cv2 is None:
+        raise MissingDependency("decoding non-PNG depth needs opencv-python (cv2)")
+    arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED | cv2.IMREAD_ANYDEPTH)
+    if arr is None:
+        raise ValueError("could not decode the depth image (EXR needs OPENCV_IO_ENABLE_OPENEXR=1)")
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if np.issubdtype(arr.dtype, np.floating):
+        mm = np.nan_to_num(arr.astype(np.float64) * 1000.0, nan=0.0, posinf=0.0, neginf=0.0)
+        return np.ascontiguousarray(np.clip(np.rint(mm), 0, 65535).astype(np.uint16))
     return np.ascontiguousarray(arr.astype(np.uint16, copy=False))
 
 
@@ -322,13 +361,69 @@ def frame_meta(store: ImageStore, frame: Frame) -> dict:
     }
 
 
+_OBS_SQL = (
+    "SELECT o.obs_id, o.robot_id, o.track_id, o.timestamp_ns, "
+    "o.bbox2d_min_x, o.bbox2d_min_y, o.bbox2d_max_x, o.bbox2d_max_y, "
+    "o.bbox3d_min_x, o.bbox3d_min_y, o.bbox3d_min_z, o.bbox3d_max_x, o.bbox3d_max_y, o.bbox3d_max_z, "
+    "o.mask_rle, o.mask_path, o.score, o.kept, b.node_id FROM observations o "
+    "LEFT JOIN track_bindings b ON b.robot_id = o.robot_id AND b.track_id = o.track_id "
+    "WHERE o.frame_id = ? AND o.kept != 0 ORDER BY o.obs_id"
+)
+
+
+def _mask_rle_from_png(path) -> str | None:
+    data = _read(path)
+    if data is None:
+        return None
+    try:
+        arr = decode_png16(data)
+    except Exception:  # noqa: BLE001
+        return None
+    from hydra_image_store.codec import rle_encode
+
+    return json.dumps(rle_encode(arr > 0), separators=(",", ":"))
+
+
+def frame_observations(store: ImageStore, frame_id: int) -> list[dict]:
+    """The kept object observations of a frame with the node their track is bound to
+    right now (``node_id`` None = not bound yet). The mask goes as RLE (sensor-sized,
+    from the mask PNG when the row has none), so the observation is self-contained.
+    Used by the live store mirror: the base then shows object images during the run."""
+    out = []
+    for db, r in store._query(_OBS_SQL, (int(frame_id),)):
+        rle = r[14]
+        if rle is None and r[15] is not None:
+            rle = _mask_rle_from_png(db.abs(r[15]))
+        out.append(
+            {
+                "obs_id": int(r[0]),
+                "robot_id": int(r[1]),
+                "track_id": int(r[2]),
+                "timestamp_ns": int(r[3]),
+                "bbox2d": None if r[4] is None else [int(v) for v in r[4:8]],
+                "bbox3d": None if r[8] is None else [float(v) for v in r[8:14]],
+                "mask_rle": rle,
+                "score": float(r[16]),
+                "kept": bool(r[17]),
+                "node_id": None if r[18] is None else int(r[18]),
+            }
+        )
+    return out
+
+
 def encode_frame(
-    store: ImageStore, frame: Frame | int, compression: str = "fast"
+    store: ImageStore,
+    frame: Frame | int,
+    compression: str = "fast",
+    *,
+    observations: bool = False,
 ) -> bytes:
     """One frame (row, calibration, RGB, depth) as a self-describing blob.
 
     ``frame`` is a :class:`Frame` or a frame id. Missing image files are simply left out
-    (``parts`` then lacks that entry).
+    (``parts`` then lacks that entry). ``observations``: also carry the frame's kept
+    object observations and their track bindings (:func:`frame_observations`), which
+    :func:`write_frame` inserts.
     """
     if compression not in COMPRESSION_MODES:
         raise ValueError(
@@ -341,12 +436,24 @@ def encode_frame(
             raise KeyError(f"unknown frame {fid}")
     meta = frame_meta(store, frame)
     meta["compression"] = compression
+    if observations:
+        obs = frame_observations(store, frame.frame_id)
+        if obs:
+            meta["observations"] = obs
     meta["depth_downscale"] = 1
     parts: list[tuple[dict, bytes]] = []
 
+    for path in (frame.rgb_path, frame.depth_path):
+        if path is not None and pathlib.Path(path).suffix.lower() == ".zip":
+            # raw InputData archives are indexed (and re-encoded) by hydra_image_store;
+            # a store row pointing at one is a bug, never ship it
+            raise ValueError(f"frame {frame.frame_id}: refusing to send archive {path}")
     rgb = _read(frame.rgb_path)
     if rgb is not None:
         fmt = _sniff(rgb)
+        if fmt == "bin" and compression != "fast":  # not JPEG/PNG: send a JPEG
+            rgb = encode_jpeg(_decode_rgb(rgb), 95)
+            fmt = "jpeg"
         if compression == "fast":  # stored JPEGs are q90+; q75 is ~40% smaller
             rgb = encode_jpeg(_decode_rgb(rgb), FAST_JPEG_QUALITY)
             fmt = "jpeg"
@@ -354,6 +461,10 @@ def encode_frame(
         parts.append(({"name": "rgb", "codec": fmt}, rgb))
 
     depth = _read(frame.depth_path)
+    if depth is not None and _sniff(depth) != "png":
+        depth = encode_png16(decode_depth_mm(depth))  # e.g. EXR metres -> PNG mm
+        if meta["calib"] is not None:
+            meta["calib"]["depth_scale"] = 0.001
     if depth is not None:
         if compression == "none":
             parts.append(
@@ -645,7 +756,43 @@ def write_frame(writer: ImageStoreWriter, decoded: dict) -> int:
                     int(meta["frame_id"]),
                 ),
             )
+        _write_observations(c, meta)
     return int(meta["frame_id"])
+
+
+def _write_observations(c, meta: dict) -> None:
+    """Rows of :func:`frame_observations` carried by a frame: observations keep their
+    source ids (a re-sent one is ignored), bindings follow the robot's latest."""
+    for o in meta.get("observations") or ():
+        b2 = o.get("bbox2d") or [None] * 4
+        b3 = o.get("bbox3d") or [None] * 6
+        rle = o.get("mask_rle")
+        if rle is not None and not isinstance(rle, str):
+            rle = json.dumps([int(v) for v in rle], separators=(",", ":"))
+        c.execute(
+            "INSERT OR IGNORE INTO observations (obs_id, robot_id, track_id, frame_id, timestamp_ns, "
+            "bbox2d_min_x, bbox2d_min_y, bbox2d_max_x, bbox2d_max_y, bbox3d_min_x, bbox3d_min_y, "
+            "bbox3d_min_z, bbox3d_max_x, bbox3d_max_y, bbox3d_max_z, mask_rle, mask_path, score, kept) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+            (
+                int(o["obs_id"]),
+                int(o["robot_id"]),
+                int(o["track_id"]),
+                int(meta["frame_id"]),
+                int(o.get("timestamp_ns", meta["timestamp_ns"])),
+                *[None if v is None else int(v) for v in b2],
+                *[None if v is None else float(v) for v in b3],
+                rle,
+                float(o.get("score", 0.0)),
+                int(bool(o.get("kept", True))),
+            ),
+        )
+        node = o.get("node_id")
+        if node is not None and int(o["track_id"]) < SAM3_TRACK_BASE:
+            c.execute(
+                "INSERT OR REPLACE INTO track_bindings (robot_id, track_id, node_id) VALUES (?, ?, ?)",
+                (int(o["robot_id"]), int(o["track_id"]), int(node)),
+            )
 
 
 def encode_frames(
@@ -666,6 +813,8 @@ __all__ = [
     "decoded_paths",
     "encode_frame",
     "encode_frames",
+    "frame_observations",
+    "decode_depth_mm",
     "full_res_depth",
     "restore_depth",
     "scale_calib",

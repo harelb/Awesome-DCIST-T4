@@ -10,6 +10,17 @@ Moved here from ``hydra_image_store.pack`` (the store reader, writer and
 
 (``hydra-image-store check`` checks a store.)
 
+What is packed: the *indexed* store, not the raw image logs. Hydra/Khronos log
+keyframe InputData zips (EXR depth, ~1.2 MB each), track dirs and event logs;
+``hydra-image-store tail`` / ``index`` turn them into ``<run>/image_store`` with
+JPEG colour and 16-bit PNG depth, about 7x smaller than the zips (Penn window A:
+146 MB store vs 1.15 GB zips), and with every anchor, binding and alias already
+resolved, so the destination needs no re-index (and no hydra_image_store
+indexer). ``pack`` indexes a run that has raw logs but no up-to-date store first
+(``hydra_image_store.indexer.ensure_indexed``; skipped while a tailer follows
+it). The console's map transfer excludes the raw log dirs from its rsync for
+the same reason.
+
 ``pack_store`` (source machine) writes a tar stream (optionally zstd-wrapped)::
 
     manifest.json            what was packed and how (first member)
@@ -140,6 +151,18 @@ class _CountingWriter(io.RawIOBase):
         self.raw.flush()
 
 
+def _ensure_indexed(src) -> None:
+    """Build / refresh ``<run>/image_store`` from the run's raw image logs."""
+    try:
+        from hydra_image_store.indexer import ensure_indexed
+    except ImportError:  # hydra_image_store before the indexer: store written by Hydra
+        return
+    try:
+        ensure_indexed(src)
+    except (OSError, sqlite3.Error) as exc:  # e.g. read-only medium: pack what is there
+        print(f"image_pack: could not index {src}: {exc}", file=sys.stderr)
+
+
 def pack_store(
     src: str | os.PathLike,
     out: str | os.PathLike | BinaryIO,
@@ -164,6 +187,7 @@ def pack_store(
         raise ValueError(f"frames must be one of {transfer.FRAME_SELECTIONS}")
     if compression not in transfer.COMPRESSION_MODES:
         raise ValueError(f"compression must be one of {transfer.COMPRESSION_MODES}")
+    _ensure_indexed(src)
     store_dir = resolve_store_dir(src)
     db_path = store_dir / DB_NAME
     if not db_path.exists():
