@@ -142,9 +142,12 @@ Maps:
   * `mtime`/`ctime` are the run dir's epoch seconds. `name_date` is a date parsed from the name (`20261018`, `2026-10-18`,
     `03192026` MMDDYYYY, `2026-07`) or null. The page sorts by `mtime`, else `name_date`.
   * `has_dsg`/`has_dsg_mesh`/`has_mesh` are `hydra/backend/{dsg.json, dsg_with_mesh.json, mesh.ply}`.
-  * `image_store` is null without `<run>/image_store/store.sqlite`, else `{frames: {keyframe, subkeyframe, object},
-    frames_total, observations, sensors, schema_version, keyframes_unanchored, sampled_files, size_bytes,
-    check: {ok, problems: [str]}}`. The quick check passes when: the index opens, `schema_version` is present,
+  * `image_store` is null without `<run>/image_store/store.sqlite` and without raw image logs, else
+    `{indexed, raw?, tail?, frames: {keyframe, subkeyframe, object}, frames_total, observations, sensors,
+    schema_version, keyframes_unanchored, sampled_files, size_bytes, check: {ok, problems: [str]}}`. `raw` =
+    `{keyframe_archives, tracks, events}` (Hydra's keyframe zips / track logs, which hydra_image_store indexes);
+    a run with raw logs but no store yet has `indexed: false` and zero counts (`ImageStore.open` / `pack` index it
+    on first use). `tail` = the tailer status `{live, final, heartbeat_wall, session}`. The quick check passes when: the index opens, `schema_version` is present,
     no frame lacks its sensor, every keyframe is anchored, and the image files of the first and last 4 frames exist.
     `sessions` = number of `sessions/<k>/image_store` (stores of earlier sessions).
   * Sizes: `size_bytes`/`image_store.size_bytes` come from one `du -b -d1 <run>` (python walk fallback), and `size`
@@ -828,26 +831,49 @@ then `INTER_LINEAR`.
 
 ## 13. Live image-store mirror (C6)
 
-During a run the robot's hydra image store (`$ADT4_OUTPUT_DIR/image_store`) is mirrored to the
-base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirror.py`
+During a run the robot's image store (`$ADT4_OUTPUT_DIR/image_store`) is mirrored to the
+base so SAM3 search on the base sees live keyframes and the console shows object images. Hydra and
+Khronos do not write that store any more: they log keyframe zips (`keyframes/`), track logs
+(`tracks/`) and event logs (`events/`), and `hydra-image-store tail` (the hydra window's
+`dcist_launch_system/bin/image-store-tail`) builds the store from them while Hydra runs. Code: `fleetlink/store_mirror.py`
 (`StoreTail` robot side, `StoreMirror` base side), codec `fleetlink/image_transfer.py`
 (moved from `hydra_image_store.transfer`; `hydra_image_store` remains the store reader/writer).
 
 ### 13.1 Robot (agent)
 * **Params.** `store_path` (default `$ADT4_OUTPUT_DIR/image_store`; `""` disables),
   `store_send` (default **false**: frames are sent only after the base turns it on, see 13.4),
-  `store_frames` (`keyframes` = kind 0, default, or `all`), `store_compression` (`none` |
+  `store_frames` (`keyframes` = kind 0 plus the frames of kept object observations, default, or `all`), `store_compression` (`none` |
   `lossless` | `fast`, default `fast`: RGB re-encoded JPEG q75, depth half resolution + row-delta
   zstd), `budget_C6` (default 150 000 B/s); yaml also `store_poll_s` (1 s), `store_queue_s` (2 s
   of budget queued at most).
-* The store is opened **read-only** (sqlite WAL, `mode=ro`); Hydra keeps writing. Frames are read
-  in `frame_id` order with a watermark (`select_frames(after=…)`), encoded at send time.
-  Every frame carries its frame row and the sensor calibration, so any frame rebuilds a valid store.
-* **Store id.** `id` names one Hydra store session (inode of `store.sqlite` + first frame
-  timestamp). Hydra rotates the store when it restarts (frame ids restart), giving a new id and a
-  new mirror directory.
+* The store is opened **read-only** (sqlite WAL, `mode=ro`, never indexed by the agent); the
+  tailer keeps writing. Frames are read in `frame_id` order with a watermark
+  (`select_frames(after=…)`), encoded at send time. Every frame carries its frame row and the
+  sensor calibration, so any frame rebuilds a valid store. Images are already JPEG / 16-bit PNG
+  (the indexer re-encodes the zips); a non-PNG depth is re-encoded and a `.zip` is never sent.
+* **Settled frames only.** The tailer anchors a frame (and decides whether it is an agent node's
+  KEYFRAME) once the next agent node exists; undecided frames are in meta
+  `indexer.r<robot>.pending_frames` / `provisional_frames` and the cursor stops before the lowest
+  of them (`state.store.held`, `hold_reason: "anchor"`).
+* **Object images.** A frame with kept observations carries them in its header
+  (`meta.observations`: ids, bbox, score, mask RLE, `node_id` of the track's binding); the base
+  inserts them and the bindings. A kept observation whose track has no binding yet waits up to
+  30 s (`hold_reason: "binding"`), unless the indexer lists it as unbound for good. A kept
+  observation that appears on a frame the cursor already passed (a track logged on a keyframe
+  archive's frame, the final reconciliation) goes out as a **late** frame `{id, frame_id, prev:
+  null, late: true, blob}` outside the `prev` chain; the base writes it when `frame_id <=
+  watermark` (`stats.late`, agent `state.store.late_sent`). After an agent restart / re-arm every
+  kept-observation frame below the watermark is re-sent late (a lost late frame is repaired then).
+  Bindings and merges changed after a frame was sent are not re-sent (the transferred map after
+  the run is exact). The console's `live:<robot>` source reads only the mirror of the current
+  store session (the receiver's, else the newest), never an earlier session's.
+* **Store id.** `id` names one store session: inode of `store.sqlite` (run-adt4 clears the run
+  dir) + the tailer's Hydra session (the `wall_ns` of the frontend event log's newest `open`, from
+  meta `indexer.tail.events`; `indexer.tail.session` itself also changes when the backend log
+  first opens, at the first merge), else the first frame timestamp (a store nobody tails). A new run or a Hydra restart
+  gives a new id and a new mirror directory.
 * **State.** C1 `state.store = {id, enabled, send, active, after, sent, last, backlog, frames_sent,
-  bytes_sent, avg_frame_bytes, frames, compression, rewinds, error}`.
+  bytes_sent, avg_frame_bytes, frames, compression, rewinds, held, hold_reason, error}`.
 * **Auto mode.** C6 is never AIMD-adjusted; with `auto` on, store frames are only queued while
   C2 and C3 have nothing queued. C6 is last in priority (zenoh `BACKGROUND`, after C5).
 * A frame that cannot be encoded is sent as a skip (`blob: null, error`) so the chain stays intact.
