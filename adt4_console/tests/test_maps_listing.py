@@ -29,13 +29,13 @@ INSERT INTO sensors VALUES (1, 0, 'cam');
 """
 
 
-def make_store(run: pathlib.Path, keyframes=3, subs=2, missing_file=False, unanchored=0):
+def make_store(run: pathlib.Path, keyframes=3, objs=2, missing_file=False, unanchored=0):
     store = run / "image_store"
     (store / "rgb").mkdir(parents=True)
     conn = sqlite3.connect(store / "store.sqlite")
     conn.executescript(SCHEMA)
     fid = 0
-    for kind, n in ((0, keyframes), (1, subs)):
+    for kind, n in ((0, keyframes), (2, objs)):
         for _ in range(n):
             fid += 1
             rel = f"rgb/{fid}.jpg"
@@ -88,7 +88,7 @@ def test_scan_run_contents(out_root):
     assert e["has_dsg"] and e["has_dsg_mesh"] and e["has_mesh"]
     assert e["has_image_store"]
     s = e["image_store"]
-    assert s["frames"] == {"keyframe": 3, "subkeyframe": 2}
+    assert s["frames"] == {"keyframe": 3, "object": 2}
     assert s["frames_total"] == 5 and s["observations"] == 1
     assert s["check"] == {"ok": True, "problems": []}
     assert s["size_bytes"] >= 5000
@@ -187,7 +187,7 @@ def test_list_maps_endpoint(settings, out_root):
     for m in remotes:
         rr = {x["name"]: x for x in machines[m]}
         assert rr["imgstore_full_20261018"]["path"] == f"{settings.output_root}/imgstore_full_20261018"
-        assert rr["imgstore_full_20261018"]["image_store"]["frames"]["subkeyframe"] == 2
+        assert rr["imgstore_full_20261018"]["image_store"]["frames"]["object"] == 2
     assert body["pending"] == []
     # sizes were cached on this host, keyed per machine
     cache = json.loads(maps_route._CACHE_FILE.read_text())

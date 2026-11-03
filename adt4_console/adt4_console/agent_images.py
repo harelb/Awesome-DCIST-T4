@@ -1,16 +1,20 @@
 """Images for agent (trajectory keyframe) nodes.
 
-Hydra saves an agent keyframe image only when the robot moved >= 1 m or turned
->= 30 deg since the last one *and* a camera frame lies within 50 ms of the node,
-so many agent nodes have no image of their own. The denser sub-keyframes
-(0.25 m / 15 deg) are anchored to agent nodes, so for such a node we show the
-frame taken closest to its pose: first among the sub-keyframes anchored to it,
-then among the frames anchored to neighbouring agent nodes within a few metres.
+Hydra's keyframe selector and pose graph pick camera keyframes and agent nodes
+independently, so many agent nodes have no image of their own. For such a node we
+show the keyframe taken closest to its pose: first among the keyframes anchored to
+it, then among the frames anchored to neighbouring agent nodes within a few metres.
 
-:class:`AgentFrameIndex` holds every keyframe / sub-keyframe with its world body
-pose (anchor pose composed with ``anchor_T_body``, or the odometric pose when the
-anchor cannot be resolved) and answers that query; sources build one per graph
-version (see ``graph_service``).
+Every keyframe in an image store is a ``FrameKind.KEYFRAME`` anchored to the agent
+node nearest in time; a node's *own* keyframe is the one taken at the node's stamp
+(``ImageStore.agent_frame``). Sources without node stamps recognise it by its
+``anchor_T_body``: a keyframe taken at the node's stamp has exactly the node's
+odometric pose, so its offset is the identity (:func:`own_keyframes`).
+
+:class:`AgentFrameIndex` holds every keyframe with its world body pose (anchor pose
+composed with ``anchor_T_body``, or the odometric pose when the anchor cannot be
+resolved) and answers that query; sources build one per graph version (see
+``graph_service``).
 """
 
 from __future__ import annotations
@@ -26,17 +30,43 @@ NEAR_M = 3.0  # neighbouring frames considered (metres from the node)
 YAW_DEG_PER_M = 90.0  # ranking: 90 deg of heading difference weighs like 1 m
 MAX_AGENT_IMAGES = 24
 
+# "subkeyframe": heracles' Neo4j SubKeyframe nodes (keyframes that are not an agent's
+# own); image-store frames are all "keyframe", the own one flagged ``own``
 KEYFRAME, SUBKEYFRAME = "keyframe", "subkeyframe"
+AGENT_FRAME_MAX_DT_NS = 50_000_000  # ImageStore.agent_frame's default
+IDENTITY_ATOL = 1e-3  # max |anchor_T_body - I| of a keyframe taken at its anchor's stamp
 
 
-def image_frame_kinds(FrameKind) -> tuple[int, ...]:
-    """Store frame kinds that carry agent images: KEYFRAME, plus SUBKEYFRAME while
-    hydra_image_store still has it (upstream drops it: every keyframe archive becomes a
-    KEYFRAME anchored to its nearest agent node)."""
-    kinds = [int(FrameKind.KEYFRAME)]
-    if hasattr(FrameKind, "SUBKEYFRAME"):
-        kinds.append(int(FrameKind.SUBKEYFRAME))
-    return tuple(kinds)
+def anchor_offset(frame) -> float:
+    """max |anchor_T_body - I| (0 for a frame without one)."""
+    if frame.anchor_T_body is None:
+        return 0.0
+    return float(np.max(np.abs(np.asarray(frame.anchor_T_body, float) - np.eye(4))))
+
+
+def own_keyframes(frames, stamp=None) -> dict[int, object]:
+    """``anchor node id -> its own keyframe`` among store ``frames`` (KEYFRAMEs).
+
+    With ``stamp(node_id) -> ns | None``: the keyframe anchored to the node nearest
+    its stamp, within ``AGENT_FRAME_MAX_DT_NS`` (``ImageStore.agent_frame``). For a
+    node without a stamp: the anchored keyframe whose ``anchor_T_body`` is the
+    identity (taken at the node's own pose and stamp)."""
+    by_anchor: dict[int, list] = defaultdict(list)
+    for f in frames:
+        if f.anchor_node_id is not None:
+            by_anchor[int(f.anchor_node_id)].append(f)
+    own = {}
+    for a, fs in by_anchor.items():
+        ts = stamp(a) if stamp is not None else None
+        if ts is not None:
+            best = min(fs, key=lambda f: (abs(f.timestamp_ns - ts), f.timestamp_ns, f.frame_id))
+            if abs(best.timestamp_ns - ts) <= AGENT_FRAME_MAX_DT_NS:
+                own[a] = best
+            continue
+        cands = [f for f in fs if anchor_offset(f) < IDENTITY_ATOL]
+        if cands:
+            own[a] = min(cands, key=lambda f: (anchor_offset(f), f.timestamp_ns, f.frame_id))
+    return own
 
 
 def yaw_of(R) -> float:
@@ -53,7 +83,7 @@ class AgentFrame:
     """One frame chosen for an agent node."""
 
     path: str
-    kind: str  # KEYFRAME | SUBKEYFRAME
+    kind: str  # KEYFRAME (image store) | SUBKEYFRAME (heracles SubKeyframe rows)
     own: bool  # the node's own keyframe
     dist_m: float | None  # translation between node and frame body pose
     yaw_deg: float | None  # heading difference (None: a heading is unknown)
@@ -70,14 +100,17 @@ def _category(sym: str | None) -> str:
 
 
 class AgentFrameIndex:
-    """Keyframes + sub-keyframes with their world body poses."""
+    """Saved keyframes with their world body poses."""
 
     def __init__(self, rows, node_pose=None):
-        """``rows``: iterable of (path, kind, anchor_sym|None, frame_id|None, xyz, yaw_rad|None);
-        ``node_pose(sym) -> (xyz, yaw_rad|None) | None`` resolves query nodes."""
+        """``rows``: iterable of (path, kind, anchor_sym|None, frame_id|None, xyz,
+        yaw_rad|None[, own]); ``own`` (the anchor's own keyframe) defaults to
+        ``kind == KEYFRAME``. ``node_pose(sym) -> (xyz, yaw_rad|None) | None``
+        resolves query nodes."""
         rows = list(rows)
         self.paths = [str(r[0]) for r in rows]
         self.kinds = [r[1] for r in rows]
+        self.own = [bool(r[6]) if len(r) > 6 else r[1] == KEYFRAME for r in rows]
         self.anchors = [r[2] for r in rows]
         self.frame_ids = [r[3] for r in rows]
         self.pos = np.array([r[4] for r in rows], float).reshape(-1, 3)
@@ -96,21 +129,22 @@ class AgentFrameIndex:
 
     # -- builders -------------------------------------------------------------
     @classmethod
-    def from_store(cls, store, lookup=None, positions=None) -> "AgentFrameIndex":
+    def from_store(cls, store, lookup=None, positions=None, stamp=None) -> "AgentFrameIndex":
         """Index an ``hydra_image_store.ImageStore``.
 
         ``lookup(node_id) -> 4x4 | None`` gives (optimized) agent poses, e.g. a
         spark_dsg graph via ``as_pose_lookup``. Without one, ``positions``
         (``sym -> xyz``, e.g. live node records) supply the anchor translation and
         the anchor's heading is recovered from its frames' odometric poses.
+        ``stamp(node_id) -> ns | None`` picks the agents' own keyframes
+        (:func:`own_keyframes`).
         """
         from hydra_image_store import FrameKind
 
         frames = [
-            f
-            for f in store.frames(kind=image_frame_kinds(FrameKind))
-            if f.rgb_path is not None
+            f for f in store.frames(kind=int(FrameKind.KEYFRAME)) if f.rgb_path is not None
         ]
+        own_ids = {f.frame_id for f in own_keyframes(frames, stamp).values()}
         canon = {}
 
         def anchor_of(f):
@@ -156,10 +190,9 @@ class AgentFrameIndex:
                     T = np.asarray(W, float) @ aTb
             if T is None:
                 T = f.world_T_body_odom
-            kind = KEYFRAME if int(f.kind) == int(FrameKind.KEYFRAME) else SUBKEYFRAME
             rows.append(
-                (f.rgb_path, kind, None if a is None else _sym(a), f.frame_id,
-                 T[:3, 3], yaw_of(T[:3, :3]))
+                (f.rgb_path, KEYFRAME, None if a is None else _sym(a), f.frame_id,
+                 T[:3, 3], yaw_of(T[:3, :3]), f.frame_id in own_ids)
             )  # fmt: skip
 
         def node_pose(sym):
@@ -238,7 +271,7 @@ class AgentFrameIndex:
             d = dy = None
             score = np.array([float(i) for i in range(len(self))])
             near = []
-        own = [i for i in anchored if self.kinds[i] == KEYFRAME]
+        own = [i for i in anchored if self.own[i]]
         by_score = lambda idx: sorted(idx, key=lambda i: (score[i], i))  # noqa: E731
         ordered = by_score(own) + by_score(anchored) + by_score(set(near) | set(anchored))
         out, seen = [], set()

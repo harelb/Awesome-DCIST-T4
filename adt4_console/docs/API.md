@@ -143,8 +143,11 @@ Maps:
     `03192026` MMDDYYYY, `2026-07`) or null. The page sorts by `mtime`, else `name_date`.
   * `has_dsg`/`has_dsg_mesh`/`has_mesh` are `hydra/backend/{dsg.json, dsg_with_mesh.json, mesh.ply}`.
   * `image_store` is null without `<run>/image_store/store.sqlite` and without raw image logs, else
-    `{indexed, raw?, tail?, frames: {keyframe, subkeyframe, object}, frames_total, observations, sensors,
-    schema_version, keyframes_unanchored, sampled_files, size_bytes, check: {ok, problems: [str]}}`. `raw` =
+    `{indexed, raw?, tail?, needs_convert?, frames: {keyframe, object[, subkeyframe]}, frames_total, observations,
+    sensors, schema_version, keyframes_unanchored, sampled_files, size_bytes, check: {ok, problems: [str]}}`.
+    `subkeyframe` / `needs_convert: true` (and a check problem) only for a store written before
+    hydra_image_store dropped sub-keyframes: the console does not read it (nor rewrite it) until it is converted
+    once with `hydra-image-store-adt4 convert <run>`. `raw` =
     `{keyframe_archives, tracks, events}` (Hydra's keyframe zips / track logs, which hydra_image_store indexes);
     a run with raw logs but no store yet has `indexed: false` and zero counts (`ImageStore.open` / `pack` index it
     on first use). `tail` = the tailer status `{live, final, heartbeat_wall, session}`. The quick check passes when: the index opens, `schema_version` is present,
@@ -842,7 +845,7 @@ Khronos do not write that store any more: they log keyframe zips (`keyframes/`),
 ### 13.1 Robot (agent)
 * **Params.** `store_path` (default `$ADT4_OUTPUT_DIR/image_store`; `""` disables),
   `store_send` (default **false**: frames are sent only after the base turns it on, see 13.4),
-  `store_frames` (`keyframes` = kind 0 plus the frames of kept object observations, default, or `all`), `store_compression` (`none` |
+  `store_frames` (`keyframes` = the agent nodes' own keyframes (KEYFRAMEs with an identity `anchor_T_body`) plus the frames of kept object observations, default, or `all`), `store_compression` (`none` |
   `lossless` | `fast`, default `fast`: RGB re-encoded JPEG q75, depth half resolution + row-delta
   zstd), `budget_C6` (default 150 000 B/s); yaml also `store_poll_s` (1 s), `store_queue_s` (2 s
   of budget queued at most).

@@ -1,5 +1,5 @@
-"""Agent-node images: the node's own keyframe, else the nearest sub-keyframe by pose
-(anchored to the node first, then to neighbouring agent nodes), with distances."""
+"""Agent-node images: the node's own keyframe, else the nearest keyframe anchored to
+it, else the nearest keyframe of a neighbouring agent node, with distances."""
 
 import datetime
 import math
@@ -39,7 +39,8 @@ def _write_graph(run):
 
 
 def _write_store(run):
-    """a0: own keyframe. a1: no keyframe, sub-keyframes 0.5 m / 0.2 m ahead (body x)
+    """a0: own keyframe (identity offset; a0 has no stamp). a1: no own keyframe (its
+    stamp is 1 s, its frames are 2-3 ns), two keyframes 0.5 m / 0.2 m ahead (body x)
     with 30 / 10 deg extra heading. a2, a3: nothing anchored."""
     from hydra_image_store import FrameKind, ImageStore, make_node_id
 
@@ -50,8 +51,8 @@ def _write_store(run):
     sid = w.add_sensor("cam", 4, 4, 1.0, 1.0, 2.0, 2.0)
     frames = {
         "kf0": (FrameKind.KEYFRAME, 0, np.eye(4)),
-        "sk_far": (FrameKind.SUBKEYFRAME, 1, _T((0.5, 0.0, 0.0), 30.0)),
-        "sk_near": (FrameKind.SUBKEYFRAME, 1, _T((0.2, 0.0, 0.0), 10.0)),
+        "sk_far": (FrameKind.KEYFRAME, 1, _T((0.5, 0.0, 0.0), 30.0)),
+        "sk_near": (FrameKind.KEYFRAME, 1, _T((0.2, 0.0, 0.0), 10.0)),
     }
     fids = {}
     for ts, (name, (kind, anchor, aTb)) in enumerate(frames.items(), start=1):
@@ -88,17 +89,17 @@ def test_own_keyframe_first(aclient):
     info = d["image_info"]
     assert info[0]["kind"] == "keyframe" and info[0]["own"] and info[0]["dist_m"] == 0.0
     assert info[0]["frame_id"] == fids["kf0"] and info[0]["anchor"] == "a(0)"
-    # the neighbour's sub-keyframes (~1 m away) follow in the strip, nearest first
+    # the neighbour's keyframes (~1 m away) follow in the strip, nearest first
     assert [i["frame_id"] for i in info[1:]] == [fids["sk_near"], fids["sk_far"]]
     assert len(d["images"]) == 3
 
 
-def test_agent_without_keyframe_uses_nearest_anchored_subkeyframe(aclient):
+def test_agent_without_own_keyframe_uses_nearest_anchored_keyframe(aclient):
     client, fids = aclient
     d = client.get("/api/graph/file:syn/node/a(1)").json()
     info = d["image_info"]
     hero = info[0]
-    assert hero["kind"] == "subkeyframe" and not hero["own"]
+    assert hero["kind"] == "keyframe" and not hero["own"]
     assert hero["frame_id"] == fids["sk_near"] and hero["anchor"] == "a(1)"
     assert hero["dist_m"] == pytest.approx(0.2, abs=1e-3)
     assert hero["yaw_deg"] == pytest.approx(10.0, abs=0.1)
@@ -112,7 +113,7 @@ def test_agent_without_keyframe_uses_nearest_anchored_subkeyframe(aclient):
 def test_agent_with_nothing_anchored_falls_back_to_neighbours(aclient):
     client, fids = aclient
     info = client.get("/api/graph/file:syn/node/a(2)").json()["image_info"]
-    # a1 faces +y, so its sub-keyframes sit at (1, 0.2) / (1, 0.5) heading 100 / 120 deg;
+    # a1 faces +y, so its keyframes sit at (1, 0.2) / (1, 0.5) heading 100 / 120 deg;
     # a2 at (2, 0) heading 0: kf0 (2 m, 0 deg) outranks them (1.02 m + 100 deg ~ 2.13)
     hero = info[0]
     expect = min(
@@ -158,7 +159,7 @@ def test_live_records_without_rotations(tmp_path):
     # anchor a5 odometric heading 90 deg; the frame is 1 m ahead of it in body x
     aTb = _T((1.0, 0.0, 0.0), 0.0)
     odom_anchor = _T((50.0, 50.0, 0.0), 90.0)
-    fid = w.add_frame_ref(sid, 1, kind=FrameKind.SUBKEYFRAME, rgb=img, link="copy",
+    fid = w.add_frame_ref(sid, 1, kind=FrameKind.KEYFRAME, rgb=img, link="copy",
                           anchor_node_id=make_node_id("a", 5), anchor_T_body=aTb,
                           world_T_body_odom=odom_anchor @ aTb)  # fmt: skip
     w.close()
@@ -203,3 +204,20 @@ def test_neo4j_agent_and_subkeyframe_rows(tmp_path):
     i = ims[0].info()
     assert i["kind"] == "subkeyframe" and i["frame_id"] == 42 and i["anchor"] == "a(7)"
     assert i["dist_m"] == pytest.approx(0.5) and i["yaw_deg"] == pytest.approx(0.0)
+
+
+def test_own_keyframes_by_stamp_or_identity_offset():
+    from types import SimpleNamespace as NS
+
+    from adt4_console.agent_images import own_keyframes
+
+    def fr(fid, ts, anchor, aTb):
+        return NS(frame_id=fid, timestamp_ns=ts, anchor_node_id=anchor, anchor_T_body=aTb)
+
+    off = _T((0.3, 0.0, 0.0), 0.0)
+    frames = [fr(1, 100, 7, off), fr(2, 200, 7, np.eye(4)), fr(3, 300, 8, off), fr(4, 400, None, None)]
+    # no stamps: the identity-offset frame of each anchor (none for 8)
+    assert {a: f.frame_id for a, f in own_keyframes(frames).items()} == {7: 2}
+    # stamps (ImageStore.agent_frame): nearest within 50 ms, whatever the offset
+    own = own_keyframes(frames, {7: 110, 8: 300 + 60_000_000}.get)
+    assert {a: f.frame_id for a, f in own.items()} == {7: 1}
