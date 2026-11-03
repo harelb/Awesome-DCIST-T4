@@ -40,13 +40,22 @@ DSG_FILES = {
 STORE_DIR = "image_store"
 STORE_DB = "store.sqlite"
 KIND_NAMES = {0: "keyframe", 1: "subkeyframe", 2: "object"}
+# Hydra/Khronos raw image logs (FORMAT.md): keyframe InputData zips and per-track
+# logs, which hydra_image_store indexes into image_store/ (the tailer while Hydra
+# runs, else ImageStore.open / pack on first use). First existing dir wins, as in
+# hydra_image_store.indexer.
+KEYFRAME_DIRS = ("keyframes", "hydra/keyframes")
+TRACK_DIRS = ("tracks", "hydra/tracks", "khronos/tracks")
+RAW_LOG_DIRS = KEYFRAME_DIRS + TRACK_DIRS
 CHECK_SAMPLES = 4  # referenced files checked from each end of the frames table
 RUN_INFO = "run_info.json"
 ORIGIN = ".adt4_origin.json"
 # never part of the manifest digest: the image store is repacked on transfer (its
-# index is fingerprinted separately), bags are not copied by default, and the
-# origin file exists only on a copy
+# index is fingerprinted separately) and the raw image logs it is built from are not
+# sent with a packed transfer, bags are not copied by default, and the origin file
+# exists only on a copy
 MANIFEST_SKIP_DIRS = {STORE_DIR, "recorded_data", "image_store.partial"}
+MANIFEST_SKIP_REL = set(RAW_LOG_DIRS)  # relative to the run dir
 MANIFEST_SKIP_FILES = {ORIGIN}
 MANIFEST_MAX_FILES = 50000
 MAP_DIRS = ("hydra/", "roman/")  # the map a relocalize loads (manifest map_digest)
@@ -129,12 +138,60 @@ def _connect_ro(db):
     raise last
 
 
-def store_info(store_dir):
-    """Counts + quick structural check of one image store (``None`` if absent)."""
-    db = os.path.join(store_dir, STORE_DB)
-    if not os.path.isfile(db):
+def _first_dir(run, rels):
+    for rel in rels:
+        if os.path.isdir(os.path.join(run, rel)):
+            return os.path.join(run, rel)
+    return None
+
+
+def raw_log_info(run):
+    """Counts of a run's raw image logs (``None`` if it has none): keyframe archives
+    (``*.zip``; ``.tmp`` files are being written) and track dirs with a track.json."""
+    kf_dir, tr_dir = _first_dir(run, KEYFRAME_DIRS), _first_dir(run, TRACK_DIRS)
+    if kf_dir is None and tr_dir is None:
         return None
-    info = {"frames": {}, "frames_total": 0, "observations": 0, "sensors": 0}
+    zips = tracks = 0
+    try:
+        if kf_dir:
+            zips = sum(1 for e in os.scandir(kf_dir) if e.name.endswith(".zip") and e.is_file())
+        if tr_dir:
+            tracks = sum(
+                1 for e in os.scandir(tr_dir)
+                if e.is_dir() and os.path.isfile(os.path.join(e.path, "track.json"))
+            )  # fmt: skip
+    except OSError:
+        pass
+    events = os.path.isdir(os.path.join(run, "events")) or os.path.isdir(os.path.join(run, "hydra", "events"))
+    return {"keyframe_archives": zips, "tracks": tracks, "events": events}
+
+
+def _tail_state(conn):
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'indexer.tail'").fetchone()
+        return json.loads(row[0]) if row else None
+    except (sqlite3.Error, ValueError):
+        return None
+
+
+def store_info(store_dir, run=None):
+    """Counts + quick structural check of one image store (``None`` if absent).
+
+    ``run``: the run directory; a run with raw image logs but no ``image_store/`` yet
+    (never indexed: no tailer ran, nothing opened it) is described by those counts
+    (``indexed: false``, ``raw``), since ``ImageStore.open`` / ``pack`` index it on
+    first use. An indexed store also reports ``raw`` and its tailer status (``tail``).
+    """
+    db = os.path.join(store_dir, STORE_DB)
+    raw = raw_log_info(run) if run else None
+    if not os.path.isfile(db):
+        if raw is None:
+            return None
+        return {"indexed": False, "raw": raw, "frames": {}, "frames_total": 0, "observations": 0,
+                "sensors": 0, "check": {"ok": True, "problems": []}}  # fmt: skip
+    info = {"frames": {}, "frames_total": 0, "observations": 0, "sensors": 0, "indexed": True}
+    if raw is not None:
+        info["raw"] = raw
     problems = []
     try:
         conn = _connect_ro(db)
@@ -152,6 +209,9 @@ def store_info(store_dir):
         for kind, n in conn.execute("SELECT kind, COUNT(*) FROM frames GROUP BY kind"):
             info["frames"][KIND_NAMES.get(kind, str(kind))] = n
         info["frames_total"] = sum(info["frames"].values())
+        tail = _tail_state(conn)
+        if tail:
+            info["tail"] = {k: tail.get(k) for k in ("live", "final", "heartbeat_wall", "session")}
         info["observations"] = one("SELECT COUNT(*) FROM observations")
         info["sensors"] = one("SELECT COUNT(*) FROM sensors")
         orphans = one(
@@ -264,8 +324,12 @@ def manifest(run):
     newest = 0.0
     run = run.rstrip("/")
     for root, dirs, files in os.walk(run):
-        dirs[:] = sorted(d for d in dirs if d not in MANIFEST_SKIP_DIRS)
         rel_root = os.path.relpath(root, run)
+        dirs[:] = sorted(
+            d for d in dirs
+            if d not in MANIFEST_SKIP_DIRS
+            and (d if rel_root == "." else rel_root + "/" + d) not in MANIFEST_SKIP_REL
+        )  # fmt: skip
         for f in files:
             if rel_root == "." and f in MANIFEST_SKIP_FILES:
                 continue
@@ -288,9 +352,13 @@ def manifest(run):
 
 
 def store_fingerprint(store):
-    """What changes when the robot adds frames: counts from ``store_info``."""
+    """What changes when the robot adds frames: counts from ``store_info`` (raw log
+    counts for a run that was not indexed yet)."""
     if not store:
         return None
+    if store.get("indexed") is False:
+        raw = store.get("raw") or {}
+        return "raw:%s:%s" % (raw.get("keyframe_archives"), raw.get("tracks"))
     frames = store.get("frames") or {}
     return "%s:%s:%s" % (
         store.get("frames_total"),
@@ -351,7 +419,7 @@ def scan_run(run, known=None, measure=True, timeout=None):
         entry[key] = os.path.isfile(os.path.join(run, rel))
     if entry["has_dsg"]:
         entry["dsg_mtime"] = _mtime(os.path.join(run, DSG_FILES["has_dsg"]))
-    store = store_info(os.path.join(run, STORE_DIR))
+    store = store_info(os.path.join(run, STORE_DIR), run)
     entry["has_image_store"] = store is not None
     entry["image_store"] = store
     entry["identity"], entry["origin"] = run_identity(run)
