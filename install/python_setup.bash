@@ -113,6 +113,9 @@ if [ "$install_spark" = true ]; then
     pip install -e ./semantic_inference/semantic_inference
     # reader/writer for hydra's image store (console, heracles, agentic_navigation)
     pip install -e "./hydra/hydra_image_store[images]"
+    # ADT4 extras on top of it: SAM3 write-back (agentic_navigation, console), legacy
+    # import, fuse and `hydra-image-store-adt4 convert` for stores with sub-keyframes
+    pip install -e ./hydra/hydra_image_store_adt4
 
     # install fast-downward
     if [ ! -d $ADT4_WS/src/fast_downward ]; then
