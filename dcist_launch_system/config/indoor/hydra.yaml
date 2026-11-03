@@ -6,7 +6,6 @@ odom_frame: $<env ADT4_ROBOT_NAME>/odom
 robot_frame: $<env ADT4_ROBOT_NAME>/base_link
 map_window: {type: spatial, max_radius_m: 10.0}
 labelspace: {type: from_msg}
-image_store: {max_images_per_object: 1, jpeg_quality: 90, write_depth: true, on_existing: rotate, session_artifacts_dir: $<env ADT4_OUTPUT_DIR>/hydra}
 input:
   type: RosInput
   inputs:
@@ -26,6 +25,8 @@ input:
           - {type: InvalidDepthFilter, max_invalid_ratio: 0.5, inf_is_valid: true}
 active_window:
   type: ActiveWindow
+  forward_intermediate_inputs: true
+  track_logger: {log_path: $<env ADT4_OUTPUT_DIR>/tracks, max_images_per_object: 1, save_depth: true}
   min_output_separation: 0.5
   volumetric_map: {voxel_size: 0.1, truncation_distance: 0.3, with_semantics: false}
   projective_integrator:
@@ -56,7 +57,6 @@ active_window:
     type: AccumulatedObjectExtractor
     min_object_allocation_confidence: 0.5
     max_object_volume: 50.0
-    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
   khronos_sinks:
     - {type: ActiveWindowVisualizer, track_label_min_observations: 15}
   sinks:
@@ -68,11 +68,13 @@ active_window:
   live_accumulated_bounding_box: true
 frontend:
   type: GraphBuilder
-  agent_extractor:
-    type: AgentImageExtractor
-    image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
-  frame_anchor_max_dist_m: 2.0
+  keyframe_selector:
+    type: KeyframeSelector
+    log_path: $<env ADT4_OUTPUT_DIR>/keyframes
+    save_fields: [color, depth]
+    keyframe_policy: {type: DistancePolicy, min_pose_separation: 0.25, rotation_separation_weight: 0.0, min_time_separation_s: 0.0, max_time_separation_s: 2.0}
+  sinks:
+    - {type: FrontendEventLogger, path: $<env ADT4_OUTPUT_DIR>/events/frontend.jsonl}
   serialize_dsg_mesh: true
   clear_object_meshes: true
   enable_mesh_objects: false
@@ -88,7 +90,6 @@ frontend:
     layer_updates:
       OBJECTS:
         prefix: O
-        archive_missing: true
   traversability_places:
     type: traversability
     layer: MESH_PLACES
@@ -114,13 +115,6 @@ frontend:
         label_traversability: {0: 1.0, 1: 0.1, 2: 0.1}
     sinks:
       - type: TraversabilityVisualizer
-sub_keyframe:
-  type: SubKeyframeModule
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
-  sensor_name: camera
-  gate: {min_translation_m: 0.25, min_rotation_deg: 15.0}
-  tf_lookup: {wait_duration_s: 0.1, buffer_size_s: 30.0, max_tries: 5}
-  queue_max_size: 30
 backend:
   type: BackendModule
   publish_backend_tf: true
@@ -131,7 +125,8 @@ backend:
   add_places_to_deformation_graph: false
   optimize_on_lc: true
   optimize_every_update: false
-  image_store_path: $<env ADT4_OUTPUT_DIR>/image_store
+  merge_sinks:
+    - {type: MergeEventLogger, path: $<env ADT4_OUTPUT_DIR>/events/backend.jsonl}
   update_functors:
     agents: {type: UpdateAgentsFunctor}
     objects:
