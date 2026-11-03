@@ -293,7 +293,7 @@ class TransferBody(BaseModel):
     as_name: str | None = None
     include_bags: bool = False
     bwlimit_kbps: int | None = None
-    # image store: which frames to send and how (hydra_image_store pack/unpack).
+    # image store: which frames to send and how (fleetlink.image_pack pack/unpack).
     # images="all" + compression="none" keeps the plain rsync of the run dir.
     images: Literal["keyframes", "all", "none"] = "all"
     compression: Literal["none", "lossless", "fast"] = "none"
@@ -303,13 +303,20 @@ class TransferBody(BaseModel):
 
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
 STORE_DIR = "image_store"
-# On a remote machine: spark_env python, with the workspace's hydra_image_store
-# source on PYTHONPATH in case it is not pip-installed there.
+# Store pack/unpack runs as ``python -m fleetlink.image_pack`` (the reader it uses,
+# hydra_image_store, comes from the same workspace).
+PACK_MODULE = "fleetlink.image_pack"
+# On a remote machine: spark_env python, with the workspace's fleetlink and
+# hydra_image_store sources on PYTHONPATH in case they are not installed there.
+# A machine whose fleetlink predates image_pack falls back to the old
+# ``python -m hydra_image_store`` (same archive format).
 REMOTE_PY = (
     'PY="${ADT4_ENV:-$HOME/environments/dcist}/spark_env/bin/python3"; '
     '[ -x "$PY" ] || PY=python3; '
-    'export PYTHONPATH="${ADT4_WS:-$HOME/dcist_ws}/src/awesome_dcist_t4/hydra/'
-    'hydra_image_store/src${PYTHONPATH:+:$PYTHONPATH}"; '
+    'SRC="${ADT4_WS:-$HOME/dcist_ws}/src/awesome_dcist_t4"; '
+    'export PYTHONPATH="$SRC/fleetlink:$SRC/hydra/hydra_image_store/src${PYTHONPATH:+:$PYTHONPATH}"; '
+    f'if "$PY" -c "import {PACK_MODULE}" 2>/dev/null; then MOD={PACK_MODULE}; '
+    "else MOD=hydra_image_store; fi; "
 )
 
 
@@ -323,29 +330,30 @@ def _is_local(svc, m: dict) -> bool:
 
 
 def _local_store_env() -> dict:
-    """Env for running ``python -m hydra_image_store`` locally."""
-    env = dict(os.environ)
-    try:
-        import hydra_image_store  # noqa: F401
+    """Env for running ``python -m fleetlink.image_pack`` locally: the console finds
+    fleetlink on sys.path (bin/adt4-console), a child process needs PYTHONPATH."""
+    import importlib.util
 
-        return env
-    except ImportError:
-        pass
+    env = dict(os.environ)
     repo = pathlib.Path(__file__).resolve().parents[3]
-    for cand in (
-        repo / "hydra" / "hydra_image_store" / "src",
-        pathlib.Path(os.path.expanduser("~/dcist_ws/src/awesome_dcist_t4/hydra/hydra_image_store/src")),
-    ):
-        if cand.is_dir():
-            env["PYTHONPATH"] = os.pathsep.join(
-                [str(cand)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
-            )
-            break
+    ws = pathlib.Path(os.path.expanduser("~/dcist_ws/src/awesome_dcist_t4"))
+    extra = []
+    try:
+        import fleetlink
+
+        extra.append(str(pathlib.Path(fleetlink.__file__).resolve().parents[1]))
+    except ImportError:
+        extra += [str(c) for c in (repo / "fleetlink", ws / "fleetlink") if c.is_dir()][:1]
+    if importlib.util.find_spec("hydra_image_store") is None:
+        cands = (repo / "hydra" / "hydra_image_store" / "src", ws / "hydra" / "hydra_image_store" / "src")
+        extra += [str(c) for c in cands if c.is_dir()][:1]
+    if extra:
+        env["PYTHONPATH"] = os.pathsep.join(extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     return env
 
 
 def pack_args(run_dir: str, images: str, compression: str) -> list[str]:
-    """``hydra-image-store pack`` → archive on stdout (zstd-wrapped: the sqlite
+    """``python -m fleetlink.image_pack pack`` → archive on stdout (zstd-wrapped: the sqlite
     index and any raw bytes compress; JPEGs pass through cheaply)."""
     return [
         "pack", run_dir, "-", "--frames", images, "--compression", compression,
@@ -354,7 +362,7 @@ def pack_args(run_dir: str, images: str, compression: str) -> list[str]:
 
 
 def unpack_args(dest_run_dir: str) -> list[str]:
-    """``hydra-image-store unpack`` ← archive on stdin; rebuilds
+    """``python -m fleetlink.image_pack unpack`` ← archive on stdin; rebuilds
     ``<dest>/image_store`` (via ``image_store.partial``) and runs ``check_store``."""
     return ["unpack", "-", dest_run_dir, "--overwrite", "--quiet"]
 
@@ -378,14 +386,14 @@ def _unpack_summary(text: str) -> str:
 
 
 def store_command(svc, m: dict, args: list[str]) -> tuple[list[str], dict | None]:
-    """argv (+ env) running ``python -m hydra_image_store <args>`` on machine ``m``."""
+    """argv (+ env) running ``python -m fleetlink.image_pack <args>`` on machine ``m``."""
     if _is_local(svc, m):
         expanded = [os.path.expanduser(a) if a.startswith("~") else a for a in args]
-        return [sys.executable, "-m", "hydra_image_store", *expanded], _local_store_env()
+        return [sys.executable, "-m", PACK_MODULE, *expanded], _local_store_env()
     remote_args = " ".join(
         a.replace("~", "$HOME", 1) if a.startswith("~") else shlex.quote(a) for a in args
     )
-    script = REMOTE_PY + f'exec "$PY" -m hydra_image_store {remote_args}'
+    script = REMOTE_PY + f'exec "$PY" -m "$MOD" {remote_args}'
     return [*SSH, f"{m['user']}@{m['ip']}", f"sh -c {shlex.quote(script)}"], None
 
 

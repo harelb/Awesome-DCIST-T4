@@ -24,6 +24,7 @@ setup(
         "console_scripts": [
             "fleetlink-agent = fleetlink.agent:main",
             "fleetlink-bridge = fleetlink.relay_ros:main",
+            "fleetlink-image-pack = fleetlink.image_pack:main",
         ]
     },
 )

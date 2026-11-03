@@ -322,17 +322,19 @@ def test_store_command_local_and_remote(settings):
 
     svc = NS(helpers=NS(get_local_ips=lambda: ["127.0.0.1"]))
     argv, env = maps.store_command(svc, {"ip": "127.0.0.1"}, maps.pack_args("~/x/run", "keyframes", "fast"))
-    assert argv[1:4] == ["-m", "hydra_image_store", "pack"] and env is not None
+    assert argv[1:4] == ["-m", "fleetlink.image_pack", "pack"] and env is not None
     assert not argv[4].startswith("~") and argv[5] == "-"
     argv, env = maps.store_command(
         svc, {"ip": "10.0.0.2", "user": "rrg"}, maps.unpack_args("~/adt4_output/r")
     )
     assert env is None and argv[0] == "ssh" and "rrg@10.0.0.2" in argv
     assert "$HOME/adt4_output/r" in argv[-1] and "spark_env" in argv[-1]
+    assert "fleetlink.image_pack" in argv[-1] and "/fleetlink:" in argv[-1]
 
 
 def test_pack_args_match_image_store_cli():
-    cli = pytest.importorskip("hydra_image_store.cli")
+    pytest.importorskip("hydra_image_store")
+    cli = pytest.importorskip("fleetlink.image_pack")
     from adt4_console.routes import maps
 
     p = cli.build_parser()

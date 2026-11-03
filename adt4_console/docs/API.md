@@ -166,6 +166,11 @@ Maps:
   → job: plan as above; `up_to_date` (source unchanged and same image settings) does nothing unless `force`;
   otherwise incremental rsync into the existing copy, image store re-packed only when its fingerprint or the
   settings changed; writes `<copy>/.adt4_origin.json`. Result `{dest, dest_name, status, run_id, up_to_date?}`.
+  The image store is streamed `python -m fleetlink.image_pack pack RUN - …` on the source into
+  `python -m fleetlink.image_pack unpack - DEST` on the destination (through the console host; the
+  remote command falls back to `python -m hydra_image_store` on a machine whose fleetlink predates
+  `image_pack`, same archive format). `unpack` rejects frame headers whose ids, timestamps or paths
+  would write outside the staged store, and reports corrupt / truncated archives as `unpack failed: …`.
 * `POST /api/maps/verify` `{experiment, machines?, names?: {machine: run name}}` → job (`names` pairs a run with its
   differently named copy; `.adt4_origin.json` is not hashed); result `{machines:[...], rows:[{path, consistent, cells:{m: str}}]}` (`compare_hashes`)
 * `POST /api/maps/ingest` `{path: RUN_DIR, target: neo4j_name, image_root?}` (`image_root` = image store dir, default `<run>/image_store`) → job. Steps: load
@@ -825,7 +830,8 @@ then `INTER_LINEAR`.
 
 During a run the robot's hydra image store (`$ADT4_OUTPUT_DIR/image_store`) is mirrored to the
 base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirror.py`
-(`StoreTail` robot side, `StoreMirror` base side), codec `hydra_image_store.transfer`.
+(`StoreTail` robot side, `StoreMirror` base side), codec `fleetlink/image_transfer.py`
+(moved from `hydra_image_store.transfer`; `hydra_image_store` remains the store reader/writer).
 
 ### 13.1 Robot (agent)
 * **Params.** `store_path` (default `$ADT4_OUTPUT_DIR/image_store`; `""` disables),
@@ -860,7 +866,7 @@ base so SAM3 search on the base sees live keyframes. Code: `fleetlink/store_mirr
 
 ### 13.3 Base (console)
 * `fleetlink.receiver.Receiver(..., store_root=DIR)` (or `store_mirror=StoreMirror(...)`) writes
-  frames with `hydra_image_store.transfer.write_frame` on a worker thread into
+  frames with `fleetlink.image_transfer.write_frame` on a worker thread into
   **`<live_store_root>/<robot>/<store_id>/image_store`**; source frame and sensor ids are kept.
   Console setting `live_store_root` / `--live-store-root` (default `<output_root>/live`,
   i.e. `~/adt4_output/live`; `""` disables). The result passes `hydra-image-store check` and
