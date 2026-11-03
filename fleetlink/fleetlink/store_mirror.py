@@ -5,16 +5,17 @@ opened read-only and never indexed from here).  Hydra/Khronos no longer write
 it: ``hydra-image-store tail`` (the hydra window's ``image-store-tail``) builds
 it from the keyframe zips, track logs and event logs while Hydra runs, already
 re-encoded (JPEG colour, 16-bit PNG depth), so no InputData zip / EXR ever goes
-on the wire.  It selects frames (``keyframes`` = kind 0, what SAM3 search uses,
-plus the frames of kept object observations; or ``all``) in ``frame_id`` order
+on the wire.  It selects frames (``keyframes`` = the agent nodes' own keyframes,
+what SAM3 search uses, plus the frames of kept object observations; or ``all``,
+which adds the other keyframes) in ``frame_id`` order
 and encodes each with :func:`fleetlink.image_transfer.encode_frame` (``none`` |
 ``lossless`` | ``fast``).  The frame row carries the sensor calibration, so the
 base can rebuild a valid store from any frame; a frame with kept object
 observations also carries them with their track's node binding, so the base
 shows object images during the run.
 
-Only *settled* frames are sent: the tailer anchors a frame (and decides whether
-it is an agent node's keyframe) once the agent node after it exists, and keeps
+Only *settled* frames are sent: the tailer anchors a frame (which decides whether
+it is an agent node's own keyframe) once the agent node after it exists, and keeps
 undecided frames in meta ``indexer.r<robot>.pending_frames`` /
 ``provisional_frames``; the cursor never passes the lowest of those.  A kept
 observation whose track is not bound to a node yet waits up to
@@ -409,7 +410,11 @@ class StoreTail:
     def avg_bytes(self) -> float:
         return self._avg_bytes
 
-    _KEPT = "(kind = 0 OR frame_id IN (SELECT frame_id FROM observations WHERE kept != 0))"
+    @staticmethod
+    def _kept_sql(store) -> str:
+        t = _transfer()
+        t.register_sql_functions(store)
+        return f"({t.OWN_KEYFRAME_SQL} OR frame_id IN (SELECT frame_id FROM observations WHERE kept != 0))"
 
     def backlog(self) -> int:
         """Selected frames after the cursor (not yet handed out)."""
@@ -419,7 +424,7 @@ class StoreTail:
         sql = "SELECT COUNT(*) FROM frames WHERE (rgb_path IS NOT NULL OR depth_path IS NOT NULL)"
         params: list = []
         if self.frames == "keyframes":
-            sql += " AND " + self._KEPT
+            sql += " AND " + self._kept_sql(store)
         if self.cursor is not None:
             sql += " AND frame_id > ?"
             params.append(self.cursor)
@@ -434,7 +439,7 @@ class StoreTail:
             return None
         sql = "SELECT MAX(frame_id) FROM frames WHERE (rgb_path IS NOT NULL OR depth_path IS NOT NULL)"
         if self.frames == "keyframes":
-            sql += " AND " + self._KEPT
+            sql += " AND " + self._kept_sql(store)
         try:
             vals = [r[0] for _db, r in store._query(sql) if r[0] is not None]
         except Exception:  # noqa: BLE001
