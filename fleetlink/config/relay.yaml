@@ -186,6 +186,30 @@ topics:
     qos: {reliability: reliable, durability: volatile, depth: 10}
     # NOTE: not per-robot; every robot publishes into the same global topic (monitor_name
     # in the msg identifies the robot). BaseBridge republishes it as is (one shared publisher).
+  # Change detection (AWCD) for plan repair: each robot's khronos publishes its detected
+  # changes, latched, on the global /awcd_changes (robot_name in the msg); the base station's
+  # awcd_base_station merges them and the scene change bridge turns them into scene changes
+  # (replan on a change). Without these rows a fleetlink-only radio never delivers them.
+  - topic: /awcd_changes
+    type: khronos_msgs/msg/AwcdChanges
+    dir: up
+    mode: latest_reliable
+    cls: C2
+    rate_hz: null
+    ttl_s: null
+    replay_on_resync: true
+    qos: {reliability: reliable, durability: transient_local, depth: 10}
+    # NOTE: global like table_in; BaseBridge republishes it as is (one shared publisher).
+  # the robot's object labelspace (latched): class names for the bridge's added objects
+  - topic: /{robot}/labelspace
+    type: semantic_inference_msgs/msg/Labelspace
+    dir: up
+    mode: latest_reliable
+    cls: C2
+    rate_hz: null
+    ttl_s: null
+    replay_on_resync: true
+    qos: {reliability: reliable, durability: transient_local, depth: 1}
   # phoenix auto / manual mode (true = manual: sequence_controller ignores plans). The
   # console reads it for the AUTO / MANUAL chip; the agent's C1 state guards carry it too.
   # change detector state (running / paused / reset), latched by khronos
