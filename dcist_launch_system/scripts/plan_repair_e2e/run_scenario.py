@@ -58,7 +58,10 @@ class Console:
 def wait(pred, timeout, every=0.5):
     t0 = time.time()
     while time.time() - t0 < timeout:
-        v = pred()
+        try:
+            v = pred()
+        except (urllib.error.URLError, ConnectionError):  # console still starting
+            v = None
         if v:
             return v
         time.sleep(every)
@@ -164,11 +167,15 @@ def main():
     ros = Ros(a.base)
     try:
         # 1 ---------------------------------------------------------------
-        sent = c.post(f"api/robots/{robot}/goal/pddl",
-                      {"goal": "(visited-object o20)", "route": "goal_manager", "engine": a.engine})  # fmt: skip
+        # a fresh omniplanner drops goals until its first DSG arrives ("no DSG"): re-send
+        # every 20 s until a plan shows up
+        t_end, first = time.time() + a.plan_timeout, None
+        while first is None and time.time() < t_end:
+            sent = c.post(f"api/robots/{robot}/goal/pddl",
+                          {"goal": "(visited-object o20)", "route": "goal_manager", "engine": a.engine})  # fmt: skip
+            first = wait(lambda: (lambda e: e if e and near(e[1], (17, 3)) else None)(
+                plan_end(c.get(f"api/robots/{robot}/plan"))), min(20, max(1, t_end - time.time())))  # fmt: skip
         step("1 goal sent through plan repair", sent.get("via") == "goal_manager", json.dumps(sent)[:200])
-        first = wait(lambda: (lambda e: e if e and near(e[1], (17, 3)) else None)(plan_end(c.get(f"api/robots/{robot}/plan"))),
-                     a.plan_timeout)  # fmt: skip
         step("1 plan drives to the goal cone O20 at (17, 3)", first, str(first))
         if not first:
             return 1
