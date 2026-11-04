@@ -27,7 +27,7 @@ if [ "$ENGINE" = grstaps ]; then
 fi
 
 mkdir -p "$OUT"
-source "$ENV_SH"
+set +u; source "$ENV_SH"; set -u
 "$PY" "$HERE/make_cone_map.py" "$OUT/cone_map" >/dev/null
 
 export ADT4_ROBOT_NAME=$BASE ADT4_PRIOR_MAP=$OUT/cone_map ADT4_NEO4J_SEED=true
