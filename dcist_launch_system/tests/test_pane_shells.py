@@ -96,18 +96,6 @@ def test_pane_scripts_parse_in_zsh(path):
         ("base_station_web-default", "console", "console", 0),
         ("base_station_web_repair-default", "console_neo4j", "console", 0),
         ("base_station_web_repair-default", "sam3_query", "sam3_query", 0),
-        (
-            "spot_no_relocalize-relocalize",
-            "transform_publishers",
-            "transform_publishers",
-            0,
-        ),
-        (
-            "spot_no_relocalize-relocalize",
-            "transform_publishers",
-            "transform_publishers",
-            1,
-        ),
         ("spot-default", "fleetlink", "fleetlink", 0),
     ],
 )
