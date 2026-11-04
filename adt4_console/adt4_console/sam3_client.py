@@ -188,6 +188,12 @@ def commit(pending_id: str, index: int, base_url: str, timeout_s: float = 60.0) 
     )
 
 
+def reload(base_url: str, timeout_s: float = 900.0) -> dict:
+    """Re-read the keyframe pool from Neo4j and write back missing frame
+    embeddings from the server's cache (after the map database was reloaded)."""
+    return _post(base_url, "/reload", {}, timeout_s)
+
+
 def discard(pending_id: str, base_url: str, timeout_s: float = 15.0) -> dict:
     return _post(base_url, "/discard", {"pending_id": pending_id}, timeout_s)
 

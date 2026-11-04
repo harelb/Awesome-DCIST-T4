@@ -14,6 +14,12 @@ import {chatAbort, clearChat, storable, useChat} from "../stores/chat";
 import {closeMission, fitMission, missionContext, openMission, saveCurrent, simCmd, useMission} from "../stores/mission";
 import {clearPreview, previewPddl, PreviewError, usePlanPreview, type PddlPreview} from "../stores/planPreview";
 import {FastDownwardDetails} from "./FastDownward";
+import {PlannerSchedule} from "./PlannerSchedule";
+import {EnginePicker} from "./EnginePicker";
+import {GoalImages} from "./GoalImages";
+import {agentColors} from "./MissionOverlay";
+import {useRobotColor3D} from "./background";
+import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
 import type {FastDownwardInfo} from "../lib/fastDownward";
 import {useRobots} from "../stores/robots";
 import {decideMapEdit, MapEditCard, mapEditNote, statusOf, toMapEditItem, type MapEditItem} from "./MapEditCard";
@@ -40,12 +46,14 @@ export interface MissionCardItem {
   name: string;
   agents: {id: string; kind: string; binding?: string | null}[];
   tasks: {id: string; agent: string; type: string; target?: unknown; depends_on?: string[]}[];
+  /** each agent's goals with where its path there ends (the mission preview's) */
+  goals?: Record<string, {sym: string; xy?: number[] | null; yaw?: number | null}[]> | null;
   issues: {level: string; msg: string}[];
   /** what the assistant interpreted or substituted (shown in amber) */
   assumptions: string[];
   makespan: number | null;
   /** omniplanner's report when it planned the mission (plan_ground_mission) */
-  planned?: {driven_m: Record<string, number>; planning_s: number; points_of_interest: number; pddl_goal?: string; fast_downward?: FastDownwardInfo | null} | null;
+  planned?: {driven_m: Record<string, number>; planning_s: number; points_of_interest: number; pddl_goal?: string; fast_downward?: FastDownwardInfo | null; engine?: string; makespan_s?: number; planner_log?: FastDownwardInfo | null} | null;
 }
 
 /** A database change the assistant proposed; runs only when approved. */
@@ -111,6 +119,7 @@ export function toChatItem(o: Record<string, unknown>): ChatItem | null {
         assumptions: Array.isArray(o.assumptions) ? o.assumptions.map(String).filter(Boolean) : [],
         makespan: typeof o.makespan === "number" ? o.makespan : null,
         planned: o.planned && typeof o.planned === "object" ? (o.planned as MissionCardItem["planned"]) : null,
+        goals: o.goals && typeof o.goals === "object" ? (o.goals as MissionCardItem["goals"]) : null,
       };
     case "cypher_write":
       return {type: "cypher_write", id: String(o.id), query: String(o.query ?? ""), summary: String(o.summary ?? ""), src: typeof o.src === "string" ? o.src : null};
@@ -177,6 +186,18 @@ export function looksTabular(text: string): boolean {
 }
 
 const MODEL_KEY = "adt4.chat.model";
+const REASONING_KEY = "adt4.chat.reasoning";
+export const REASONING_LEVELS = ["fast", "low", "medium", "high"] as const;
+/** GPT-5 / 6 (and o-series) take a reasoning effort. */
+export const isReasoningModel = (m: string | null | undefined) => /^(gpt-[5-9]|o\d)/.test(m ?? "");
+const loadReasoning = () => {
+  try {
+    const v = localStorage.getItem(REASONING_KEY);
+    return (REASONING_LEVELS as readonly string[]).includes(v ?? "") ? (v as string) : "fast";
+  } catch {
+    return "fast";
+  }
+};
 const loadModel = () => {
   try {
     return localStorage.getItem(MODEL_KEY) ?? "";
@@ -233,6 +254,15 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [model, setModelRaw] = useState(loadModel);
+  const [reasoning, setReasoningRaw] = useState(loadReasoning);
+  const setReasoning = (r: string) => {
+    setReasoningRaw(r);
+    try {
+      localStorage.setItem(REASONING_KEY, r);
+    } catch {
+      /* private window */
+    }
+  };
   const scroller = useRef<HTMLDivElement>(null);
   // how many items the log last scrolled for (0: scroll to the end on mount)
   const shown = useRef(0);
@@ -311,6 +341,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
         history: trimTranscript(transcript.current),
         model: chosenModel,
         mission_ctx: withMission ? missionContext() : undefined,
+        reasoning: isReasoningModel(chosenModel ?? defaultModel) ? reasoning : undefined,
       };
       const res = await fetch("api/chat", {method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal});
       if (!res.ok || !res.body) {
@@ -469,7 +500,9 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
       return;
     }
     try {
-      const r = await sendGoal(robot, it.kind, it.body);
+      // a PDDL goal goes to the engine the card shows (GRSTAPS-X: its plugin or goal_manager)
+      const engine = it.kind === "pddl" ? ((it.body as {engine?: string}).engine ?? useEngines.getState().engine) : undefined;
+      const r = await sendGoal(robot, it.kind, engine === "grstaps" ? {...it.body, engine} : it.body);
       patch(idx, c => ({...(c as typeof it), sent: goalSendMessage(`Sent to ${robot}`, r)}));
     } catch (e) {
       patch(idx, c => ({...(c as typeof it), sent: {tone: "err", text: `failed: ${errorText(e)}`}}));
@@ -489,6 +522,22 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
                   {m}
                 </option>
               ))}
+          </select>
+        )}
+        {isReasoningModel(chosenModel ?? defaultModel) && (
+          <select
+            className="input input-sm"
+            value={reasoning}
+            onChange={e => setReasoning(e.target.value)}
+            aria-label="Reasoning effort"
+            title="How hard the model thinks before answering: fast = the least it allows (quickest); high = slowest, best for hard lookups and plans"
+            data-testid="reasoning-effort"
+          >
+            {REASONING_LEVELS.map(r => (
+              <option key={r} value={r}>
+                {r === "fast" ? "reasoning: fast" : `reasoning: ${r}`}
+              </option>
+            ))}
           </select>
         )}
         <span className="grow" />
@@ -525,6 +574,11 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
           {missionMode ? "Clear" : "New chat"}
         </button>
       </div>
+      {missionMode && (
+        <div className="chat-engine">
+          <EnginePicker label="planner" />
+        </div>
+      )}
       <div className="chat-log" ref={scroller}>
         {items.length === 0 && (
           <div className="muted small pad">
@@ -580,6 +634,17 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   );
 }
 
+/** {agent: [node symbol, ...]}: where each agent's tasks go (map symbols only, in order). */
+export function missionGoals(tasks: {agent: string; type: string; target?: unknown}[]): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const t of tasks) {
+    if (typeof t.target !== "string" || t.target.startsWith("$") || !/^[A-Za-z]+\(?\d+\)?$/.test(t.target)) continue;
+    const l = (out[t.agent] ??= []);
+    if (!l.includes(t.target)) l.push(t.target);
+  }
+  return out;
+}
+
 export function MissionCard({it}: {it: MissionCardItem}) {
   const mine = useMission(s => s.current?.id === it.id);
   // the newest revision: the open mission's, else the mission list's
@@ -600,6 +665,12 @@ export function MissionCard({it}: {it: MissionCardItem}) {
     }
   };
   const byAgent = it.agents.map(a => ({a, tasks: it.tasks.filter(t => t.agent === a.id)}));
+  const robotColor = useRobotColor3D();
+  const colors = agentColors(it.agents as Parameters<typeof agentColors>[0], robotColor);
+  // where each goal's path ends (places get the nearest view): the card's, else the open
+  // mission's preview of this revision (cards from before goals were sent), else symbols only
+  const openGoals = useMission(s => (s.current?.id === it.id && s.current.revision === it.revision ? s.preview?.goals : null));
+  const goals = it.goals ?? openGoals ?? missionGoals(it.tasks);
   return (
     <div className={`card chat-card mission-card ${superseded ? "superseded" : ""}`}>
       <div className="row gap">
@@ -617,14 +688,16 @@ export function MissionCard({it}: {it: MissionCardItem}) {
           </li>
         ))}
       </ul>
+      <GoalImages goals={goals} colors={colors} />
       {it.planned && (
         <div className="small muted" data-testid="mission-planned">
-          omniplanner:{" "}
+          omniplanner{it.planned.engine ? ` (${ENGINE_LABEL[it.planned.engine as EngineId] ?? it.planned.engine})` : ""}:{" "}
           {Object.entries(it.planned.driven_m)
             .map(([a, m]) => `${a} ${Math.round(m)} m`)
             .join(" · ")}{" "}
-          · planned in {it.planned.planning_s.toFixed(1)} s{it.planned.pddl_goal && <pre className="mono small">{it.planned.pddl_goal}</pre>}
-          <FastDownwardDetails fd={it.planned.fast_downward} />
+          · planned in {it.planned.planning_s.toFixed(1)} s{it.planned.makespan_s != null ? ` · makespan ${Math.round(it.planned.makespan_s)} s` : ""}
+          {it.planned.pddl_goal && <pre className="mono small">{it.planned.pddl_goal}</pre>}
+          <FastDownwardDetails fd={it.planned.planner_log ?? it.planned.fast_downward} />
         </div>
       )}
       {(it.assumptions ?? []).length > 0 && (
@@ -702,13 +775,13 @@ function LookupGroup({tools}: {tools: ToolItem[]}) {
 function ToolCard({it}: {it: Extract<ChatItem, {type: "tool"}>}) {
   if (it.name === "plan_ground_mission") {
     // only failures are tool cards (a plan is a mission card)
-    const a = (it.args ?? {}) as {pddl_goal?: string};
-    const r = (it.result ?? {}) as {error?: string; fast_downward?: FastDownwardInfo | null};
+    const a = (it.args ?? {}) as {pddl_goal?: string; engine?: string};
+    const r = (it.result ?? {}) as {error?: string; fast_downward?: FastDownwardInfo | null; planner_log?: FastDownwardInfo | null};
     return (
       <div className="msg msg-tool msg-err" data-testid="omniplanner-failure">
-        <Badge tone="err">omniplanner</Badge> <span className="small">{r.error ?? "no plan"}</span>
+        <Badge tone="err">omniplanner{a.engine ? ` · ${ENGINE_LABEL[a.engine as EngineId] ?? a.engine}` : ""}</Badge> <span className="small">{r.error ?? "no plan"}</span>
         {a.pddl_goal && <pre className="mono small">{a.pddl_goal}</pre>}
-        <FastDownwardDetails fd={r.fast_downward} />
+        <FastDownwardDetails fd={r.planner_log ?? r.fast_downward} />
       </div>
     );
   }
@@ -853,8 +926,14 @@ function previewRobots(robot: string | null): {name: string; start?: number[] | 
 }
 
 function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"}>; robot: string | null; src: string | null; onSend: () => void}) {
-  const b = it.body as {goal?: string; points?: string[]; command?: string; constraints?: {predicate: string; symbols: string[]}[]};
+  const b = it.body as {goal?: string; points?: string[]; command?: string; engine?: string; constraints?: {predicate: string; symbols: string[]}[]};
   const sent = it.sent;
+  const {engines, engine: chosen, loaded} = useEngines();
+  useEffect(() => {
+    if (!loaded && it.kind === "pddl") void refreshEngines();
+  }, [loaded, it.kind]);
+  // the model's choice (engine in the proposal) wins; else the operator's
+  const engine = (b.engine as EngineId | undefined) ?? chosen;
   const [pv, setPv] = useState<{busy?: boolean; err?: string; fd?: FastDownwardInfo | null; p?: PddlPreview} | null>(null);
   const shown = usePlanPreview(s => s.goal !== null && s.goal === b.goal);
   const preview = async () => {
@@ -864,7 +943,7 @@ function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"
     if (robots.length === 0) return setPv({err: "no robot poses: connect the robots, or add agents with starts in the mission planner"});
     setPv({busy: true});
     try {
-      setPv({p: await previewPddl(b.goal, robots, src, b.constraints)});
+      setPv({p: await previewPddl(b.goal, robots, src, b.constraints, engine)});
     } catch (e) {
       setPv({err: errorText(e), fd: e instanceof PreviewError ? e.fd : null});
     }
@@ -874,6 +953,14 @@ function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"
       <div className="row gap between">
         <span>
           <Badge tone="info">{it.kind}</Badge> goal proposal
+          {it.kind === "pddl" && engines.length > 1 && (
+            <>
+              {" "}
+              <Badge tone={engine === "grstaps" ? "info" : "off"} title={b.engine ? "the chat chose this planner" : "the planner chosen in the mission panel"}>
+                {ENGINE_LABEL[engine]}
+              </Badge>
+            </>
+          )}
         </span>
         <span className="row gap-sm">
           {it.kind === "pddl" && b.goal && (
@@ -911,8 +998,11 @@ function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"
             .map(([r, m]) => `${r} ${Math.round(m)} m`)
             .join(" · ") || "no driving"}{" "}
           · {pv.p.actions.length} actions · planned in {(pv.p.ground_s + pv.p.solve_s).toFixed(1)} s
+          {pv.p.schedule ? ` · makespan ${Math.round(pv.p.schedule.makespan)} s` : ""}
         </div>
       )}
+      {pv?.p?.goals && shown && <GoalImages goals={pv.p.goals} src={src} />}
+      {pv?.p?.schedule && shown && <PlannerSchedule schedule={pv.p.schedule} compact />}
       {sent && <div className={`small tone-${sent.tone}`}>{sent.text}</div>}
     </div>
   );

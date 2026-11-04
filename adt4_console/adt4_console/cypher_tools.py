@@ -163,7 +163,9 @@ Cypher conventions:
 (a)-[:CONTAINS*]->(b) matches transitively. Within a layer: OBJECT_CONNECTED, \
 PLACE_CONNECTED, MESH_PLACE_CONNECTED, ROOM_CONNECTED, BUILDING_CONNECTED. \
 (o:Object)-[:HAS_OBSERVATION]->(:Observation).
-- center is a 3D POINT in metres (map frame); use point.distance(a.center, b.center). \
+- center is a 3D POINT in metres (map frame), NOT a list: its coordinates are center.x, \
+center.y, center.z (center[1] is an error; results show it as [x, y, z]). North = +y, east = +x. \
+Use point.distance(a.center, b.center). \
 Robot positions are given below when known: point({x: .., y: .., z: ..}).
 - class is the semantic label name (see the labelspace).
 - Objects may carry admission_status: trusted_prior / admitted are confirmed, \

@@ -14,6 +14,7 @@ import importlib
 import itertools
 import json
 import logging
+import os
 import pathlib
 import queue
 import threading
@@ -48,7 +49,15 @@ PLUGIN_TYPES = {
         "pddl_goal",
         "omniplanner_msgs/msg/ConstrainedPddlGoalMsg",
     ),
+    # GRSTAPS-X (goal_format: constrained_pddl, the repair flow's form); with the
+    # default goal_format: points it takes a GotoPointsGoalMsg (GRSTAPS_POINTS)
+    "Grstaps": ("grstaps", "pddl_goal", "omniplanner_msgs/msg/ConstrainedPddlGoalMsg"),
 }
+GRSTAPS_POINTS = ("grstaps_points", "grstaps_goal", "omniplanner_msgs/msg/GotoPointsGoalMsg")
+# which plugin kind an omniplanner engine (mission/omni_planner.ENGINES) is
+ENGINE_KIND = {"fast_downward": "pddl_constrained", "grstaps": "grstaps"}
+NO_GRSTAPS = ("no GRSTAPS-X planner is running (start the base station with a grstaps "
+              "session, e.g. base_station_web_grstaps_repair)")  # fmt: skip
 # plan repair v3: goal_manager (master.launch.yaml, launch_omniplanner_repair)
 # takes operator goals on /<planner_ns>/commanded_goal, pauses the running plan,
 # skips replanning when it already satisfies the goal, else forwards to
@@ -59,7 +68,8 @@ NO_GOAL_MANAGER_WARNING = (
     "plan repair goal_manager is not running; sent straight to omniplanner "
     "— no constraints / replanning"
 )
-CONSTRAINT_PREDICATES = ("forbidden-poi", "forbidden-edge")
+CONSTRAINT_PREDICATES = ("forbidden-poi", "forbidden-edge", "before")  # before: GRSTAPS-X only
+CONSTRAINT_ARITY = {"forbidden-poi": 1, "forbidden-edge": 2, "before": 2}
 
 
 def normalize_constraints(facts) -> list[dict]:
@@ -77,7 +87,7 @@ def normalize_constraints(facts) -> list[dict]:
         pred = str(pred).strip().lower()
         if pred not in CONSTRAINT_PREDICATES:
             raise ValueError(f"unknown constraint predicate {pred!r} (use {', '.join(CONSTRAINT_PREDICATES)})")
-        want = 1 if pred == "forbidden-poi" else 2
+        want = CONSTRAINT_ARITY[pred]
         if len(syms) != want:
             raise ValueError(f"{pred} takes {want} symbol(s), got {len(syms)}")
         syms = [str(x).strip().replace("(", "").replace(")", "").lower() for x in syms]
@@ -107,6 +117,15 @@ class RosUnavailable(Exception):
 
 
 def plugins_yaml_path() -> pathlib.Path | None:
+    """The omniplanner plugins the base station runs: ``ADT4_OMNIPLANNER_PLUGINS``
+    (e.g. config/grstaps_repair/omniplanner_plugins.yaml for GRSTAPS-X), else the
+    default config's."""
+    env = os.environ.get("ADT4_OMNIPLANNER_PLUGINS")
+    if env:
+        p = pathlib.Path(env).expanduser()
+        if p.is_file():
+            return p
+        log.warning("ADT4_OMNIPLANNER_PLUGINS=%s is not a file; using the default plugins", env)
     try:
         import dcist_launch_system
 
@@ -136,14 +155,20 @@ def load_plugins(path=None) -> list[dict]:
                 name: (cfg or {}).get("plugin", {}).get("type")
                 for name, cfg in (data.get("planners") or {}).items()
             }
+            formats = {
+                name: (cfg or {}).get("plugin", {}).get("goal_format")
+                for name, cfg in (data.get("planners") or {}).items()
+            }
         except Exception as e:  # noqa: BLE001
             log.warning("could not parse %s: %s", path, e)
     if not planners:
-        planners = dict(DEFAULT_PLUGINS)
+        planners, formats = dict(DEFAULT_PLUGINS), {}
     out = []
     for name, ptype in planners.items():
         if ptype in PLUGIN_TYPES:
             kind, suffix, msg = PLUGIN_TYPES[ptype]
+            if ptype == "Grstaps" and (formats.get(name) or "points") != "constrained_pddl":
+                kind, suffix, msg = GRSTAPS_POINTS
             out.append({"name": name, "kind": kind, "suffix": suffix, "msg_type": msg})
     return out
 
@@ -258,6 +283,8 @@ class RobotPlanState:
         self.manual_mode: dict | None = None  # phoenix ~/manual_mode {value, t}
         # khronos RosChangeDetectionController ~/state: running / paused / reset
         self.change_detection: dict | None = None  # {state, t}
+        # GRSTAPS-X's last fleet schedule that gives this robot work (schedule_from_msg)
+        self.schedule: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -269,7 +296,21 @@ class RobotPlanState:
             "repair_alerts": list(self.repair_alerts),
             "constraints": list(self.constraints),
             "lease": self.lease,
+            "schedule": self.schedule,
         }
+
+
+def schedule_from_msg(msg) -> dict:
+    """omniplanner_msgs/TaskScheduleMsg -> {plan_id, makespan, t, rows: [{robot,
+    action, target, start, finish}]} (a joint task: one row per robot)."""
+    return {
+        "plan_id": str(msg.plan_id),
+        "makespan": round(float(msg.makespan), 2),
+        "t": time.time(),
+        "rows": [{"robot": str(r.robot_name), "action": str(r.action), "target": str(r.target),
+                  "start": round(float(r.start_time), 2), "finish": round(float(r.finish_time), 2)}
+                 for r in msg.tasks],  # fmt: skip
+    }
 
 
 def lease_from_guards(msg) -> dict:
@@ -644,6 +685,17 @@ class RosBridge:
                 lambda m: self._on_repair_alert(robot, "plan_failed", m.data),
                 10,
             )
+            # GRSTAPS-X publishes the fleet's timed schedule with every plan
+            # (an omniplanner_msgs built before it has no TaskScheduleMsg)
+            try:
+                n.create_subscription(
+                    import_type("omniplanner_msgs/msg/TaskScheduleMsg"),
+                    f"/{self.planner_ns}/omniplanner_node/task_schedule",
+                    lambda m: self._on_schedule(robot, m),
+                    1,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info("no GRSTAPS-X schedule subscription: %s", e)
         if not spot:
             # phoenix has no spot_executor_node (no results / guards / teleop
             # state); its auto / manual mode is relayed up like the guards
@@ -799,6 +851,13 @@ class RosBridge:
         self._plan[robot].status.append(st)
         self._publish_plan(robot)
 
+    def _on_schedule(self, default_robot, msg) -> None:
+        sched = schedule_from_msg(msg)
+        robots = {r["robot"] for r in sched["rows"] if r["robot"]} or {self._last_goal_robot or default_robot}
+        for robot in robots:
+            self._plan[robot].schedule = sched
+            self._publish_plan(robot)
+
     def _on_guards(self, robot, msg) -> None:
         st = self._plan[robot]
         new = lease_from_guards(msg)
@@ -896,6 +955,8 @@ class RosBridge:
     def add_constraints(self, robot: str, facts) -> list[dict]:
         """Add (normalized, de-duplicated) constraints; returns the active set."""
         new = normalize_constraints(facts)
+        if any(f["predicate"] == "before" for f in new):
+            raise ValueError("before orders one goal's targets: send it with the goal (GRSTAPS-X), not as a standing constraint")
         with self._lock:
             cur = self._plan[robot].constraints
             for f in new:
@@ -915,14 +976,39 @@ class RosBridge:
         self._publish_plan(robot)
         return out
 
-    def send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto") -> dict:
+    def goal_manager_engine(self) -> str | None:
+        """Which engine goal_manager forwards to (its ``planner_goal_topic``): the
+        engine whose plugin topic a goal_manager node publishes on; None if unknown."""
+        def find():
+            for engine, kind in ENGINE_KIND.items():
+                for p in self.plugins:
+                    if p["kind"] != kind:
+                        continue
+                    infos = self.node.get_publishers_info_by_topic(goal_topic(self.planner_ns, p))
+                    if any("goal_manager" in i.node_name for i in infos):
+                        return engine
+            return None
+
+        try:
+            return self.run(find)
+        except Exception:  # noqa: BLE001 — a graph query; unknown is fine
+            return None
+
+    def send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto", engine=None) -> dict:
         """A PDDL goal through plan repair v3 when its goal_manager runs, else
         straight to an omniplanner Pddl plugin with a warning.
 
         ``constraints`` are added to the robot's persistent set first; the whole
         set goes with a goal_manager goal. ``route``: "auto" (default),
         "planner" (skip goal_manager) or "goal_manager" (fail if it is down).
+        ``engine``: "grstaps" wants GRSTAPS-X: through goal_manager when it
+        forwards there, else straight to the Grstaps plugin (constraints go
+        with the goal either way); None / "fast_downward" as before.
         """
+        if engine == "grstaps":
+            return self._send_grstaps(robot, goal, constraints, route)
+        if any(f["predicate"] == "before" for f in normalize_constraints(constraints)):
+            raise ValueError("before (ordering) needs GRSTAPS-X: send it with engine grstaps")
         active = self.add_constraints(robot, constraints) if constraints else self.constraints(robot)
         gm = self.goal_manager_subscribers() if route != "planner" else 0
         if gm > 0:
@@ -946,6 +1032,31 @@ class RosBridge:
             {"robot_id": robot, "pddl_goal": goal},
             {"via": "planner", "warning": warning, "constraints": active, "plugin": p["name"]},
         )  # fmt: skip
+
+    def _send_grstaps(self, robot, goal, constraints, route) -> dict:
+        """GRSTAPS-X: ``before`` is per goal (an ordering of this goal's targets),
+        so it never joins the robot's persistent constraint set."""
+        facts = normalize_constraints(constraints)
+        order = [f for f in facts if f["predicate"] == "before"]
+        rest = [f for f in facts if f["predicate"] != "before"]
+        active = self.add_constraints(robot, rest) if rest else self.constraints(robot)
+        fields = {"goal": {"robot_id": robot, "pddl_goal": goal}, "constraints": active + order}
+        if route != "planner" and self.goal_manager_subscribers() > 0:
+            if self.goal_manager_engine() == "grstaps":
+                return self._send(robot, "pddl", self.commanded_goal_topic(), COMMANDED_GOAL_TYPE, fields,
+                                  {"via": "goal_manager", "engine": "grstaps", "constraints": active + order})  # fmt: skip
+            if route == "goal_manager":
+                raise LookupError("goal_manager forwards to Fast Downward, not GRSTAPS-X")
+        elif route == "goal_manager":
+            raise LookupError(NO_GOAL_MANAGER_WARNING.split(";")[0])
+        p = self.find_plugin("grstaps")
+        if p is None:
+            raise LookupError(NO_GRSTAPS)
+        warning = ("sent straight to GRSTAPS-X: goal_manager (plan repair) is not driving it, so a goal "
+                   "the running plan already covers is planned again")  # fmt: skip
+        return self._send(robot, "pddl", goal_topic(self.planner_ns, p), p["msg_type"], fields,
+                          {"via": "planner", "engine": "grstaps", "warning": warning,
+                           "constraints": active + order, "plugin": p["name"]})  # fmt: skip
 
     def take_lease(self, robot: str) -> dict:
         """Ask the robot's executor to forcibly take the Spot lease

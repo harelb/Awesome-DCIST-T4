@@ -18,6 +18,7 @@ from .model import FOUND_PREFIX, Mission, Task
 
 DWELL_INSPECT_S = 10.0
 DWELL_IMAGE_S = 2.0
+DWELL_MANIPULATE_S = 10.0  # GRSTAPS-X's nominal pick / place duration
 DECONFLICT_M = 2.0
 DECONFLICT_DT_S = 1.0
 # robots parked side by side and both still at their starts this early are pulling
@@ -163,6 +164,8 @@ def task_motion(mission: Mission, world: World, t: Task, pos) -> Motion:
             goal = _standoff(pos, xy, float(t.params.get("standoff_m", 1.5)))
     elif t.type == "request_image":
         dwell = DWELL_IMAGE_S
+    elif t.type in ("pick", "place"):
+        dwell = float(t.params.get("dwell_s", DWELL_MANIPULATE_S))
     path, off = leg_path(mission, world, agent, pos, goal)
     short = False
     if off and agent.is_ground and not t.found_query() and len(path) > 2:
@@ -217,6 +220,8 @@ def preview(mission: Mission, world: World) -> dict:
         agent = mission.agent(t.agent)
         if agent.is_ground and t.type in ("explore_area",):
             issues.append({"level": "error", "task": t.id, "msg": f"{agent.kind} cannot explore_area (quads only)"})
+        if not agent.is_ground and t.type in ("pick", "place"):
+            issues.append({"level": "error", "task": t.id, "msg": f"a {agent.kind} cannot {t.type} (ground robots with an arm)"})
         try:
             m = task_motion(mission, world, t, pos[t.agent])
         except P.NoPath as e:
@@ -308,7 +313,41 @@ def preview(mission: Mission, world: World) -> dict:
     issues += planted_unmatched(mission)
     issues += deconflict(mission, out_tasks)
     makespan = max([r["t_end"] for r in out_tasks.values()], default=0.0)
-    return {"tasks": out_tasks, "agents": agents_out, "issues": issues, "makespan": round(makespan, 1)}
+    return {"tasks": out_tasks, "agents": agents_out, "issues": issues, "makespan": round(makespan, 1),
+            "goals": goal_points(mission, out_tasks)}  # fmt: skip
+
+
+def end_pose(path, yaw=None):
+    """([x, y], heading rad) where a path ends: the last point and the direction of
+    its last move (``yaw`` when the path does not move)."""
+    import math
+
+    pts = [p[:2] for p in path or []]
+    if not pts:
+        return None, yaw
+    for a in reversed(pts[:-1]):
+        if math.dist(a, pts[-1]) > 0.05:
+            yaw = math.atan2(pts[-1][1] - a[1], pts[-1][0] - a[0])
+            break
+    return [round(float(pts[-1][0]), 2), round(float(pts[-1][1]), 2)], (None if yaw is None else round(yaw, 3))
+
+
+def goal_points(mission: Mission, out_tasks: dict) -> dict:
+    """{agent: [{sym, xy, yaw}]}: each map symbol an agent's tasks go to, with where
+    its path there ends and the heading it arrives with (the chat and the mission tab
+    show an image per goal: the object's own, else the view nearest to that point)."""
+    goals: dict = {}
+    yaw: dict = {}
+    for t in mission.tasks:
+        rec = out_tasks.get(t.id) or {}
+        xy, yaw[t.agent] = end_pose(rec.get("path"), yaw.get(t.agent))
+        sym = t.target if isinstance(t.target, str) and not t.target.startswith(FOUND_PREFIX) else None
+        if not sym or xy is None:
+            continue
+        lst = goals.setdefault(t.agent, [])
+        if all(g["sym"] != sym for g in lst):
+            lst.append({"sym": sym, "xy": xy, "yaw": yaw[t.agent]})
+    return goals
 
 
 def search_queries(mission: Mission) -> list[str]:

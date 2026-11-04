@@ -13,6 +13,12 @@ The plan's ``goto-poi`` actions become ``goto`` tasks (an ``inspect`` of the
 target just reached turns that goto into an ``inspect``), so the preview, the
 simulator and the live executor treat them like any other mission. Ground
 robots only; the console's executors have no pick / place.
+
+Two engines plan these goals (``engine``): ``fast_downward`` (above) and
+``grstaps`` (GRSTAPS-X, :mod:`.grstaps_engine`: task allocation + a timed
+schedule, coalition inspections, ``before`` ordering, relocation). Failures
+carry ``planner_log`` = {planner, digest, log, problem_file} for either; the
+Fast Downward one is also kept under its old name ``fast_downward``.
 """
 
 from __future__ import annotations
@@ -30,6 +36,9 @@ log = logging.getLogger(__name__)
 
 DOMAIN = "RegionObjectRearrangementDomain_MultiRobot_FD_Explore"
 SUPPORTED = ("goto-poi", "inspect")
+ENGINES = {"fast_downward": "Fast Downward", "grstaps": "GRSTAPS-X"}
+DEFAULT_ENGINE = "fast_downward"
+CONSTRAINTS = {"forbidden-poi": 1, "forbidden-edge": 2, "before": 2}  # predicate -> arity
 
 
 class OmniUnavailable(Exception):
@@ -37,12 +46,26 @@ class OmniUnavailable(Exception):
 
 
 class PlanningFailed(ValueError):
-    """No plan, with Fast Downward's account when it ran: ``fast_downward`` =
-    {digest, log (last lines), problem_file} or None (grounding failed first)."""
+    """No plan, with the planner's account when it ran: ``planner_log`` =
+    {planner, digest, log (last lines), problem_file} or None (grounding failed
+    first). ``fast_downward`` is the same account for the Fast Downward engine
+    (None for the others), the name the API used before GRSTAPS-X."""
 
-    def __init__(self, message: str, fast_downward: dict | None = None):
+    def __init__(self, message: str, fast_downward: dict | None = None, planner_log: dict | None = None,
+                 engine: str = DEFAULT_ENGINE):  # fmt: skip
         super().__init__(message)
-        self.fast_downward = fast_downward
+        self.engine = engine
+        if planner_log is None and fast_downward is not None:
+            planner_log = {"planner": ENGINES["fast_downward"], **fast_downward}
+        self.planner_log = planner_log
+        self.fast_downward = fast_downward if engine == "fast_downward" else None
+
+
+def check_engine(engine: str | None) -> str:
+    engine = engine or DEFAULT_ENGINE
+    if engine not in ENGINES:
+        raise ValueError(f"unknown planner {engine!r} (one of {', '.join(ENGINES)})")
+    return engine
 
 
 def _modules():
@@ -73,13 +96,38 @@ def _modules():
     }
 
 
-def available() -> str | None:
-    """None when planning works here, else why not."""
+def available(engine: str = DEFAULT_ENGINE) -> str | None:
+    """None when planning with ``engine`` works here, else why not."""
+    if check_engine(engine) == "grstaps":
+        from . import grstaps_engine
+
+        return grstaps_engine.available()
     try:
         _modules()
     except OmniUnavailable as e:
         return str(e)
     return None
+
+
+def engines() -> list[dict]:
+    """[{id, label, available, reason}] for the planner choice in the UI."""
+    out = []
+    for eid, label in ENGINES.items():
+        reason = available(eid)
+        out.append({"id": eid, "label": label, "available": reason is None, "reason": reason})
+    return out
+
+
+def _constraint_facts(constraints, ConstraintFact):
+    facts = []
+    for c in constraints or []:
+        pred, syms = c["predicate"], [str(s).lower() for s in c["symbols"]]
+        if pred not in CONSTRAINTS:
+            raise ValueError(f"unknown constraint {pred!r} (one of {', '.join(CONSTRAINTS)})")
+        if len(syms) != CONSTRAINTS[pred]:
+            raise ValueError(f"{pred} takes {CONSTRAINTS[pred]} symbol(s), got {len(syms)}")
+        facts.append(ConstraintFact(predicate=pred, symbols=syms))
+    return facts
 
 
 def pddl_name(agent_id: str) -> str:
@@ -117,16 +165,37 @@ def _height_lookup(G):
         return lambda x, y: float(pos[np.argmin(np.hypot(pos[:, 0] - x, pos[:, 1] - y)), 2])
 
 
-def solve(goal: str, starts: dict, G, constraints=None, geofences=None) -> dict:
+def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None) -> dict:
+    from dsg_pddl.pddl_grounding import ConstraintFact
+
+    from . import grstaps_engine
+
+    facts = _constraint_facts(constraints, ConstraintFact) + _geofence_constraints(G, geofences, ConstraintFact)
+    try:
+        out = grstaps_engine.solve(goal, starts, G, facts, _height_lookup(G), robot_types=kinds)
+    except grstaps_engine.GrstapsFailed as e:
+        raise PlanningFailed(str(e), planner_log=e.planner_log, engine="grstaps") from None
+    huskies = sorted(r for r, k in (kinds or {}).items() if k == "husky")
+    if huskies:
+        out["left_out"] = huskies
+    return out
+
+
+def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: str = DEFAULT_ENGINE,
+          kinds: dict | None = None) -> dict:
     """Plan ``goal`` for robots at ``starts`` ({pddl robot name: [x, y]}).
 
     Returns {actions: [(robot, action tuple, path [[x, y, z], ...])], routes:
-    {robot: [[x, y, z], ...]}, driven_m: {robot: m}, ground_s, solve_s, pois}.
+    {robot: [[x, y, z], ...]}, driven_m: {robot: m}, ground_s, solve_s, pois};
+    GRSTAPS-X adds ``steps`` (tasks with dependencies) and ``schedule``.
     Raises ValueError for a goal that cannot be planned (the reason in words).
     """
+    if check_engine(engine) == "grstaps":
+        return _solve_grstaps(goal, starts, G, constraints, geofences, kinds)
     om = _modules()
-    facts = [om["ConstraintFact"](predicate=c["predicate"], symbols=[str(s).lower() for s in c["symbols"]])
-             for c in constraints or []]  # fmt: skip
+    if any(c["predicate"] == "before" for c in constraints or []):
+        raise ValueError("Fast Downward cannot order targets (before): plan it with GRSTAPS-X")
+    facts = _constraint_facts(constraints, om["ConstraintFact"])
     facts += _geofence_constraints(G, geofences, om["ConstraintFact"])
     robots = {r: np.asarray(p, dtype=float)[:2] for r, p in starts.items()}
     first = next(iter(robots))
@@ -144,7 +213,7 @@ def solve(goal: str, starts: dict, G, constraints=None, geofences=None) -> dict:
                   "problem_file": getattr(e, "problem_file", None)}  # fmt: skip
         log.warning("omniplanner could not plan %s: %s%s", goal, first_line,
                     "".join(f"\n  | {line}" for line in (fd or {}).get("log", [])[-15:]))  # fmt: skip
-        raise PlanningFailed(f"{type(e).__name__}: {first_line}", fd) from None
+        raise PlanningFailed(f"{type(e).__name__}: {first_line}", fd, engine="fast_downward") from None
     t2 = time.perf_counter()
     stats = getattr(grounded, "fd_stats", None) or {}
     z_of = _height_lookup(G)
@@ -164,17 +233,38 @@ def solve(goal: str, starts: dict, G, constraints=None, geofences=None) -> dict:
             )
     pois = sum(1 for s in grounded.symbols.values() if s.layer in ("place", "object"))
     return {"actions": actions, "routes": routes, "driven_m": driven, "ground_s": t1 - t0,
-            "solve_s": t2 - t1, "pois": pois, "fast_downward": stats}  # fmt: skip
+            "solve_s": t2 - t1, "pois": pois, "fast_downward": stats,
+            "planner_log": {"planner": ENGINES["fast_downward"], **stats} if stats else None}  # fmt: skip
+
+
+def _grstaps_tasks(steps, back) -> list[Task]:
+    """GRSTAPS-X steps (see grstaps_engine) -> console tasks; ``after`` keys -> depends_on."""
+    ids = {s["key"]: new_id("t") for s in steps if back.get(s["robot"])}
+    tasks = []
+    for s in steps:
+        aid = back.get(s["robot"])
+        if aid is None:
+            continue
+        params = dict(s.get("params") or {})
+        if s.get("dwell_s") is not None:
+            params["dwell_s"] = s["dwell_s"]
+        params["planned"] = [round(s["t_start"], 1), round(s["t_end"], 1)]
+        tasks.append(Task(id=ids[s["key"]], agent=aid, type=s["type"], target=s["target"], note=s["note"],
+                          depends_on=[ids[k] for k in s["after"] if k in ids], params=params))  # fmt: skip
+    return tasks
 
 
 def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constraints=None,
-              geofences=None, text: str = "", name: str = "") -> tuple[Mission, dict]:  # fmt: skip
+              geofences=None, text: str = "", name: str = "",
+              engine: str = DEFAULT_ENGINE) -> tuple[Mission, dict]:  # fmt: skip
     """A mission for the ground agents that achieves ``goal`` (see :func:`solve`)."""
     from .planning import start_of
 
+    engine = check_engine(engine)
     src = src or service._default_src()
     m0 = Mission(text=text or goal, name=name, src=src, agents=agents, planner="omniplanner",
-                 geofences=geofences or [], goal={"pddl": goal, "constraints": list(constraints or [])})  # fmt: skip
+                 geofences=geofences or [],
+                 goal={"pddl": goal, "constraints": list(constraints or []), "engine": engine})  # fmt: skip
     ground = [a for a in m0.agents if a.is_ground]
     if not ground:
         raise ValueError("omniplanner plans ground robots (spot, husky) only")
@@ -189,7 +279,19 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
             raise ValueError(f"{a.id} has no start (give it one, or bind it to a robot with a pose)")
         starts[pddl_name(a.id)] = s[:2]
         back[pddl_name(a.id)] = a.id
-    out = solve(goal, starts, G, constraints, m0.geofences)
+    kinds = {pddl_name(a.id): a.kind for a in ground}
+    out = solve(goal, starts, G, constraints, m0.geofences, engine=engine, kinds=kinds)
+    if engine == "grstaps":
+        m0.tasks = _grstaps_tasks(out["steps"], back)
+        if not m0.tasks:
+            raise ValueError("the goal is already satisfied: the plan has no actions")
+        sched = out["schedule"]
+        m0.goal["schedule"] = {**sched, "rows": [{**r, "robot": back.get(r["robot"], r["robot"])} for r in sched["rows"]]}
+        info = {"driven_m": {back.get(r, r): round(v, 1) for r, v in out["driven_m"].items()},
+                "planning_s": round(out["solve_s"], 2), "points_of_interest": out["pois"], "engine": engine,
+                "makespan_s": sched["makespan"], "planner_log": out["planner_log"], "fast_downward": None,
+                "left_out": [back.get(r, r) for r in out.get("left_out", [])]}  # fmt: skip
+        return Mission.model_validate(m0.model_dump()), info
     unsupported = sorted({act[0] for _, act, _ in out["actions"] if act[0] not in SUPPORTED})
     if unsupported:
         raise ValueError(f"the plan needs {', '.join(unsupported)}, which the console's robots cannot "
@@ -216,18 +318,53 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
     m0.tasks = tasks
     info = {"driven_m": {back.get(r, r): round(v, 1) for r, v in out["driven_m"].items()},
             "planning_s": round(out["ground_s"] + out["solve_s"], 2), "points_of_interest": out["pois"],
-            "fast_downward": out["fast_downward"]}  # fmt: skip
+            "fast_downward": out["fast_downward"], "engine": engine,
+            "planner_log": out["planner_log"]}  # fmt: skip
     return Mission.model_validate(m0.model_dump()), info
 
 
-def preview(goal: str, robots: list[dict], src: str | None, service, constraints=None) -> dict:
+def _goals_by_robot(out: dict, G) -> dict[str, list[str]]:
+    """{robot: [node symbol, ...]}: where each robot's plan goes, in order (the chat
+    shows each goal's image). GRSTAPS-X steps already name nodes; Fast Downward's
+    goto / inspect name PDDL symbols."""
+    from .planning import end_pose
+
+    goals: dict[str, list[dict]] = {}
+    last: dict[str, tuple] = {}
+
+    def add(robot, sym, path):
+        xy, yaw = end_pose(path, (last.get(robot) or (None, None))[1])
+        if xy is None:
+            xy, yaw = last.get(robot, (None, yaw))
+        last[robot] = (xy, yaw)
+        lst = goals.setdefault(robot, [])
+        if sym and all(g["sym"] != sym for g in lst):
+            lst.append({"sym": sym, "xy": xy, "yaw": yaw})
+
+    if "steps" in out:  # GRSTAPS-X: one action per step, in the same order
+        for s, (_, _, path) in zip(out["steps"], out["actions"]):
+            add(s["robot"], s["target"], path)
+        return goals
+    to_node = _modules()["to_node"]
+    for robot, act, path in out["actions"]:
+        if act[0] in ("goto-poi", "inspect") and len(act) > 2:
+            try:
+                sym = str(to_node(G, act[-1]))
+            except Exception:  # noqa: BLE001 — a symbol the graph does not know
+                sym = None
+            add(robot, sym, path)
+    return goals
+
+
+def preview(goal: str, robots: list[dict], src: str | None, service, constraints=None,
+            engine: str = DEFAULT_ENGINE) -> dict:
     """What omniplanner would do with ``goal`` for these robots, without a mission:
     {routes, driven_m, actions, robots, ground_s, solve_s, pois}. ``robots``:
     [{name, start?}] (no start: the robot's live pose)."""
     from .planning import start_of
 
     src = src or service._default_src()
-    m0 = Mission(src=src, agents=[{"id": r["name"], "kind": "spot", "binding": r["name"],
+    m0 = Mission(src=src, agents=[{"id": r["name"], "kind": r.get("kind") or "spot", "binding": r["name"],
                                    "start": r.get("start")} for r in robots])  # fmt: skip
     world = service.world(m0)
     if world.graph is None or world.graph.G is None:
@@ -239,8 +376,13 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
             starts[pddl_name(a.id)] = s[:2]
     if not starts:
         raise ValueError("no robot has a pose: connect the robots, or add agents with starts in the mission planner")
-    out = solve(goal, starts, world.graph.G, constraints)
+    kinds = {pddl_name(a.id): a.kind for a in m0.agents}
+    out = solve(goal, starts, world.graph.G, constraints, engine=engine, kinds=kinds)
     return {
+        "goals": _goals_by_robot(out, world.graph.G),
+        "engine": check_engine(engine),
+        "schedule": out.get("schedule"),
+        "planner_log": out.get("planner_log"),
         "routes": out["routes"],
         "driven_m": {r: round(v, 1) for r, v in out["driven_m"].items()},
         "actions": [{"robot": r, "action": " ".join(a)} for r, a, _ in out["actions"]],
@@ -248,5 +390,5 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
         "ground_s": round(out["ground_s"], 3),
         "solve_s": round(out["solve_s"], 3),
         "pois": out["pois"],
-        "fast_downward": out["fast_downward"],
+        "fast_downward": out.get("fast_downward"),
     }

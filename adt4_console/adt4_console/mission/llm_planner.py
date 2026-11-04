@@ -39,7 +39,8 @@ it. If it returns candidates, say in one line that they are on screen to approve
 in that turn; once the operator approves one you are told its new symbol, then plan with it. Only \
 when the image search finds nothing (or fails), or the operator names an area that is not in the \
 areas list or a place the map does not have, do not use something else in its place: ask one \
-short clarifying question instead and do not call propose_mission in that turn, e.g. "There's no \
+short clarifying question instead and do not plan in that turn (neither propose_mission nor \
+plan_ground_mission; not even the other parts of the request), e.g. "There's no \
 area called 'courtyard': draw it on the map, or pick one of: A1, North lot." Whatever you still interpret (a synonym class, which of several matches, which agent does \
 what, a default you chose) goes in propose_mission's `assumptions`, one short line each; the \
 operator sees them on the card.
@@ -48,7 +49,10 @@ a clarifying question or image candidates await approval); never stop after anno
 Tool rounds are limited. First read "Object classes in the map" (above) to see which requested \
 things exist; then look up everything at once (one Cypher query over all the classes and areas, or \
 several tool calls in one reply), not one thing per reply. A thing whose class is not in that list \
-goes straight to search_robot_images, in the same reply as the other lookups.
+goes straight to search_robot_images, in the same reply as the other lookups. A more specific \
+kind than a map class counts as missing too ("food truck" when the map only has truck, "fire \
+hydrant" when it only has pole): search the images for the operator's words first; only if that \
+finds nothing may you ask whether a plain one of the general class will do.
 """
 
 TOOL = {
@@ -139,9 +143,33 @@ region r3 -> r3) and robots are the agent ids in lower case:
 does it. Use the -by forms whenever the operator says which robot does a task.
 - (safe o12): some robot inspects o12 (the console's inspect: go there and look).
 - (at-object spot1 o12), (at-place spot1 t40): spot1 ends there.
-- (visited-region r3): some robot enters region r3; (explored-region r3): every place of r3 is visited.
+- (visited-region r3): some robot enters region r3 (its core, not a stray edge); (explored-region r3): every \
+place of r3 is visited. (visited-region-by spot1 r3), (explored-region-by spot1 r3): that robot does it.
 constraints: {predicate: 'forbidden-poi', symbols: ['o14']} keeps routes away from o14; \
 {predicate: 'forbidden-edge', symbols: ['t1', 't2']} closes the passage between two places.
+"""
+
+PLAN_GRSTAPS = """\
+plan_ground_mission can also plan with engine 'grstaps' (GRSTAPS-X): it allocates tasks to robots and \
+SCHEDULES them in time (start/finish per task, a makespan), and it plans what Fast Downward cannot:
+- ordering: constraint {predicate: 'before', symbols: ['o4', 'o8']} = everything at o4 finishes before \
+anything at o8 starts (one entry per pair; never both directions). Use it for "first", "then", "after".
+- inspection: (safe o4) / (not (suspicious o4)) = one robot (the planner picks) goes and looks; \
+(inspected-by spot1 o4) = spot1 does it; (and (inspected-by spot1 o4) (inspected-by spot2 o4)) = a \
+JOINT inspection: they meet there and look together. GRSTAPS-X gives each robot as many tasks as \
+it needs (a robot is not limited to one route), but it leaves huskies out and cannot visit or \
+explore regions.
+- relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
+have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
+GRSTAPS-X does NOT take or, at-place / at-object, holding, visited-region / explored-region, or any \
+other not: visit the last stop and order it last with before instead of at-*. Use engine 'grstaps' \
+when the request needs ordering, a joint inspection, moving an object, or a schedule; otherwise \
+'fast_downward' (the default, shortest routes). A relocation runs only via Send to robot, not the \
+console's executor.
+"""
+
+PLAN_GRSTAPS_FORCED = """\
+The operator chose the GRSTAPS-X engine: call plan_ground_mission with engine 'grstaps'.
 """
 
 PLAN_FORCED = """\
@@ -161,12 +189,15 @@ PLAN_TOOL = {
             "name": {"type": "string", "description": "short title"},
             "goal": {"type": "string", "description": "the operator's request in one sentence, in their words"},
             "pddl_goal": {"type": "string", "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'"},
+            "engine": {"type": "string", "enum": ["fast_downward", "grstaps"],
+                       "description": "fast_downward (default): shortest routes; grstaps: GRSTAPS-X, a timed "
+                       "schedule, joint inspections, before-ordering, object-in-place"},
             "constraints": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge"]},
+                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge", "before"]},
                         "symbols": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["predicate", "symbols"],
@@ -200,21 +231,32 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
         return [], {"error": "no ground agents in the roster: ask the operator to add a spot or husky"}
     geofences = (cur.get("geofences") if revising else None) or no_go_zones(ctx)
     text = str(args.get("goal") or "").strip() or request_text(history, message)
+    engine = args.get("engine") or ctx.get("engine") or omni_planner.DEFAULT_ENGINE
+    if engine not in omni_planner.ENGINES:
+        return [], {"error": f"unknown engine {engine!r}: fast_downward or grstaps"}
+    why = omni_planner.available(engine)
+    if why:
+        return [], {"error": f"{omni_planner.ENGINES[engine]} cannot plan here ({why})"
+                             + ("; use engine fast_downward" if engine == "grstaps" else "; use propose_mission")}
     try:
         m, planned = omni_planner.plan_pddl(goal, agents, src, service, args.get("constraints"), geofences,
-                                            text=text, name=str(args.get("name") or ""))  # fmt: skip
+                                            text=text, name=str(args.get("name") or ""), engine=engine)  # fmt: skip
     except omni_planner.OmniUnavailable as e:
         return [], {"error": f"omniplanner is not available here ({e}); use propose_mission"}
     except ValueError as e:
         fd = getattr(e, "fast_downward", None)
-        # the operator sees the failure (with Fast Downward's log) as a tool card
+        plog = getattr(e, "planner_log", None)
+        # the operator sees the failure (with the planner's log) as a tool card
         card = {"type": "tool", "name": PLAN_TOOL["name"],
-                "args": {"pddl_goal": goal, "constraints": args.get("constraints") or []},
-                "result": {"error": str(e), "fast_downward": fd}}  # fmt: skip
-        for_model = {"error": f"omniplanner could not plan {goal}: {e}. Check the symbols (run_cypher) and "
-                              "the robot names, or use propose_mission."}  # fmt: skip
+                "args": {"pddl_goal": goal, "constraints": args.get("constraints") or [], "engine": engine},
+                "result": {"error": str(e), "fast_downward": fd, "planner_log": plog}}  # fmt: skip
+        for_model = {"error": f"omniplanner could not plan {goal} with {omni_planner.ENGINES[engine]}: {e}. Check the symbols "
+                              "(run_cypher) and the robot names, or use propose_mission."}  # fmt: skip
         if fd:
             for_model["fast_downward"] = {"digest": fd.get("digest"), "log_tail": fd.get("log", [])[-12:]}
+        elif plog:
+            for_model["planner_log"] = {"planner": plog.get("planner"), "digest": plog.get("digest"),
+                                        "log_tail": (plog.get("log") or [])[-12:]}  # fmt: skip
         return [card], for_model
     if revising:
         m = m.model_copy(update={"id": cur["id"], "parent": cur["id"]})
@@ -280,8 +322,23 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
     parts = [PROMPT.format(max_agents=MAX_AGENTS)]
     if ctx.get("omniplanner"):  # set by the chat when omniplanner can plan here
         parts.append(PLAN_PROMPT)
+        if ctx.get("grstaps"):  # and GRSTAPS-X too
+            parts.append(PLAN_GRSTAPS)
         if ctx.get("planner") == "omniplanner":
             parts.append(PLAN_FORCED)
+            if ctx.get("engine") == "grstaps":
+                parts.append(PLAN_GRSTAPS_FORCED)
+        elif ctx.get("engine") == "fast_downward" or (ctx.get("engine") == "grstaps" and ctx.get("grstaps")):
+            # the planner the operator picked in the chat window
+            name = "GRSTAPS-X" if ctx["engine"] == "grstaps" else "Fast Downward"
+            parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
+                         f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
+                         "in one line instead of switching"
+                         + (": a husky's task or a region goal (visited-region / explored-region) needs Fast "
+                            "Downward, so then say 'this needs the Fast Downward planner (husky / regions): "
+                            "switch the planner above', and do not ask to merge routes." if ctx["engine"] == "grstaps"
+                            else ": ordering (before), a joint inspection or moving an object needs GRSTAPS-X.")  # fmt: skip
+                         )
     roster = ctx.get("roster") or []
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))
@@ -401,6 +458,7 @@ def mission_card(m: Mission, out: dict, assumptions: list[str], planned: dict | 
         "issues": issues,
         "assumptions": assumptions,
         "makespan": pv.get("makespan"),
+        "goals": pv.get("goals"),
         "map": pv.get("map"),
         "planner": m.planner,
     }

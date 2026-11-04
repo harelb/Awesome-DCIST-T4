@@ -256,6 +256,7 @@ export function MapsPage() {
         }
       />
       {err && <ErrorBox error={err} compact />}
+      <DatabaseReset targets={config.data?.neo4j_targets ?? []} onStart={(target, title) => startJob("api/maps/reset", {target}, title)} />
       {maps.loading && !maps.data && <Loading label="Listing experiments (ssh to each machine)" />}
       {maps.error && !maps.data && <ErrorBox error={maps.error} onRetry={maps.reload} />}
       {maps.data && entries.length === 0 && <Empty title="No machines reported maps" />}
@@ -700,5 +701,70 @@ function IngestDialog({map, targets, onClose, onStart}: {map: MapEntry; targets:
         </>
       )}
     </Modal>
+  );
+}
+
+interface ResetStatus {
+  target: string;
+  source: string;
+  run: string;
+  nodes: number;
+  added_objects: number;
+  map_edits: number;
+}
+
+/** One row per map database: what it was loaded from, what has been added since, and a
+ *  one-click reset to that map (API.md §6.6). The job asks once before wiping. */
+export function DatabaseReset({targets, onStart}: {targets: ConsoleConfig["neo4j_targets"]; onStart: (target: string, title: string) => Promise<string | null>}) {
+  if (!targets.length) return null;
+  return (
+    <Card title="Map databases" actions={<span className="muted small">reset = reload the map; drops added objects and edits</span>}>
+      <div className="db-reset">
+        {targets.map(t => (
+          <DatabaseResetRow key={t.name} name={t.name} uri={t.uri} onStart={onStart} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function DatabaseResetRow({name, uri, onStart}: {name: string; uri: string; onStart: (target: string, title: string) => Promise<string | null>}) {
+  const st = useApi<ResetStatus>(`api/maps/reset?target=${encodeURIComponent(name)}`);
+  const [started, setStarted] = useState<string | null>(null);
+  const job = useJobs(s => (started ? s.jobs[started] : undefined));
+  const running = job && (job.state === "running" || job.state === "waiting");
+  const runName = st.data?.run.split("/").filter(Boolean).pop();
+  const added = st.data ? st.data.added_objects + st.data.map_edits : 0;
+  return (
+    <div className="db-reset-row" data-testid="db-reset-row">
+      <div className="db-reset-info">
+        <b className="mono">neo4j:{name}</b> <span className="muted small mono">{uri}</span>
+        <div className="small">
+          {st.loading && !st.data && <Spinner />}
+          {st.error && <span className="tone-err">{String(st.error)}</span>}
+          {st.data && (
+            <>
+              <span className="muted">loaded from</span> <span className="mono" title={st.data.source}>{runName}</span> · {st.data.nodes.toLocaleString()} nodes ·{" "}
+              {added ? (
+                <span className="tone-warn">
+                  {st.data.added_objects} added object(s), {st.data.map_edits} map edit(s)
+                </span>
+              ) : (
+                <span className="tone-ok">clean (nothing added)</span>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      <button
+        className="btn btn-sm"
+        disabled={!st.data || Boolean(running)}
+        title={st.data ? `Wipe neo4j:${name} and reload ${st.data.source}: removes objects added by the chat, the live image tab or an operator, and map edits (about 15 min; asks once)` : "no map recorded for this database"}
+        onClick={async () => setStarted(await onStart(name, `Reset neo4j:${name} to ${runName}`))}
+        data-testid="db-reset"
+      >
+        {running ? <Spinner /> : "↺"} Reset to original map
+      </button>
+    </div>
   );
 }

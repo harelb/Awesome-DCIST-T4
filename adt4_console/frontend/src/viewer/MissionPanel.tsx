@@ -53,9 +53,14 @@ import {StartEditor, type CoordMode} from "./StartEditor";
 import {startLockReason} from "../lib/agentStart";
 import type {ChatItem} from "./ChatPanel";
 import {FastDownwardDetails} from "./FastDownward";
+import {PlannerSchedule, type PlannerScheduleData} from "./PlannerSchedule";
+import {GoalImages} from "./GoalImages";
+import {ENGINE_LABEL, type EngineId} from "../stores/engines";
+import {EnginePicker} from "./EnginePicker";
+export {EnginePicker};
 import type {TranscriptItem} from "../lib/chatTranscript";
 
-const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼"};
+const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼", pick: "✋", place: "⤓"};
 
 function fmtS(s: number | null | undefined): string {
   if (s == null) return "–";
@@ -156,6 +161,25 @@ function Roster() {
       )}
     </section>
   );
+}
+
+/** Each agent's goals as images: the object's own, else the view nearest to where its path ends. */
+function MissionGoalImages() {
+  const {current, preview} = useMission();
+  const robotColor = useRobotColor3D();
+  const colors = useMemo(() => agentColors(current?.agents ?? [], robotColor), [current, robotColor]);
+  if (!current || !preview?.goals) return null;
+  return <GoalImages goals={preview.goals} src={current.src} colors={colors} />;
+}
+
+/** The solver's own schedule of a GRSTAPS-X mission (the Timeline above is the console's simulation of it). */
+function MissionSchedule() {
+  const {current} = useMission();
+  const robotColor = useRobotColor3D();
+  const colors = useMemo(() => agentColors(current?.agents ?? [], robotColor), [current, robotColor]);
+  const sched = current?.goal?.schedule as PlannerScheduleData | undefined;
+  if (!sched) return null;
+  return <PlannerSchedule schedule={sched} colors={colors} title="GRSTAPS-X schedule (as planned)" compact />;
 }
 
 function Timeline({run}: {run: RunState | null}) {
@@ -653,12 +677,15 @@ export function MissionPanel() {
             and areas below.
           </div>
         ) : (
+          <>
+          <EnginePicker />
           <div className="row gap">
             <input className="input input-sm grow" placeholder="e.g. spot1 go to the nearest tree, spot2 visit the sign" value={omniText} onChange={e => setOmniText(e.target.value)} aria-label="omniplanner command" />
             <button className="btn btn-sm" disabled={!omniText.trim() || s.busy === "omni"} onClick={() => void planWithOmniplanner(omniText.trim())}>
               {s.busy === "omni" ? <Spinner /> : "Plan"}
             </button>
           </div>
+          </>
         )}
         {error && (
           <div className="msg msg-err small" role="alert">
@@ -674,7 +701,7 @@ export function MissionPanel() {
             <div className="row gap wrap small">
               <b title={current.text || undefined}>{current.name || current.text.slice(0, 60) || current.id}</b>
               <Badge tone="info">r{current.revision}</Badge>
-              <Badge tone="off">{current.planner}</Badge>
+              <Badge tone="off">{current.planner}{current.goal?.engine ? ` · ${ENGINE_LABEL[current.goal.engine as EngineId] ?? current.goal.engine}` : ""}</Badge>
               <span className="muted">~{fmtS(preview.makespan)}</span>
               <span className="grow" />
               {current.chat && (
@@ -706,6 +733,8 @@ export function MissionPanel() {
             </div>
             <Transport run={run} />
             <Timeline run={run} />
+            <MissionSchedule />
+            <MissionGoalImages />
             {preview.map?.stale && (
               <div className="mission-stale small" role="status" data-testid="mission-map-stale">
                 <span>

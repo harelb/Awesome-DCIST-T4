@@ -583,9 +583,13 @@ class Source:
         """Agent images from an ImageStore; poses from ``lookup`` (node id → 4x4),
         else from the loaded node records; ``stamp`` (node id → ns) picks the agents'
         own keyframes (agent_images.own_keyframes)."""
+        idx = self.store_frame_index(store, loaded, lookup, stamp)
+        return agent_frame_images(idx, sym, loaded.records.get(sym))
+
+    def store_frame_index(self, store, loaded, lookup=None, stamp=None):
+        """The AgentFrameIndex of an ImageStore (see store_agent_images)."""
         from .agent_images import AgentFrameIndex
 
-        rec = loaded.records.get(sym)
         key = ("store", loaded.version, store_signature(store))
 
         def build():
@@ -598,7 +602,24 @@ class Source:
                 store, lookup=lookup, positions=positions, stamp=stamp
             )
 
-        return agent_frame_images(self.agent_index(key, build), sym, rec)
+        return self.agent_index(key, build)
+
+    def frame_index(self):
+        """Every keyframe / sub-keyframe of this map with its world pose (None: no
+        image store). Sources with better poses override it."""
+        store = self.image_store()
+        if store is None:
+            return None
+        with self._store_lock:
+            return self.store_frame_index(store, self.loaded())
+
+    def frames_near(self, x: float, y: float, yaw: float | None = None, n: int = 6) -> list:
+        """The frames taken closest to (x, y) (API.md §15.5: a region / place goal's
+        image is the view nearest to where the plan ends)."""
+        idx = self.frame_index()
+        if idx is None:
+            return []
+        return idx.nearest((x, y), yaw, limit=n)
 
     def trajectory(self) -> list:
         return _records_trajectory(self.loaded())
@@ -1061,6 +1082,19 @@ class FileSource(Source):
             return _codec().mesh_arrays(G.mesh)
         return None
 
+    def frame_index(self):
+        store = self.image_store()
+        if store is None:
+            return None
+        loaded = self.loaded()
+        lookup = None
+        if loaded.G is not None:
+            from hydra_image_store import as_pose_lookup
+
+            lookup = as_pose_lookup(loaded.G)
+        with self._store_lock:
+            return self.store_frame_index(store, loaded, lookup, spark_agent_stamp(loaded.G))
+
     def node_detail_extra(self, sym, loaded):
         node = _spark_node(loaded.G, sym) if loaded.G is not None else None
         if node is None:
@@ -1338,6 +1372,10 @@ class Neo4jSource(Source):
     def agent_images(self, sym: str, loaded) -> list:
         """Own keyframe, else the nearest sub-keyframes (heracles Agent / SubKeyframe
         rows; the image store when the DB carries no frame paths)."""
+        return agent_frame_images(self.frame_index(), sym, loaded.records.get(sym))
+
+    def frame_index(self):
+        """Every keyframe / sub-keyframe: heracles Agent / SubKeyframe rows, else the image store."""
         from .agent_images import KEYFRAME, SUBKEYFRAME, AgentFrameIndex
 
         poses: dict[str, tuple] = {}
@@ -1406,8 +1444,7 @@ class Neo4jSource(Source):
                     store, lookup=lookup, stamp=lambda nid: stamps.get(symbol_of(int(nid)))
                 )
 
-        idx = self.agent_index(("neo4j", self.version()), build)
-        return agent_frame_images(idx, sym, loaded.records.get(sym))
+        return self.agent_index(("neo4j", self.version()), build)
 
     def node_images(self, sym: str, props: dict) -> list[pathlib.Path]:
         """Image files from the heracles ``rgb_path`` properties (Agent, SubKeyframe,

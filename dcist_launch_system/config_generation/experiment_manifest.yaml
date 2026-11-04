@@ -24,6 +24,11 @@ launch_configs:
   plan_prior_web: [main, prior_dsg_web, planning_web, console, fleetlink_base]
   # web console + heracles (Neo4j) + plan repair + SAM3 object search on the base station
   plan_prior_web_heracles_repair: [main, heracles_prior_dsg_repair_web, planning_repair_web, console_neo4j, fleetlink_base, sam3_query]
+  # Same repair flow, but the goal manager forwards to the GRSTAPS-X plugin.
+  plan_prior_repair_grstaps: [main, prior_dsg, planning_repair_grstaps, fleetlink_base]
+  plan_prior_heracles_repair_grstaps: [main, heracles_prior_dsg_repair_grstaps, planning_repair_grstaps, fleetlink_base]
+  # web console base station with the goal manager forwarding to GRSTAPS-X
+  plan_prior_web_heracles_repair_grstaps: [main, heracles_prior_dsg_repair_web, planning_repair_web_grstaps, console_neo4j, fleetlink_base, sam3_query]
 # Configs build the set of rosparams that will be loaded
 configs:
   default: []
@@ -35,6 +40,12 @@ configs:
   relocalize_awcd: [relocalize]
   apollo_relocalize: [relocalize]
   indoor_regions: [indoor, regions]
+  grstaps: [prior_dsg]
+  # Same planner, but listening for the repair flow's ConstrainedPddlGoalMsg
+  # instead of a plain point list. Kept as its own config rather than inheriting
+  # grstaps: resolve_override_dirs only collects leaf keys, so a non-leaf parent
+  # contributes no overrides and the overlay has to stand alone anyway.
+  grstaps_repair: [prior_dsg]
 # Variant names shown first in run-adt4 session selection
 important_variants:
   - base_station-default
@@ -67,6 +78,10 @@ experiments:
   base_station_web_repair:
     launch_config: [plan_prior_web_heracles_repair, multi_status, tf_relay]
     config: [default]
+  # same, planning with GRSTAPS-X (needs `itags` on PATH and ADT4_GUROBI_LICENSE)
+  base_station_web_grstaps_repair:
+    launch_config: [plan_prior_web_heracles_repair_grstaps, multi_status, tf_relay]
+    config: [grstaps_repair]
 
   # spot configs — require Spot hardware or bag playback
   spot:
@@ -131,6 +146,18 @@ experiments:
   spot_sim_fleetlink:
     launch_config: [robot_main, spot_sim, fleetlink]
     config: [default]
+  spot_grstaps:
+    launch_config: [plan_prior, spot_sim]
+    config: [grstaps]
+  spot_grstaps_repair:
+    launch_config: [plan_prior_repair_grstaps, spot_sim]
+    config: [grstaps_repair]
+  spot_grstaps_heracles_repair:
+    launch_config: [plan_prior_heracles_repair_grstaps, spot_sim]
+    config: [grstaps_repair]
+  base_station_grstaps_heracles_repair:
+    launch_config: [plan_prior_heracles_repair_grstaps, multi_status]
+    config: [grstaps_repair]
   spot_prior_dsg:
     launch_config: [plan_prior, spot_sim]
     config: [prior_dsg]

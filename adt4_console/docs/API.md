@@ -183,6 +183,15 @@ Maps:
   `hydra/backend/dsg.json` (fall back to `dsg_with_mesh.json`); typed confirm `required_text="wipe"`
   showing current node count of the target; `heracles.utils.load_dsg_to_db`; `store_mesh_path(<run>/hydra/backend/mesh.ply)`;
   `bump_version`; broadcast `graph/neo4j:<name>/version`. Result `{nodes, edges, seconds}`.
+* **Reset** (Maps page, "Map databases": one button per Neo4j target). `GET /api/maps/reset?target=NAME`
+  → `{target, source, run, nodes, added_objects, map_edits}`: the map the database was loaded from
+  (`_GraphMetadata {key: 'source'}`) and what a reset undoes (objects the chat / live-image SAM3 tab /
+  an operator added: `source` or `sam3_created` set; GraphMutation map edits). `POST /api/maps/reset
+  {target}` → job: one Reset / Cancel confirm, then wipe + ingest that map (as `/ingest`), the place /
+  room SigLIP2 features from `hydra/backend/semantic_features.npz`, a version bump, and `POST
+  <sam3_url>/reload` so the SAM3 server re-reads the keyframes (their embeddings come back from its
+  cache; nothing is recomputed). 409 when the database records no map or it no longer exists.
+  ~15-17 min for the fused Penn map.
 * `POST /api/maps/register` `{name, path}` → adds a `file:<name>` source at runtime
 
 Graph sources (all served from the same `fleetlink.codec` formats):
@@ -1112,7 +1121,7 @@ Needs omniplanner with that grounding and Fast Downward on `PATH` (`available()`
   `t4826`, region `r3`), robots = the agent ids in lower case: `visited-object` /
   `visited-place` (any robot), `visited-object-by` / `visited-place-by` / `inspected-by` (that
   robot), `safe` (some robot inspects it), `at-object` / `at-place` (where a robot ends),
-  `visited-region`, `explored-region`, under `and` / `or`. Optional constraints
+  `visited-region`, `explored-region` (and their `-by` forms: that robot), under `and` / `or`. Optional constraints
   `forbidden-poi` / `forbidden-edge`; the mission's no-go zones become `forbidden-poi` on the
   places inside them.
 * **Mission**: each `goto-poi` → a `goto` task, a goto followed by an `inspect` of its target → one
@@ -1129,6 +1138,61 @@ Needs omniplanner with that grounding and Fast Downward on `PATH` (`available()`
   hidden. Sending the goal is unchanged (the robots' omniplanner plans it).
 * An object farther than 5 m from every place the robots can reach (another component, or
   behind a closed area) cannot be reached; the error says so.
+
+#### 15.5.1 Engines: Fast Downward and GRSTAPS-X (`mission/grstaps_engine.py`)
+
+Every omniplanner request takes `engine`: `fast_downward` (default, everything above) or
+`grstaps`, omniplanner's GRSTAPS-X planner (ITAGS task allocation + a Gurobi MILP schedule).
+`GET /api/missions/plan/engines` → `{engines: [{id, label, available, reason}], default}`; the
+mission tab's planner choice, the robot-chat goal card and the mission chat use it.
+
+* **Setup** (checked by `available("grstaps")`, said in words): omniplanner with
+  `omniplanner.grstaps_planner`; the `itags` binary on `PATH` (a colcon build of `grstapsx`,
+  `install/packages.yaml`) or `ADT4_ITAGS_BINARY`; a Gurobi license file named by
+  `ADT4_GUROBI_LICENSE` (else `GRB_LICENSE_FILE`, else `~/gurobi.lic`) that is not expired and,
+  for a named-user license, made for this host (a WLS web license is not host-bound but needs
+  internet). Problem / solution files go to `ADT4_GRSTAPS_WORK_DIR` (else
+  `$ADT4_OUTPUT_DIR/grstaps`); a solve is stopped after `ADT4_GRSTAPS_TIMEOUT_S` (60 s).
+* **Goals**: `visited-object` / `visited-place`, the `-by` forms, `safe` / `(not (suspicious o))`
+  (one robot looks), `inspected-by` (that robot does; several `inspected-by` on one object = a **joint** inspection), huskies left out,
+  `(object-in-place o p)` (relocation: pick, carry, place; every Spot counts as armed). No `or`,
+  `at-*`, `holding`, region predicates or other negation. Constraints add `before`
+  (`["before", "o4", "o8"]`: everything at o4 finishes before anything at o8 starts);
+  Fast Downward refuses `before`.
+* **Mission**: visit → `goto`; joint inspection → a `goto` and an `inspect` per member, each
+  `inspect` depending on every member's `goto` (they look together); relocation → `pick` (the
+  object) + `place` (`target` = destination, `params.object`); the solver's precedence →
+  `depends_on`; `params.planned` = the solver's [start, finish]. `goal = {pddl, constraints,
+  engine, schedule}`, `schedule = {makespan, rows: [{robot, task, action, target, start, finish,
+  coalition}], precedence}` (the mission panel draws it under the simulated timeline); a replan
+  keeps the engine (`engine` in the replan body overrides it). `planned` adds `engine`,
+  `makespan_s`, `planner_log`. `pick` / `place` are simulated (goto + 10 s); the console's live
+  executor refuses them: send the goal to the robots instead.
+* **Preview**: `POST /plan/preview_pddl {engine: "grstaps"}` adds `schedule` (drawn under the goal
+  card).
+* **Failures** (every planner route): `planner_log = {planner, digest, log, problem_file}` (GRSTAPS-X:
+  the solver's last lines, `itags_input.json`; a license problem says so in the digest);
+  `fast_downward` stays for Fast Downward's account.
+* **Sending** (`POST /api/robots/{robot}/goal/pddl {engine: "grstaps"}`): through goal_manager when
+  it forwards to GRSTAPS-X (`planner_goal_topic:=grstaps_planner/pddl_goal`, e.g. run-adt4
+  `base_station_web_grstaps_repair`), else straight to the `Grstaps` plugin's
+  `.../grstaps_planner/pddl_goal` (a ConstrainedPddlGoalMsg) with a warning; `before` goes with
+  the goal, never into the robot's standing constraints (which refuse it). The console finds the
+  plugin in `ADT4_OMNIPLANNER_PLUGINS` (e.g. `config/grstaps_repair/omniplanner_plugins.yaml`),
+  else the default config. `/<planner_ns>/omniplanner_node/task_schedule` (TaskScheduleMsg) →
+  `plan.schedule` of every robot in it, drawn in the robot's plan panel.
+
+#### 15.5.2 Goal images
+
+Mission previews (`GET /api/missions/{id}/preview`, the mission card) and `POST /plan/preview_pddl`
+carry `goals = {agent: [{sym, xy, yaw}]}`: each map symbol an agent's plan goes to, where its path
+there ends and the heading it arrives with. The mission tab, the chat's mission card and the goal
+card's Preview show them per robot (`GoalImages`): an object its own views (cropped, mask drawn;
+click: full size, Previous / Next, a Mask toggle); a place or region goal the keyframes /
+sub-keyframes taken nearest to that end point, ranked by ground distance plus heading difference
+(90° weighs like 1 m): `GET /api/graph/{src}/near?x&y&yaw?&n` →
+`{frames: [{image, kind, dist_m, yaw_deg, frame_id, anchor}]}`, each `image` =
+`/api/graph/{src}/near/image?…&i=k(&w=)`.
 
 ## 16. Penn quadrotor link (`quad/`)
 

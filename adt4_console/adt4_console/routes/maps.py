@@ -914,6 +914,139 @@ def ingest(body: IngestBody, request: Request):
     return {"job_id": job.id}
 
 
+# --- reset a Neo4j map to the scene graph it was loaded from (API.md §6.6) ------------
+
+ADDED_OBJECTS = "MATCH (o:Object) WHERE o.source IS NOT NULL OR o.sam3_created IS NOT NULL RETURN count(o) AS c"
+
+
+def _source_run(target) -> tuple[pathlib.Path, pathlib.Path]:
+    """(dsg file, run dir) the target was last ingested from (_GraphMetadata source)."""
+    rows = target.query("MATCH (m:_GraphMetadata {key: 'source'}) RETURN m.file_path AS p")
+    path = rows[0]["p"] if rows else None
+    if not path:
+        raise HTTPException(409, f"neo4j:{target.name} does not record which map it was loaded from; "
+                                 "load one from the Maps list instead")  # fmt: skip
+    dsg = pathlib.Path(path)
+    if not dsg.is_file():
+        raise HTTPException(409, f"neo4j:{target.name} was loaded from {dsg}, which no longer exists")
+    run = dsg.parent.parent.parent if dsg.parent.name == "backend" else dsg.parent
+    return dsg, run
+
+
+def reset_status(target) -> dict:
+    """What a reset would undo: objects the chat / live-image (SAM3) tab added and
+    map edits since the map was loaded."""
+    dsg, run = _source_run(target)
+    q = lambda c: int(target.query(c)[0]["c"])  # noqa: E731
+    return {
+        "target": target.name, "uri": target.uri, "source": str(dsg), "run": str(run),
+        "nodes": target.count_nodes(),
+        "added_objects": q(ADDED_OBJECTS),
+        "map_edits": q("MATCH (g:GraphMutation) RETURN count(g) AS c"),
+    }  # fmt: skip
+
+
+def load_semantic_features(target, run: pathlib.Path) -> int:
+    """Place / room SigLIP2 features (hydra/backend/semantic_features.npz) as the
+    ``siglip2_emb`` property with a cosine vector index per label; 0 when absent."""
+    import re
+
+    import numpy as np
+
+    path = run / "hydra" / "backend" / "semantic_features.npz"
+    if not path.is_file():
+        return 0
+    F = np.load(path)
+    rows = [{"s": re.sub(r"\((\d+)\)", r"\1", str(sym)), "e": f.tolist()} for sym, f in zip(F["symbols"], F["features"])]
+    for i in range(0, len(rows), 500):
+        target.query("UNWIND $rows AS r MATCH (n:MeshPlace|Room {nodeSymbol: r.s}) SET n.siglip2_emb = r.e",
+                     rows=rows[i:i + 500])  # fmt: skip
+    dim = int(F["features"].shape[1])
+    for label in ("MeshPlace", "Room"):
+        target.query(f"CREATE VECTOR INDEX {label.lower()}_siglip2_emb IF NOT EXISTS FOR (n:{label}) ON (n.siglip2_emb) "
+                     "OPTIONS {indexConfig: {`vector.dimensions`: $dim, `vector.similarity_function`: 'cosine'}}", dim=dim)  # fmt: skip
+    return len(rows)
+
+
+@router.get("/reset")
+def reset_info(target: str, request: Request):
+    """What resetting ``neo4j:<target>`` would reload and undo (API.md §6.6)."""
+    try:
+        t = services(request).graph.neo4j(target)
+    except NotFound as e:
+        raise HTTPException(404, str(e)) from None
+    return reset_status(t)
+
+
+class ResetBody(BaseModel):
+    target: str
+
+
+@router.post("/reset")
+def reset(body: ResetBody, request: Request):
+    """Wipe ``neo4j:<target>`` and load the map it was loaded from again: every object
+    the chat agent, the live image (SAM3) tab or an operator added, and every map
+    edit, is gone. Then the place / room features, and the SAM3 server re-reads its
+    keyframes (their embeddings come back from its cache: nothing is recomputed)."""
+    svc = services(request)
+    try:
+        target = svc.graph.neo4j(body.target)
+    except NotFound as e:
+        raise HTTPException(404, str(e)) from None
+    st = reset_status(target)
+    dsg_path, run_dir = pathlib.Path(st["source"]), pathlib.Path(st["run"])
+    sam3_url = getattr(svc.settings, "sam3_url", None)
+
+    def run(job):
+        import spark_dsg as dsg
+        from heracles.graph_interface import store_mesh_path
+        from heracles.utils import load_dsg_to_db
+
+        from .. import sam3_client
+
+        answer = job.confirm(
+            f"Reset neo4j:{target.name} to {run_dir.name}?\n\nThis removes {st['added_objects']} added object(s) "
+            f"(chat, live images, operator) and {st['map_edits']} map edit(s), and reloads the scene graph "
+            f"({st['nodes']} nodes now). It takes about 15 minutes; the map is unavailable meanwhile.",
+            kind="reset_neo4j", yes_label="Reset", no_label="Cancel", detail=st,
+        )  # fmt: skip
+        if not answer:
+            job.log("error", "Reset cancelled: database left untouched.")
+            return False
+        t0 = time.time()
+        job.log("info", f"Loading {dsg_path} ...")
+        G = dsg.DynamicSceneGraph.load(str(dsg_path))
+        job.log("ok", f"Loaded {G.num_nodes()} nodes; wiping neo4j:{target.name} and writing it (several minutes) ...")
+        image_store = str(run_dir / "image_store") if (run_dir / "image_store").is_dir() else None
+        load_dsg_to_db(target.uri, target.creds, G, image_store=image_store)
+        db = target.db()
+        target.query("MERGE (m:_GraphMetadata {key: 'source'}) SET m.file_path = $p", p=str(dsg_path))
+        mesh = dsg_path.parent / "mesh.ply"
+        if mesh.is_file():
+            store_mesh_path(db, str(mesh))
+        n_feat = load_semantic_features(target, run_dir)
+        if n_feat:
+            job.log("ok", f"place / room features: {n_feat}")
+        version = bump_map_counters(db)
+        target.invalidate()
+        svc.graph.notify_version(target.id, "reset")
+        nodes = target.count_nodes()
+        job.log("ok", f"Reset: {nodes} nodes in {round(time.time() - t0)} s (v{version})")
+        sam3 = None
+        if sam3_url:
+            job.log("info", "SAM3 server: re-reading the keyframes (embeddings from its cache) ...")
+            try:
+                sam3 = sam3_client.reload(sam3_url)
+                job.log("ok", f"SAM3 server reloaded: {sam3}")
+            except Exception as e:  # noqa: BLE001 — the map is reset either way
+                job.log("warn", f"SAM3 server not reloaded ({e}); restart it to pick up the new keyframes")
+        return {"nodes": nodes, "version": version, "seconds": round(time.time() - t0, 1),
+                "removed_objects": st["added_objects"], "removed_edits": st["map_edits"], "sam3": sam3}  # fmt: skip
+
+    job = svc.jobs.start("reset", f"Reset neo4j:{target.name} to {run_dir.name}", run)
+    return {"job_id": job.id, **st}
+
+
 class RegisterBody(BaseModel):
     name: str
     path: str

@@ -13,6 +13,7 @@ import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
 import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, type SendTone} from "./PlanRepair";
 import {usePlatform} from "./usePlatform";
+import {PlannerSchedule} from "./PlannerSchedule";
 import {PhoenixChips} from "./PhoenixStatus";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
@@ -69,6 +70,10 @@ export function PlanPanel() {
   const spot = usePlatform(planRobot, current?.platform) === "spot";
   const kinds = new Set(current?.plugins.map(p => p.kind) ?? []);
   const pddlPlugins = current?.plugins.filter(p => p.kind === "pddl") ?? [];
+  // the base station runs GRSTAPS-X (a Grstaps plugin taking PDDL goals): offer it for PDDL goals
+  const hasGrstaps = current?.plugins.some(p => p.kind === "grstaps") ?? false;
+  const [pddlEngine, setPddlEngine] = useState<"fast_downward" | "grstaps">("fast_downward");
+  const sendGrstaps = hasGrstaps && pddlEngine === "grstaps";
   useEffect(() => {
     if (pddlPlugins.length && !pddlPlugins.some(p => p.name === pddlPlugin)) setPddlPlugin(pddlPlugins[0].name);
   }, [pddlPlugins, pddlPlugin]);
@@ -213,7 +218,19 @@ export function PlanPanel() {
 
       {tool === "pddl" && (
         <div className="goal-tool">
-          {pddlPlugins.length > 1 && (
+          {hasGrstaps && (
+            <Segmented
+              ariaLabel="PDDL planner"
+              value={pddlEngine}
+              onChange={setPddlEngine}
+              options={[
+                {value: "fast_downward", label: "Fast Downward"},
+                {value: "grstaps", label: "GRSTAPS-X"},
+              ]}
+            />
+          )}
+          {sendGrstaps && <p className="muted small">GRSTAPS-X also takes ordering, e.g. a constraint “before o4 o8” sent with the goal, joint inspections (safe o4) and (object-in-place o4 t598).</p>}
+          {!sendGrstaps && pddlPlugins.length > 1 && (
             <select className="input" value={pddlPlugin} onChange={e => setPddlPlugin(e.target.value)} aria-label="PDDL plugin">
               {pddlPlugins.map(p => (
                 <option key={p.name} value={p.name}>
@@ -233,12 +250,12 @@ export function PlanPanel() {
           <p className="muted small">Select an object and press "Visit (PDDL)" to fill a template. Edit freely.</p>
           <button
             className="btn btn-primary"
-            disabled={!pddlDraft.trim() || !!busy || !pddlPlugins.length}
-            onClick={() => run("PDDL", () => sendGoal(planRobot!, "pddl", {plugin: pddlPlugin, goal: pddlDraft.trim()}))}
+            disabled={!pddlDraft.trim() || !!busy || (!pddlPlugins.length && !sendGrstaps)}
+            onClick={() => run("PDDL", () => sendGoal(planRobot!, "pddl", sendGrstaps ? {goal: pddlDraft.trim(), engine: "grstaps"} : {plugin: pddlPlugin, goal: pddlDraft.trim()}))}
           >
             {busy === "PDDL" && <Spinner />} Send PDDL goal
           </button>
-          {!pddlPlugins.length && <div className="muted small">No PDDL plugin for this robot.</div>}
+          {!pddlPlugins.length && !hasGrstaps && <div className="muted small">No PDDL plugin for this robot.</div>}
           {planRobot && <ConstraintsBox robot={planRobot} constraints={plan?.constraints ?? []} />}
         </div>
       )}
@@ -319,6 +336,7 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
         </>
       )}
       <RepairAlerts alerts={plan?.repair_alerts ?? []} />
+      {plan?.schedule && <PlannerSchedule schedule={plan.schedule} title={`GRSTAPS-X schedule · ${fmtTime(plan.schedule.t)}`} compact />}
       {plan?.status && plan.status.length > 0 && (
         <>
           <h4 className="sub-title">Planner</h4>

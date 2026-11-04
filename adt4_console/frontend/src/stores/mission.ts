@@ -12,6 +12,7 @@ import {roundXY, startLockReason, type StartDrag} from "../lib/agentStart";
 import {ws} from "../ws";
 import {useViewer} from "./viewer";
 import {OVERLAY_SELECTOR, overlayInsets} from "../lib/fitView";
+import {ENGINE_LABEL, useEngines} from "./engines";
 
 export type AgentKind = "spot" | "husky" | "quad";
 export const MAX_AGENTS = 5;
@@ -57,7 +58,7 @@ export interface Mission {
   src: string | null;
   planner: string;
   /** omniplanner's goal: a replan plans it again from the agents' starts */
-  goal?: {pddl: string; constraints: unknown[]} | null;
+  goal?: {pddl: string; constraints: unknown[]; engine?: string; schedule?: unknown} | null;
   agents: Agent[];
   tasks: Task[];
   geofences: Polygon[];
@@ -113,6 +114,8 @@ export interface Preview {
   geo: unknown;
   /** the map it was planned on vs now (API.md §17.7); null: not an editable Neo4j map */
   map?: MapStatus | null;
+  /** each agent's goals with where its path there ends (GoalImages) */
+  goals?: Record<string, {sym: string; xy?: number[] | null; yaw?: number | null}[]>;
 }
 
 export interface MapStatus {
@@ -312,6 +315,8 @@ export function missionContext() {
     no_go: s.fences.map(f => ({name: f.id, polygon: f.polygon})),
     planted: s.planted,
     mission: s.current,
+    // the planner picked in the chat window / omniplanner tab (plan_ground_mission's engine)
+    engine: useEngines.getState().engine,
   };
 }
 
@@ -531,13 +536,14 @@ export async function planWithOmniplanner(text: string): Promise<void> {
       agents: s.roster,
       areas: missionContext().areas,
       src: s.world?.src ?? null,
+      engine: useEngines.getState().engine,
     });
     st().set({current: r.mission, preview: r.preview, run: null});
     follow(r.mission.id);
     fitMission();
     void refreshList();
   } catch (e) {
-    st().set({error: `omniplanner: ${errorText(e)}`, errorFd: e instanceof ApiError ? fastDownwardOf(e.body) : null});
+    st().set({error: `omniplanner (${ENGINE_LABEL[useEngines.getState().engine]}): ${errorText(e)}`, errorFd: e instanceof ApiError ? fastDownwardOf(e.body) : null});
   } finally {
     st().set({busy: null});
   }

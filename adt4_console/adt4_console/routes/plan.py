@@ -63,6 +63,8 @@ class PddlGoal(BaseModel):
     # "auto": goal_manager when it runs, else the plugin + a warning;
     # "planner": straight to the plugin; "goal_manager": 409 when it is down
     route: Literal["auto", "planner", "goal_manager"] = "auto"
+    # omniplanner engine: None / "fast_downward" (goal_manager's default) or "grstaps"
+    engine: Literal["fast_downward", "grstaps"] | None = None
 
 
 class ConstraintsBody(BaseModel):
@@ -132,7 +134,7 @@ def goal_pddl(robot: str, body: PddlGoal, request: Request):
     ros = _ros(request)
     try:
         return ros.send_pddl_goal(
-            robot, body.goal, body.plugin, body.constraints, body.route
+            robot, body.goal, body.plugin, body.constraints, body.route, engine=body.engine
         )
     except ValueError as e:  # bad constraint
         raise HTTPException(400, str(e)) from None
