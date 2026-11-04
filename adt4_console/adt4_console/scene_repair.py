@@ -262,7 +262,8 @@ def pose_in_global(pose: dict | None, frame_align: dict | None, global_frame: st
 class SceneRepair:
     def __init__(self, hub=None, *, send=None, resume=None, active_goals=None, plan_of=None,
                  class_of=None, position_of=None, robot_xy=None, invalidate=None,
-                 clock=time.time, max_changes: int = 100, max_recs: int = 50):  # fmt: skip
+                 clock=time.time, max_changes: int = 100, max_recs: int = 50,
+                 planner_wait_s: float = 10.0):  # fmt: skip
         self.hub = hub
         self.send = send  # (robot, pddl, constraints, engine) -> result dict
         self.resume = resume  # (robot) -> result dict
@@ -289,6 +290,9 @@ class SceneRepair:
         # map edits staged but not published ({src, count, summary, t}): not in the
         # map yet, so nothing replans; the panel says publish them to replan
         self.staged: dict | None = None
+        self.planner_map_version: int | None = None  # omniplanner's ~/map_version
+        self.planner_wait_s = planner_wait_s
+        self._mv_cv = threading.Condition(self._lock)
 
     # -------------------------------------------------------------- inputs
     def on_applied(self, source: str, map_version, changes: list[dict], *, summary: str | None = None,
@@ -333,9 +337,31 @@ class SceneRepair:
         self._publish()
 
     def on_map_version(self, v) -> None:
+        """omniplanner's (latched) map_version: the newest map the planner holds."""
         with self._lock:
-            self.map_version = int(v)
+            self.planner_map_version = int(v)
+            if self.map_version is None or self.planner_map_version > self.map_version:
+                self.map_version = self.planner_map_version
+            self._mv_cv.notify_all()
         self._publish()
+
+    def _wait_for_planner(self, needed) -> tuple[float, bool]:
+        """Block until the planner holds ``needed`` (its map_version), at most
+        ``planner_wait_s``.  The goal manager judges a resent goal against that
+        version: sent before the planner has the change, an unchanged goal reads
+        as covered on the old map and is not replanned.  Returns (waited s, ok);
+        no wait when the planner's version is unknown (no ROS / older planner)."""
+        t0 = self.clock()
+        with self._mv_cv:
+            if needed is None or self.planner_map_version is None:
+                return 0.0, True
+            end = time.monotonic() + self.planner_wait_s
+            while self.planner_map_version < needed:
+                left = end - time.monotonic()
+                if left <= 0:
+                    return self.clock() - t0, False
+                self._mv_cv.wait(left)
+        return self.clock() - t0, True
 
     def on_replan_request(self, reason: str) -> None:
         self._event("replan_request", str(reason))
@@ -577,6 +603,9 @@ class SceneRepair:
                 goal, rec["rewrites"] if variant == "proposed" else []
             )
         self._publish()
+        versions = [rec.get("map_version")] + [c.get("map_version") for c in rec.get("changes") or []]
+        versions = [int(v) for v in versions if v is not None]
+        waited, fresh = self._wait_for_planner(max(versions) if versions else None)
         try:
             res = self.send(rec["robot"], pddl, constraints, goal.get("engine"))
         except Exception as e:  # noqa: BLE001 — leave it pending: the operator may retry
@@ -590,7 +619,9 @@ class SceneRepair:
         with self._lock:
             rec.update(status="confirmed", t_done=self.clock(),
                        result={"ok": bool((res or {}).get("ok", True)), "variant": variant, "pddl": pddl,
-                               "send": res})  # fmt: skip
+                               "send": res, "waited_s": round(waited, 2),
+                               **({} if fresh else {"warning": "the planner had not received the changed "
+                                                             "map yet; the goal may be judged on the old one"})})  # fmt: skip
             out = dict(rec)
         self._publish()
         return out
@@ -616,7 +647,7 @@ class SceneRepair:
     def state(self) -> dict:
         with self._lock:
             recs = [dict(r) for r in self._recs.values()]
-            return {"map_version": self.map_version, "changes": list(self._changes)[-50:],
+            return {"map_version": self.map_version, "planner_map_version": self.planner_map_version, "changes": list(self._changes)[-50:],
                     "events": list(self._events), "recommendations": recs,
                     "staged": dict(self.staged) if self.staged else None,
                     "pending": {r["robot"]: r["id"] for r in recs if r["status"] == "pending"}}  # fmt: skip

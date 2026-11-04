@@ -495,3 +495,35 @@ def test_edit_service_reports_staged_counts(monkeypatch):
     svc._staged_changed("live", 3, ["delete O20", "add cone"])
     svc._staged_changed("live", 0)
     assert seen == [("live", 3, "delete O20; add cone"), ("live", 0, None)]
+
+
+def test_confirm_waits_until_the_planner_has_the_changed_map():
+    """An unchanged goal resent before omniplanner holds the edited map reads as
+    covered on the old map (goal manager) and is not replanned (e2e step 4)."""
+    import threading
+
+    sr, hub, sent, _ = make()
+    sr.on_map_version(3)
+    sr.on_applied("console/operator", 4, [], summary="delete O5")
+    (rec,) = [r for r in sr.state()["recommendations"] if r["status"] == "pending"]
+    t = threading.Timer(0.3, lambda: sr.on_map_version(4))
+    t.start()
+    out = sr.confirm(rec["id"], "original")
+    t.join()
+    assert sent and out["result"]["waited_s"] >= 0.2 and "warning" not in out["result"]
+
+
+def test_confirm_sends_anyway_with_a_warning_when_the_planner_lags():
+    sr, hub, sent, _ = make(planner_wait_s=0.2)
+    sr.on_map_version(3)
+    sr.on_applied("console/operator", 4, [], summary="delete O5")
+    (rec,) = [r for r in sr.state()["recommendations"] if r["status"] == "pending"]
+    out = sr.confirm(rec["id"], "original")
+    assert sent and "planner had not received" in out["result"]["warning"]
+
+
+def test_confirm_does_not_wait_without_a_planner_version():
+    sr, hub, sent, _ = make(planner_wait_s=5)
+    sr.on_applied("console/operator", 4, [], summary="delete O5")
+    (rec,) = [r for r in sr.state()["recommendations"] if r["status"] == "pending"]
+    assert sr.confirm(rec["id"], "original")["result"]["waited_s"] < 1
