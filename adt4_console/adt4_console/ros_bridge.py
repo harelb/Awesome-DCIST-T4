@@ -138,7 +138,8 @@ class RosUnavailable(Exception):
 def plugins_yaml_path() -> pathlib.Path | None:
     """The omniplanner plugins the base station runs: ``ADT4_OMNIPLANNER_PLUGINS``
     (e.g. config/grstaps_repair/omniplanner_plugins.yaml for GRSTAPS-X), else the
-    default config's."""
+    run-adt4 session's config (every generated session exports ``config``, e.g.
+    grstaps_repair for base_station_web_grstaps_repair), else the default config's."""
     env = os.environ.get("ADT4_OMNIPLANNER_PLUGINS")
     if env:
         p = pathlib.Path(env).expanduser()
@@ -149,9 +150,10 @@ def plugins_yaml_path() -> pathlib.Path | None:
         import dcist_launch_system
 
         root = pathlib.Path(dcist_launch_system.__file__).resolve().parents[2]
-        p = root / "config" / "default" / "omniplanner_plugins.yaml"
-        if p.is_file():
-            return p
+        for conf in dict.fromkeys(c for c in (os.environ.get("config"), "default") if c):
+            p = root / "config" / conf / "omniplanner_plugins.yaml"
+            if p.is_file():
+                return p
     except Exception:  # noqa: BLE001
         pass
     p = (

@@ -527,3 +527,19 @@ def test_confirm_does_not_wait_without_a_planner_version():
     sr.on_applied("console/operator", 4, [], summary="delete O5")
     (rec,) = [r for r in sr.state()["recommendations"] if r["status"] == "pending"]
     assert sr.confirm(rec["id"], "original")["result"]["waited_s"] < 1
+
+
+def test_console_plugins_follow_the_session_config(monkeypatch):
+    """base_station_web_grstaps_repair exports config=grstaps_repair: the console must
+    know the GRSTAPS-X plugin, or a plan-repair goal for GRSTAPS-X is refused."""
+    from adt4_console import ros_bridge
+
+    monkeypatch.delenv("ADT4_OMNIPLANNER_PLUGINS", raising=False)
+    monkeypatch.setenv("config", "grstaps_repair")
+    p = ros_bridge.plugins_yaml_path()
+    if p is None:
+        pytest.skip("dcist_launch_system not importable")
+    assert p.parts[-2] == "grstaps_repair"
+    assert any(x["kind"] == "grstaps" for x in ros_bridge.load_plugins(p))
+    monkeypatch.setenv("config", "no_such_config")
+    assert ros_bridge.plugins_yaml_path().parts[-2] == "default"
