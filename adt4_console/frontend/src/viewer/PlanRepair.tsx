@@ -1,11 +1,22 @@
 // Plan repair v3 in the Plan panel: is goal_manager running, the robot's
 // persistent constraints (sent with every goal_manager goal), and goal_manager
-// / planner-failure alerts. API.md §9.
-import {useState} from "react";
-import {errorText, postJSON, sendJSON, useApi} from "../lib/api";
+// / planner-failure alerts. API.md §9.  Plan repair v5: scene changes and the
+// console's replan recommendations (SceneRepairPanel). API.md §20.
+import {useEffect, useState} from "react";
+import {errorText, getJSON, postJSON, sendJSON, useApi} from "../lib/api";
 import {fmtTime} from "../lib/fuzzy";
-import type {ConstraintFact, GoalSendResult, RepairAlert, RepairStatus} from "../types";
-import {Badge} from "../components/ui";
+import type {
+  ConstraintFact,
+  GoalSendResult,
+  RepairAlert,
+  RepairStatus,
+  SceneChangeBatch,
+  SceneChangeEntry,
+  SceneRecommendation,
+  SceneRepairState,
+} from "../types";
+import {Badge, type Tone} from "../components/ui";
+import {ws} from "../ws";
 
 export type SendTone = "ok" | "warn" | "err";
 
@@ -127,6 +138,148 @@ export function RepairAlerts({alerts}: {alerts: RepairAlert[]}) {
           <li key={a.seq} className={a.kind === "plan_failed" ? "tone-err" : "tone-warn"}>
             <span className="mono muted">{fmtTime(a.t)}</span> {a.kind === "plan_failed" ? "planner failed: " : ""}
             {a.text}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------- plan repair v5
+
+export const SCENE_REPAIR_TOPIC = "plan/scene_repair";
+
+/** The console's scene change / recommendation state: initial GET + hub pushes. */
+export function useSceneRepair(): [SceneRepairState | null, (s: SceneRepairState) => void] {
+  const [st, setSt] = useState<SceneRepairState | null>(null);
+  useEffect(() => {
+    let live = true;
+    getJSON<SceneRepairState>("api/plan/scene_repair").then(d => live && setSt(d), () => undefined);
+    const off = ws.on(SCENE_REPAIR_TOPIC, d => {
+      if (d && typeof d === "object") setSt(d as SceneRepairState);
+    });
+    return () => {
+      live = false;
+      off();
+    };
+  }, []);
+  return [st, setSt];
+}
+
+/** "awcd/hamilton" -> "awcd" (the chip's class and text). */
+export function sourceKind(source: string): string {
+  const head = (source || "").split("/")[0].toLowerCase();
+  return ["awcd", "sget", "console", "executor"].includes(head) ? head : "other";
+}
+
+export function changeText(c: SceneChangeEntry): string {
+  return [c.kind, c.symbol, c.label].filter(Boolean).join(" ");
+}
+
+const PRIORITY_TONE: Record<SceneRecommendation["priority"], Tone> = {high: "err", normal: "warn", low: "info"};
+
+/** The pending recommendation for ``robot`` (null: every robot's) and the recent
+ *  scene change feed. Shown with the plan repair alerts. */
+export function SceneRepairPanel({robot}: {robot: string | null}) {
+  const [st, setSt] = useSceneRepair();
+  // an older console without §20 (or a test stub) answers something else
+  if (!st || !Array.isArray(st.recommendations) || !Array.isArray(st.changes)) return null;
+  const pending = st.recommendations.filter(r => r.status === "pending" || r.status === "confirming").filter(r => !robot || r.robot === robot);
+  const recent = st.changes.slice(-6).reverse();
+  if (!pending.length && !recent.length) return null;
+  const refresh = () => getJSON<SceneRepairState>("api/plan/scene_repair").then(setSt, () => undefined);
+  return (
+    <div className="scene-repair">
+      {pending.map(r => (
+        <RecommendationCard key={r.id} rec={r} onDone={refresh} />
+      ))}
+      {recent.length > 0 && <SceneChangeFeed batches={recent} mapVersion={st.map_version} />}
+    </div>
+  );
+}
+
+export function RecommendationCard({rec, onDone}: {rec: SceneRecommendation; onDone?: () => void}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [resume, setResume] = useState(false);
+  const base = `api/plan/scene_repair/${encodeURIComponent(rec.id)}`;
+  const act = async (label: string, path: string, body: unknown) => {
+    setBusy(label);
+    setErr(null);
+    try {
+      await postJSON(path, body);
+      onDone?.();
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const rewritten = rec.rewrites.length > 0 && rec.proposed_goal !== rec.goal.pddl;
+  const newSyms = rec.rewrites.map(w => w.to.toUpperCase()).join(", ");
+  const disabled = !!busy || rec.status !== "pending";
+  return (
+    <div className={`scene-rec prio-${rec.priority}`} role="alert" aria-label={`Replan recommendation for ${rec.robot}`}>
+      <div className="row gap between">
+        <h4 className="sub-title">Replan recommended · {rec.robot}</h4>
+        <Badge tone={PRIORITY_TONE[rec.priority] ?? "warn"}>{rec.priority}</Badge>
+      </div>
+      <p className="small scene-rec-reason">{rec.reason}</p>
+      {rec.changes.length > 0 && (
+        <ul className="result-list small scene-rec-changes">
+          {rec.changes.slice(-5).map((c, i) => (
+            <li key={i}>
+              <span className={`src-chip src-${sourceKind(c.source ?? rec.source)}`}>{sourceKind(c.source ?? rec.source)}</span> {changeText(c)}
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="scene-rec-goals small">
+        <div>
+          <span className="muted">goal </span>
+          <code className="mono">{rec.goal.pddl}</code>
+        </div>
+        {rewritten && (
+          <div>
+            <span className="muted">proposed </span>
+            <code className="mono">{rec.proposed_goal}</code>
+          </div>
+        )}
+      </div>
+      <div className="row gap-sm wrap">
+        {rewritten && (
+          <button className="btn btn-sm btn-primary" disabled={disabled} onClick={() => act("proposed", `${base}/confirm`, {variant: "proposed"})}>
+            Replan with {newSyms}
+          </button>
+        )}
+        <button className={`btn btn-sm${rewritten ? "" : " btn-primary"}`} disabled={disabled} onClick={() => act("original", `${base}/confirm`, {variant: "original"})}>
+          Replan same goal
+        </button>
+        <button className="btn btn-sm" disabled={disabled} onClick={() => act("decline", `${base}/decline`, {resume})}>
+          Dismiss
+        </button>
+        <label className="small muted row gap-sm" title="goal_manager may have paused the robot for this change">
+          <input type="checkbox" checked={resume} onChange={e => setResume(e.target.checked)} aria-label="Resume robot on dismiss" /> resume robot
+        </label>
+      </div>
+      {err && <div className="inline-msg tone-err small">{err}</div>}
+    </div>
+  );
+}
+
+export function SceneChangeFeed({batches, mapVersion}: {batches: SceneChangeBatch[]; mapVersion: number | null}) {
+  return (
+    <>
+      <h4 className="sub-title">
+        Scene changes{mapVersion != null && <span className="mono small muted"> map v{mapVersion}</span>}
+      </h4>
+      <ul className="result-list small scene-feed">
+        {batches.map(b => (
+          <li key={b.id}>
+            <span className="mono muted">{fmtTime(b.t)}</span> <span className={`src-chip src-${sourceKind(b.source)}`} title={b.source}>{sourceKind(b.source)}</span>{" "}
+            {b.changes.length ? b.changes.slice(0, 3).map(changeText).join(", ") : b.summary || "map edited"}
+            {b.changes.length > 3 && <span className="muted"> +{b.changes.length - 3}</span>}
+            {b.map_version != null && <span className="mono muted"> v{b.map_version}</span>}
           </li>
         ))}
       </ul>

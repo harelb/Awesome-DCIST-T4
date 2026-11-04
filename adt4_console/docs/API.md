@@ -1472,6 +1472,80 @@ transient_local). In router mode they are plain ROS.
   `override: true`.
 - Hub topic: `robot/{robot}/change_detection` (`{robot, state, t}`).
 
+## 20. Scene changes and replan recommendations (`scene_repair.py`, `routes/scene_repair.py`)
+
+Plan repair v5: heracles' `scene_change_writer_node` applies observed changes (AWCD change
+detection, source `awcd/<robot>`) to Neo4j and republishes them on
+`/scene_graph/changes_applied` (`heracles_ros_interfaces/SceneChangeMsg`: `source`,
+`map_version`, `changes[]` of `SceneChange {kind ADDED=0 REMOVED=1 MOVED=2, symbol,
+semantic_label, old_position, new_position, confidence}`). The state updater publishes the
+robots' own placements there with source `executor/<robot>`; heracles_agents' chat (SGET)
+publishes its edits with source `sget/...`. omniplanner's repair node replans for changes to
+objects its plan depends on (`/<planner_ns>/omniplanner_node/replan_request`, String reason)
+and latches `/<planner_ns>/omniplanner_node/map_version` (Int64).
+
+An **added** object is a new symbol, which no plan depends on, so omniplanner ignores it ("go
+to the nearest cone" and change detection finds a nearer cone). The console closes that gap.
+It recommends replanning and the operator confirms.
+
+**What the console subscribes to** (once, planner-wide): `/scene_graph/changes_applied` (skipped
+with a log line when the message type is missing), `replan_request` (logged as events) and
+`map_version` (TRANSIENT_LOCAL). Every applied batch from ROS also invalidates the live Neo4j
+target's graph cache (`graph/<src>/version`).
+
+**Console edits publish scene changes.** After a committed map edit on the live target
+(`edit_service` `on_commit`), the Object-layer `graph_edit` changes become scene changes:
+create / restore / recreate → ADDED (`new` = pos, label = class), delete / retire → REMOVED,
+an update of `center` / `position` → MOVED (old / new from the change). They are published on
+`/scene_graph/changes_applied` with source `console/<operator>` and the edit's `map_version`.
+They are also fed to the recommender directly, so `--no-ros` consoles get recommendations too.
+The copy that comes back over ROS is skipped (dedupe by `(source, map_version)`). An edit with
+no Object changes (edges, places, regions) is fed with its summary but not published.
+
+**Active goal.** The last PDDL goal `send_pddl_goal` sent a robot (`{pddl, constraints, engine,
+route, plugin, t, via}`; also `active_goal` in `GET /robots/{r}/plan`). Sending a new goal
+supersedes that robot's pending recommendation.
+
+**When a batch recommends replanning** (only robots with an active goal):
+
+| Source | Rule |
+|---|---|
+| `sget/...`, `console/...` (edits) | always (`map edited (<source>): <summary>`), priority high |
+| `executor/...` | never (the robot's own pick / place) |
+| anything else (perception, `awcd/...`) | only when it relates to the plan (below); none once the plan's last action reported success |
+
+Perception rules (symbols compared case-insensitively: `o12` = `O12` = `O(12)`):
+
+- (a) a symbol the PDDL goal names is removed or moved (high). Moves under 0.5 m are ignored as jitter;
+- (b) an unfinished PICK of that object, or a GAZE within 1 m of its old position (high);
+- (c) an **added** object of a goal object's class (class looked up in the live Neo4j map)
+  that is **closer to the robot** (live pose) than that goal object. The recommendation
+  rewrites the goal to the new symbol (`new cone O43 is 3.1 m away, closer than goal O20 at
+  7.4 m`, high). A farther one gives no recommendation. When a distance is unknown (no robot
+  pose or no position), it is still proposed at priority low;
+- (d) a removed / moved object within 1.5 m of the remaining FOLLOW route (normal).
+
+One pending recommendation per robot. A newer one supersedes it (`status: superseded`,
+`result.by`). While the goal is the same, the new one carries the older one's reasons, changes
+and rewrites forward.
+
+Recommendation: `{id, robot, t, source, origin (edit|perception), map_version, reason, reasons[],
+priority (high|normal|low), changes[], goal (active goal), proposed_goal, rewrites [{from, to}],
+status (pending|confirming|confirmed|declined|superseded), result}`.
+
+| Method | Path | Body / notes |
+|---|---|---|
+| GET | `/plan/scene_repair` | `{map_version, changes: [{id, source, origin, map_version, t, summary, changes: [{kind added\|removed\|moved, symbol, label, old, new, confidence?}]}], events: [{t, kind: replan_request, text}], recommendations: [...], pending: {robot: id}}` |
+| POST | `/plan/scene_repair/{id}/confirm` | `{variant: "proposed" (default) \| "original"}`: `send_pddl_goal(robot, goal, engine=...)`. The bridge resends the persistent constraints. A GRSTAPS-X goal's `before` facts go with it, rewritten like the goal. → the record (`status: confirmed`, `result {ok, variant, pddl, send}`). 404 unknown id, 409 not pending, 400 no planner, 503 ROS down. A failed send leaves it pending with `result.error` |
+| POST | `/plan/scene_repair/{id}/decline` | `{resume: false}`. `resume: true` also resumes the robot (as the Resume route does), since goal_manager may have paused it. 404 / 409 as above |
+
+Hub topic `plan/scene_repair` carries the full state on every change. **UI:** the Plan panel's
+current plan section (under the plan repair alerts) shows the robot's pending recommendation.
+The card shows the reason, the changes, the original and proposed goals, and the buttons
+**Replan with O43** (only when rewritten), **Replan same goal** and **Dismiss** (a "resume
+robot" checkbox). Below it is a feed of the last 6 batches (source chip awcd / sget / console,
+kind, symbol, class, map version).
+
 ## Deviations
 
 ### fleetlink (§8)

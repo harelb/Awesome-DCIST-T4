@@ -74,6 +74,7 @@ class Services:
     quad: object = None  # quad.link.QuadLink
     edits: object = None  # edit_service.EditService
     maps: object = None  # map_loader.MapLoader: the live map and switching it
+    scene_repair: object = None  # scene_repair.SceneRepair: scene change -> replan (API.md §20)
 
 
     def start(self) -> None:
@@ -152,7 +153,94 @@ def build_services(
                             launch_state=lambda: svc.launch_state.get() if svc.launch_state else None)  # fmt: skip
     chat.edits = svc.edits
     svc.missions.edits = svc.edits
+    wire_scene_repair(svc)
     return svc
+
+
+def _live_target(svc):
+    try:
+        return svc.maps.target()
+    except Exception:  # noqa: BLE001 — no Neo4j target
+        return None
+
+
+def _object_row(svc, sym: str) -> dict | None:
+    """The live map's Object ``sym`` ({c: class, x, y}) or None."""
+    t = _live_target(svc)
+    if t is None:
+        return None
+    from .graph_service import parse_symbol
+
+    try:
+        c, i = parse_symbol(sym)
+        rows = t.query("MATCH (n:Object) WHERE n.nodeSymbol IN $syms "
+                       "RETURN n.class AS c, n.center.x AS x, n.center.y AS y LIMIT 1",
+                       syms=[f"{c.upper()}{i}", f"{c.upper()}({i})"])  # fmt: skip
+    except Exception:  # noqa: BLE001
+        return None
+    return dict(rows[0]) if rows else None
+
+
+def wire_scene_repair(svc) -> None:
+    """Scene changes -> replan recommendations (scene_repair), and console edits ->
+    SceneChangeMsg on /scene_graph/changes_applied."""
+    from .scene_repair import SceneRepair, scene_changes_from_edit
+
+    def robot_xy(robot):
+        st = svc.live.state(robot) if svc.live is not None else None
+        p = (st or {}).get("pose") or {}
+        return (p["x"], p["y"]) if "x" in p and "y" in p else None
+
+    def position_of(sym):
+        r = _object_row(svc, sym)
+        return (r["x"], r["y"]) if r and r.get("x") is not None else None
+
+    def invalidate():
+        t = _live_target(svc)
+        if t is None:
+            return
+        t.invalidate()
+        svc.graph.notify_version(t.id, "scene changes")
+
+    def send(robot, pddl, constraints, engine):
+        return svc.ros.send_pddl_goal(robot, pddl, constraints=constraints, engine=engine)
+
+    def resume(robot):
+        from .routes import teleop as teleop_routes  # Resume also clears a STOP latch
+
+        return teleop_routes.resume(svc, svc.ros, robot)
+
+    sr = SceneRepair(
+        svc.hub, send=send, resume=resume, active_goals=lambda: svc.ros.active_goals(),
+        plan_of=lambda robot: svc.ros.plan(robot),
+        class_of=lambda sym: (_object_row(svc, sym) or {}).get("c"),
+        position_of=position_of, robot_xy=robot_xy, invalidate=invalidate,
+    )  # fmt: skip
+    svc.scene_repair = sr
+    svc.ros.scene_repair = sr
+
+    def on_commit(src_id, out, prov):
+        t = _live_target(svc)
+        if t is not None and t.id != src_id:
+            return  # an edit of another map: no robot plans on it
+        source = f"console/{prov.get('operator') or 'operator'}"
+        changes = scene_changes_from_edit(out.get("changes"))
+        summary = out.get("summary")
+        if isinstance(summary, (list, tuple)):
+            summary = "; ".join(str(x) for x in summary)
+        sr.on_applied(source, out.get("map_version"), changes, summary=summary or None, local=True)
+        if changes and svc.ros.available:
+            import threading
+
+            def go():
+                try:
+                    svc.ros.publish_scene_changes(source, out.get("map_version"), changes)
+                except Exception:  # noqa: BLE001
+                    log.exception("publishing scene changes of an edit")
+
+            threading.Thread(target=go, name="edit-scene-changes", daemon=True).start()
+
+    svc.edits.on_commit = on_commit
 
 
 PLACEHOLDER = """<!doctype html><html><head><meta charset="utf-8"><title>ADT4 Console</title>
@@ -205,13 +293,14 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         plan,
         quad,
         sam3,
+        scene_repair,
         teleop,
         terminal,
         ws,
     )
 
     for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal,
-                geo, mission, quad, edit, change_detection, ws):  # fmt: skip
+                geo, mission, quad, edit, change_detection, scene_repair, ws):  # fmt: skip
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 

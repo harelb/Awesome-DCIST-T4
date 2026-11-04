@@ -111,6 +111,25 @@ CHANGE_DETECTION_NS = "change_detection"
 CHANGE_DETECTION_CMDS = ("start", "stop", "reset")
 CHANGE_DETECTION_TIMEOUT_S = 10.0
 
+# plan repair v5: heracles scene_change_writer (and the state updater) republish
+# the changes Neo4j now has, with the map_version containing them (API.md §20)
+SCENE_CHANGES_TOPIC = "/scene_graph/changes_applied"
+SCENE_CHANGE_TYPE = "heracles_ros_interfaces/msg/SceneChangeMsg"
+
+
+def scene_change_msg_to_dict(msg) -> dict:
+    """SceneChangeMsg -> ``{source, map_version, changes: [{kind, symbol, label,
+    old, new, confidence}]}`` (kind 0/1/2 as in SceneChange)."""
+    return {
+        "source": str(msg.source),
+        "map_version": int(msg.map_version),
+        "changes": [
+            {"kind": int(c.kind), "symbol": str(c.symbol), "label": str(c.semantic_label),
+             "old": _pt(c.old_position), "new": _pt(c.new_position), "confidence": float(c.confidence)}
+            for c in msg.changes
+        ],
+    }  # fmt: skip
+
 
 class RosUnavailable(Exception):
     """ROS is disabled or failed to start (→ 503)."""
@@ -285,6 +304,9 @@ class RobotPlanState:
         self.change_detection: dict | None = None  # {state, t}
         # GRSTAPS-X's last fleet schedule that gives this robot work (schedule_from_msg)
         self.schedule: dict | None = None
+        # the last PDDL goal sent for the robot ({pddl, constraints, engine, route,
+        # t, via}): what a scene change recommendation replans (scene_repair)
+        self.active_goal: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -297,6 +319,7 @@ class RobotPlanState:
             "constraints": list(self.constraints),
             "lease": self.lease,
             "schedule": self.schedule,
+            "active_goal": self.active_goal,
         }
 
 
@@ -357,6 +380,9 @@ class RosBridge:
         # robot -> the console's teleop STOP latch (TeleopService.stopped; the
         # app binds it) so every teleop view, hub pushes included, carries it
         self.teleop_latch = None
+        # scene_repair.SceneRepair (the app binds it): fed applied scene changes,
+        # omniplanner replan requests / map versions and the goals sent
+        self.scene_repair = None
         self._calls: queue.Queue = queue.Queue()
         self._pubs: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -398,6 +424,7 @@ class RosBridge:
         try:
             self.call(self._subscribe_status).result(5)
             self.call(self._subscribe_link_status).result(5)
+            self.call(self._subscribe_scene_changes).result(5)
             for r in robots or []:
                 self.ensure_robot(r)
         except Exception as e:  # noqa: BLE001
@@ -553,6 +580,54 @@ class RosBridge:
     def _subscribe_link_status(self) -> None:
         cls = import_type("std_msgs/msg/String")
         self.node.create_subscription(cls, LINK_STATUS_TOPIC, self._on_link_status, 10)
+
+    def _subscribe_scene_changes(self) -> None:
+        """Planner-wide plan repair v5 topics: applied scene changes, the repair
+        node's replan requests and its (latched) map version."""
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+        n = self.node
+        try:
+            n.create_subscription(import_type(SCENE_CHANGE_TYPE), SCENE_CHANGES_TOPIC, self._on_scene_changes, 10)
+        except Exception as e:  # noqa: BLE001 — heracles_ros_interfaces without SceneChangeMsg
+            log.warning("no %s subscription (%s): scene change recommendations need console edits only", SCENE_CHANGE_TYPE, e)
+        n.create_subscription(
+            import_type("std_msgs/msg/String"), f"/{self.planner_ns}/omniplanner_node/replan_request",
+            lambda m: self.scene_repair is not None and self.scene_repair.on_replan_request(m.data), 10,
+        )  # fmt: skip
+        n.create_subscription(
+            import_type("std_msgs/msg/Int64"), f"/{self.planner_ns}/omniplanner_node/map_version",
+            lambda m: self.scene_repair is not None and self.scene_repair.on_map_version(m.data),
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )  # fmt: skip
+
+    def _on_scene_changes(self, msg) -> None:
+        if self.scene_repair is None:
+            return
+        d = scene_change_msg_to_dict(msg)
+        # off the executor thread: evaluating looks things up in Neo4j
+        threading.Thread(
+            target=self._feed_scene_changes, args=(d,), name="scene-changes", daemon=True
+        ).start()
+
+    def _feed_scene_changes(self, d: dict) -> None:
+        try:
+            self.scene_repair.on_applied(d["source"], d["map_version"], d["changes"])
+        except Exception:  # noqa: BLE001
+            log.exception("scene changes from %s", d.get("source"))
+
+    def publish_scene_changes(self, source: str, map_version, changes: list[dict]) -> int:
+        """Publish ``changes`` (scene_repair's form, or SceneChange fields) on
+        /scene_graph/changes_applied, as the scene change writer would."""
+        from .scene_repair import to_msg_change
+
+        fields = {
+            "header": {"frame_id": "map"},
+            "source": source,
+            "map_version": int(map_version or 0),
+            "changes": [c if "semantic_label" in c else to_msg_change(c) for c in changes],
+        }
+        return self.publish(SCENE_CHANGES_TOPIC, SCENE_CHANGE_TYPE, fields, match_timeout=0.5)
 
     def _on_link_status(self, msg) -> None:
         try:
@@ -994,7 +1069,32 @@ class RosBridge:
         except Exception:  # noqa: BLE001 — a graph query; unknown is fine
             return None
 
+    def active_goals(self) -> dict[str, dict]:
+        """robot -> the last PDDL goal the console sent it (see RobotPlanState)."""
+        return {r: dict(st.active_goal) for r, st in list(self._plan.items()) if st.active_goal}
+
     def send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto", engine=None) -> dict:
+        """:meth:`_send_pddl_goal`, then the goal is the robot's active goal."""
+        from .mission.omni_planner import AREA_SYMBOL
+
+        if AREA_SYMBOL.search(goal or ""):
+            # a drawn area is a polygon only the console has; the robots plan Room nodes
+            raise ValueError("a drawn mission area (area1, ...) cannot be sent to the robots: plan it in the "
+                             "mission planner (GRSTAPS-X), or name a map region (r...)")  # fmt: skip
+        out = self._send_pddl_goal(robot, goal, plugin, constraints, route, engine)
+        self._plan[robot].active_goal = {
+            "pddl": goal, "constraints": list(constraints or []), "engine": engine, "route": route,
+            "plugin": plugin, "t": time.time(), "via": out.get("via"),
+        }  # fmt: skip
+        if self.scene_repair is not None:
+            try:
+                self.scene_repair.goal_sent(robot)
+            except Exception:  # noqa: BLE001
+                log.exception("scene_repair.goal_sent")
+        self._publish_plan(robot)
+        return out
+
+    def _send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto", engine=None) -> dict:
         """A PDDL goal through plan repair v3 when its goal_manager runs, else
         straight to an omniplanner Pddl plugin with a warning.
 
@@ -1005,12 +1105,6 @@ class RosBridge:
         forwards there, else straight to the Grstaps plugin (constraints go
         with the goal either way); None / "fast_downward" as before.
         """
-        from .mission.omni_planner import AREA_SYMBOL
-
-        if AREA_SYMBOL.search(goal or ""):
-            # a drawn area is a polygon only the console has; the robots plan Room nodes
-            raise ValueError("a drawn mission area (area1, ...) cannot be sent to the robots: plan it in the "
-                             "mission planner (GRSTAPS-X), or name a map region (r...)")  # fmt: skip
         if engine == "grstaps":
             return self._send_grstaps(robot, goal, constraints, route)
         if any(f["predicate"] == "before" for f in normalize_constraints(constraints)):

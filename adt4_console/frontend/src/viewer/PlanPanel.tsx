@@ -11,7 +11,7 @@ import {parseSym} from "../codec";
 import {LeaseControl, LeaseRefusalNotice} from "./LeaseControl";
 import {FocusChip} from "./RobotFocusPicker";
 import {useFocusedRobot} from "./useRobotFocus";
-import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, type SendTone} from "./PlanRepair";
+import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, SceneRepairPanel, type SendTone} from "./PlanRepair";
 import {usePlatform} from "./usePlatform";
 import {PlannerSchedule} from "./PlannerSchedule";
 import {PhoenixChips} from "./PhoenixStatus";
@@ -336,6 +336,7 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
         </>
       )}
       <RepairAlerts alerts={plan?.repair_alerts ?? []} />
+      <SceneRepairPanel robot={robot} />
       {plan?.schedule && <PlannerSchedule schedule={plan.schedule} title={`GRSTAPS-X schedule · ${fmtTime(plan.schedule.t)}`} compact />}
       {plan?.status && plan.status.length > 0 && (
         <>

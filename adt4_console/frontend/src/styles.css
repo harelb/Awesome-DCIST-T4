@@ -3593,6 +3593,61 @@ input[type="checkbox"] {
 .repair-alerts li.tone-err {
   color: var(--err);
 }
+/* ---------- plan repair v5: scene changes -> replan recommendation ---------- */
+.scene-repair {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.scene-rec {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  min-width: 0;
+}
+.scene-rec.prio-high {
+  border-color: var(--err);
+}
+.scene-rec.prio-low {
+  border-color: var(--line);
+  background: transparent;
+}
+.scene-rec .sub-title {
+  margin: 0;
+}
+.scene-rec-reason {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.scene-rec-goals code {
+  overflow-wrap: anywhere;
+}
+.src-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.src-chip.src-awcd {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.src-chip.src-sget,
+.src-chip.src-console {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.src-chip.src-executor {
+  opacity: 0.7;
+}
 
 /* ---------- Cypher-first chat ---------- */
 .chat-bar {

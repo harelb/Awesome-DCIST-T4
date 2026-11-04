@@ -458,6 +458,72 @@ export interface RobotPlan {
   lease?: LeaseInfo | null;
   /** GRSTAPS-X's last fleet schedule that gives this robot work (omniplanner_node/task_schedule) */
   schedule?: {plan_id: string; makespan: number; t: number; rows: {robot: string; action: string; target: string; start: number; finish: number}[]} | null;
+  /** the last PDDL goal sent (scene change recommendations replan it) */
+  active_goal?: ActiveGoal | null;
+}
+
+/** One applied scene change (API.md §20); positions are map-frame [x, y, z]. */
+export interface SceneChangeEntry {
+  kind: "added" | "removed" | "moved" | string;
+  symbol: string;
+  label: string;
+  old: number[] | null;
+  new: number[] | null;
+  confidence?: number;
+  /** on a recommendation's change list: the batch it came from */
+  source?: string;
+  map_version?: number | null;
+}
+
+/** A batch on /scene_graph/changes_applied (or a console edit). */
+export interface SceneChangeBatch {
+  id: number;
+  source: string;
+  /** edit: sget/… or console/…; perception: awcd/…; executor: the robot's own placements */
+  origin: "edit" | "perception" | "executor";
+  map_version: number | null;
+  t: number;
+  summary?: string | null;
+  changes: SceneChangeEntry[];
+}
+
+/** The last PDDL goal the console sent a robot (what a recommendation replans). */
+export interface ActiveGoal {
+  pddl: string;
+  constraints?: unknown[];
+  engine?: string | null;
+  route?: string;
+  t?: number;
+  via?: string | null;
+}
+
+export interface SceneRecommendation {
+  id: string;
+  robot: string;
+  t: number;
+  source: string;
+  origin: SceneChangeBatch["origin"];
+  map_version: number | null;
+  reason: string;
+  reasons: string[];
+  priority: "high" | "normal" | "low";
+  changes: SceneChangeEntry[];
+  goal: ActiveGoal;
+  /** the goal with the old target replaced (same as goal.pddl when nothing was rewritten) */
+  proposed_goal: string;
+  rewrites: {from: string; to: string}[];
+  status: "pending" | "confirming" | "confirmed" | "declined" | "superseded";
+  result: Record<string, unknown> | null;
+}
+
+/** GET /api/plan/scene_repair; hub topic plan/scene_repair */
+export interface SceneRepairState {
+  map_version: number | null;
+  changes: SceneChangeBatch[];
+  events: {t: number; kind: string; text: string}[];
+  recommendations: SceneRecommendation[];
+  /** robot -> id of its pending recommendation */
+  pending: Record<string, string>;
 }
 
 /** GET /api/plan/repair */

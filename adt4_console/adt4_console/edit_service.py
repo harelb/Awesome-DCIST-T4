@@ -67,6 +67,9 @@ class EditService:
             tempfile.gettempdir()) / "adt4_console_snapshots"  # fmt: skip
         self._lock = threading.RLock()
         self._staged: dict[str, list[dict]] = {}  # src id -> [{op, summary, t, author}]
+        # (src_id, out, provenance) after every commit: scene change publishing +
+        # replan recommendations (app.py -> scene_repair, API.md §20)
+        self.on_commit = None
 
     # ------------------------------------------------------------- sources
     def source(self, src_id: str):
@@ -121,7 +124,7 @@ class EditService:
         p.update({k: v for k, v in (author or {}).items() if v is not None})
         return p
 
-    def _after_commit(self, src_id: str, out: dict, reason: str) -> None:
+    def _after_commit(self, src_id: str, out: dict, reason: str, author: dict | None = None) -> None:
         if out.get("dry_run") or not out.get("mutation_id"):
             return
         try:
@@ -133,6 +136,11 @@ class EditService:
             self.hub.publish(f"edit/{src_id}", {"kind": "commit", "mutation_id": out["mutation_id"],
                                                 "revision": out["revision"], "summary": out["summary"],
                                                 "map_version": out.get("map_version")})  # fmt: skip
+        if self.on_commit is not None:
+            try:
+                self.on_commit(src_id, out, self._provenance(src_id, author))
+            except Exception:  # noqa: BLE001 — the edit is committed; never fail it here
+                log.exception("edit on_commit hook")
 
     def apply(self, src_id: str, ops: list[dict], *, author: dict | None = None,
               expected_revision: int | None = None, summary: str | None = None,
@@ -146,7 +154,7 @@ class EditService:
         out = ge.apply_edit(db, ops, provenance=self._provenance(src_id, author),
                             expected_revision=expected_revision, summary=summary,
                             dry_run=dry_run)  # fmt: skip
-        self._after_commit(src_id, out, "map edit")
+        self._after_commit(src_id, out, "map edit", author)
         return {**out, "staged": False}
 
     def undo(self, src_id: str, mutation_id: str | None = None, *, author: dict | None = None,
@@ -154,7 +162,7 @@ class EditService:
         ge = _ge()
         out = ge.undo_edit(self._db(src_id), mutation_id, provenance=self._provenance(src_id, author),
                            force=force)  # fmt: skip
-        self._after_commit(src_id, out, "map edit undo")
+        self._after_commit(src_id, out, "map edit undo", author)
         return out
 
     def history(self, src_id: str, limit: int = 50) -> list[dict]:
