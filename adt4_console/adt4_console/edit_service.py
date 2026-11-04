@@ -70,6 +70,8 @@ class EditService:
         # (src_id, out, provenance) after every commit: scene change publishing +
         # replan recommendations (app.py -> scene_repair, API.md §20)
         self.on_commit = None
+        # (src_id, count, summary) whenever the staged-edit count changes
+        self.on_stage = None
 
     # ------------------------------------------------------------- sources
     def source(self, src_id: str):
@@ -214,7 +216,18 @@ class EditService:
                    "staged_summary": dry["summary"], "affected": dry["affected"]}  # fmt: skip
         if self.hub is not None:
             self.hub.publish(f"edit/{src_id}", {"kind": "staged", "count": len(staged)})
+        self._staged_changed(src_id, len(staged), lines)
         return out
+
+    def _staged_changed(self, src_id: str, count: int, summary=None) -> None:
+        if self.on_stage is None:
+            return
+        if isinstance(summary, (list, tuple)):
+            summary = "; ".join(str(x) for x in summary)
+        try:
+            self.on_stage(src_id, count, summary or None)
+        except Exception:  # noqa: BLE001
+            log.exception("edit on_stage hook")
 
     def discard(self, src_id: str, index: int | None = None) -> dict:
         with self._lock:
@@ -228,6 +241,7 @@ class EditService:
             n = len(staged)
         if self.hub is not None:
             self.hub.publish(f"edit/{src_id}", {"kind": "staged", "count": n})
+        self._staged_changed(src_id, n)
         return {"count": n}
 
     def preview_staged(self, src_id: str) -> dict:
@@ -252,6 +266,7 @@ class EditService:
             self._staged[src_id] = []
         if self.hub is not None:
             self.hub.publish(f"edit/{src_id}", {"kind": "staged", "count": 0})
+        self._staged_changed(src_id, 0)
         return {**out, "published": len(ops)}
 
     # ------------------------------------------------------------- snapshots

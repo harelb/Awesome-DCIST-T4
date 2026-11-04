@@ -143,4 +143,13 @@ describe("SceneRepairPanel", () => {
     expect(host!.textContent).toContain("map edited (sget/chat)");
     expect([...host!.querySelectorAll("button")].map(b => b.textContent)).toEqual(["Replan same goal", "Dismiss"]);
   });
+
+  it("says staged edits must be published before anything replans", async () => {
+    stubFetch(state({recommendations: [], changes: [], pending: {}, staged: {src: "live", count: 2, summary: "delete O20", t: 1}}));
+    render(<SceneRepairPanel robot="hamilton" />);
+    await flush();
+    const note = host!.querySelector(".scene-staged")!;
+    expect(note.textContent).toContain("2 staged map edits not published yet");
+    expect(note.textContent).toContain("Publish them");
+  });
 });

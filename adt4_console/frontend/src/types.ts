@@ -524,6 +524,8 @@ export interface SceneRepairState {
   recommendations: SceneRecommendation[];
   /** robot -> id of its pending recommendation */
   pending: Record<string, string>;
+  /** map edits staged on the live map but not published yet (API.md §20) */
+  staged?: {src: string; count: number; summary: string | null; t: number} | null;
 }
 
 /** GET /api/plan/repair */

@@ -186,10 +186,18 @@ export function SceneRepairPanel({robot}: {robot: string | null}) {
   if (!st || !Array.isArray(st.recommendations) || !Array.isArray(st.changes)) return null;
   const pending = st.recommendations.filter(r => r.status === "pending" || r.status === "confirming").filter(r => !robot || r.robot === robot);
   const recent = st.changes.slice(-6).reverse();
-  if (!pending.length && !recent.length) return null;
+  const staged = st.staged && st.staged.count > 0 ? st.staged : null;
+  if (!pending.length && !recent.length && !staged) return null;
   const refresh = () => getJSON<SceneRepairState>("api/plan/scene_repair").then(setSt, () => undefined);
   return (
     <div className="scene-repair">
+      {staged && (
+        <div className="inline-msg tone-warn small scene-staged" role="status">
+          {staged.count} staged map edit{staged.count > 1 ? "s" : ""} not published yet
+          {staged.summary ? ` (${staged.summary})` : ""}: the robots still plan on the old map. Publish them to
+          get a replan recommendation.
+        </div>
+      )}
       {pending.map(r => (
         <RecommendationCard key={r.id} rec={r} onDone={refresh} />
       ))}

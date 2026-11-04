@@ -229,6 +229,36 @@ def _describe(c: dict) -> str:
     return f"{what} {c['kind']}"
 
 
+def pose_in_global(pose: dict | None, frame_align: dict | None, global_frame: str = "map"):
+    """(x, y) of a fleetlink live pose in the planner's global frame, or None.
+
+    The agent sends the pose in the robot's scene-graph frame (``<robot>/map`` or
+    odom) and, once relocalized, ``frame_align`` = global <- that frame (``T`` =
+    x y z qw qx qy qz).  A pose already in the global frame is used as is; one in
+    the alignment's child frame is transformed; anything else is unknown (None),
+    so distances are never compared across frames."""
+    if not pose or pose.get("x") is None or pose.get("y") is None:
+        return None
+    x, y, z = float(pose["x"]), float(pose["y"]), float(pose.get("z") or 0.0)
+    frame = pose.get("frame") or ""
+    fa = frame_align or {}
+    parent = fa.get("parent") or global_frame
+    if frame in (parent, global_frame) or (not frame and fa.get("child") == fa.get("parent")):
+        return (x, y)
+    T = fa.get("T")
+    if not fa.get("ok") or frame != fa.get("child") or not T or len(T) != 7:
+        return None
+    tx, ty, tz, qw, qx, qy, qz = (float(v) for v in T)
+    n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+    if n < 1e-9:
+        return None
+    qw, qx, qy, qz = qw / n, qx / n, qy / n, qz / n
+    # rotate (x, y, z) by q, then translate
+    gx = (1 - 2 * (qy * qy + qz * qz)) * x + 2 * (qx * qy - qz * qw) * y + 2 * (qx * qz + qy * qw) * z
+    gy = 2 * (qx * qy + qz * qw) * x + (1 - 2 * (qx * qx + qz * qz)) * y + 2 * (qy * qz - qx * qw) * z
+    return (gx + tx, gy + ty)
+
+
 class SceneRepair:
     def __init__(self, hub=None, *, send=None, resume=None, active_goals=None, plan_of=None,
                  class_of=None, position_of=None, robot_xy=None, invalidate=None,
@@ -256,6 +286,9 @@ class SceneRepair:
         self._batch_ids = itertools.count(1)
         self._rec_ids = itertools.count(1)
         self.map_version: int | None = None
+        # map edits staged but not published ({src, count, summary, t}): not in the
+        # map yet, so nothing replans; the panel says publish them to replan
+        self.staged: dict | None = None
 
     # -------------------------------------------------------------- inputs
     def on_applied(self, source: str, map_version, changes: list[dict], *, summary: str | None = None,
@@ -285,6 +318,19 @@ class SceneRepair:
         made = self._evaluate(batch)
         self._publish()
         return made
+
+    def on_staged(self, src_id: str, count: int, summary: str | None = None) -> None:
+        """Staged-edit count of the live map changed (0: published or discarded)."""
+        with self._lock:
+            before = (self.staged or {}).get("count", 0)
+            self.staged = ({"src": src_id, "count": int(count), "summary": summary, "t": self.clock()}
+                           if count else None)  # fmt: skip
+            if count and count > before:
+                self._events.append({"t": self.clock(), "kind": "staged",
+                                     "text": f"{count} map edit(s) staged"
+                                             + (f": {summary}" if summary else "")
+                                             + " -- publish them to replan"})  # fmt: skip
+        self._publish()
 
     def on_map_version(self, v) -> None:
         with self._lock:
@@ -572,6 +618,7 @@ class SceneRepair:
             recs = [dict(r) for r in self._recs.values()]
             return {"map_version": self.map_version, "changes": list(self._changes)[-50:],
                     "events": list(self._events), "recommendations": recs,
+                    "staged": dict(self.staged) if self.staged else None,
                     "pending": {r["robot"]: r["id"] for r in recs if r["status"] == "pending"}}  # fmt: skip
 
     def _publish(self) -> None:

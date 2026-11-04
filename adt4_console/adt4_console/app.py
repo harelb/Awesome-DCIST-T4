@@ -184,12 +184,32 @@ def _object_row(svc, sym: str) -> dict | None:
 def wire_scene_repair(svc) -> None:
     """Scene changes -> replan recommendations (scene_repair), and console edits ->
     SceneChangeMsg on /scene_graph/changes_applied."""
-    from .scene_repair import SceneRepair, scene_changes_from_edit
+    from .scene_repair import SceneRepair, pose_in_global, scene_changes_from_edit
 
     def robot_xy(robot):
+        """The robot's (x, y) in the planner's map frame: heracles' state updater
+        writes it on the live map's Robot node; else the fleetlink live pose,
+        aligned to the global frame (frame_align); else unknown."""
+        t = _live_target(svc)
+        if t is not None:
+            try:
+                rows = t.query("MATCH (r:Robot {name: $n}) RETURN r.position.x AS x, r.position.y AS y LIMIT 1",
+                               n=robot)  # fmt: skip
+                if rows and rows[0].get("x") is not None:
+                    return (float(rows[0]["x"]), float(rows[0]["y"]))
+            except Exception:  # noqa: BLE001 — no Robot node / Neo4j down
+                pass
         st = svc.live.state(robot) if svc.live is not None else None
-        p = (st or {}).get("pose") or {}
-        return (p["x"], p["y"]) if "x" in p and "y" in p else None
+        if not st:
+            return None
+        fa = st.get("frame_align")
+        if fa is None:
+            rx = getattr(svc.live, "receiver", None)
+            try:
+                fa = (rx.link(robot) or {}).get("frame_align") if rx is not None else None
+            except Exception:  # noqa: BLE001
+                fa = None
+        return pose_in_global(st.get("pose"), fa)
 
     def position_of(sym):
         r = _object_row(svc, sym)
@@ -241,6 +261,14 @@ def wire_scene_repair(svc) -> None:
             threading.Thread(target=go, name="edit-scene-changes", daemon=True).start()
 
     svc.edits.on_commit = on_commit
+
+    def on_stage(src_id, count, summary):
+        t = _live_target(svc)
+        if t is not None and t.id != src_id:
+            return
+        sr.on_staged(src_id, count, summary)
+
+    svc.edits.on_stage = on_stage
 
 
 PLACEHOLDER = """<!doctype html><html><head><meta charset="utf-8"><title>ADT4 Console</title>
