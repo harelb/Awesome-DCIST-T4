@@ -73,6 +73,7 @@ class Services:
     missions: object = None  # mission.service.MissionService
     quad: object = None  # quad.link.QuadLink
     edits: object = None  # edit_service.EditService
+    maps: object = None  # map_loader.MapLoader: the live map and switching it
 
 
     def start(self) -> None:
@@ -124,6 +125,9 @@ def build_services(
     )
     ros.teleop_latch = svc.teleop.stopped
     svc.geo = GeoService(settings, graph, fetch=tile_fetch)
+    from .map_loader import MapLoader
+
+    svc.maps = MapLoader(settings, graph, jobs, hub, svc.geo)
     from .mission.service import MissionService
     from .quad.link import QuadLink
     from .quad.protocol import QuadFrame

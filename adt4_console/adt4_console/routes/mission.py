@@ -193,7 +193,7 @@ def plan_omniplanner(body: OmniBody, request: Request):
     if body.pddl_goal:
         try:
             m, planned = omni_planner.plan_pddl(body.pddl_goal, body.agents, src, svc, body.constraints,
-                                                text=body.text, engine=engine)  # fmt: skip
+                                                text=body.text, engine=engine, areas=body.areas)  # fmt: skip
         except ValueError as e:
             return _planning_failed(e)
         out = svc.put(m)
@@ -233,6 +233,9 @@ class PddlPreviewBody(BaseModel):
     robots: list[dict]
     src: str | None = None
     engine: str | None = None
+    # the operator's drawn mission areas [{name, polygon}]: a GRSTAPS-X goal may
+    # name them as area1, area2, ... (in this order)
+    areas: list[dict] | None = None
 
 
 @router.post("/plan/preview_pddl")
@@ -244,7 +247,7 @@ def preview_pddl(body: PddlPreviewBody, request: Request):
     engine = _engine_or_503(omni_planner, body.engine)
     try:
         return omni_planner.preview(body.pddl_goal, body.robots, body.src or svc._default_src(), svc,
-                                    body.constraints, engine=engine)  # fmt: skip
+                                    body.constraints, engine=engine, areas=body.areas)  # fmt: skip
     except ValueError as e:
         return _planning_failed(e)
 
@@ -275,7 +278,8 @@ def replan(mid: str, body: ReplanBody, request: Request):
             a["start"] = body.starts[a["id"]]
     try:
         new, planned = omni_planner.plan_pddl(goal, agents, m.src, svc, m.goal.get("constraints"), m.geofences,
-                                              text=m.text, name=m.name, engine=engine)  # fmt: skip
+                                              text=m.text, name=m.name, engine=engine,
+                                              areas=m.goal.get("areas"))  # fmt: skip
     except ValueError as e:
         return _planning_failed(e)
     new = new.model_copy(update={"id": m.id, "parent": m.id, "saved": m.saved, "chat": m.chat, "planted": m.planted})

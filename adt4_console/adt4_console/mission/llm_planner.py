@@ -157,12 +157,15 @@ anything at o8 starts (one entry per pair; never both directions). Use it for "f
 - inspection: (safe o4) / (not (suspicious o4)) = one robot (the planner picks) goes and looks; \
 (inspected-by spot1 o4) = spot1 does it; (and (inspected-by spot1 o4) (inspected-by spot2 o4)) = a \
 JOINT inspection: they meet there and look together. GRSTAPS-X gives each robot as many tasks as \
-it needs (a robot is not limited to one route), but it leaves huskies out and cannot visit or \
-explore regions.
+it needs (a robot is not limited to one route), but it leaves huskies out.
+- regions: (visited-region r3) = one robot goes into r3's core; (explored-region r3) = robots \
+cover r3 at waypoints about 8 m apart (the planner splits them between robots); the -by forms pin \
+them to that robot. A mission area the operator drew is a region too, named by its symbol \
+(area1, area2, ... in the Named areas list): (explored-region area1). Only GRSTAPS-X plans drawn \
+areas. before works with regions: ['r3', 'o8'] = all of r3 first.
 - relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
 have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
-GRSTAPS-X does NOT take or, at-place / at-object, holding, visited-region / explored-region, or any \
-other not: visit the last stop and order it last with before instead of at-*. Use engine 'grstaps' \
+GRSTAPS-X does NOT take or, at-place / at-object, holding, or any other not: visit the last stop and order it last with before instead of at-*. Use engine 'grstaps' \
 when the request needs ordering, a joint inspection, moving an object, or a schedule; otherwise \
 'fast_downward' (the default, shortest routes). A relocation runs only via Send to robot, not the \
 console's executor.
@@ -240,7 +243,9 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
                              + ("; use engine fast_downward" if engine == "grstaps" else "; use propose_mission")}
     try:
         m, planned = omni_planner.plan_pddl(goal, agents, src, service, args.get("constraints"), geofences,
-                                            text=text, name=str(args.get("name") or ""), engine=engine)  # fmt: skip
+                                            text=text, name=str(args.get("name") or ""), engine=engine,
+                                            areas=(cur.get("goal") or {}).get("areas") if revising and not ctx.get("areas")
+                                            else ctx.get("areas"))  # fmt: skip
     except omni_planner.OmniUnavailable as e:
         return [], {"error": f"omniplanner is not available here ({e}); use propose_mission"}
     except ValueError as e:
@@ -297,12 +302,19 @@ def merged_areas(ctx: dict | None, regions=None) -> list[dict]:
                     "members": r.get("members"),
                     "polygon": [[round(x, 1), round(y, 1)] for x, y in (r.get("polygon") or [])]})  # fmt: skip
         seen.add((r.get("name") or "").strip().lower())
+    from .omni_planner import area_symbols
+
+    # area1, area2, ...: what a GRSTAPS-X goal names a drawn area by (numbered as
+    # omni_planner.area_symbols numbers them, so the two always agree)
+    symbol_of = {id(a): s for s, a in zip(area_symbols((ctx or {}).get("areas")),
+                                          [a for a in (ctx or {}).get("areas") or []
+                                           if isinstance(a, dict) and len(a.get("polygon") or []) >= 3])}  # fmt: skip
     for a in (ctx or {}).get("areas") or []:
         name = str(a.get("name") or "").strip() if isinstance(a, dict) else ""
         if not name or name.lower() in seen or not a.get("polygon"):
             continue
         seen.add(name.lower())
-        out.append({"name": name, "scope": "mission",
+        out.append({"name": name, "scope": "mission", **({"symbol": symbol_of[id(a)]} if id(a) in symbol_of else {}),
                     "polygon": [[round(x, 1), round(y, 1)] for x, y in a["polygon"]]})  # fmt: skip
     return out
 
@@ -334,10 +346,11 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
                          f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
                          "in one line instead of switching"
-                         + (": a husky's task or a region goal (visited-region / explored-region) needs Fast "
-                            "Downward, so then say 'this needs the Fast Downward planner (husky / regions): "
-                            "switch the planner above', and do not ask to merge routes." if ctx["engine"] == "grstaps"
-                            else ": ordering (before), a joint inspection or moving an object needs GRSTAPS-X.")  # fmt: skip
+                         + (": a husky's task needs Fast Downward, so then say 'this needs the Fast Downward "
+                            "planner (husky): switch the planner above', and do not ask to merge routes."
+                            if ctx["engine"] == "grstaps"
+                            else ": ordering (before), a joint inspection, moving an object or a drawn mission "
+                                 "area (area1, ...) needs GRSTAPS-X.")  # fmt: skip
                          )
     roster = ctx.get("roster") or []
     if roster:
@@ -349,8 +362,8 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
         parts.append(
             "Named areas (scope map: a Room node in the scene graph, MATCH (r:Room {name: ..})-[:CONTAINS]->(x) "
             "gives its places/objects, and its symbol works as a goto/inspect target = its centre; scope "
-            "mission: drawn by the operator for this mission only). Use an area's name (or symbol) as an "
-            "explore_area `area`: " + json.dumps(areas, separators=(",", ":"))
+            "mission: drawn by the operator for this mission only; its symbol area1, area2, ... is a region "
+            "for GRSTAPS-X goals only). Use an area's name (or symbol) as an explore_area `area`: " + json.dumps(areas, separators=(",", ":"))
         )
     else:
         parts.append("Named areas: none (the operator can draw one on the map).")

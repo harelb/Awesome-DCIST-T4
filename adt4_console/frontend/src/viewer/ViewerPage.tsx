@@ -11,6 +11,7 @@ import {Scene, type SceneCallbacks} from "./Scene";
 import type {GraphLayout} from "./layout";
 import type {TileStats} from "./MeshTiles";
 import {DisplayPanel, Inspector, LayersPanel, SearchBox, SourcesPanel} from "./panels";
+import {LiveMapPanel, MapLoadPill} from "./LiveMapPanel";
 import {ColorsPanel, ScreenshotButton} from "./StylePanels";
 import {PlanPanel, visitGoal} from "./PlanPanel";
 import {ChatPanel} from "./ChatPanel";
@@ -406,6 +407,7 @@ export default function ViewerPage({mode = "viewer"}: {mode?: "viewer" | "missio
 
   const leftPanel = (
     <>
+      <LiveMapPanel />
       <SourcesPanel stats={stats} />
       <LayersPanel />
       <LiveOverlaysPanel />
@@ -681,6 +683,7 @@ export default function ViewerPage({mode = "viewer"}: {mode?: "viewer" | "missio
           </div>
         )}
         <Scene sources={enabled} bounds={bounds} cb={cb} />
+        <MapLoadPill />
         {isPhone ? (
           searchOpen ? (
             <div className="vtoolbar phone-bar phone-search">

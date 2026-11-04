@@ -8,7 +8,11 @@ plan has a makespan. It also covers what the Fast Downward domain cannot:
 - an inspection (``(safe o4)``, ``(inspected-by spot1 o4)``) is ONE task done by
   a coalition of robots together (two Spots here: there is no UAV);
 - ``["before", "o4", "o8"]`` orders two targets;
-- ``(object-in-place o4 t598)`` relocates an object (pick, carry, place).
+- ``(object-in-place o4 t598)`` relocates an object (pick, carry, place);
+- ``(visited-region r3)`` is one visit in the region's core and
+  ``(explored-region r3)`` visits coverage waypoints spread over it (the -by
+  forms pin them to a robot). An operator-drawn mission area (``area1``, ...)
+  is planned the same way from its polygon (``region_polygons``).
 
 The solver is the ``itags`` binary a colcon build of ``grstapsx`` installs. It
 needs a Gurobi license on this machine: ``ADT4_GUROBI_LICENSE`` names the file
@@ -188,13 +192,16 @@ def _leg(transition) -> list[list[float]]:
     return pts
 
 
-def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | None = None) -> dict:
+def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | None = None,
+          region_polygons: dict | None = None) -> dict:
     """Plan ``goal`` for robots at ``starts`` ({pddl robot name: [x, y]}).
 
     ``facts``: ConstraintFact-like (forbidden-poi, forbidden-edge, before).
     Returns the Fast Downward engine's shape (actions, routes, driven_m,
     ground_s, solve_s, pois) plus ``steps`` (console tasks to make, with
-    dependencies) and ``schedule``.
+    dependencies), ``schedule`` and ``regions`` ({region: {kind, places,
+    spacing_m}} for the region goals). ``region_polygons``: {area symbol:
+    [[x, y], ...]} for drawn areas the goal names.
     """
     om, err = _modules()
     if err:
@@ -217,6 +224,8 @@ def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | Non
     g = gp.GrstapsGoal(
         goal_points=found["visit"], inspect_points=found["inspect"], manipulate_points=found["manipulate"],
         manipulate_destinations=found["destinations"], robot_bound=found["bound"], robot_id=first,
+        region_visits=found["regions"]["visit"], region_explores=found["regions"]["explore"],
+        region_bound=found["region_bound"], region_polygons=dict(region_polygons or {}),
         constraints=list(facts), robot_types={r: KIND_TYPE.get((robot_types or {}).get(r, "spot"), "spot") for r in robots},
     )  # fmt: skip
     left_out = sorted(r for r in robots if (robot_types or {}).get(r) == "husky")
@@ -272,6 +281,9 @@ def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> d
             kind = {"visit-location": "visit", "inspect-object": "inspect", "relocate-object": "relocate",
                     "pick-object": "pick", "place-object": "place"}.get(kind, kind)  # fmt: skip
             target = task_location(name) or ""
+            region = (plan.task_geometry.get(tid) or {}).get("region")
+            if region:
+                name = f"{name} ({region_label(region)})"
             pts3 = walk(_leg(legs[i]) if i < len(legs) else [])
             keys = []
 
@@ -291,6 +303,8 @@ def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> d
             team = members.get(tid) or [robot]
             if kind == "visit":
                 step("goto", target, name, pts3)
+                if region:
+                    steps[-1]["params"] = {"region": region["region"], "region_kind": region["kind"]}
             elif kind == "inspect":
                 step("goto", target, name, pts3)
                 step("inspect", target, f"{name} with {', '.join(team)}" if len(team) > 1 else name)
@@ -329,13 +343,40 @@ def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> d
         team = members.get(t.get("id")) or []
         who = team or [a.get("name", "") for a in plan.agents or [] if t.get("id") in (a.get("individual_plan") or [])]
         name = t.get("name", "")
+        region = (plan.task_geometry.get(t.get("id")) or {}).get("region")
         for r in who:
-            rows.append({"robot": r, "task": t.get("id"), "action": name.split()[0] if name else "",
-                         "target": node(task_location(name) or ""), "start": round(float(t.get("start_timepoint", 0.0)), 2),
-                         "finish": round(float(t.get("finish_timepoint", 0.0)), 2), "coalition": team})  # fmt: skip
+            row = {"robot": r, "task": t.get("id"), "action": name.split()[0] if name else "",
+                   "target": node(task_location(name) or ""), "start": round(float(t.get("start_timepoint", 0.0)), 2),
+                   "finish": round(float(t.get("finish_timepoint", 0.0)), 2), "coalition": team}  # fmt: skip
+            if region:
+                row["region"], row["label"] = region["region"], region_label(region)
+            rows.append(row)
     schedule = {"makespan": round(float(plan.makespan), 2), "rows": rows,
                 "precedence": [list(p[:2]) for p in plan.precedence or []]}  # fmt: skip
+    # {region: {kind, places, points, total, spacing_m}}: where each region goal's visits go
+    # (an explore's waypoints still to do), for the planner log and the map
+    regions, seen = {}, set()
+    for g in (plan.task_geometry or {}).values():
+        info = g.get("region")
+        if not info or (info["region"], g.get("target")) in seen:
+            continue
+        seen.add((info["region"], g.get("target")))
+        r = regions.setdefault(info["region"], {"kind": info["kind"], "places": [], "points": [],
+                                                "total": info.get("total"), "spacing_m": info.get("spacing_m")})  # fmt: skip
+        r["places"].append(node(g.get("target")))
+        r["points"].append([round(float(v), 2) for v in np.asarray(g["object_point"], dtype=float)[:2]])
+    digest = f"makespan {plan.makespan:.1f} s, {len(plan.tasks or [])} task(s)"
+    for sym, r in regions.items():
+        digest += (f"; explore {sym}: {len(r['places'])} of {r['total']} waypoint(s) {r['spacing_m']:g} m apart"
+                   if r["kind"] == "explore" else f"; visit {sym} at {r['places'][0]}")  # fmt: skip
     return {"actions": actions, "routes": {r: p for r, p in routes.items() if p}, "driven_m": driven,
             "ground_s": 0.0, "solve_s": solve_s, "pois": len({s["target"] for s in steps}),
-            "steps": steps, "schedule": schedule,
-            "planner_log": {"planner": LABEL, "digest": f"makespan {plan.makespan:.1f} s, {len(plan.tasks or [])} task(s)"}}  # fmt: skip
+            "steps": steps, "schedule": schedule, "regions": regions,
+            "planner_log": {"planner": LABEL, "digest": digest}}  # fmt: skip
+
+
+def region_label(region: dict) -> str:
+    """'visit r6' / 'explore r6 · 3/9' for a task's region info (expand_regions)."""
+    if region.get("kind") == "explore":
+        return f"explore {region['region']} · {region.get('index', '?')}/{region.get('total', '?')}"
+    return f"visit {region['region']}"

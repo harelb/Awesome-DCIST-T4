@@ -1,4 +1,5 @@
 import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
+import {activateMap} from "../stores/liveMap";
 import {useNavigate} from "react-router";
 import {errorText, getJSON, postJSON, useApi} from "../lib/api";
 import {trackJob, useJobs} from "../stores/jobs";
@@ -502,6 +503,14 @@ function MapTable({rows, local, opening, showMachine, emptyText, onTransfer, onV
                     )}
                     {isLocal && (
                       <>
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => void activateMap(m.abs_path || m.path || "", m.name)}
+                          disabled={!(m.abs_path || m.path) || !(m.has_dsg || m.has_dsg_mesh)}
+                          title="Make it the console's map: load it into the live Neo4j (planning works once the scene graph is in; images and features follow)"
+                        >
+                          Make live
+                        </button>
                         <button className="btn btn-sm" onClick={() => onIngest(r)}>
                           Load into Neo4j
                         </button>

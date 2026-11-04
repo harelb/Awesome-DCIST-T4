@@ -228,3 +228,65 @@ describe("mission card goals", () => {
     expect((it as {goals: unknown}).goals).toEqual({topaz: [{sym: "t(10376)", xy: [48, 41], yaw: 1.2}]});
   });
 });
+
+describe("GRSTAPS-X region goals", () => {
+  it("label a region visit in the schedule", () => {
+    const el = render(
+      <PlannerSchedule
+        schedule={{
+          makespan: 30,
+          rows: [
+            {robot: "spot1", action: "visit-location", target: "P(12)", start: 0, finish: 10, region: "r6", label: "explore r6 · 1/3"},
+            {robot: "spot1", action: "visit-location", target: "P(40)", start: 10, finish: 20, region: "r2", label: "visit r2"},
+          ],
+        }}
+      />,
+    );
+    const bars = [...el.querySelectorAll<HTMLElement>('[data-testid="schedule-bar"]')];
+    expect(bars[0].title).toContain("explore r6 · 1/3 at P(12)");
+    expect(bars[0].textContent).toBe("⬚");
+    expect(bars[1].title).toContain("visit r2 at P(40)");
+  });
+
+  it("name map regions and drawn areas the way the server does", async () => {
+    const {regionGoalSymbol} = await import("../src/viewer/AreaTools");
+    const areas = [
+      {name: "Dock", polygon: [[0, 0], [1, 0], [1, 1]]},
+      {name: "Yard", polygon: [[0, 0], [2, 0], [2, 2]]},
+    ];
+    const row = {key: "", name: "Yard", purpose: "search" as const, scope: "mission" as const, color: ""};
+    expect(regionGoalSymbol(row, areas)).toBe("area2");
+    expect(regionGoalSymbol({...row, scope: "map", region: {symbol: "R(6)"} as never}, areas)).toBe("r6");
+    expect(regionGoalSymbol({...row, purpose: "no_go"}, areas)).toBeNull();
+  });
+
+  it("preview a drawn area with its polygon and show the waypoints", async () => {
+    const {AreasSection} = await import("../src/viewer/AreaTools");
+    const {useMission} = await import("../src/stores/mission");
+    const {usePlanPreview} = await import("../src/stores/planPreview");
+    useMission.setState({areas: [{name: "Yard", polygon: [[0, 0], [9, 0], [9, 9]]}] as never, fences: [], roster: [{id: "spot1", kind: "spot", start: [1, 1]}] as never});
+    useEngines.setState({loaded: true, engines: [{id: "grstaps", label: "GRSTAPS-X", available: true, reason: null}]});
+    const bodies: Record<string, unknown>[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("preview_pddl")) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return json({routes: {}, driven_m: {}, actions: [], robots: ["spot1"], ground_s: 0, solve_s: 0.2, pois: 3, engine: "grstaps",
+          schedule: {makespan: 95, rows: []}, regions: {area1: {kind: "explore", places: ["P(1)", "P(2)", "P(3)"], points: [[1, 1], [5, 1], [8, 6]], total: 3, spacing_m: 8}}}); // prettier-ignore
+      }
+      return json({regions: [], state: {}, history: [], snapshots: []});
+    });
+    const el = render(<AreasSection />);
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 0)); // the map's areas load
+    });
+    const explore = [...el.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent === "Explore")!;
+    await act(async () => {
+      explore.click();
+      await new Promise(r => setTimeout(r, 0));
+    });
+    expect(bodies[0]).toMatchObject({pddl_goal: "(explored-region area1)", engine: "grstaps", areas: [{name: "Yard", polygon: [[0, 0], [9, 0], [9, 9]]}]});
+    expect(el.querySelector('[data-testid="region-goal-result"]')!.textContent).toBe("3 waypoint(s) 8 m apart · makespan 1.6 min");
+    expect(usePlanPreview.getState().preview?.regions?.area1.points).toHaveLength(3);
+    act(() => usePlanPreview.getState().set(null, null));
+  });
+});
