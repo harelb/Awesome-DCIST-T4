@@ -25,6 +25,7 @@ import math
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 RESULTS = []
@@ -151,6 +152,7 @@ def main():
     ap.add_argument("--console", default="http://127.0.0.1:8095")
     ap.add_argument("--base", default="prv5base")
     ap.add_argument("--robot", default="hilbert")
+    ap.add_argument("--edit-src", default="neo4j:live", help="the console's id of the live Neo4j source")
     ap.add_argument("--engine", choices=["fast_downward", "grstaps"], default=None)
     ap.add_argument("--plan-timeout", type=float, default=90)
     a = ap.parse_args()
@@ -195,7 +197,8 @@ def main():
 
         # 4 ---------------------------------------------------------------
         before = plan_end(c.get(f"api/robots/{robot}/plan"))
-        edit = c.post("api/edit/live/batch", {"ops": [{"op": "delete_node", "symbol": "O5"}]})
+        src = urllib.parse.quote(a.edit_src, safe="")
+        edit = c.post(f"api/edit/{src}/batch", {"ops": [{"op": "delete_node", "symbol": "O5"}]})
         step("4 console edit committed (delete chair O5)", edit.get("mutation_id"), str(edit.get("summary")))
         rec = wait(lambda: pending(c, robot), 20)
         step("4 a console edit always recommends replanning", rec, (rec or {}).get("reason", ""))
