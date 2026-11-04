@@ -22,7 +22,7 @@ input:
         use_exact: true
         queue_size: 30
         filters:
-          - {type: InvalidDepthFilter, max_invalid_ratio: 0.5}
+          - {type: InvalidDepthFilter, max_invalid_ratio: 0.5, inf_is_valid: true}
         with_feature: true
 active_window:
   type: ActiveWindow
@@ -32,6 +32,7 @@ active_window:
   volumetric_map: {voxel_size: 0.1, truncation_distance: 0.3, with_semantics: false}
   projective_integrator:
     semantic_integrator: {type: SingleLabelIntegrator}
+    interpolation_method: {type: adaptive, inf_is_free_space: true}
   object_detector:
     type: InstanceForwarding
     min_cluster_size: 30
@@ -44,21 +45,21 @@ active_window:
     track_by: voxels
     min_semantic_iou: 0.1
     min_cross_iou: 0.1
-    min_num_observations: 30
+    min_num_observations: 15
     verbosity: 0
     preassociate_by_id: true
     voxel_size: 0.1
     accumulate_voxels: true
     min_voxel_hits: 15
     merge_tracks: true
-    merge_containment_threshold: 0.2
+    merge_containment_threshold: 0.35
     merge_distance_factor: 2.0
   object_extractor:
     type: AccumulatedObjectExtractor
     min_object_allocation_confidence: 0.5
-    max_object_volume: 40.0
+    max_object_volume: 50.0
   khronos_sinks:
-    - {type: ActiveWindowVisualizer, track_label_min_observations: 30}
+    - {type: ActiveWindowVisualizer, track_label_min_observations: 15}
   sinks:
     - {type: ReconstructionVisualizer}
     - {type: TsdfOccupancyPublisher, min_distance: 0.25, use_relative_height: true, slice_height: 0.25, num_slices: 4}
@@ -73,8 +74,9 @@ frontend:
     log_path: $<env ADT4_OUTPUT_DIR>/keyframes
     save_fields: [color, depth]
     keyframe_policy: {type: DistancePolicy, min_pose_separation: 0.25, rotation_separation_weight: 0.0, min_time_separation_s: 0.0, max_time_separation_s: 2.0}
-    max_range_difference_m: 0.5
-    feature_selector: {type: average}
+    feature_selector:
+      type: average
+      max_range_difference_m: 2.5
   sinks:
     - {type: FrontendEventLogger, path: $<env ADT4_OUTPUT_DIR>/events/frontend.jsonl}
   serialize_dsg_mesh: true
@@ -92,8 +94,6 @@ frontend:
     layer_updates:
       OBJECTS:
         prefix: O
-        matcher: {type: IoUNodeMatcher, min_same_iou: 0.2, min_cross_iou: 0.5}
-        merger: {type: EarliestAttributeMerger}
   traversability_places:
     type: traversability
     layer: MESH_PLACES
@@ -109,6 +109,14 @@ frontend:
       sinks:
         - {type: TsdfGradientOccupancyPublisher, gradient_threshold: 0.5, min_confidence: 0.5, filter_disjoint: true}
     clustering: {type: RegionGrowingTraversabilityClustering, max_radius: 1.5}
+    persistent_processing:
+      - type: RobotFootprintTraversability
+        bbox_min: [-0.75, -0.25]
+        bbox_max: [0.75, 0.25]
+      - type: ProjectiveSemanticTraversabilityIntegrator
+        max_range: 3.0
+        fusion_mode: MIN
+        label_traversability: {0: 1.0, 1: 0.1, 2: 0.1}
     sinks:
       - type: TraversabilityVisualizer
 backend:
@@ -128,7 +136,7 @@ backend:
     objects:
       type: GenericUpdateFunctor
       layer: OBJECTS
-      node_matcher: {type: IoUNodeMatcher, min_same_iou: 0.1, min_cross_iou: 0.3}
+      node_matcher: {type: IoUNodeMatcher, min_same_iou: 0.3, min_cross_iou: 0.5}
       merge_proposer:
         strategy: {type: Pairwise}
     traversability: {type: UpdateRegionGrowingTraversabilityFunctor, layer: MESH_PLACES}
@@ -137,7 +145,7 @@ backend:
       source_layer: MESH_PLACES
       clustering:
         type: AgglomerativeIBClustering
-        verbosity: 1
+        verbosity: 0
         max_delta: 0.015
         score_threshold: 0.21
         top_k: 3
@@ -147,7 +155,7 @@ backend:
           type: RosEmbeddingGroup
           ns: ~/regions
           verbosity: 1
-          prompts: [hallway, conference room, lounge, study area, kitchenette, office, lab]
+          prompts: [hallway, conference room, lounge, study area, kitchenette, office, lab, courtyard, lawn, walking path, bike rack]
   pgmo:
     run_mode: FULL
     embed_trajectory_delta_t: 5.0

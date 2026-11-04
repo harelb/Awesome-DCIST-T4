@@ -69,6 +69,7 @@ class SessionInfo:
     output_path: pathlib.Path
     platform_id: str = ""
     sim_time: bool = False
+    session_name: str | None = None
     bag: Optional[pathlib.Path] = None
     bag_delay: float = 5.0
     bag_args: list[str] = field(default_factory=list)
@@ -412,6 +413,36 @@ def _bag_tf_args(info: SessionInfo):
     return args
 
 
+def _tf_remap_args(info: SessionInfo):
+    # ADT4 namespaces all TF by robot (see master.launch.yaml)
+    ns = f"/{info.robot_name}"
+    return ["-r", f"/tf:={ns}/tf", "-r", f"/tf_static:={ns}/tf_static"]
+
+
+def _bag_tf_args(info: SessionInfo):
+    """Point ianvs at the bag's TF topics: /<robot>/tf in newer bags, /tf in older ones."""
+    bag_dir = info.bag if info.bag.is_dir() else info.bag.parent
+    try:
+        with (bag_dir / "metadata.yaml").open("r") as fin:
+            metadata = yaml.safe_load(fin)["rosbag2_bagfile_information"]
+        counts = {
+            x["topic_metadata"]["name"]: x["message_count"]
+            for x in metadata["topics_with_message_count"]
+        }
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        click.secho(f"Could not read bag metadata in '{bag_dir}'", fg="yellow")
+        return []
+
+    ns = f"/{info.robot_name}"
+    args = []
+    if counts.get(f"{ns}/tf", 0) > 0:
+        args += ["--tf-topic", f"{ns}/tf"]
+    if counts.get(f"{ns}/tf_static", 0) > 0:
+        args += ["--tf-static-topic", f"{ns}/tf_static"]
+
+    return args
+
+
 def _make_bag_window(info: SessionInfo):
     to_drop = [".*leg.*", ".*foot.*", ".*rail.*", ".*map.*"]
     if info.trajectory:
@@ -503,6 +534,9 @@ def _write_session_to_file(session_path, info: SessionInfo, fout, verbose=False)
     for var, value in info.session_env.items():
         contents["environment"][var] = value
 
+    if info.session_name:
+        contents["session_name"] = info.session_name
+
     contents = yaml.dump(contents, width=300)
     fout.write(contents)
     fout.flush()
@@ -542,6 +576,7 @@ def _write_session_to_file(session_path, info: SessionInfo, fout, verbose=False)
 @click.option("--yes", "-y", is_flag=True, help="skip env variable check")
 @click.option("--force", "-f", is_flag=True, help="clear output if it exists")
 @click.option("--dry-run", "-d", is_flag=True, help="only show command")
+@click.option("--tmuxp-session-name", help="name to use instead of adt4_system")
 @click.option("--show-tmux", is_flag=True, help="show tmuxp contents before starting")
 @click.option("--bag", default=None, type=click.Path(exists=True), help="bag to run")
 @click.option("--bag-delay", default=5.0, help="bag playback delay")
@@ -587,6 +622,7 @@ def main(
     yes,
     force,
     dry_run,
+    tmuxp_session_name,
     show_tmux,
     bag,
     bag_delay,
@@ -642,6 +678,7 @@ def main(
         output_dir,
         platform_id=platform_id,
         sim_time=sim_time,
+        session_name=tmuxp_session_name,
         bag=_normalize_optional(bag),
         bag_delay=bag_delay,
         bag_start=bag_start,

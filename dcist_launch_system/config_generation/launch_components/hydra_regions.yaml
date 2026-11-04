@@ -9,7 +9,7 @@ windows:
     panes:
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_instance_segmentation:=true
       - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_clip_features:=true
-      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true labelspace_name:=instance_seg
+      - ros2 launch dcist_launch_system master.launch.yaml conf_name:=$config sim_time:=$sim_time robot_name:=$ADT4_ROBOT_NAME launch_hydra:=true
       # image store: index the keyframe zips / track logs / event logs into $ADT4_OUTPUT_DIR/image_store
       # while hydra runs (detached; finalizes after hydra saves, see bin/image-store-tail)
       - $ADT4_WS/src/awesome_dcist_t4/dcist_launch_system/bin/image-store-tail $ADT4_OUTPUT_DIR

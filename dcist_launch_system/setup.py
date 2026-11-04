@@ -24,6 +24,7 @@ launch_files = get_share_info("launch", "*.launch.yaml")
 config_files = get_share_info("config", "*.yaml")
 labelspaces = get_share_info("labelspaces", "*.yaml")
 config_files_csv = get_share_info("config", "*.csv")
+resource_files = get_share_info("resource", "*.csv")
 platform_files = get_share_info("platforms")
 rviz_files = get_share_info("rviz", "*.rviz")
 
@@ -36,6 +37,7 @@ data_files = (
     + config_files
     + labelspaces
     + config_files_csv
+    + resource_files
     + platform_files
     + rviz_files
 )
@@ -56,10 +58,8 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "example_1_node = dcist_launch_system.example_1:main",
-            "example_2_node = dcist_launch_system.example_2:main",
-            "prior_dsg_publisher_node = dcist_launch_system.prior_dsg_publisher_node:main",
-            "awcd_visualizer_node = dcist_launch_system.awcd_visualizer_node:main",
+            "awcd_base_station_node = dcist_launch_system.awcd_base_station_node:main",
+            "awcd_scene_change_bridge_node = dcist_launch_system.awcd_scene_change_bridge_node:main",
             "dsg_saver_node = dcist_launch_system.dsg_saver_node:main",
             "record_topics = dcist_launch_system.record_topics:main",
             "static_tf_from_json = dcist_launch_system.static_tf_from_json:main",
