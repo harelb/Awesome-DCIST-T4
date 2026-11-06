@@ -1,0 +1,122 @@
+# Penn multi-robot NL missions (euclid + hamilton = Spots with arms, gauss = Husky, no arm).
+# Start: black shelter by the r0/r12 gate, map (9,-1) = place t10739.
+# Symbols are the Penn fused graph (console source neo4j:pennmissions); O704/O705/O706 are
+# open-set objects grounded with SAM3 (white water tank, orange barriers) that the prior map lacked.
+starts:
+  euclid: {kind: spot, start: [9.0, -1.0]}
+  hamilton: {kind: spot, start: [11.0, -3.0]}
+  gauss: {kind: husky, start: [7.0, 1.0]}
+places:
+  shelter: t10739        # (9.8,-1.8) r12, next to the start
+  r0_core: t1149         # main intersection centre (-30,-21)
+  r19_core: t6774        # south intersection (-24,-52)
+  r10_core: t7505        # north intersection (-6,59)
+  r20_a: t6880           # south sidewalk (5,-42)
+  r20_b: t3644           # south sidewalk (4,-40)
+  r1_r2_gate: t1280      # courtyard meets the west sidewalk (-73,22)
+  r1_r11_gate: t3966     # courtyard meets sidewalk r11 (-15.5,23)
+  r1_r0_gate: t8729      # courtyard entrance from the main intersection (-22,13)
+missions:
+  - id: M1
+    title: Lock down the intersections
+    engine: fast_downward
+    text: "Hamilton and Euclid, each grab a cone from the east parking lot and use them to block the two southern intersections. Gauss, go hold the north intersection."
+    goal: "(and (object-in-place o453 t1149) (object-in-place o459 t6774) (in-region gauss r10))"
+    shows:
+      - "region association (intersections r0/r19/r10, parking lot r16)"
+      - "Cypher (cones in r16)"
+      - "agent class (gauss cannot pick)"
+    setup: "At least 2 cones in the east parking lot r16 near (30,64) (8 there in the prior map)."
+  - id: M2
+    title: Sandbag off the field
+    engine: grstaps
+    text: "Gauss, check out the blue sandbag on the field first. Once it is cleared, have a Spot drag it back to the shelter. Euclid, sweep the south field meanwhile."
+    goal: "(and (inspected-by gauss o511) (object-in-place o511 t10739) (explored-region-by euclid r14))"
+    shows:
+      - "open-set (blue sandbag -> O511 'bag')"
+      - "drag (heavy)"
+      - "agent class (manipulator)"
+      - "order (inspect before drag)"
+    setup: "Blue sandbag on the field r12 at about (31,11)."
+  - id: M3
+    title: The water tanks nobody mapped
+    engine: fast_downward
+    text: "There are white water tanks by the drone cage that are not on the map. Send Gauss to look at them, have Euclid drag the bag closest to them back to the shelter, and Hamilton inspect the bicycles by the field."
+    goal: "(and (visited-object-by gauss o704) (visited-object-by euclid o690) (object-in-place o690 t10739) (inspected-by hamilton o189))"
+    shows:
+      - "open-set grounding + commit (white water tank -> O704)"
+      - "Cypher (bag nearest O704)"
+      - "drag"
+    setup: "White IBC tanks at (36,20) (fixed); a bag on the field near (32,10); bicycles at (45,45)."
+  - id: M4
+    title: Clear the loading dock
+    engine: grstaps
+    text: "Before anyone goes into the loading dock, Gauss must sweep the courtyard. Then Euclid and Hamilton inspect the orange barrier at the upper loading dock together, and after that one of the Spots moves the cone next to it to the courtyard's west entrance."
+    goal: "(and (explored-region-by gauss r1) (inspected-by euclid o706) (inspected-by hamilton o706) (object-in-place o167 t1280))"
+    constraints: [{predicate: before, symbols: [r1, o706]}, {predicate: before, symbols: [o706, o167]}]
+    shows:
+      - "open-set (orange barrier -> O706)"
+      - "region exploration"
+      - "coalition inspection"
+      - "2x temporal ordering"
+    setup: "Orange barrier at the upper loading dock (-79,120); a cone near it (-80,115)."
+  - id: M5
+    title: West-side safety audit
+    engine: fast_downward
+    text: "Inspect the fire hydrant and every trash can on the west side, split between the two Spots. Gauss, check the cones next to the hydrant."
+    goal: "(and (inspected-by euclid o700) (inspected-by euclid o328) (inspected-by hamilton o387) (visited-object-by gauss o332))"
+    shows:
+      - "Cypher (class + distance; the hydrant has no region)"
+      - "open-set (trash cans the graph labels 'box': O387)"
+      - "split by robot"
+    setup: "Fire hydrant (-108,13), trash can (-79,1), trash cans at the main intersection (-40,-10), cones at (-101,12)."
+  - id: M6
+    title: Seal the courtyard
+    engine: fast_downward
+    text: "Seal off the courtyard: Euclid and Hamilton, each take a cone from the west parking lot and put one wherever the courtyard meets a sidewalk. Gauss, block the courtyard entrance from the main intersection."
+    goal: "(and (visited-object-by euclid o558) (visited-object-by hamilton o18) (object-in-place o18 t1280) (object-in-place o558 t3966) (at-place gauss t8729))"
+    shows:
+      - "Cypher region adjacency (ROOM_CONNECTED r1-r2, r1-r11 boundary places)"
+      - "region association"
+      - "blocking end pose"
+    setup: "Cones in the west parking lot r4 (-75,-53) (3 in the prior map)."
+  - id: M7
+    title: Bags dumped in the intersection
+    engine: grstaps
+    text: "Two bags were dumped in the main intersection. Gauss inspects both first; then Euclid and Hamilton each drag one onto the south sidewalk."
+    goal: "(and (inspected-by gauss o387) (inspected-by gauss o39) (object-in-place o387 t6880) (object-in-place o39 t3644))"
+    shows:
+      - "open-set on the day (dev stand-ins O387/O39 at (-40,-10))"
+      - "drag x2"
+      - "agent class"
+      - "order (inspect before drag)"
+    setup: "ON THE DAY: put 2 bags at the main intersection near (-40,-10); re-ground them with SAM3 ('bag') and swap the symbols."
+  - id: M8
+    title: Whole-map patrol
+    engine: grstaps
+    text: "Hamilton, explore the upper loading dock; Euclid, check the road north of it and then the far parking lot; Gauss, go through the north intersection and on to the east parking lot."
+    goal: "(and (explored-region-by hamilton r7) (visited-region-by euclid r17) (visited-region-by euclid r18) (visited-region-by gauss r10) (visited-region-by gauss r16))"
+    shows:
+      - "region exploration at whole-map scale (waypoint expansion)"
+      - "patrol waypoints for the husky"
+    setup: "None; long drives (100-150 m per robot)."
+  - id: M9
+    title: Cone relay
+    engine: grstaps
+    text: "Euclid, check the cone in the west parking lot and carry it to the main intersection. Hamilton, meanwhile inspect the trash cans at that intersection. Only after the cone is placed, Gauss goes to guard it."
+    goal: "(and (inspected-by euclid o18) (object-in-place o18 t1149) (inspected-by hamilton o387) (visited-region-by gauss r0))"
+    constraints: [{predicate: before, symbols: [o18, r0]}]
+    shows:
+      - "Cypher (cone in r4)"
+      - "3-robot temporal hand-off (inspect -> carry -> guard)"
+    setup: "A cone in the west parking lot r4 (-75,-53)."
+  - id: M10
+    title: Fetch from both lots
+    engine: fast_downward
+    text: "Bring a cone from each parking lot back to the shelter, and have whichever robot cannot carry things check the bag in the courtyard."
+    goal: "(and (object-in-place o18 t10739) (object-in-place o453 t10739) (inspected-by gauss o599))"
+    shows:
+      - "agent-class reasoning in language (-> gauss inspects)"
+      - "Cypher (one cone per lot r4/r16)"
+      - "parallel fetches"
+    setup: "Cones in parking lots r4 (-75,-53) and r16 (30,64); a bag in the courtyard (-46,9)."
