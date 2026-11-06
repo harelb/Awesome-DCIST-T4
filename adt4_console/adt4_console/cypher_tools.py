@@ -151,8 +151,10 @@ The 3D scene graph (Hydra) is hierarchical. Layers, bottom to top: Objects \
 ground segments, with a semantic class such as road or sidewalk), Rooms (R<n>) and \
 Buildings (B<n>). An object's parent is a Place or MeshPlace. Rooms are also the \
 operator's named regions (class 'region', a name such as 'courtyard', a boundary \
-polygon): a region CONTAINS the places and objects inside it, so \
-MATCH (r:Room {name: 'courtyard'})-[:CONTAINS]->(o:Object) lists its objects. Agent nodes (a<n>, or \
+polygon): a region CONTAINS the places inside it and those places CONTAIN the objects, so \
+MATCH (r:Room {name: 'courtyard'})-[:CONTAINS*1..2]->(o:Object) lists its objects (always use *1..2: \
+on fused maps objects hang off mesh places). Several Rooms can share a name (e.g. three \
+'intersection' or three 'parking lot' rooms): tell them apart by their centre (r.center). Agent nodes (a<n>, or \
 a robot-prefixed symbol) are trajectory keyframes of the robots; Observation nodes \
 hold where/how an object was seen in a camera image.
 """

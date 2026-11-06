@@ -30,7 +30,7 @@ export interface Agent {
 export interface Task {
   id: string;
   agent: string;
-  type: "goto" | "inspect" | "explore_area" | "request_image" | "wait_for" | "return_home" | "hold";
+  type: "goto" | "inspect" | "explore_area" | "request_image" | "wait_for" | "return_home" | "hold" | "pick" | "place" | "drag";
   target?: string | number[] | null;
   area?: number[][] | null;
   depends_on?: string[];
@@ -146,6 +146,12 @@ export interface Candidate {
   manual?: boolean;
 }
 
+/** What a sim agent holds between a pick / drag and its place. */
+export interface Carrying {
+  sym: string | null;
+  mode: "carry" | "drag";
+}
+
 export interface RunState {
   mission: string;
   kind: "sim" | "live";
@@ -154,8 +160,10 @@ export interface RunState {
   finished: boolean;
   playing: boolean;
   speed: number;
-  agents: Record<string, {pos: number[]; yaw: number; task: string | null; status: string}>;
+  agents: Record<string, {pos: number[]; yaw: number; task: string | null; status: string; carrying?: Carrying | null}>;
   tasks: Record<string, {state: string; times: [number, number | null] | null; note: string | null}>;
+  /** objects a place left somewhere new (sim): symbol -> map [x, y] */
+  moved?: Record<string, number[]>;
   candidates: Candidate[];
   events: {t: number; kind: string; [k: string]: unknown}[];
   images: number;

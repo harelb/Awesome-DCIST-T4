@@ -15,7 +15,7 @@ import {useFrame, useThree} from "@react-three/fiber";
 import {Html, Line} from "@react-three/drei";
 import {agentModelFor} from "../lib/robotModel";
 import {PoseTrack} from "../lib/gait";
-import {moveStart, useMission, type Agent, type Mission, type Preview, type RunState} from "../stores/mission";
+import {moveStart, useMission, type Agent, type Carrying, type Mission, type Preview, type RunState} from "../stores/mission";
 import {dragTo, grab, nearestPlace, release, startLockReason, type PlacePoint, type StartDrag} from "../lib/agentStart";
 import {fmtLonLat, mapToLonLat} from "../lib/geo";
 import {pickRadius, TAP_SLOP_PX} from "../lib/tap";
@@ -113,7 +113,21 @@ function GroundAgent({kind, color, motion}: {kind: Agent["kind"]; color: string;
 /** A ground agent at its pose, replayed one update late and interpolated between
  *  run-state updates (``stamp``: the run's sim time, so a re-sent pose while the
  *  agent dwells still counts as a sample); outside a run it is placed as is. */
-function TrackedGroundAgent({agent, pos, yaw, color, z, status, stamp}: {agent: Agent; pos: number[]; yaw: number; color: string; z: number; status?: string; stamp: number | null}) {
+/** The object a sim agent carries (on its back) or drags (behind it, on a line). */
+function CarriedObject({carrying}: {carrying: Carrying}) {
+  const drag = carrying.mode === "drag";
+  return (
+    <group>
+      {drag && <Line points={[[-0.6, 0, 0.3], [-1.9, 0, 0.2]]} color="#ffffff" lineWidth={2} depthTest={false} renderOrder={ORDER + 6} />}
+      <mesh position={drag ? [-2.2, 0, 0.2] : [0, 0, 1.0]} renderOrder={ORDER + 7}>
+        <boxGeometry args={drag ? [0.9, 0.9, 0.4] : [0.6, 0.6, 0.6]} />
+        <meshBasicMaterial color={drag ? "#3b82f6" : "#ff8c1a"} depthTest={false} />
+      </mesh>
+    </group>
+  );
+}
+
+function TrackedGroundAgent({agent, pos, yaw, color, z, status, stamp, carrying}: {agent: Agent; pos: number[]; yaw: number; color: string; z: number; status?: string; stamp: number | null; carrying?: Carrying | null}) {
   const track = useMemo(() => new PoseTrack(), []);
   const outer = useRef<THREE.Group>(null);
   const inner = useRef<THREE.Group>(null);
@@ -137,18 +151,20 @@ function TrackedGroundAgent({agent, pos, yaw, color, z, status, stamp}: {agent: 
     <group ref={outer}>
       <group ref={inner}>
         <GroundAgent kind={agent.kind} color={color} motion={track} />
+        {carrying && <CarriedObject carrying={carrying} />}
       </group>
       <Html position={[0, 0, 2]} center className="mission-agent-tag" zIndexRange={[25, 0]}>
         <span style={{borderColor: color}}>
           {agent.id}
           {status && status !== "idle" ? <em> · {status}</em> : null}
+          {carrying ? <em> · {carrying.mode === "drag" ? "dragging" : "carrying"} {carrying.sym ?? ""}</em> : null}
         </span>
       </Html>
     </group>
   );
 }
 
-function AgentGlyph({agent, pos, yaw, color, z, status, stamp}: {agent: Agent; pos: number[]; yaw: number; color: string; z: number; status?: string; stamp: number | null}) {
+function AgentGlyph({agent, pos, yaw, color, z, status, stamp, carrying}: {agent: Agent; pos: number[]; yaw: number; color: string; z: number; status?: string; stamp: number | null; carrying?: Carrying | null}) {
   const quad = agent.kind === "quad";
   const h = agent.altitude ?? 20;
   const foot = useMemo(() => {
@@ -164,7 +180,7 @@ function AgentGlyph({agent, pos, yaw, color, z, status, stamp}: {agent: Agent; p
       [-l, w],
     ].map(([f, lft]) => [pos[0] + c * f - s * lft, pos[1] + s * f + c * lft]);
   }, [quad, h, pos, yaw]);
-  if (!quad) return <TrackedGroundAgent agent={agent} pos={pos} yaw={yaw} color={color} z={z} status={status} stamp={stamp} />;
+  if (!quad) return <TrackedGroundAgent agent={agent} pos={pos} yaw={yaw} color={color} z={z} status={status} stamp={stamp} carrying={carrying} />;
   return (
     <group>
       {foot && <Poly pts={foot} z={z} color={color} fill={0.08} width={1} dashed />}
@@ -346,8 +362,23 @@ export function MissionOverlay({groundZ}: {groundZ: number}) {
         const r = run?.agents[a.id];
         const start = shownPos(a, run, preview);
         if (!start) return null;
-        return <AgentGlyph key={`agent-${a.id}`} agent={a} pos={start} yaw={r?.yaw ?? 0} color={colors[a.id]} z={z} status={r?.status} stamp={r ? (run?.t ?? null) : null} />;
+        return <AgentGlyph key={`agent-${a.id}`} agent={a} pos={start} yaw={r?.yaw ?? 0} color={colors[a.id]} z={z} status={r?.status} stamp={r ? (run?.t ?? null) : null} carrying={r?.carrying} />;
       })}
+      {Object.entries(run?.moved ?? {}).map(([sym, p]) => (
+        <group key={`moved-${sym}`} position={[p[0], p[1], z + 0.2]}>
+          <mesh renderOrder={ORDER + 6}>
+            <boxGeometry args={[0.9, 0.9, 0.5]} />
+            <meshBasicMaterial color="#ff8c1a" depthTest={false} />
+          </mesh>
+          <mesh renderOrder={ORDER + 5}>
+            <ringGeometry args={[1.0, 1.4, 24]} />
+            <meshBasicMaterial color="#ffffff" depthTest={false} transparent opacity={0.9} side={THREE.DoubleSide} />
+          </mesh>
+          <Html position={[0, 0, 1.2]} center className="mission-plant-tag" zIndexRange={[20, 0]}>
+            {sym} placed
+          </Html>
+        </group>
+      ))}
       {m.drag?.moved && <DragGhost drag={m.drag} color={colors[m.drag.agent] ?? "#ffffff"} z={z} />}
       <StartDragger z={z} />
       {draft.length > 0 && (

@@ -51,8 +51,10 @@ ROBOT_TYPE_SPECIES = {"spot": "spot_arm", "simulated-spot": "spot_arm"}
 # with inspected-by makes it a joint inspection by all of them. (The field config,
 # grstaps_repair, asks for two ground robots per inspection instead.)
 INSPECT_REQUIREMENT = {"ground": 1, "sensor": 1}
-# console agent kind -> GRSTAPS-X robot type; a husky is left out of GRSTAPS-X plans
-# (its executor does not wait on ordering or partners)
+# console agent kind -> GRSTAPS-X robot type. A husky plans as a ground robot
+# without an arm (visits, inspections, exploration); ADT4_GRSTAPS_ALLOW_HUSKY=0
+# leaves huskies out again (an executor that does not wait on ordering/partners).
+ALLOW_HUSKY = os.environ.get("ADT4_GRSTAPS_ALLOW_HUSKY", "1").strip().lower() not in ("0", "false", "no")
 KIND_TYPE = {"spot": "spot", "husky": "husky", "quad": "uav"}
 SOLVER_TIMEOUT_S = float(os.environ.get("ADT4_GRSTAPS_TIMEOUT_S", "60"))
 LOG_TAIL = 40
@@ -220,6 +222,7 @@ def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | Non
         license_path=str(lic), robot_type_species=dict(ROBOT_TYPE_SPECIES),
         inspect_requirement=dict(INSPECT_REQUIREMENT), solver_timeout_s=SOLVER_TIMEOUT_S,
         scenario_name="console",
+        **({"allow_husky": ALLOW_HUSKY} if "allow_husky" in getattr(gp.GrstapsDomain, "__dataclass_fields__", {}) else {}),
     )  # fmt: skip
     g = gp.GrstapsGoal(
         goal_points=found["visit"], inspect_points=found["inspect"], manipulate_points=found["manipulate"],
@@ -228,7 +231,7 @@ def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | Non
         region_bound=found["region_bound"], region_polygons=dict(region_polygons or {}),
         constraints=list(facts), robot_types={r: KIND_TYPE.get((robot_types or {}).get(r, "spot"), "spot") for r in robots},
     )  # fmt: skip
-    left_out = sorted(r for r in robots if (robot_types or {}).get(r) == "husky")
+    left_out = sorted(r for r in robots if (robot_types or {}).get(r) == "husky") if not ALLOW_HUSKY else []
     if left_out and len(left_out) == len(robots):
         raise GrstapsFailed("GRSTAPS-X does not plan huskies (their executor does not wait on ordering or partners)",
                             {"planner": LABEL, "digest": "only huskies", "log": [], "problem_file": None})  # fmt: skip
@@ -243,7 +246,10 @@ def solve(goal: str, starts: dict, G, facts: list, z_of, robot_types: dict | Non
     plan = _unwrap(out, gp.GrstapsPlan)
     if not isinstance(plan, gp.GrstapsPlan):
         raise GrstapsFailed("GRSTAPS-X returned no plan", {"planner": LABEL, "digest": "no plan", "log": [], "problem_file": None})
-    return _convert(plan, found, robots, z_of, om["to_node"], G, t1 - t0, gp.task_location)
+    out = _convert(plan, found, robots, z_of, om["to_node"], G, t1 - t0, gp.task_location)
+    if left_out:
+        out["left_out"] = left_out
+    return out
 
 
 def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> dict:
@@ -279,7 +285,8 @@ def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> d
             name = task.get("name", "")
             kind = (plan.task_geometry.get(tid) or {}).get("action") or name.split()[0] if name else "visit"
             kind = {"visit-location": "visit", "inspect-object": "inspect", "relocate-object": "relocate",
-                    "pick-object": "pick", "place-object": "place"}.get(kind, kind)  # fmt: skip
+                    "pick-object": "pick", "place-object": "place", "drag-object": "drag_relocate",
+                    "drag": "drag_relocate", "start-drag": "drag", "release-drag": "release"}.get(kind, kind)  # fmt: skip
             target = task_location(name) or ""
             region = (plan.task_geometry.get(tid) or {}).get("region")
             if region:
@@ -310,16 +317,18 @@ def _convert(plan, found, robots, z_of, to_node, G, solve_s, task_location) -> d
                 step("inspect", target, f"{name} with {', '.join(team)}" if len(team) > 1 else name)
                 # look together: every member's inspect waits for every member's arrival
                 steps[-1]["rendezvous"] = [f"{tid}@{m}#0" for m in team if m != robot]
-            elif kind in ("relocate", "pick", "place"):
+            elif kind in ("relocate", "pick", "place", "drag_relocate", "drag", "release"):
                 dest = found["destinations"].get(target)
-                if kind in ("relocate", "pick"):
-                    step("pick", target, name, pts3)
-                if kind in ("relocate", "place"):
+                dragged = kind in ("drag_relocate", "drag", "release")
+                if kind in ("relocate", "pick", "drag_relocate", "drag"):
+                    step("drag" if dragged else "pick", target, name, pts3)
+                if kind in ("relocate", "place", "drag_relocate", "release"):
                     g = plan.task_geometry.get(tid) or {}
                     carry = g.get("carry_path")
                     carry3 = walk([[float(x), float(y)] for x, y in carry]) if carry is not None and len(carry) else []
-                    step("place", dest or target, f"{name} -> {dest}" if dest else name, carry3 or (pts3 if kind == "place" else []))
-                    steps[-1]["params"] = {"object": node(target)}
+                    single = kind in ("place", "release")
+                    step("place", dest or target, f"{name} -> {dest}" if dest else name, carry3 or (pts3 if single else []))
+                    steps[-1]["params"] = {"object": node(target), **({"dragged": True} if dragged else {})}
             else:
                 step("goto", target, name, pts3)
             first_step[(tid, robot)] = keys[0]

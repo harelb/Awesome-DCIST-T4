@@ -52,6 +52,7 @@ class AgentState:
         self.travelled = 0.0
         self.next_capture = 0.0
         self.status = "idle"  # idle | moving | dwelling | waiting | done
+        self.carrying: dict | None = None  # {sym, mode: carry|drag} between a pick/drag and its place
 
 
 class MissionSim:
@@ -72,6 +73,7 @@ class MissionSim:
         self._seen: set[tuple] = set()  # (query, planted index) already a candidate
         self._n_cand = 0
         self._n_img = 0
+        self.moved: dict[str, list] = {}  # object symbol -> where a place left it
         self.agents: dict[str, AgentState] = {}
         for a in mission.agents:
             s = planning.start_of(mission, world, a.id) or [0.0, 0.0]
@@ -192,7 +194,7 @@ class MissionSim:
     def _advance(self, st: AgentState, dt: float) -> None:
         t = self.mission.task(st.task)
         agent = self.mission.agent(st.id)
-        speed = agent.speed_mps()
+        speed = planning.task_speed(agent, t)
         budget = speed * dt
         while budget > 0 and st.seg < len(st.path) - 1:
             a, b = st.path[st.seg], st.path[st.seg + 1]
@@ -223,9 +225,23 @@ class MissionSim:
                     return
             if t.type == "explore_area":
                 self._capture(st, t, agent)
+            self._manipulated(st, t)
             self._finish(t.id, "done")
             st.task = None
             st.status = "idle"
+
+    def _manipulated(self, st: AgentState, t) -> None:
+        """Pick / drag attach the target object to the agent; a place leaves it here."""
+        if t.type in ("pick", "drag"):
+            sym = t.target if isinstance(t.target, str) else None
+            st.carrying = {"sym": sym, "mode": "drag" if t.type == "drag" else "carry"}
+            self._log("picked" if t.type == "pick" else "drag_start", agent=st.id, symbol=sym)
+        elif t.type == "place":
+            sym = t.params.get("object") or (st.carrying or {}).get("sym")
+            if sym:
+                self.moved[str(sym)] = [round(v, 2) for v in st.pos]
+            self._log("placed", agent=st.id, symbol=sym, pos=[round(v, 2) for v in st.pos])
+            st.carrying = None
 
     def _capture_spacing(self, agent) -> float:
         fx, fy, cx, cy = camera.intrinsics()
@@ -344,7 +360,7 @@ class MissionSim:
             "finished": self.finished,
             "agents": {
                 aid: {"pos": [round(v, 2) for v in st.pos], "yaw": round(st.yaw, 3),
-                      "task": st.task, "status": st.status}  # fmt: skip
+                      "task": st.task, "status": st.status, "carrying": st.carrying}  # fmt: skip
                 for aid, st in self.agents.items()
             },
             "tasks": {
@@ -353,6 +369,7 @@ class MissionSim:
             },
             "candidates": list(self.candidates.values()),
             "found": self.world.found,
+            "moved": dict(self.moved),
             "events": list(self.events)[-events:],
             "images": len(self.captures),
         }

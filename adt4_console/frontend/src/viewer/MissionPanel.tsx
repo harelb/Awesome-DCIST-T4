@@ -60,7 +60,7 @@ import {EnginePicker} from "./EnginePicker";
 export {EnginePicker};
 import type {TranscriptItem} from "../lib/chatTranscript";
 
-const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼", pick: "✋", place: "⤓"};
+const TASK_ICON: Record<string, string> = {goto: "→", inspect: "◎", explore_area: "▦", request_image: "📷", wait_for: "⏸", return_home: "⌂", hold: "◼", pick: "✋", place: "⤓", drag: "⇶"};
 
 function fmtS(s: number | null | undefined): string {
   if (s == null) return "–";

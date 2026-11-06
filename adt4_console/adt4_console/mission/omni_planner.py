@@ -11,8 +11,11 @@ taken out of the graph first.
 
 The plan's ``goto-poi`` actions become ``goto`` tasks (an ``inspect`` of the
 target just reached turns that goto into an ``inspect``), so the preview, the
-simulator and the live executor treat them like any other mission. Ground
-robots only; the console's executors have no pick / place.
+simulator and the live executor treat them like any other mission. A pick /
+start-drag at the object just reached turns that goto into a ``pick`` /
+``drag`` task, and a place / release-drag into a ``place`` (``params.object``,
+``params.dragged``); the console's live executor cannot send those (NOT_LIVE),
+the robots' omniplanner executor can. Ground robots only.
 
 Two engines plan these goals (``engine``): ``fast_downward`` (above) and
 ``grstaps`` (GRSTAPS-X, :mod:`.grstaps_engine`: task allocation + a timed
@@ -36,7 +39,10 @@ from .paths import point_in_polygon
 log = logging.getLogger(__name__)
 
 DOMAIN = "RegionObjectRearrangementDomain_MultiRobot_FD_Explore"
-SUPPORTED = ("goto-poi", "inspect")
+SUPPORTED = ("goto-poi", "inspect", "pick-object", "place-object", "start-drag", "release-drag")
+# FD manipulation action -> console task type; the object is the action's 2nd argument
+GRAB = {"pick-object": "pick", "start-drag": "drag"}
+DROP = {"place-object": False, "release-drag": True}  # -> dragged?
 ENGINES = {"fast_downward": "Fast Downward", "grstaps": "GRSTAPS-X"}
 DEFAULT_ENGINE = "fast_downward"
 CONSTRAINTS = {"forbidden-poi": 1, "forbidden-edge": 2, "before": 2}  # predicate -> arity
@@ -210,9 +216,8 @@ def _solve_grstaps(goal, starts, G, constraints, geofences, kinds=None, areas=No
                                    region_polygons={s: a["polygon"] for s, a in (areas or {}).items()})  # fmt: skip
     except grstaps_engine.GrstapsFailed as e:
         raise PlanningFailed(str(e), planner_log=e.planner_log, engine="grstaps") from None
-    huskies = sorted(r for r, k in (kinds or {}).items() if k == "husky")
-    if huskies:
-        out["left_out"] = huskies
+    if out.get("left_out"):
+        out["left_out"] = sorted(out["left_out"])
     return out
 
 
@@ -242,7 +247,10 @@ def solve(goal: str, starts: dict, G, constraints=None, geofences=None, engine: 
     first = next(iter(robots))
     t0 = time.perf_counter()
     try:
-        goal_obj = om["PddlGoal"](pddl_goal=goal, robot_id=first, constraints=facts)
+        extra = {}
+        if kinds and "robot_types" in getattr(om["PddlGoal"], "__dataclass_fields__", {}):
+            extra["robot_types"] = {r: kinds.get(r, "spot") for r in robots}  # husky -> no arm
+        goal_obj = om["PddlGoal"](pddl_goal=goal, robot_id=first, constraints=facts, **extra)
         grounded = om["ground_problem"](om["domain"], G, robots, goal_obj).value
         t1 = time.perf_counter()
         plan = om["make_plan"](grounded, G)
@@ -352,9 +360,24 @@ def plan_pddl(goal: str, agents: list[dict], src: str | None, service, constrain
             continue
         target = str(to_node(G, act[-1]))  # o12 -> O(12), the form the console resolves
         prev = last.get(aid)
-        if act[0] == "inspect" and prev is not None and prev.target == target and prev.type == "goto":
+        at_prev = prev is not None and prev.type == "goto"
+        if act[0] == "inspect" and at_prev and prev.target == target:
             prev.type = "inspect"  # goto then inspect = the console's inspect (goto + dwell)
             prev.note += f"; {' '.join(act)}"
+            continue
+        if act[0] in GRAB or act[0] in DROP:
+            obj = str(to_node(G, act[2]))
+            if act[0] in GRAB:
+                typ, tgt, params = GRAB[act[0]], obj, {}
+            else:
+                typ, tgt, params = "place", target, {"object": obj, **({"dragged": True} if DROP[act[0]] else {})}
+            if at_prev and prev.target == tgt:  # the goto that got there becomes the manipulation
+                prev.type, prev.params = typ, {**prev.params, **params}
+                prev.note += f"; {' '.join(act)}"
+                continue
+            t = Task(id=new_id("t"), agent=aid, type=typ, target=tgt, note=" ".join(act), params=params)
+            tasks.append(t)
+            last[aid] = t
             continue
         t = Task(id=new_id("t"), agent=aid, type="goto" if act[0] == "goto-poi" else "inspect",
                  target=target, note=" ".join(act))  # fmt: skip
@@ -439,4 +462,5 @@ def preview(goal: str, robots: list[dict], src: str | None, service, constraints
         "pois": out["pois"],
         "fast_downward": out.get("fast_downward"),
         "regions": out.get("regions") or {},
+        "left_out": out.get("left_out") or [],
     }

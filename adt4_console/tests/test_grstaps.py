@@ -104,7 +104,17 @@ def test_an_inspection_is_one_robot_unless_several_are_named(svc):
     assert [t.type for t in m.tasks] == ["goto", "inspect"] and len({t.agent for t in m.tasks}) == 1
 
 
-def test_a_husky_is_left_out(svc):
+def test_a_husky_plans_as_a_ground_robot(svc):
+    _, service = svc
+    husky = {"id": "gauss", "kind": "husky", "start": [17.0, 2.0]}  # right next to O(0)
+    m, planned = omni.plan_pddl("(safe o0)", [SPOT1, husky], None, service, engine="grstaps")
+    assert {t.agent for t in m.tasks} == {"gauss"} and not planned["left_out"]
+
+
+def test_a_husky_is_left_out_when_disallowed(svc, monkeypatch):
+    from adt4_console.mission import grstaps_engine
+
+    monkeypatch.setattr(grstaps_engine, "ALLOW_HUSKY", False)
     _, service = svc
     husky = {"id": "gauss", "kind": "husky", "start": [17.0, 2.0]}  # right next to O(0)
     m, planned = omni.plan_pddl("(safe o0)", [SPOT1, husky], None, service, engine="grstaps")

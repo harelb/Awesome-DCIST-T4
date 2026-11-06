@@ -29,9 +29,11 @@ TaskType = Literal[
     "hold",  # stay put for params.dwell_s
     "pick",  # ground robot with an arm: go to the object (target), pick it up (GRSTAPS-X relocation)
     "place",  # carry the held object (params.object) to target and put it down
+    "drag",  # ground robot with an arm: go to a heavy object (target), grab it to drag (then a place)
 ]
 # what the console's live executor cannot send (the robots' omniplanner executor can: Send to robot)
-NOT_LIVE = ("pick", "place")
+NOT_LIVE = ("pick", "place", "drag")
+MANIPULATE = ("pick", "place", "drag")
 GROUND_KINDS = ("spot", "husky")
 DEFAULT_SPEED = {"spot": 1.0, "husky": 1.2, "quad": 4.0}  # m/s
 QUAD_ALTITUDE_M = 20.0

@@ -19,6 +19,7 @@ from .model import FOUND_PREFIX, Mission, Task
 DWELL_INSPECT_S = 10.0
 DWELL_IMAGE_S = 2.0
 DWELL_MANIPULATE_S = 10.0  # GRSTAPS-X's nominal pick / place duration
+DWELL_DRAG_S = 15.0  # grabbing a heavy object to drag it
 DECONFLICT_M = 2.0
 DECONFLICT_DT_S = 1.0
 # robots parked side by side and both still at their starts this early are pulling
@@ -166,6 +167,8 @@ def task_motion(mission: Mission, world: World, t: Task, pos) -> Motion:
         dwell = DWELL_IMAGE_S
     elif t.type in ("pick", "place"):
         dwell = float(t.params.get("dwell_s", DWELL_MANIPULATE_S))
+    elif t.type == "drag":
+        dwell = float(t.params.get("dwell_s", DWELL_DRAG_S))
     path, off = leg_path(mission, world, agent, pos, goal)
     short = False
     if off and agent.is_ground and not t.found_query() and len(path) > 2:
@@ -220,8 +223,10 @@ def preview(mission: Mission, world: World) -> dict:
         agent = mission.agent(t.agent)
         if agent.is_ground and t.type in ("explore_area",):
             issues.append({"level": "error", "task": t.id, "msg": f"{agent.kind} cannot explore_area (quads only)"})
-        if not agent.is_ground and t.type in ("pick", "place"):
+        if not agent.is_ground and t.type in ("pick", "place", "drag"):
             issues.append({"level": "error", "task": t.id, "msg": f"a {agent.kind} cannot {t.type} (ground robots with an arm)"})
+        if agent.kind == "husky" and t.type in ("pick", "place", "drag"):
+            issues.append({"level": "error", "task": t.id, "msg": f"{agent.id} is a husky (no arm): it cannot {t.type}"})
         try:
             m = task_motion(mission, world, t, pos[t.agent])
         except P.NoPath as e:
@@ -246,7 +251,7 @@ def preview(mission: Mission, world: World) -> dict:
             "type": t.type,
             "path": [[round(v, 2) for v in p[:2]] for p in path],
             "length_m": round(length, 1),
-            "move_s": length / mission.agent(t.agent).speed_mps(),
+            "move_s": length / task_speed(mission.agent(t.agent), t),
             "dwell_s": m.dwell_s,
             "tentative": m.tentative,
             "symbol": m.symbol,
@@ -383,6 +388,17 @@ def pos_start(mission, world, aid):
     return [round(v, 2) for v in s] if s else None
 
 
+DRAG_SPEED_FACTOR = 0.6  # a robot dragging a heavy object walks slower
+
+
+def task_speed(agent, t) -> float:
+    """m/s for ``agent`` driving task ``t``: slower while dragging (a place of a dragged object)."""
+    v = agent.speed_mps()
+    if t.type == "place" and t.params.get("dragged"):
+        v *= DRAG_SPEED_FACTOR
+    return v
+
+
 def position_at(rec: dict, speed: float, t: float):
     """Where an agent is at time ``t`` during task record ``rec`` (None outside it)."""
     if t < rec["t_start"] or t > rec["t_end"]:
@@ -422,8 +438,9 @@ def deconflict(mission: Mission, tasks: dict) -> list[dict]:
         t = k * DECONFLICT_DT_S
         where = {}
         for a in ground:
-            for r in (tasks[x.id] for x in mission.agent_tasks(a.id)):
-                p = position_at(r, a.speed_mps(), t)
+            for x in mission.agent_tasks(a.id):
+                r = tasks[x.id]
+                p = position_at(r, task_speed(a, x), t)
                 if p is not None:
                     where[a.id] = p
                     break

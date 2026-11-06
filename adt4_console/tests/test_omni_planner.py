@@ -112,11 +112,25 @@ def test_no_go_zone_on_the_only_gap_cuts_the_object_off(svc):
         omni.plan_pddl("(visited-object o0)", [SPOT1], None, service, geofences=[gap])
 
 
-def test_pick_and_place_are_refused(svc):
+def test_pick_and_place_become_tasks(svc):
     _, service = svc
     G = _G(service)
-    with pytest.raises(ValueError, match="pick-object"):
-        omni.plan_pddl(f"(object-in-place o0 {_place(G, 0, 0)})", [SPOT1], None, service)
+    dest = _place(G, 0, 0)
+    m, _ = omni.plan_pddl(f"(object-in-place o0 {dest})", [SPOT1], None, service)
+    types = [t.type for t in m.tasks]
+    assert "pick" in types and "place" in types
+    pick = next(t for t in m.tasks if t.type == "pick")
+    place = next(t for t in m.tasks if t.type == "place")
+    assert pick.target == "O(0)" and place.params["object"] == "O(0)" and not place.params.get("dragged")
+    assert types.index("pick") < types.index("place")
+
+
+def test_a_husky_never_picks(svc):
+    _, service = svc
+    G = _G(service)
+    husky = {"id": "gauss", "kind": "husky", "start": [17.0, 2.0]}  # right next to O(0)
+    m, _ = omni.plan_pddl(f"(object-in-place o0 {_place(G, 0, 0)})", [SPOT1, husky], None, service)
+    assert all(t.agent == "spot1" for t in m.tasks if t.type in ("pick", "place", "drag"))
 
 
 def test_bad_symbol_is_reported(svc):

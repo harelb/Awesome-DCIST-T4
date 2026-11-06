@@ -144,7 +144,15 @@ does it. Use the -by forms whenever the operator says which robot does a task.
 - (safe o12): some robot inspects o12 (the console's inspect: go there and look).
 - (at-object spot1 o12), (at-place spot1 t40): spot1 ends there.
 - (visited-region r3): some robot enters region r3 (its core, not a stray edge); (explored-region r3): every \
-place of r3 is visited. (visited-region-by spot1 r3), (explored-region-by spot1 r3): that robot does it.
+place of r3 is visited (small regions only; use GRSTAPS-X to cover a big one). (visited-region-by spot1 r3), \
+(explored-region-by spot1 r3): that robot does it; (in-region spot1 r3): spot1 ends inside r3 (hold / block it).
+- (object-in-place o4 t598): a robot with an arm picks o4 up, carries it and puts it down at mesh place \
+t598. Heavy objects (bags, sandbags, boxes, trash cans) are DRAGGED instead of carried; the planner \
+decides that from the object's class, so "drag the bag to X" and "bring the bag to X" are the same goal. \
+Spots have arms; a husky has NONE, so it never picks or drags: give it visits, inspections, end positions \
+(e.g. blocking a spot with at-place / in-region). To put an object "at" a region (block an intersection, \
+leave it by the courtyard entrance), look up a mesh place inside that region near where it should go and use \
+that t-symbol. Name who carries with (visited-object-by spot1 o4) next to the object-in-place.
 constraints: {predicate: 'forbidden-poi', symbols: ['o14']} keeps routes away from o14; \
 {predicate: 'forbidden-edge', symbols: ['t1', 't2']} closes the passage between two places.
 """
@@ -157,14 +165,17 @@ anything at o8 starts (one entry per pair; never both directions). Use it for "f
 - inspection: (safe o4) / (not (suspicious o4)) = one robot (the planner picks) goes and looks; \
 (inspected-by spot1 o4) = spot1 does it; (and (inspected-by spot1 o4) (inspected-by spot2 o4)) = a \
 JOINT inspection: they meet there and look together. GRSTAPS-X gives each robot as many tasks as \
-it needs (a robot is not limited to one route), but it leaves huskies out.
+it needs (a robot is not limited to one route); a husky takes part as a robot without an arm \
+(visits, inspections, exploration, never relocations).
 - regions: (visited-region r3) = one robot goes into r3's core; (explored-region r3) = robots \
 cover r3 at waypoints about 8 m apart (the planner splits them between robots); the -by forms pin \
 them to that robot. A mission area the operator drew is a region too, named by its symbol \
 (area1, area2, ... in the Named areas list): (explored-region area1). Only GRSTAPS-X plans drawn \
 areas. before works with regions: ['r3', 'o8'] = all of r3 first.
 - relocation: (object-in-place o4 t598) = pick o4 up, carry it, put it down at place t598 (the Spots \
-have arms). Use it for "move X out of the way" / "put X at Y" (pick a clear place you looked up).
+have arms; heavy objects -- bags, sandbags, boxes, trash cans -- are dragged instead, automatically). \
+Use it for "move X out of the way" / "put X at Y" / "drag X to Y" (pick a clear place you looked up). \
+An inspection and a relocation of the same object are ordered inspect -> move by themselves.
 GRSTAPS-X does NOT take or, at-place / at-object, holding, or any other not: visit the last stop and order it last with before instead of at-*. Use engine 'grstaps' \
 when the request needs ordering, a joint inspection, moving an object, or a schedule; otherwise \
 'fast_downward' (the default, shortest routes). A relocation runs only via Send to robot, not the \
@@ -193,8 +204,9 @@ PLAN_TOOL = {
             "goal": {"type": "string", "description": "the operator's request in one sentence, in their words"},
             "pddl_goal": {"type": "string", "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'"},
             "engine": {"type": "string", "enum": ["fast_downward", "grstaps"],
-                       "description": "fast_downward (default): shortest routes; grstaps: GRSTAPS-X, a timed "
-                       "schedule, joint inspections, before-ordering, object-in-place"},
+                       "description": "fast_downward (default): shortest routes, visits, inspections, end poses, "
+                       "moving / dragging objects (object-in-place); grstaps: GRSTAPS-X, a timed schedule, joint "
+                       "inspections, before-ordering, region coverage, object-in-place"},
             "constraints": {
                 "type": "array",
                 "items": {
@@ -346,11 +358,11 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
                          f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
                          "in one line instead of switching"
-                         + (": a husky's task needs Fast Downward, so then say 'this needs the Fast Downward "
-                            "planner (husky): switch the planner above', and do not ask to merge routes."
+                         + (": an end pose (at-place / in-region) or an or needs Fast Downward."
                             if ctx["engine"] == "grstaps"
-                            else ": ordering (before), a joint inspection, moving an object or a drawn mission "
-                                 "area (area1, ...) needs GRSTAPS-X.")  # fmt: skip
+                            else ": ordering (before), a joint inspection, covering a big region or a drawn mission "
+                                 "area (area1, ...) needs GRSTAPS-X. Fast Downward does plan moving and dragging "
+                                 "objects (object-in-place).")  # fmt: skip
                          )
     roster = ctx.get("roster") or []
     if roster:
