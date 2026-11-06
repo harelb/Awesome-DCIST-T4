@@ -100,13 +100,15 @@ for m in cat["missions"]:
     engine = "GRSTAPS-X" if m["engine"] == "grstaps" else "Fast Downward"
     tags = "".join(f"<li>{E(s)}</li>" for s in m.get("shows", []))
     nav.append(f"<a href='#{mid.lower()}'><b>{mid}</b> {E(m['title'])}</a>")
+    if mid == "M11":
+        cards.append('<h2 class="divider">Without drag: M11–M15</h2><p class="muted divider-note">The Spot drag skill is still being built, so these five use only what the robots do today. Spots carry cones and light bags with the arm; gauss visits, inspects, sweeps and blocks.</p>')
     cards.append(f"""
 <section class="mission" id="{mid.lower()}">
   <header class="mhead">
     <div class="mid">{mid}</div>
     <div class="mtitle"><h2>{E(m['title'])}</h2>
       <div class="meta"><span class="engine e-{m['engine']}">{engine}</span>
-      <span>≈ {mk/60:.1f} min</span><span>{sum(pv['driven_m'].values()):.0f} m driven</span>{'<span class="drag">drag ×%d</span>' % drags if drags else ''}</div></div>
+      <span>≈ {mk/60:.1f} min</span><span>{sum(pv['driven_m'].values()):.0f} m driven</span>{'<span class="drag">drag ×%d</span>' % drags if drags else ''}{'<span class="nodrag">no drag</span>' if m.get('nodrag') else ''}</div></div>
   </header>
   <blockquote class="command">“{E(m['text'])}”</blockquote>
   <div class="grid">
@@ -178,7 +180,7 @@ nav.index a:hover, nav.index a:focus-visible {{ border-color: var(--cone); outli
 .mtitle {{ min-width: 0; display: grid; gap: 4px }}
 .meta {{ display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums }}
 .engine {{ font-weight: 600 }} .e-grstaps {{ color: var(--grstaps) }} .e-fast_downward {{ color: var(--fd) }}
-.drag {{ color: var(--cone); font-weight: 600 }}
+.drag {{ color: var(--cone); font-weight: 600 }} .nodrag {{ color: var(--fd); font-weight: 600 }}
 .command {{ margin: 0; font-size: 1.12rem; line-height: 1.5; border-left: 3px solid var(--cone); padding: 2px 0 2px 14px; max-width: 80ch }}
 .grid {{ display: grid; grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); gap: 20px }}
 .media video {{ width: 100%; max-width: 100%; border-radius: 4px; background: #000; display: block; aspect-ratio: 16 / 10 }}
@@ -203,6 +205,7 @@ summary {{ cursor: pointer; font-weight: 600 }}
 summary:focus-visible {{ outline: 2px solid var(--cone); outline-offset: 2px }}
 pre, code {{ font-family: var(--mono); font-size: .82rem }}
 pre {{ background: var(--bg); padding: 10px 12px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; margin: 0 }}
+.divider {{ margin-top: 12px }} .divider-note {{ margin: -18px 0 0; max-width: 80ch }}
 .notes {{ display: grid; gap: 8px }} .notes ul {{ margin: 0; padding-left: 20px; display: grid; gap: 4px; max-width: 90ch }}
 @media (max-width: 820px) {{ .grid, .robots {{ grid-template-columns: minmax(0, 1fr) }} }}
 @media (prefers-reduced-motion: reduce) {{ * {{ scroll-behavior: auto !important }} }}
@@ -210,9 +213,9 @@ html {{ scroll-behavior: smooth }}
 </style>
 <div class="wrap">
   <header class="intro">
-    <div class="kicker">Pennovation · fused Penn scene graph · 10 missions</div>
+    <div class="kicker">Pennovation · fused Penn scene graph · 15 missions</div>
     <h1>Pennovation Mission Suite</h1>
-    <p>Ten natural-language missions for two Spots and a Husky. Each mixes region association, Cypher lookups and open-set grounding. Five are planned with Fast Downward and five with GRSTAPS-X, which handles ordering, joint inspections and arm-only tasks. Each video is the console's overhead simulation of the planned mission. The goal images are what each robot should expect to see.</p>
+    <p>Fifteen natural-language missions for two Spots and a Husky. M11–M15 avoid the drag skill, which is still being built. Each mixes region association, Cypher lookups and open-set grounding. Five are planned with Fast Downward and five with GRSTAPS-X, which handles ordering, joint inspections and arm-only tasks. Each video is the console's overhead simulation of the planned mission. The goal images are what each robot should expect to see.</p>
     <div class="facts">
       <span><span class="dot rb-euclid"></span><b>euclid</b> Spot + arm, start ({start['euclid']['start'][0]:.0f}, {start['euclid']['start'][1]:.0f})</span>
       <span><span class="dot rb-hamilton"></span><b>hamilton</b> Spot + arm, start ({start['hamilton']['start'][0]:.0f}, {start['hamilton']['start'][1]:.0f})</span>
@@ -229,6 +232,7 @@ html {{ scroll-behavior: smooth }}
       <li><b>Husky in GRSTAPS-X.</b> Plans now include gauss as a robot without an arm, and the schedules order its tasks (M9: gauss only moves after the cone is placed). On the robots, the compiled plan does not yet make Spots wait on gauss or gauss wait on Spots. That needs the executor-side ordering you mentioned.</li>
       <li><b>Open-set objects.</b> O704 (white water tank), O705 and O706 (orange barriers) were grounded with SAM3 on the dev copy of the map. M7's bags are placed on the day: put two bags near (−40, −10), ground them with the chat's image search, then plan with the new symbols.</li>
       <li><b>Moved objects.</b> Cones and bags in the prior map may have moved since it was recorded. Before each run, check the targets in the goal images, or re-ground them with SAM3.</li>
+      <li><b>Planning limits.</b> GRSTAPS-X solves up to about 20 tasks in its 60 s limit. Each explored region adds up to 15 coverage waypoints, so keep to one exploration per mission or raise <code>ADT4_GRSTAPS_TIMEOUT_S</code>. Fast Downward's region exploration visits every place in the region and does not scale to big regions.</li>
       <li><b>Allocation from language.</b> Neither planner can assign a relocation to a named robot. "Euclid carries X" is written as <code>(visited-object-by euclid X)</code> next to the <code>object-in-place</code>, which in practice makes euclid do it.</li>
     </ul>
   </section>

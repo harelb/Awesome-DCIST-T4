@@ -120,3 +120,66 @@ missions:
       - "Cypher (one cone per lot r4/r16)"
       - "parallel fetches"
     setup: "Cones in parking lots r4 (-75,-53) and r16 (30,64); a bag in the courtyard (-46,9)."
+  # ---- M11-M15: no drag (the Spot drag skill is still in the works); cones and light bags are carried with the arm.
+  # Plan these with bags carryable: OMNIPLANNER_HEAVY_CLASSES='sandbag,box,trash,trash can,suitcase' on the console.
+  - id: M11
+    title: Cone gate at the shelter
+    engine: fast_downward
+    nodrag: true
+    text: "Euclid and Hamilton, each bring a cone from the east parking lot and set them up as a gate on either side of the path by the shelter. Gauss, go look at the white water tanks meanwhile."
+    goal: "(and (visited-object-by euclid o453) (visited-object-by hamilton o459) (object-in-place o453 t8209) (object-in-place o459 t8220) (inspected-by gauss o704))"
+    shows:
+      - "region association (east parking lot r16)"
+      - "Cypher (cones in r16; places at the r0/r12 gate)"
+      - "open-set (white water tank O704)"
+      - "agent class (gauss inspects, Spots carry)"
+    setup: "2 cones in the east parking lot r16 near (30,64); gate places t8209 (3,-1) and t8220 (2,1)."
+  - id: M12
+    title: Hydrant relay
+    engine: grstaps
+    nodrag: true
+    text: "Euclid and Hamilton, inspect the fire hydrant together. After that, Gauss checks the cones next to it on the west sidewalk, and only then Euclid goes to the courtyard and brings the bag there back to the shelter."
+    goal: "(and (inspected-by euclid o700) (inspected-by hamilton o700) (inspected-by gauss o332) (visited-object-by euclid o599) (object-in-place o599 t10739))"
+    constraints: [{predicate: before, symbols: [o700, o332]}, {predicate: before, symbols: [o332, o599]}]
+    shows:
+      - "Cypher (fire hydrant has no region; cones by distance)"
+      - "coalition inspection"
+      - "2x temporal ordering across all three robots"
+      - "region association (courtyard r1) + carrying a bag (arm, no drag)"
+    setup: "Fire hydrant (-108,13); cones at (-101,12); a light bag in the courtyard (-46,9)."
+  - id: M13
+    title: Survey the south
+    engine: grstaps
+    nodrag: true
+    text: "Gauss, explore the south sidewalk. Hamilton, carry the bag on the field to the south intersection. Euclid, inspect the orange barrier near the shelter first, then check the cone in the west parking lot."
+    goal: "(and (explored-region-by gauss r20) (visited-object-by hamilton o690) (object-in-place o690 t6774) (inspected-by euclid o705) (inspected-by euclid o18))"
+    constraints: [{predicate: before, symbols: [o705, o18]}]
+    shows:
+      - "region exploration (r20) + carrying a bag to a region (r19)"
+      - "open-set (orange barrier O705 near the shelter)"
+      - "Cypher (cone in r4)"
+      - "temporal ordering"
+    setup: "Orange barrier near (22,3); a cone in the west parking lot r4 (-75,-53); a light bag on the field near (32,10)."
+  - id: M14
+    title: Close the north approach
+    engine: fast_downward
+    nodrag: true
+    text: "Hamilton, move a cone from the east parking lot into the north intersection. Euclid, inspect the bicycles by the field. Gauss, park where the courtyard meets sidewalk r11 and block it."
+    goal: "(and (visited-object-by hamilton o641) (object-in-place o641 t7505) (inspected-by euclid o189) (at-place gauss t3966))"
+    shows:
+      - "region association (north intersection r10, east parking lot r16)"
+      - "Cypher region adjacency (r1-r11 boundary place)"
+      - "blocking end pose for the husky"
+    setup: "A cone in the east parking lot r16; bicycles at (45,45)."
+  - id: M15
+    title: Sweep, then cone the courtyard
+    engine: grstaps
+    nodrag: true
+    text: "Gauss sweeps the courtyard first. Once it's clear, Euclid and Hamilton each carry a cone from the west parking lot to the two courtyard entrances from the main intersection."
+    goal: "(and (explored-region-by gauss r1) (visited-object-by euclid o18) (visited-object-by hamilton o558) (object-in-place o18 t8729) (object-in-place o558 t1192))"
+    constraints: [{predicate: before, symbols: [r1, o18]}, {predicate: before, symbols: [r1, o558]}]
+    shows:
+      - "region exploration + ordering (sweep before placing)"
+      - "Cypher region adjacency (r1-r0 boundary places)"
+      - "two parallel cone carries"
+    setup: "2 cones in the west parking lot r4 (-75,-53)."
