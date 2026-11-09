@@ -1146,6 +1146,48 @@ class FileSource(Source):
         return {k: {kk: v for kk, v in label.items() if v} for k in {p[4] for p in self.trajectory()}}
 
 
+# --- incremental Neo4j updates (Neo4jSource.apply_change) -------------------
+# Mirrors heracles graph_interface.db_to_spark_dsg: the layer labels it reads
+# (_DEFAULT_LAYER_MAP) and the edges add_edges_from_db inserts, as
+# (relationship type, from label, to label).  tests/test_incremental_refresh.py
+# checks an incremental update against a full reload, so a drift shows there.
+INCREMENTAL_MAX_NODES = 400
+_MAP_LABELS = ("Object", "Place", "MeshPlace", "Room", "Building")
+_NODE_LABELS = _MAP_LABELS + ("Agent", "Retired")
+_EDGE_RULES = (
+    ("OBJECT_CONNECTED", "Object", "Object"),
+    ("MESH_PLACE_CONNECTED", "MeshPlace", "MeshPlace"),
+    ("PLACE_CONNECTED", "Place", "Place"),
+    ("ROOM_CONNECTED", "Room", "Room"),
+    ("BUILDING_CONNECTED", "Building", "Building"),
+    ("CONTAINS", "MeshPlace", "Object"),
+    ("CONTAINS", "Place", "Object"),
+    ("CONTAINS", "Room", "Place"),
+    ("CONTAINS", "Room", "MeshPlace"),
+    ("CONTAINS", "Building", "Room"),
+)
+_EDGE_SET = frozenset(_EDGE_RULES)
+_INCIDENT_EDGES = (
+    f"MATCH (n:{'|'.join(_MAP_LABELS)}) WHERE n.nodeSymbol IN $syms "
+    "MATCH (n)-[r]-() WHERE type(r) IN $types "
+    "WITH DISTINCT r "
+    "WITH startNode(r) AS a, endNode(r) AS b, type(r) AS t "
+    "RETURN a.nodeSymbol AS f, labels(a) AS fl, t, b.nodeSymbol AS to, labels(b) AS tl"
+)
+
+
+def _symbol_variants(sym: str) -> list[str]:
+    """``"O(12)"`` -> both spellings a ``nodeSymbol`` may be stored in."""
+    c, i = parse_symbol(sym)
+    return [f"{c}({i})", f"{c}{i}"]
+
+
+def _rule_labels(r) -> tuple[str | None, str | None]:
+    """(from, to) map labels of an incident-edge row."""
+    pick = lambda labs: next((lab for lab in _MAP_LABELS if lab in labs), None)  # noqa: E731
+    return pick(r["fl"]), pick(r["tl"])
+
+
 def _neo4j_image(r: dict) -> NodeImage:
     """A heracles Observation row → NodeImage (mask PNG / sensor-sized RLE)."""
     mp = r.get("mp")
@@ -1237,8 +1279,14 @@ class Neo4jSource(Source):
         return self._version
 
     def invalidate(self) -> None:
+        """A write we know about landed: new version, reloaded on next use.  The DB
+        key is re-read now so the poll does not see the same write again (and bump,
+        and reload, a second time)."""
         self._props_cache.clear()
-        self._db_key_seen = None
+        try:
+            self._db_key_seen = self._db_key()
+        except Exception:  # noqa: BLE001  (unreachable: the poll re-reads it)
+            self._db_key_seen = None
         self._version = (self._version or 0) + 1
 
     def reset_map(self) -> None:
@@ -1251,17 +1299,185 @@ class Neo4jSource(Source):
         self.invalidate()
 
     def poll(self) -> bool:
-        """Re-read the DB key; True (and a new version) if it changed."""
+        """Re-read the DB key; True (and a new version) if it changed.  Under the
+        source lock, so it never interleaves with :meth:`apply_change`."""
+        with self._lock:
+            key = self._db_key()
+            if self._version is None:
+                self._db_key_seen, self._version = key, 1
+                return False
+            if key == self._db_key_seen:
+                return False
+            self._props_cache.clear()
+            self._db_key_seen = key
+            self._version += 1
+            return True
+
+    # -- incremental updates ------------------------------------------------
+    def apply_change(self, state_version, affected) -> tuple | None:
+        """Fold one known write into the loaded graph instead of reloading it all.
+
+        ``state_version`` is the ``_State.version`` the write bumped to and
+        ``affected`` the node symbols it touched (heracles ``notify_map_change`` /
+        graph_edit ``affected``).  When the console had seen the DB right up to
+        that write (``state_version`` is exactly one past it) and the graph is
+        loaded, only the affected nodes and their edges are re-read from Neo4j and
+        patched into a copy of the graph; returns ``(GraphDelta, new version)``.
+        A labelspace that only gained entries (a new class) is applied too.
+        Anything else -- an unknown write in between, nothing loaded, a renamed or
+        renumbered labelspace entry, too many nodes, any error -- falls back to
+        :meth:`invalidate` (full reload on next use) and returns None."""
+        with self._lock:
+            delta = None
+            try:
+                delta = self._try_apply(state_version, affected)
+            except Exception:  # noqa: BLE001
+                log.exception("%s: incremental update failed; reloading", self.id)
+            if delta is None:
+                self.invalidate()
+            return delta
+
+    def _try_apply(self, state_version, affected):
+        loaded, seen = self._loaded, self._db_key_seen
+        syms = []
+        for s in affected or ():
+            try:
+                syms.append(canonical_symbol(str(s)))
+            except ValueError:
+                return None
+        syms = list(dict.fromkeys(syms))
+        if (
+            not syms
+            or len(syms) > INCREMENTAL_MAX_NODES
+            or state_version is None
+            or loaded is None
+            or loaded.G is None
+            or self._version is None
+            or loaded.version != self._version
+            or seen is None
+            or int(state_version) != seen[0] + 1
+            or "db_labelspaces" not in loaded.extra
+        ):
+            return None
+        t0 = time.time()
+        db_ls, old_ls = self._db_labelspaces(), loaded.extra["db_labelspaces"]
+        if db_ls != old_ls and not all(
+            old_ls.get(k, {}).items() <= db_ls[k].items() for k in db_ls
+        ):  # an entry renamed / renumbered: existing nodes' labels change
+            return None
+        G, records, delta = self._patched(loaded, syms, db_ls)
+        labelspaces, extra = loaded.labelspaces, dict(loaded.extra)
+        if db_ls != old_ls:  # only grew (a new class): new names, same ids
+            import spark_dsg as dsg
+
+            for k, (layer, part) in (("object", (2, 0)), ("room", (4, 0))):
+                if db_ls[k]:
+                    G.set_labelspace(dsg.Labelspace({v: n for n, v in db_ls[k].items()}), layer, part)
+            labelspaces = _codec().graph_labelspaces(G)
+            delta.labelspaces = labelspaces
+            extra["db_labelspaces"] = db_ls
         key = self._db_key()
-        if self._version is None:
-            self._db_key_seen, self._version = key, 1
-            return False
-        if key == self._db_key_seen:
-            return False
-        self._props_cache.clear()
-        self._db_key_seen = key
-        self._version += 1
-        return True
+        if key[0] != int(state_version):
+            return None  # another write landed meanwhile: its nodes are unknown
+        version = self._version + 1
+        edges = _codec().graph_edges(G)  # whole graph: 60 ms on Penn, same form as a full load
+        delta.edges_add = sorted(edges - loaded.edges)
+        delta.edges_del = sorted(loaded.edges - edges)
+        self._loaded = Loaded(
+            version=version, records=records, edges=edges,
+            labelspaces=labelspaces, G=G, extra=extra,
+        )  # fmt: skip
+        for s in syms:
+            self._props_cache.pop(s, None)
+        self._version, self._db_key_seen = version, key
+        log.info("%s: v%s = v%s + %d node(s) (%d up, %d del, +%d/-%d edges) in %.3fs",
+                 self.id, version, version - 1, len(syms), len(delta.upserts), len(delta.deletes),
+                 len(delta.edges_add), len(delta.edges_del), time.time() - t0)  # fmt: skip
+        return delta, version
+
+    def _db_labelspaces(self) -> dict:
+        """The object / room ``_Labelspace`` rows ({layer: {name: id}}), as
+        heracles' ``db_to_spark_dsg`` reads them."""
+        out = {}
+        for layer in ("object", "room"):
+            rows = self.query(
+                "MATCH (m:_Labelspace {layer: $layer}) RETURN m.ids AS ids, m.names AS names",
+                layer=layer,
+            )
+            out[layer] = (
+                {n: i for i, n in zip(rows[0]["ids"] or [], rows[0]["names"] or [])} if rows else {}
+            )
+        return out
+
+    def _patched(self, loaded: Loaded, syms: list[str], ls: dict):
+        """(G, records, GraphDelta without edges) with ``syms`` re-read from Neo4j
+        into a copy of ``loaded`` (readers of the old graph are never disturbed);
+        ``ls`` = the DB labelspaces ({layer: {name: id}}) to resolve labels with."""
+        import spark_dsg as dsg
+        from heracles import constants
+        from heracles.graph_interface import db_record_to_spark_attrs
+
+        codec = _codec()
+        variants = [v for s in syms for v in _symbol_variants(s)]
+        rows = self.query(
+            f"MATCH (n:{'|'.join(_NODE_LABELS)}) WHERE n.nodeSymbol IN $syms "
+            "RETURN labels(n) AS labels, properties(n) AS props",
+            syms=variants,
+        )
+        found: dict[str, tuple[str, dict]] = {}
+        for r in rows:
+            labs = set(r["labels"])
+            props = dict(r["props"])
+            label = next((lab for lab in _MAP_LABELS if lab in labs), None)
+            if label is None and constants.AGENTS in labs:
+                label = constants.AGENTS
+            if label is None:  # retired: no longer on the map
+                continue
+            try:
+                found[canonical_symbol(str(props["nodeSymbol"]))] = (label, props)
+            except (KeyError, ValueError):
+                continue
+        G = loaded.G.clone()
+        records = dict(loaded.records)
+        delta = codec.GraphDelta()
+        for sym in syms:
+            c, i = parse_symbol(sym)
+            ns = dsg.NodeSymbol(c, i)
+            if G.has_node(ns):
+                G.remove_node(ns)
+            hit = found.get(sym)
+            if hit is not None and hit[0] != constants.AGENTS:
+                attrs = db_record_to_spark_attrs(hit[1], ls["object"], ls["room"])
+                G.add_node(constants.HERACLES_TO_SPARK_LAYER_NAMES[hit[0]], ns.value, attrs)
+        # edges after every node is back, so edges between two affected nodes land.
+        # An ingested intralayer edge is stored both ways round; a full load keeps
+        # the first it meets, so an edge the graph already had keeps its direction
+        for r in self.query(_INCIDENT_EDGES, syms=variants, types=sorted({t for t, _, _ in _EDGE_RULES})):
+            if (r["t"], *_rule_labels(r)) not in _EDGE_SET:
+                continue
+            try:
+                a, b = (dsg.NodeSymbol(*parse_symbol(str(r[k]))) for k in ("f", "to"))
+                if (str(b), str(a)) in loaded.edges and (str(a), str(b)) not in loaded.edges:
+                    a, b = b, a
+                if G.has_node(a) and G.has_node(b) and not G.has_edge(a, b):
+                    G.insert_edge(a.value, b.value)
+            except (ValueError, RuntimeError):
+                continue
+        for sym in syms:
+            c, i = parse_symbol(sym)
+            ns = dsg.NodeSymbol(c, i)
+            hit = found.get(sym)
+            rec = None
+            if G.has_node(ns):
+                rec = codec.node_record(G.get_node(ns))
+            elif hit is not None and hit[1].get("center") is not None:  # an Agent
+                rec = codec.NodeRecord(sym, AGENT_LAYER, ord(c), tuple(float(v) for v in hit[1]["center"][:3]))
+            if rec is not None:
+                records[rec.sym] = rec
+                delta.upserts.append(rec)
+            elif records.pop(sym, None) is not None:
+                delta.deletes.append(sym)
+        return G, records, delta
 
     def count_nodes(self) -> int:
         return int(self.query("MATCH (n) RETURN count(n) AS c")[0]["c"])
@@ -1283,10 +1499,15 @@ class Neo4jSource(Source):
             raise GraphUnavailable(f"heracles unavailable: {e}") from None
         db = self.db()
         try:
+            # read before the graph: a labelspace written in between then shows
+            # as a change to apply_change (full reload), never as a stale match
+            labelspaces = self._db_labelspaces()
             G = db_to_spark_dsg(db)
+        except GraphUnavailable:
+            raise
         except Exception as e:  # noqa: BLE001
             raise GraphUnavailable(f"db_to_spark_dsg failed: {e}") from None
-        loaded = _graph_loaded(G, version)
+        loaded = _graph_loaded(G, version, {"db_labelspaces": labelspaces})
         self._add_agent_records(loaded)
         return loaded
 
@@ -1783,7 +2004,12 @@ class GraphService:
             srcs = list(self.sources.values())
         return [s.info() for s in srcs]
 
-    def notify_version(self, src_id: str, reason: str) -> None:
+    def notify_version(self, src_id: str, reason: str, delta=None) -> None:
+        """Push ``graph/<src>/version``.  With ``delta`` (a fleetlink GraphDelta from
+        Neo4jSource.apply_change) the frame also carries it and the version it
+        applies to (``base``): a viewer holding exactly ``base`` applies it in
+        place; any other viewer (or one that missed a frame: the topic is
+        latest-value) reloads the snapshot as before."""
         src = self.sources.get(src_id)
         if src is None or self.hub is None:
             return
@@ -1791,7 +2017,22 @@ class GraphService:
             v = src.version()
         except Exception:  # noqa: BLE001
             v = None
-        self.hub.publish(f"graph/{src_id}/version", {"version": v, "reason": reason})
+        msg = {"version": v, "reason": reason}
+        if delta is not None:
+            d, dv = delta  # (GraphDelta, the version it produced)
+            msg.update(version=dv, base=dv - 1, delta=d.encode())
+        self.hub.publish(f"graph/{src_id}/version", msg)
+
+    def apply_change(self, src_id: str, reason: str, state_version, affected) -> bool:
+        """A write to Neo4j source ``src_id`` that touched ``affected`` and bumped
+        ``_State`` to ``state_version``: fold it in (or invalidate) and tell
+        viewers.  True when it was applied incrementally."""
+        src = self.sources.get(src_id)
+        if not isinstance(src, Neo4jSource):
+            return False
+        delta = src.apply_change(state_version, affected)
+        self.notify_version(src_id, reason, delta)
+        return delta is not None
 
     # -- live events (called from the fleetlink receiver thread) -----------
     def on_live(self, robot: str, kind: str, data) -> None:

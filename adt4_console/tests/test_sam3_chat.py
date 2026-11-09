@@ -64,7 +64,7 @@ class FakeSam3:
                     if body.get("pending_id") != "p-1":
                         code, out = 404, {"error": "unknown or expired pending_id"}
                     else:
-                        code, out = 200, {"symbol": "O(123)", "created": True}
+                        code, out = 200, {"symbol": "O(123)", "created": True, "state_version": 42}
                 elif self.path == "/discard":
                     code, out = 200, {"ok": True}
                 else:
@@ -189,7 +189,7 @@ def test_offline_found_objects_skip_sam3(svc_client, sam3):
 def test_commit_and_discard_forward_and_refresh(svc_client, sam3):
     client, svc = svc_client
     notified = []
-    svc.graph.notify_version = lambda sid, reason: notified.append((sid, reason))
+    svc.graph.notify_version = lambda sid, reason, delta=None: notified.append((sid, reason))
     r = client.post("/api/sam3/commit", json={"pending_id": "p-1", "index": 0, "src": "file:syn"})
     assert r.status_code == 200, r.text
     assert r.json()["symbol"] == "O(123)" and r.json()["created"] is True
@@ -205,12 +205,22 @@ def test_commit_refreshes_neo4j_source(svc_client, sam3):
     from adt4_console.graph_service import Neo4jSource
 
     src = Neo4jSource("live", "bolt://x:1", "u", "p")
+    other = Neo4jSource("other", "bolt://x:2", "u", "p")
     svc.graph.sources[src.id] = src
-    notified = []
-    svc.graph.notify_version = lambda sid, reason: notified.append((sid, reason))
+    svc.graph.sources[other.id] = other
+    applied, notified = [], []
+    svc.graph.apply_change = lambda sid, reason, sv, aff: applied.append((sid, reason, sv, aff))
+    svc.graph.notify_version = lambda sid, reason, delta=None: notified.append((sid, reason))
+    # the written source folds the new object in (state_version + symbol from the server)
     r = client.post("/api/sam3/commit", json={"pending_id": "p-1", "index": 1, "src": src.id})
     assert r.status_code == 200 and r.json()["refreshed"] == [src.id]
-    assert notified == [(src.id, "sam3")]
+    assert applied == [(src.id, "sam3", 42, ["O(123)"])] and notified == []
+    # no src: the --sam3-neo4j target is applied, every other Neo4j source reloads
+    applied.clear()
+    svc.settings.sam3_neo4j = "other"
+    r = client.post("/api/sam3/commit", json={"pending_id": "p-1", "index": 1})
+    assert r.status_code == 200 and sorted(r.json()["refreshed"]) == sorted([src.id, other.id])
+    assert applied == [(other.id, "sam3", 42, ["O(123)"])] and notified == [(src.id, "sam3")]
 
 
 def test_commit_errors_carry_real_reason(svc_client, sam3):

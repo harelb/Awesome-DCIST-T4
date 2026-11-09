@@ -177,12 +177,13 @@ export async function applyOps(ops: EditOp[], label?: string): Promise<EditResul
   const s = useMapEdit.getState();
   if (!s.src || !ops.length) return null;
   s.set({busy: true, error: null});
+  const before = viewerVersion(s.src);
   try {
     const r = await editApi.batch(s.src, ops, label);
     const toast = toastFor(r, label);
     const undo = r.staged || !r.mutation_id ? [] : [{mutationId: r.mutation_id, summary: toast.text, at: Date.now()}];
     useMapEdit.getState().set({toast, editUndo: [...useMapEdit.getState().editUndo, ...undo].slice(-20)});
-    await afterEdit();
+    await afterEdit(before);
     return r;
   } catch (e) {
     useMapEdit.getState().set({error: errorText(e)});
@@ -192,20 +193,32 @@ export async function applyOps(ops: EditOp[], label?: string): Promise<EditResul
   }
 }
 
-async function afterEdit() {
+/** The graph version the viewer holds for ``src`` (taken before an edit request). */
+const viewerVersion = (src: string | null) => (src ? (useViewer.getState().sources[src]?.version ?? null) : null);
+
+/** How long the version push (which carries the edit's delta) may take before
+ *  the viewer reloads the snapshot on its own. */
+export const EDIT_PUSH_GRACE_MS = 2000;
+
+async function afterEdit(before: number | null) {
   const src = useMapEdit.getState().src;
   await refreshEdit();
   // the open mission's preview says whether the map changed since it was planned
   const cur = useMission.getState().current;
   if (cur) void openMission(cur.id);
-  // the viewer reloads on the graph/<src>/version push; nudge it in case the push lags
-  if (src) void useViewer.getState().reloadSource(src);
+  // the viewer applies the edit from the graph/<src>/version push; reload only
+  // when that push has not shown up (lagging, or this tab missed it)
+  if (src)
+    window.setTimeout(() => {
+      if (viewerVersion(src) === before) void useViewer.getState().reloadSource(src);
+    }, EDIT_PUSH_GRACE_MS);
 }
 
 export async function undoEdit(mutationId?: string | null) {
   const s = useMapEdit.getState();
   if (!s.src) return;
   s.set({busy: true, error: null});
+  const before = viewerVersion(s.src);
   try {
     const r = await editApi.undo(s.src, mutationId);
     const stack = useMapEdit.getState().editUndo;
@@ -215,7 +228,7 @@ export async function undoEdit(mutationId?: string | null) {
       toast: {text: `Undone: ${r.summary.map(uiSummary).join("; ")}`, mutationId: null, staged: false, t: Date.now()},
       editUndo: gone ? stack.filter(u => u.mutationId !== gone) : stack.slice(0, -1),
     });
-    await afterEdit();
+    await afterEdit(before);
   } catch (e) {
     useMapEdit.getState().set({error: errorText(e)});
   } finally {
@@ -227,6 +240,7 @@ export async function publishStaged(confirm: string): Promise<boolean> {
   const s = useMapEdit.getState();
   if (!s.src) return false;
   s.set({busy: true, error: null});
+  const before = viewerVersion(s.src);
   try {
     const r = await editApi.publish(s.src, confirm);
     const cur = useMapEdit.getState().state;
@@ -235,7 +249,7 @@ export async function publishStaged(confirm: string): Promise<boolean> {
       stagedSummary: [],
       state: cur ? {...cur, staged: []} : cur,
     });
-    await afterEdit();
+    await afterEdit(before);
     return true;
   } catch (e) {
     useMapEdit.getState().set({error: errorText(e)});

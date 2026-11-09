@@ -405,11 +405,19 @@ function subscribeSource(id: string): () => void {
     const src = st.sources[id];
     if (!src?.enabled) return;
     if (kind === "version") {
-      const v = (data as {version?: number})?.version ?? null;
-      if (v !== src.version) {
-        st.patchSource(id, {version: v});
-        void st.reloadSource(id);
+      const msg = (data ?? {}) as {version?: number; base?: number; delta?: unknown};
+      const v = msg.version ?? null;
+      if (v === src.version) return;
+      // a known write (SAM3 commit, map edit) comes with its delta: applied in
+      // place when we hold exactly the version it was made against; otherwise
+      // (missed a frame, still loading) reload the snapshot
+      if (msg.delta && msg.base != null && msg.base === src.version && src.model && src.status === "ready") {
+        src.model.applyDelta(decodeDelta(msg.delta));
+        st.patchSource(id, {version: v, rev: src.model.rev});
+        return;
       }
+      st.patchSource(id, {version: v});
+      void st.reloadSource(id);
     } else if (kind === "delta") {
       if (!src.model || src.status !== "ready") return;
       const d = decodeDelta(data);
