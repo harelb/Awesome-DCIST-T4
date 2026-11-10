@@ -18,6 +18,7 @@ import os
 import pathlib
 import queue
 import threading
+import re
 import time
 
 log = logging.getLogger(__name__)
@@ -350,6 +351,8 @@ def lease_from_guards(msg) -> dict:
 
 
 # re-send an unchanged lease view this often (the UI ages it out without one)
+# a PDDL predicate naming the robot that must achieve it: (visited-poi-by hamilton t1)
+GOAL_BY_ROBOT = re.compile(r"-by\s+([A-Za-z_][A-Za-z0-9_]*)")
 LEASE_REPUBLISH_S = 5.0
 TAKE_LEASE_TIMEOUT_S = 20.0
 # phoenix Stop / Resume (/<robot>/toggle_manual_mode); the relay times out at 10 s
@@ -1030,8 +1033,48 @@ class RosBridge:
         topic = goal_topic(self.planner_ns, plugin)
         return self._send(robot, plugin["kind"], topic, plugin["msg_type"], fields)
 
+    def goal_robots(self, robot, fields) -> list[str]:
+        """The robots a goal commands: ``robot`` plus every robot a PDDL goal names
+        with a ``-by`` predicate (``(visited-poi-by hamilton t1)``)."""
+        out = [robot]
+        for name in GOAL_BY_ROBOT.findall(json.dumps(fields, default=str)):
+            if name not in out:
+                out.append(name)
+        return out
+
+    def auto_take_leases(self, robots) -> dict:
+        """Sending a plan takes the Spot lease (ADT4_AUTO_TAKE_LEASE, default on):
+        for each Spot whose executor reports it does not own it, :meth:`take_lease`.
+        {robot: {ok, message} | {skipped}}."""
+        if os.environ.get("ADT4_AUTO_TAKE_LEASE", "1").lower() in ("0", "false", "no", "off"):
+            return {}
+        out = {}
+        for r in robots:
+            try:
+                if self.platform(r) != "spot":
+                    continue
+            except Exception:  # noqa: BLE001  (unknown robot)
+                continue
+            lease = self._plan[r].lease or {}
+            if not lease.get("known") or lease.get("owned"):
+                continue  # owned already, or no runtime guards from the executor yet
+            try:
+                res = self.take_lease(r)
+            except Exception as e:  # noqa: BLE001
+                res = {"ok": False, "message": str(e)}
+            log.info("auto take_lease %s: %s", r, res)
+            out[r] = {"ok": bool(res.get("ok")), "message": res.get("message", "")}
+        return out
+
     def _send(self, robot, kind, topic, msg_type, fields, extra=None) -> dict:
         self.ensure_robot(robot)
+        leases = self.auto_take_leases(self.goal_robots(robot, fields))
+        if leases:
+            extra = {**(extra or {}), "lease": leases}
+            failed = [r for r, v in leases.items() if not v["ok"]]
+            if failed:
+                extra["warning"] = "; ".join(filter(None, [(extra or {}).get("warning"),
+                                   f"could not take the Spot lease of {', '.join(failed)}"]))  # fmt: skip
         subs = self.publish(topic, msg_type, fields)
         self._last_goal_robot = robot
         extra = {k: v for k, v in (extra or {}).items() if v is not None}
