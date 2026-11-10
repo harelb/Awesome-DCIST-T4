@@ -257,3 +257,70 @@ def test_a_chat_tool_call_becomes_a_card_and_the_route_runs_it():
     out = c.execute_scene_edit(card["id"], True)
     assert out["ok"] and "t5571" in out["result"]
     assert c.undo_scene_edit("neo4j:live")["ok"]
+
+
+# ------------------------------------------------- viewer: undo / clear / reset
+def test_writer_actions_call_the_writer_and_reload_the_map():
+    svc, graph, ros, mod = service()
+    out = svc.writer_action("undo", "neo4j:live")
+    assert out == {"ok": True, "action": "undo", "service": "/willow/scene_change_writer/undo_last_edit",
+                   "message": "Removed the latest edit; map rebuilt"}  # fmt: skip
+    out = svc.writer_action("clear", None)
+    assert out["ok"] and out["service"].endswith("/clear_edits")
+    out = svc.writer_action("reset", "neo4j:live", confirm="reset")
+    assert out["ok"] and out["service"].endswith("/reset")
+    assert [n for n, _ in ros.services] == [
+        "/willow/scene_change_writer/undo_last_edit",
+        "/willow/scene_change_writer/clear_edits",
+        "/willow/scene_change_writer/reset",
+    ]
+    assert graph.src.invalidated == 3 and len(graph.notified) == 3
+    assert mod.calls == []  # straight to the writer, no heracles_agents tool
+
+
+def test_reset_needs_the_typed_confirm_and_unknown_actions_are_refused():
+    import pytest
+
+    svc, graph, ros, mod = service()
+    with pytest.raises(ValueError, match='type "reset"'):
+        svc.writer_action("reset", "neo4j:live")
+    with pytest.raises(ValueError, match="unknown map action"):
+        svc.writer_action("explode", "neo4j:live")
+    assert ros.services == []
+
+
+def test_writer_absent_or_failing_is_reported_without_reloading():
+    svc, graph, ros, mod = service(writer=False)
+    st = svc.status()
+    assert st["running"] is False and "scene change writer" in st["reason"]
+    out = svc.writer_action("undo", "neo4j:live")
+    assert out["ok"] is False and "not running" in out["message"] and ros.services == []
+    svc, graph, ros, mod = service(answer=(False, "No edits to undo"))
+    out = svc.writer_action("undo", "neo4j:live")
+    assert out == {"ok": False, "action": "undo", "service": "/willow/scene_change_writer/undo_last_edit",
+                   "message": "No edits to undo"}  # fmt: skip
+    assert graph.src.invalidated == 0
+
+
+def test_map_scene_routes():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from adt4_console.routes import maps
+
+    svc, graph, ros, mod = service()
+    app = FastAPI()
+    app.include_router(maps.router)
+    app.state.services = NS(chat=NS(sget=svc))
+    client = TestClient(app)
+    st = client.get("/api/maps/scene").json()
+    assert st["running"] is True and st["writer"] == "/willow/scene_change_writer"
+    assert client.post("/api/maps/scene/undo", json={}).json()["ok"] is True
+    r = client.post("/api/maps/scene/reset", json={"confirm": "nope"})
+    assert r.status_code == 400 and "reset" in r.json()["detail"]
+    assert (
+        client.post("/api/maps/scene/reset", json={"confirm": "reset"}).json()["ok"]
+        is True
+    )
+    app.state.services = NS(chat=NS(sget=None))
+    assert client.get("/api/maps/scene").status_code == 503

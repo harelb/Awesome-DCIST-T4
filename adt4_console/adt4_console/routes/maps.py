@@ -103,7 +103,9 @@ REMOTE_TIMEOUT_S = 20
 FILL_TIMEOUT_S = 600
 _CACHE_FILE = pathlib.Path(os.path.expanduser("~/.cache/adt4_console/map_sizes.json"))
 _cache_lock = threading.Lock()
-_size_cache: dict[str, dict[str, list]] | None = None  # machine -> key -> [sig, size, store]
+_size_cache: dict[str, dict[str, list]] | None = (
+    None  # machine -> key -> [sig, size, store]
+)
 _filling: set[str] = set()
 
 
@@ -144,7 +146,11 @@ def _cache_put(machine: str, items: dict[str, list]) -> None:
 def _sized(entries: list[dict], key=lambda e: e["name"]) -> dict[str, list]:
     """Cache rows for the entries that got a size."""
     return {
-        key(e): [e["signature"], e["size_bytes"], (e.get("image_store") or {}).get("size_bytes")]
+        key(e): [
+            e["signature"],
+            e["size_bytes"],
+            (e.get("image_store") or {}).get("size_bytes"),
+        ]
         for e in entries
         if e.get("size_bytes") is not None and "signature" in e
     }
@@ -171,7 +177,11 @@ def _scan_local(dirs, machine: str, budget: float | None) -> list[dict]:
         left = None if deadline is None else deadline - time.monotonic()
         known = {d.name: cache[str(d)]} if str(d) in cache else None
         try:
-            out.append(scan_run(str(d), known, measure=left is None or left > 0.05, timeout=left))
+            out.append(
+                scan_run(
+                    str(d), known, measure=left is None or left > 0.05, timeout=left
+                )
+            )
         except Exception as e:  # noqa: BLE001
             out.append({"name": d.name, "path": str(d), "subdirs": [], "error": str(e)})
     _cache_put(machine, _sized(out, key=lambda e: e["path"]))
@@ -227,7 +237,9 @@ def list_remote(svc, m: dict, pending: set | None = None) -> list[dict]:
     h, root, name = svc.helpers, svc.settings.output_root, m["name"]
     cache = _cache_get(name)
     rc, stdout, stderr = h.ssh_cmd(
-        m["user"], m["ip"], remote_scan_command(root, cache, _budget(name, REMOTE_BUDGET_S)),
+        m["user"],
+        m["ip"],
+        remote_scan_command(root, cache, _budget(name, REMOTE_BUDGET_S)),
         timeout=REMOTE_TIMEOUT_S,
     )
     if rc != 0:
@@ -241,7 +253,8 @@ def list_remote(svc, m: dict, pending: set | None = None) -> list[dict]:
 
         def fill():
             rc, out, _ = h.ssh_cmd(
-                m["user"], m["ip"],
+                m["user"],
+                m["ip"],
                 remote_scan_command(root, _cache_get(name), None, todo),
                 timeout=FILL_TIMEOUT_S,
             )
@@ -275,7 +288,9 @@ def list_maps(request: Request, local: bool = False):
 
     # remote ssh scans run while the local scan does its own budgeted pass
     with ThreadPoolExecutor(max_workers=1) as pool:
-        remote_future = pool.submit(lambda: h.run_parallel(fetch, remotes) if remotes else [])
+        remote_future = pool.submit(
+            lambda: h.run_parallel(fetch, remotes) if remotes else []
+        )
         try:
             out[_local_name(svc)] = list_local(svc, pending)
         except Exception as e:  # noqa: BLE001
@@ -303,13 +318,27 @@ class TransferBody(BaseModel):
     force: bool = False
 
 
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+SSH = [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "ConnectTimeout=10",
+]
 STORE_DIR = "image_store"
 # Hydra/Khronos raw image logs (keyframe InputData zips, per-track logs). A packed
 # transfer sends the indexed store built from them (7x smaller than the zips, no
 # re-index at the destination), so they stay behind; the small event logs and the
 # save-time files (hydra/) still go with the rsync. A plain transfer copies all.
-RAW_LOG_EXCLUDES = ["/keyframes/", "/tracks/", "/hydra/keyframes/", "/hydra/tracks/", "/khronos/tracks/"]
+RAW_LOG_EXCLUDES = [
+    "/keyframes/",
+    "/tracks/",
+    "/hydra/keyframes/",
+    "/hydra/tracks/",
+    "/khronos/tracks/",
+]
 # Store pack/unpack runs as ``python -m fleetlink.image_pack`` (the reader it uses,
 # hydra_image_store, comes from the same workspace).
 PACK_MODULE = "fleetlink.image_pack"
@@ -350,12 +379,19 @@ def _local_store_env() -> dict:
 
         extra.append(str(pathlib.Path(fleetlink.__file__).resolve().parents[1]))
     except ImportError:
-        extra += [str(c) for c in (repo / "fleetlink", ws / "fleetlink") if c.is_dir()][:1]
+        extra += [str(c) for c in (repo / "fleetlink", ws / "fleetlink") if c.is_dir()][
+            :1
+        ]
     if importlib.util.find_spec("hydra_image_store") is None:
-        cands = (repo / "hydra" / "hydra_image_store" / "src", ws / "hydra" / "hydra_image_store" / "src")
+        cands = (
+            repo / "hydra" / "hydra_image_store" / "src",
+            ws / "hydra" / "hydra_image_store" / "src",
+        )
         extra += [str(c) for c in cands if c.is_dir()][:1]
     if extra:
-        env["PYTHONPATH"] = os.pathsep.join(extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        env["PYTHONPATH"] = os.pathsep.join(
+            extra + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+        )
     return env
 
 
@@ -363,8 +399,16 @@ def pack_args(run_dir: str, images: str, compression: str) -> list[str]:
     """``python -m fleetlink.image_pack pack`` → archive on stdout (zstd-wrapped: the sqlite
     index and any raw bytes compress; JPEGs pass through cheaply)."""
     return [
-        "pack", run_dir, "-", "--frames", images, "--compression", compression,
-        "--zstd-level", "3", "--quiet",
+        "pack",
+        run_dir,
+        "-",
+        "--frames",
+        images,
+        "--compression",
+        compression,
+        "--zstd-level",
+        "3",
+        "--quiet",
     ]
 
 
@@ -380,12 +424,14 @@ def _unpack_summary(text: str) -> str:
 
     text = text.strip()
     try:
-        stats = json.loads(text[text.index("{"):])
+        stats = json.loads(text[text.index("{") :])
     except ValueError:
         return text[-400:]
     if not isinstance(stats, dict):
         return text[-400:]
-    parts = [f"{k}={v}" for k, v in stats.items() if isinstance(v, (int, float, str, bool))]
+    parts = [
+        f"{k}={v}" for k, v in stats.items() if isinstance(v, (int, float, str, bool))
+    ]
     check = stats.get("check")
     if isinstance(check, dict) and "ok" in check:
         parts.append(f"check ok={check['ok']}")
@@ -398,23 +444,34 @@ def store_command(svc, m: dict, args: list[str]) -> tuple[list[str], dict | None
         expanded = [os.path.expanduser(a) if a.startswith("~") else a for a in args]
         return [sys.executable, "-m", PACK_MODULE, *expanded], _local_store_env()
     remote_args = " ".join(
-        a.replace("~", "$HOME", 1) if a.startswith("~") else shlex.quote(a) for a in args
+        a.replace("~", "$HOME", 1) if a.startswith("~") else shlex.quote(a)
+        for a in args
     )
     script = REMOTE_PY + f'exec "$PY" -m "$MOD" {remote_args}'
     return [*SSH, f"{m['user']}@{m['ip']}", f"sh -c {shlex.quote(script)}"], None
 
 
-def pipe_store(job, svc, src: dict, dst: dict, src_run: str, dst_run: str, images, compression):
+def pipe_store(
+    job, svc, src: dict, dst: dict, src_run: str, dst_run: str, images, compression
+):
     """Stream ``pack`` on ``src`` into ``unpack`` on ``dst`` through this host.
 
     Returns (ok, message).  Bytes on the wire are counted and logged.
     """
-    pack_cmd, pack_env = store_command(svc, src, pack_args(src_run, images, compression))
+    pack_cmd, pack_env = store_command(
+        svc, src, pack_args(src_run, images, compression)
+    )
     unpack_cmd, unpack_env = store_command(svc, dst, unpack_args(dst_run))
     job.log("dim", "pack: " + " ".join(pack_cmd[-1:] if pack_env is None else pack_cmd))
-    p_src = subprocess.Popen(pack_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pack_env)
+    p_src = subprocess.Popen(
+        pack_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=pack_env
+    )
     p_dst = subprocess.Popen(
-        unpack_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=unpack_env
+        unpack_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=unpack_env,
     )
     errs: dict[str, bytes] = {}
 
@@ -436,7 +493,9 @@ def pipe_store(job, svc, src: dict, dst: dict, src_run: str, dst_run: str, image
             sent += len(chunk)
             if sent >= next_log:
                 rate = sent / max(time.time() - t0, 1e-3) / 1e6
-                job.log("dim", f"image store: {sent / 1e6:.1f} MB sent ({rate:.1f} MB/s)")
+                job.log(
+                    "dim", f"image store: {sent / 1e6:.1f} MB sent ({rate:.1f} MB/s)"
+                )
                 next_log += 8 << 20
     except BrokenPipeError:
         pass
@@ -459,7 +518,9 @@ def pipe_store(job, svc, src: dict, dst: dict, src_run: str, dst_run: str, image
     if rc_dst != 0:
         return False, f"unpack failed (rc {rc_dst}): {tail(errs.get('unpack'))}"
     summary = _unpack_summary((errs.get("unpack") or b"").decode("utf-8", "replace"))
-    return True, f"{sent / 1e6:.1f} MB in {secs:.1f}s" + (f"; {summary}" if summary else "")
+    return True, f"{sent / 1e6:.1f} MB in {secs:.1f}s" + (
+        f"; {summary}" if summary else ""
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -486,7 +547,8 @@ def _scan_one(svc, m: dict, name: str, root: str | None = None) -> dict | None:
         e["abs_path"] = str(path)
         return e
     rc, out, err = svc.helpers.ssh_cmd(
-        m["user"], m["ip"],
+        m["user"],
+        m["ip"],
         remote_scan_command(root, _cache_get(m["name"]), 0, [name]),
         timeout=REMOTE_TIMEOUT_S,
     )
@@ -509,7 +571,9 @@ def _dest_entries(svc, m: dict) -> list[dict]:
     if _is_local(svc, m):
         return scan_root(root, light=True)
     rc, out, err = svc.helpers.ssh_cmd(
-        m["user"], m["ip"], remote_scan_command(root, None, 0, None, light=True),
+        m["user"],
+        m["ip"],
+        remote_scan_command(root, None, 0, None, light=True),
         timeout=REMOTE_TIMEOUT_S,
     )
     if rc != 0:
@@ -517,8 +581,15 @@ def _dest_entries(svc, m: dict) -> list[dict]:
     return parse_scan_output(out)
 
 
-def plan_transfer(svc, src: dict, dst: dict, experiment: str, as_name: str | None,
-                  images: str, compression: str) -> dict:
+def plan_transfer(
+    svc,
+    src: dict,
+    dst: dict,
+    experiment: str,
+    as_name: str | None,
+    images: str,
+    compression: str,
+) -> dict:
     """Where the copy goes and what has to move.
 
     ``status``: ``new`` (no copy yet), ``update`` (copy exists, source changed or the
@@ -534,10 +605,15 @@ def plan_transfer(svc, src: dict, dst: dict, experiment: str, as_name: str | Non
     run_id = ri.canonical_id(source)
     dests = _dest_entries(svc, dst)
     if _is_local(svc, dst):  # legacy copies (no ids) are matched by their files
-        same = next((d for d in dests if d.get("name") == experiment and not d.get("origin")), None)
+        same = next(
+            (d for d in dests if d.get("name") == experiment and not d.get("origin")),
+            None,
+        )
         if same is not None:
             same["manifest"] = manifest(same["path"])
-            same["dsg_mtime"] = _mtime_of(pathlib.Path(same["path"]) / "hydra/backend/dsg.json")
+            same["dsg_mtime"] = _mtime_of(
+                pathlib.Path(same["path"]) / "hydra/backend/dsg.json"
+            )
     copy, how = ri.find_copy(source, src["name"], dests)
     robot = (source.get("identity") or {}).get("robot") or src["name"]
     plain = images == "all" and compression == "none"
@@ -553,10 +629,14 @@ def plan_transfer(svc, src: dict, dst: dict, experiment: str, as_name: str | Non
     if copy is not None:
         origin = copy.get("origin") if how != "contents" else None
         state = ri.copy_state(source, origin, copy)
-        same_mode = bool(origin) and origin.get("images") == images and (
-            origin.get("compression") == compression
+        same_mode = (
+            bool(origin)
+            and origin.get("images") == images
+            and (origin.get("compression") == compression)
         )
-        send_store = (not plain) and ri.store_needs_send(source, origin, images, compression)
+        send_store = (not plain) and ri.store_needs_send(
+            source, origin, images, compression
+        )
         status = "up_to_date" if state == ri.IN_SYNC and same_mode else "update"
         note = (
             f"{dst['name']}:{copy['name']} is already an up-to-date copy"
@@ -582,7 +662,9 @@ def plan_transfer(svc, src: dict, dst: dict, experiment: str, as_name: str | Non
             dest_name=name,
             status="collision" if st.startswith("collision") else "new",
             state=ri.NOT_COPIED,
-            send_store=(not plain) and images != "none" and bool(source.get("has_image_store")),
+            send_store=(not plain)
+            and images != "none"
+            and bool(source.get("has_image_store")),
             note=(
                 f"{dst['name']}:{wanted} holds a different run; copying to {name} instead"
                 if st.startswith("collision")
@@ -604,13 +686,20 @@ def write_origin(svc, m: dict, dest_path: str, origin: dict) -> None:
     from dcist_launch_system.fleet import run_identity as ri
 
     if _is_local(svc, m):
-        ri.write_json_atomic(os.path.join(os.path.expanduser(dest_path), ri.ORIGIN), origin)
+        ri.write_json_atomic(
+            os.path.join(os.path.expanduser(dest_path), ri.ORIGIN), origin
+        )
         return
     rc, out, err = svc.helpers.ssh_cmd(
-        m["user"], m["ip"], ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin), timeout=15
+        m["user"],
+        m["ip"],
+        ri.remote_write_command(f"{dest_path}/{ri.ORIGIN}", origin),
+        timeout=15,
     )
     if rc != 0:
-        raise RuntimeError(f"could not write {ri.ORIGIN} on {m['name']}: {(err or out)[-200:]}")
+        raise RuntimeError(
+            f"could not write {ri.ORIGIN} on {m['name']}: {(err or out)[-200:]}"
+        )
 
 
 def find_local_copy(svc, run_id: str) -> dict | None:
@@ -684,7 +773,9 @@ def transfer(body: TransferBody, request: Request):
         if not plain:
             exclude.append(f"/{STORE_DIR}/")
             exclude += RAW_LOG_EXCLUDES
-        send_store = not plain and body.images != "none" and (plan["send_store"] or body.force)
+        send_store = (
+            not plain and body.images != "none" and (plan["send_store"] or body.force)
+        )
         job.log(
             "info",
             f"{src['name']}:{root}/{body.experiment} -> {dst['name']}:{root}/{dest_name}"
@@ -722,7 +813,9 @@ def transfer(body: TransferBody, request: Request):
             job.log("dim", "image store unchanged since the last copy; not re-packed")
             result["image_store"] = "unchanged"
         if send_store:
-            job.log("info", f"Packing image store ({body.images}, {body.compression}) ...")
+            job.log(
+                "info", f"Packing image store ({body.images}, {body.compression}) ..."
+            )
             ok, msg = pipe_store(
                 job,
                 svc,
@@ -745,7 +838,10 @@ def transfer(body: TransferBody, request: Request):
             origin["include_bags"] = True
         try:
             write_origin(svc, dst, f"{root}/{dest_name}", origin)
-            job.log("dim", f"wrote {ri.ORIGIN} (copy of {src['name']}:{origin['source_path']})")
+            job.log(
+                "dim",
+                f"wrote {ri.ORIGIN} (copy of {src['name']}:{origin['source_path']})",
+            )
         except Exception as e:  # noqa: BLE001
             job.log("warn", str(e))
         job.set_progress(dst["name"], 100)
@@ -775,7 +871,10 @@ def _attach_pending_prior(svc, job, dst: dict, plan: dict) -> None:
         state["prior"] = prior
         svc.launch_state.set(state)
         svc.graph.notify_version(sid, "registered")
-        job.log("ok", f"prior map of the active launch is now in the viewer ({prior['label']})")
+        job.log(
+            "ok",
+            f"prior map of the active launch is now in the viewer ({prior['label']})",
+        )
 
 
 class VerifyBody(BaseModel):
@@ -805,15 +904,19 @@ def verify(body: VerifyBody, request: Request):
     def run(job):
         def fetch(m):
             return svc.helpers.hash_remote_experiment(
-                m["user"], m["ip"], svc.settings.output_root,
+                m["user"],
+                m["ip"],
+                svc.settings.output_root,
                 run_names.get(m["name"], body.experiment),
             )
 
         if run_names:
             job.log(
                 "dim",
-                "comparing " + " ↔ ".join(
-                    f"{m['name']}:{run_names.get(m['name'], body.experiment)}" for m in targets
+                "comparing "
+                + " ↔ ".join(
+                    f"{m['name']}:{run_names.get(m['name'], body.experiment)}"
+                    for m in targets
                 ),
             )
 
@@ -885,11 +988,12 @@ def ingest(body: IngestBody, request: Request):
             job.log("error", "Ingest aborted — database left untouched.")
             return False
         image_store = body.image_root or (
-            str(run_dir / "image_store")
-            if (run_dir / "image_store").is_dir()
-            else None
+            str(run_dir / "image_store") if (run_dir / "image_store").is_dir() else None
         )
-        job.log("info", f"Writing to {target.uri} (image store: {image_store or 'none'}) ...")
+        job.log(
+            "info",
+            f"Writing to {target.uri} (image store: {image_store or 'none'}) ...",
+        )
         load_dsg_to_db(target.uri, target.creds, G, image_store=image_store)
         db = target.db()
         target.query(
@@ -923,14 +1027,18 @@ ADDED_OBJECTS = "MATCH (o:Object) WHERE o.source IS NOT NULL OR o.sam3_created I
 
 def _source_run(target) -> tuple[pathlib.Path, pathlib.Path]:
     """(dsg file, run dir) the target was last ingested from (_GraphMetadata source)."""
-    rows = target.query("MATCH (m:_GraphMetadata {key: 'source'}) RETURN m.file_path AS p")
+    rows = target.query(
+        "MATCH (m:_GraphMetadata {key: 'source'}) RETURN m.file_path AS p"
+    )
     path = rows[0]["p"] if rows else None
     if not path:
         raise HTTPException(409, f"neo4j:{target.name} does not record which map it was loaded from; "
                                  "load one from the Maps list instead")  # fmt: skip
     dsg = pathlib.Path(path)
     if not dsg.is_file():
-        raise HTTPException(409, f"neo4j:{target.name} was loaded from {dsg}, which no longer exists")
+        raise HTTPException(
+            409, f"neo4j:{target.name} was loaded from {dsg}, which no longer exists"
+        )
     run = dsg.parent.parent.parent if dsg.parent.name == "backend" else dsg.parent
     return dsg, run
 
@@ -959,7 +1067,10 @@ def load_semantic_features(target, run: pathlib.Path) -> int:
     if not path.is_file():
         return 0
     F = np.load(path)
-    rows = [{"s": re.sub(r"\((\d+)\)", r"\1", str(sym)), "e": f.tolist()} for sym, f in zip(F["symbols"], F["features"])]
+    rows = [
+        {"s": re.sub(r"\((\d+)\)", r"\1", str(sym)), "e": f.tolist()}
+        for sym, f in zip(F["symbols"], F["features"])
+    ]
     for i in range(0, len(rows), 500):
         target.query("UNWIND $rows AS r MATCH (n:MeshPlace|Room {nodeSymbol: r.s}) SET n.siglip2_emb = r.e",
                      rows=rows[i:i + 500])  # fmt: skip
@@ -1018,11 +1129,19 @@ def reset(body: ResetBody, request: Request):
         t0 = time.time()
         job.log("info", f"Loading {dsg_path} ...")
         G = dsg.DynamicSceneGraph.load(str(dsg_path))
-        job.log("ok", f"Loaded {G.num_nodes()} nodes; wiping neo4j:{target.name} and writing it (several minutes) ...")
-        image_store = str(run_dir / "image_store") if (run_dir / "image_store").is_dir() else None
+        job.log(
+            "ok",
+            f"Loaded {G.num_nodes()} nodes; wiping neo4j:{target.name} and writing it (several minutes) ...",
+        )
+        image_store = (
+            str(run_dir / "image_store") if (run_dir / "image_store").is_dir() else None
+        )
         load_dsg_to_db(target.uri, target.creds, G, image_store=image_store)
         db = target.db()
-        target.query("MERGE (m:_GraphMetadata {key: 'source'}) SET m.file_path = $p", p=str(dsg_path))
+        target.query(
+            "MERGE (m:_GraphMetadata {key: 'source'}) SET m.file_path = $p",
+            p=str(dsg_path),
+        )
         mesh = dsg_path.parent / "mesh.ply"
         if mesh.is_file():
             store_mesh_path(db, str(mesh))
@@ -1033,15 +1152,23 @@ def reset(body: ResetBody, request: Request):
         target.invalidate()
         svc.graph.notify_version(target.id, "reset")
         nodes = target.count_nodes()
-        job.log("ok", f"Reset: {nodes} nodes in {round(time.time() - t0)} s (v{version})")
+        job.log(
+            "ok", f"Reset: {nodes} nodes in {round(time.time() - t0)} s (v{version})"
+        )
         sam3 = None
         if sam3_url:
-            job.log("info", "SAM3 server: re-reading the keyframes (embeddings from its cache) ...")
+            job.log(
+                "info",
+                "SAM3 server: re-reading the keyframes (embeddings from its cache) ...",
+            )
             try:
                 sam3 = sam3_client.reload(sam3_url)
                 job.log("ok", f"SAM3 server reloaded: {sam3}")
             except Exception as e:  # noqa: BLE001 — the map is reset either way
-                job.log("warn", f"SAM3 server not reloaded ({e}); restart it to pick up the new keyframes")
+                job.log(
+                    "warn",
+                    f"SAM3 server not reloaded ({e}); restart it to pick up the new keyframes",
+                )
         return {"nodes": nodes, "version": version, "seconds": round(time.time() - t0, 1),
                 "removed_objects": st["added_objects"], "removed_edits": st["map_edits"], "sam3": sam3}  # fmt: skip
 
@@ -1102,3 +1229,33 @@ def activate_map(body: ActivateBody, request: Request):
         raise HTTPException(400, str(e)) from None
     except Busy as e:
         raise HTTPException(409, {"detail": str(e), "job_id": e.job_id}) from None
+
+
+# ------------------------------------------------- plan repair: undo / clear / reset
+def _sget(request: Request):
+    chat = getattr(services(request), "chat", None)
+    sget = getattr(chat, "sget", None)
+    if sget is None:
+        raise HTTPException(503, "plan repair map controls are not available")
+    return sget
+
+
+@router.get("/scene")
+def scene_status(request: Request):
+    """Can the viewer undo / clear / reset map edits: the scene change writer's state."""
+    return _sget(request).status()
+
+
+class SceneActionBody(BaseModel):
+    src: str | None = None
+    confirm: str | None = None  # reset: the operator types "reset"
+
+
+@router.post("/scene/{action}")
+def scene_action(action: str, body: SceneActionBody, request: Request):
+    """undo (the last edit) / clear (every edit) / reset (to the prior map) through
+    plan repair's scene change writer, which rebuilds the map; the console reloads it."""
+    try:
+        return _sget(request).writer_action(action, body.src, body.confirm)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None

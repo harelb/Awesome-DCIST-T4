@@ -105,6 +105,9 @@ TOOLS = {
     },
 }  # fmt: skip
 WRITER_TOOLS = ("undo_scene_edit", "clear_scene_edits", "reset_scene_graph")
+# the viewer's map controls: action -> scene change writer service (std_srvs/Trigger)
+WRITER_ACTIONS = {"undo": "undo_last_edit", "clear": "clear_edits", "reset": "reset"}
+RESET_CONFIRM = "reset"  # typed by the operator: a reset drops every change to the map
 _NO_EDIT = ("Refused", "Not done", "Not available", "Failed")
 
 SYSTEM_NOTE = (
@@ -207,6 +210,46 @@ class SgetService:
         """SGET replaces the console's own edit path: plan repair's writer runs and
         heracles_agents is importable."""
         return self.module() is not None and self.writer_running()
+
+    # ------------------------------------------------------- viewer map controls
+    def status(self) -> dict:
+        """What the viewer's Undo / Clear / Reset controls need: is the writer up."""
+        running = self.writer_running()
+        reason = None
+        if not running:
+            ros = self.ros
+            if ros is None or not getattr(ros, "available", False):
+                reason = "ROS is not running on this console"
+            else:
+                reason = (f"plan repair's scene change writer ({self.writer()}) is not running "
+                          "on the base station")  # fmt: skip
+        return {"writer": self.writer(), "running": running, "reason": reason,
+                "actions": sorted(WRITER_ACTIONS)}  # fmt: skip
+
+    def writer_action(
+        self, action: str, src_id: str | None = None, confirm: str | None = None
+    ) -> dict:
+        """Undo the last edit / clear all edits / reset the map to its prior, through
+        the scene change writer (it rebuilds the map); then reload the console's map.
+        {ok, action, service, message}."""
+        service = WRITER_ACTIONS.get(action)
+        if service is None:
+            raise ValueError(
+                f"unknown map action {action!r} (use {', '.join(sorted(WRITER_ACTIONS))})"
+            )
+        if action == "reset" and (confirm or "").strip().lower() != RESET_CONFIRM:
+            raise ValueError(f'type "{RESET_CONFIRM}" to reset the map to its prior')
+        name = f"{self.writer()}/{service}"
+        if not self.writer_running():
+            return {"ok": False, "action": action, "service": name,
+                    "message": self.status()["reason"]}  # fmt: skip
+        ok, message = self._call_writer(service)
+        if ok:
+            src = self._source(src_id)
+            if src is not None:
+                self._refresh(src)
+        log.info("map %s via %s: ok=%s %s", action, name, ok, message)
+        return {"ok": bool(ok), "action": action, "service": name, "message": message}
 
     # --------------------------------------------------------------- proposals
     def propose(self, tool: str, args: dict, src_id: str) -> tuple[dict, dict]:

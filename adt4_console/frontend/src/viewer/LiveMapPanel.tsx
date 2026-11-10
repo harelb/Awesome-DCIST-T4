@@ -4,6 +4,7 @@
 // its own bar. Runs without an image store skip those stages.
 import {useEffect, useState} from "react";
 import {Badge} from "../components/ui";
+import {MapEditControls} from "./MapEditControls";
 import {activateMap, bindLiveMap, mapLoaded, mapProgress, refreshMapChoices, useLiveMap, type LiveMap, type MapStage} from "../stores/liveMap";
 
 const STATE_TEXT: Record<MapStage["state"], string> = {
@@ -80,6 +81,7 @@ export function LiveMapPanel() {
       )}
       {map && (loading || map.stages.some(s => s.state === "failed")) && <MapLoadBars map={map} />}
       {error && <div className="inline-err small">{error}</div>}
+      {map?.ready && <MapEditControls src={map.target ? `neo4j:${map.target}` : null} />}
     </section>
   );
 }
