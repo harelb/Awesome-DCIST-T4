@@ -27,7 +27,9 @@ class MissionService:
         self.live = live
         self.ros = ros
         self.quad = quad
-        self.edits = None  # edit_service.EditService: the map revision a mission plans on
+        self.edits = (
+            None  # edit_service.EditService: the map revision a mission plans on
+        )
         d = getattr(settings, "missions_dir", None)
         self.dir = pathlib.Path(os.path.expanduser(d)) if d else None
         img = getattr(settings, "quad_images_dir", None)
@@ -37,7 +39,9 @@ class MissionService:
         self.runs: dict[str, SimRunner] = {}  # mission id -> sim or live runner
         self._graphs: dict[str, tuple] = {}  # src -> (version, PlaceGraph)
         self._mosaics: dict[str, object] = {}
-        self._quick: dict[str, tuple] = {}  # mission id -> ((id, revision, map version), errors)
+        self._quick: dict[
+            str, tuple
+        ] = {}  # mission id -> ((id, revision, map version), errors)
         self._load_saved()
 
     # ------------------------------------------------------------ storage
@@ -70,11 +74,21 @@ class MissionService:
         with self._lock:
             ms = sorted(self.missions.values(), key=lambda m: -m.created_at)
             return [
-                {"id": m.id, "name": m.name or m.text[:60], "text": m.text, "agents": len(m.agents),
-                 "tasks": len(m.tasks), "created_at": m.created_at, "revision": m.revision,
-                 "planner": m.planner, "run": self.runs[m.id].kind if m.id in self.runs else None,
-                 "saved": m.saved, "decisions": len(m.decisions), "has_chat": bool(m.chat),
-                 "errors": self._quick_errors(m)}  # fmt: skip
+                {
+                    "id": m.id,
+                    "name": m.name or m.text[:60],
+                    "text": m.text,
+                    "agents": len(m.agents),
+                    "tasks": len(m.tasks),
+                    "created_at": m.created_at,
+                    "revision": m.revision,
+                    "planner": m.planner,
+                    "run": self.runs[m.id].kind if m.id in self.runs else None,
+                    "saved": m.saved,
+                    "decisions": len(m.decisions),
+                    "has_chat": bool(m.chat),
+                    "errors": self._quick_errors(m),
+                }  # fmt: skip
                 for m in ms
             ]
 
@@ -126,7 +140,11 @@ class MissionService:
     def _unique_name(self, name: str, mid: str) -> str:
         """``name``, or ``name (2)``, ``(3)``, ... when another mission has it
         (case-insensitive; a trailing ``(n)`` of ``name`` is its own base)."""
-        taken = {(o.name or "").strip().lower() for o in self.missions.values() if o.id != mid}
+        taken = {
+            (o.name or "").strip().lower()
+            for o in self.missions.values()
+            if o.id != mid
+        }
         if name.lower() not in taken:
             return name
         base = re.sub(r"\s*\(\d+\)$", "", name)
@@ -161,7 +179,11 @@ class MissionService:
             return None
         try:
             now = self.edits.map_stamp(sid)
-            n = self.edits.edits_since(sid, m.map_revision or 0) if m.map_version is not None else 0
+            n = (
+                self.edits.edits_since(sid, m.map_revision or 0)
+                if m.map_version is not None
+                else 0
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("map status for %s: %s", sid, e)
             return None
@@ -170,9 +192,13 @@ class MissionService:
         stale = unknown or now["map_version"] != m.map_version or n > 0
         msg = None
         if unknown:
-            msg = "planned before map versions were recorded, so the map may have changed"
+            msg = (
+                "planned before map versions were recorded, so the map may have changed"
+            )
         elif stale:
-            msg = "map changed since planning" + (f" ({n} edit{'s' if n != 1 else ''})" if n else "")
+            msg = "map changed since planning" + (
+                f" ({n} edit{'s' if n != 1 else ''})" if n else ""
+            )
         return {"planned_revision": m.map_revision, "revision": now["map_revision"],
                 "planned_map_version": m.map_version, "map_version": now["map_version"],
                 "edits_since": n, "stale": stale, "unknown": unknown, "message": msg,
@@ -192,7 +218,9 @@ class MissionService:
         sid = self._edit_src(m.src)
         if sid is None:
             raise ValueError("the mission's map is not an editable Neo4j map")
-        info = self.edits.snapshot(sid, name or f"mission {m.name or m.id}", mission=m.id)
+        info = self.edits.snapshot(
+            sid, name or f"mission {m.name or m.id}", mission=m.id
+        )
         with self._lock:
             m.map_snapshot = info["id"]
             self._save(m)
@@ -287,7 +315,9 @@ class MissionService:
     def run(self, mid: str) -> SimRunner | None:
         return self.runs.get(mid)
 
-    def sim(self, mid: str, cmd: str, value=None, auto_approve: bool | None = None) -> dict:
+    def sim(
+        self, mid: str, cmd: str, value=None, auto_approve: bool | None = None
+    ) -> dict:
         """``cmd="replay"``: a fresh run that re-applies the saved operator
         decisions at their sim times (the mission plays out as it was approved)."""
         with self._lock:
@@ -301,7 +331,9 @@ class MissionService:
                 make = None
                 if cmd == "replay":
                     if not m.decisions:
-                        raise ValueError("this mission has no saved run to replay (save it after simulating)")
+                        raise ValueError(
+                            "this mission has no saved run to replay (save it after simulating)"
+                        )
 
                     def make():
                         from .sim import MissionSim
@@ -310,7 +342,9 @@ class MissionService:
                         sim._replay = [dict(d) for d in m.decisions]
                         return sim
 
-                run = SimRunner(m, world, self._publish, auto_approve=bool(auto_approve), make=make)
+                run = SimRunner(
+                    m, world, self._publish, auto_approve=bool(auto_approve), make=make
+                )
                 self.runs[mid] = run
         if auto_approve is not None and cmd != "auto_approve":
             run.control("auto_approve", auto_approve)
@@ -319,12 +353,24 @@ class MissionService:
         if cmd == "replay":
             out = run.control("play")
             st = self.map_status(m)
-            if st and st["stale"] and isinstance(out, dict):  # the run was approved on another map
-                out = {**out, "map": st, "warning": f"replaying on a different map: {st['message']}"}
+            if (
+                st and st["stale"] and isinstance(out, dict)
+            ):  # the run was approved on another map
+                out = {
+                    **out,
+                    "map": st,
+                    "warning": f"replaying on a different map: {st['message']}",
+                }
             return out
         return run.control(cmd, value)
 
-    def save(self, mid: str, name: str | None = None, chat: dict | None = None, keep_run: bool = True) -> dict:
+    def save(
+        self,
+        mid: str,
+        name: str | None = None,
+        chat: dict | None = None,
+        keep_run: bool = True,
+    ) -> dict:
         """Keep a mission: name it, attach its chat and (``keep_run``) the operator
         decisions of its current simulated run. Same id and revision (the plan
         does not change), so its run keeps going."""
@@ -337,7 +383,10 @@ class MissionService:
                 m.chat = chat
             run = self.runs.get(mid)
             if keep_run and run is not None and run.kind == "sim" and run.sim.decisions:
-                m.decisions = [{k: v for k, v in d.items() if not k.startswith("_")} for d in run.sim.decisions]
+                m.decisions = [
+                    {k: v for k, v in d.items() if not k.startswith("_")}
+                    for d in run.sim.decisions
+                ]
             self._save(m)
         return {"mission": m.model_dump(), "decisions": len(m.decisions)}
 
@@ -383,14 +432,21 @@ class MissionService:
         out = {}
         if c["status"] == "rejected" and approve:
             raise ValueError(f"detection {cid} was rejected")
-        if commit and c["status"] == "approved" and c.get("sym") and not str(c["sym"]).startswith("sim:"):
+        if (
+            commit
+            and c["status"] == "approved"
+            and c.get("sym")
+            and not str(c["sym"]).startswith("sim:")
+        ):
             return c  # already in the map
         if approve and commit:
             from .objects import add_object
 
             src = self._neo4j_for(run.mission.src)
             if src is None:
-                raise ValueError("no Neo4j map to add the object to (simulation-only approve)")
+                raise ValueError(
+                    "no Neo4j map to add the object to (simulation-only approve)"
+                )
             path = self._store_image(mid, c["image"], self.image(mid, c["image"]))
             out = add_object(src, c["label"], c["pos"], image_path=str(path) if path else None,
                              bbox_2d=c.get("bbox"), source="quad")  # fmt: skip
@@ -399,7 +455,9 @@ class MissionService:
         cand = run.decide(cid, approve, sym)
         return {**cand, **({"map_version": out.get("map_version")} if out else {})}
 
-    def annotate(self, mid: str, img_id: str, bbox, label: str, query: str | None = None) -> dict:
+    def annotate(
+        self, mid: str, img_id: str, bbox, label: str, query: str | None = None
+    ) -> dict:
         run = self.runs.get(mid)
         if run is None:
             raise KeyError(mid)
@@ -428,13 +486,15 @@ class MissionService:
     # ------------------------------------------------------------ live runs
     def execute(self, mid: str) -> dict:
         """Start the mission for real: bound agents drive their robots / the quad."""
-        from .live import LiveIO, LiveRun
+        from .live import LiveIO, LiveRun, mission_plan
 
         m = self.get(mid)
         pv = self.preview(m)
         errors = [i for i in pv["issues"] if i["level"] == "error"]
         if errors:
-            raise ValueError("fix the mission first: " + "; ".join(i["msg"] for i in errors))
+            raise ValueError(
+                "fix the mission first: " + "; ".join(i["msg"] for i in errors)
+            )
         manip = sorted({t.type for t in m.tasks if t.type in NOT_LIVE})
         if manip:
             raise ValueError(f"the console cannot run {' / '.join(manip)} on a robot: send this goal to the robots "
@@ -442,22 +502,63 @@ class MissionService:
         bound = [a for a in m.agents if a.binding]
         if not bound:
             raise ValueError("no agent is bound to a real robot; simulate it instead")
-        if any(a.kind == "quad" for a in bound) and (self.quad is None or not self.quad.configured):
-            raise ValueError("a quad is bound but the quad link is not configured (--quad-cmd-uri)")
+        if any(a.kind == "quad" for a in bound) and (
+            self.quad is None or not self.quad.configured
+        ):
+            raise ValueError(
+                "a quad is bound but the quad link is not configured (--quad-cmd-uri)"
+            )
         io = LiveIO(
             send_goto=self._send_goto,
+            send_plan=self._send_plan,
             robot_pose=self.robot_pose,
-            robot_results=lambda r: (self.ros.plan(r) or {}).get("results") if self.ros is not None else [],
+            robot_results=lambda r: (self.ros.plan(r) or {}).get("results")
+            if self.ros is not None
+            else [],
             quad=self.quad,
         )
         world = self.world(m)
+        plan = mission_plan(m, self._no_go_constraints(m, world))
+        if plan and "fallback" in plan:
+            log.info("mission %s: sending a goto per task (%s)", mid, plan["fallback"])
         with self._lock:
             old = self.runs.pop(mid, None)
             if old is not None:
                 old.stop()
-            run = SimRunner(m, world, self._publish, make=lambda: LiveRun(m, world, io), kind="live")
+            run = SimRunner(
+                m,
+                world,
+                self._publish,
+                make=lambda: LiveRun(m, world, io, plan=plan),
+                kind="live",
+            )
             self.runs[mid] = run
         return run.control("play")
+
+    def _send_plan(self, robot, pddl, constraints, engine):
+        """The mission's PDDL goal, through the robot's planner as the Plan tab sends it
+        (plan repair's goal_manager when it runs; GRSTAPS-X for engine grstaps)."""
+        if self.ros is None:
+            raise RuntimeError("ROS is off (--no-ros)")
+        return self.ros.send_pddl_goal(robot, pddl, None, constraints or None, "auto",
+                                       engine=None if engine in (None, "fast_downward") else engine)  # fmt: skip
+
+    def _no_go_constraints(self, m, world) -> list[dict]:
+        """forbidden-poi for every map place inside the mission's no-go zones."""
+        if (
+            not m.geofences
+            or world.graph is None
+            or getattr(world.graph, "G", None) is None
+        ):
+            return []
+        try:
+            from .omni_planner import _geofence_constraints
+
+            return _geofence_constraints(world.graph.G, m.geofences,
+                                         lambda predicate, symbols: {"predicate": predicate, "symbols": symbols})  # fmt: skip
+        except Exception as e:  # noqa: BLE001
+            log.warning("no-go zones not sent with the mission's goal: %s", e)
+            return []
 
     def _send_goto(self, robot, symbols):
         if self.ros is None:
@@ -467,7 +568,11 @@ class MissionService:
         plugin = self.ros.find_plugin("goto", None)
         if plugin is None:
             raise RuntimeError("omniplanner has no goto plugin")
-        return self.ros.send_goal(robot, plugin, {"robot_id": robot, "point_names_to_visit": omniplanner_points(symbols)})
+        return self.ros.send_goal(
+            robot,
+            plugin,
+            {"robot_id": robot, "point_names_to_visit": omniplanner_points(symbols)},
+        )
 
     def abort(self, mid: str) -> dict:
         run = self.runs.get(mid)
