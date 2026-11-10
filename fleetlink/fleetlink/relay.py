@@ -41,6 +41,19 @@ Delivery modes (per topic):
                    at the next slot), fire and forget; stale tseq dropped
 =================  ==========================================================
 
+**Large messages.**  In the acked modes a message larger than ``chunk_bytes``
+(16 kB) is sent in parts: ``{..., id, part, parts, data}`` with the same
+``id`` / ``tseq``, at most ``chunk_window`` (6) parts unacknowledged at a time (so
+a few hundred kB never overflows zenoh's 128 kB per-priority queue, which drops a
+message that does not fit whole).  The receiver answers each part with
+``{op: "pack", id, topic, part}`` and, once it has every part, reassembles the
+message and handles it as one (type, ttl, order, the usual ``ack``).  The sender
+resends only the parts not acked: after a timer set from the pace of part acks
+(at least ``retry_s``, doubled on a timeout without progress, at most 8 s), or at
+once when a part sent after it is acked first (fast retransmit).  The give-up
+budget (``max_tries``) counts timeouts without progress.  ``latest`` (fire and
+forget) is never split.
+
 ``ttl_s`` is checked on both ends: the sender stops retrying, the receiver
 rejects (``ok: false, err: "expired"``) a message older than that, measured
 against its envelope ``t`` corrected by the heartbeat clock offset.
@@ -470,6 +483,8 @@ def _counters() -> dict:
             "rejected",  # negative acks received
             "stale_epoch",  # addressed to a previous incarnation of this end
             "dropped_restart",  # pending dropped because the peer restarted
+            "parts_sent",  # parts of large messages (first sends and resends)
+            "parts_rx",  # parts received
         ),
         0,
     )
@@ -484,6 +499,17 @@ class _Pending:
     t_sent: float
     to: str | None
     tries: int = 1
+    # large messages: number of parts, parts the receiver acked, part -> last sent
+    parts: int = 1
+    have: set = field(default_factory=set)
+    part_sent: dict = field(default_factory=dict)
+    # part resend timer: set from the measured pace of part acks (a part can take
+    # longer than retry_s to serialise on a slow radio) and doubled on a timeout
+    rto: float = 0.0
+    ack_dt: float | None = None  # smoothed seconds between part acks
+    last_pack_t: float | None = None
+    send_n: int = 0  # parts put on the wire so far
+    part_order: dict = field(default_factory=dict)  # part -> send_n of its last send
 
 
 class _Out:
@@ -510,6 +536,10 @@ class _In:
         self.last_applied: int | None = None  # latest / latest_reliable
         self.expected: int | None = None  # reliable: next tseq to apply
         self.held: dict[int, tuple] = {}  # reliable: tseq -> (data, meta)
+        # large messages being reassembled: id -> {"n", "chunks", "t", "tseq"}
+        self.partial: dict[str, dict] = {}
+        # ids already reassembled (a late resent part is answered, not rebuilt)
+        self.done: collections.OrderedDict[str, None] = collections.OrderedDict()
         self.c = _counters()
         self.last_rx: float | None = None
 
@@ -518,6 +548,8 @@ class _In:
         self.last_applied = None
         self.expected = None
         self.held.clear()
+        self.partial.clear()
+        self.done.clear()
 
 
 @dataclass
@@ -569,6 +601,8 @@ class RelayCore:
         connected_timeout: float = 3.0,
         srv_cache: int = 64,
         loss_window_s: float = 5.0,
+        chunk_bytes: int = 16 * 1024,
+        chunk_window: int = 6,
     ):
         if side not in SIDES:
             raise ValueError(f"side must be robot|base, got {side!r}")
@@ -594,6 +628,8 @@ class RelayCore:
         self.connected_timeout = connected_timeout
         self.srv_cache = srv_cache
         self.loss_window_s = loss_window_s
+        self.chunk_bytes = max(1024, int(chunk_bytes))
+        self.chunk_window = max(1, int(chunk_window))
 
         self.epoch = secrets.token_hex(6)
         self.prefix = f"adt4/{robot}/ros"
@@ -770,6 +806,8 @@ class RelayCore:
                     p.to = self.peer_epoch
                     p.tries = 0
                     p.t_sent = -1e18  # resent by the next tick
+                    p.have.clear()  # a new peer has none of the parts
+                    p.part_sent.clear()
             elif o.last is not None and e.mode != "reliable":
                 # state (latest / latest_reliable, e.g. /tf_static): the new peer
                 # needs the current value.  A reliable entry is a stream of events
@@ -832,6 +870,7 @@ class RelayCore:
                 self._id_owner.pop(old, None)
             o.pending.clear()
         p = _Pending(pid, tseq, data, t, now, self.peer_epoch)
+        p.parts = max(1, -(-len(data) // self.chunk_bytes))
         o.pending[pid] = p
         self._id_owner[pid] = e.name
         if e.mode == "reliable":
@@ -839,9 +878,44 @@ class RelayCore:
                 old, _ = o.pending.popitem(last=False)
                 self._id_owner.pop(old, None)
                 o.c["overflow"] += 1
-        self._put_data(o, tseq, data, t, pid, p.to)
+        if p.parts > 1:
+            self._send_parts(o, p, now)
+        else:
+            self._put_data(o, tseq, data, t, pid, p.to)
 
-    def _put_data(self, o: _Out, tseq, data, t, pid, to) -> None:
+    def _send_parts(self, o: _Out, p: _Pending, now: float) -> None:
+        """Lock held: send the parts of ``p`` not acked, keeping at most
+        ``chunk_window`` of them in flight (sent less than ``retry_s`` ago)."""
+        rto = max(self.retry_s, p.rto)
+        in_flight = sum(
+            1 for i, ts in p.part_sent.items()
+            if i not in p.have and now - ts < rto
+        )  # fmt: skip
+        timed_out = False
+        for i in range(p.parts):
+            if in_flight >= self.chunk_window:
+                break
+            if i in p.have:
+                continue
+            ts = p.part_sent.get(i)
+            if ts is not None and now - ts < rto:
+                continue
+            # a timeout with no part acked since: the link is slower (or lossier)
+            # than the timer assumed
+            if ts is not None and (p.last_pack_t is None or p.last_pack_t < ts):
+                timed_out = True
+            p.part_sent[i] = now
+            p.send_n += 1
+            p.part_order[i] = p.send_n
+            in_flight += 1
+            o.c["parts_sent"] += 1
+            lo, hi = i * self.chunk_bytes, (i + 1) * self.chunk_bytes
+            self._put_data(o, p.tseq, p.data[lo:hi], p.t, p.id, p.to, part=(i, p.parts))
+        if timed_out:
+            p.rto = min(max(rto, self.retry_s) * 2, 8.0)  # back off
+            p.tries += 1  # the give-up budget counts timeouts, not ticks
+
+    def _put_data(self, o: _Out, tseq, data, t, pid, to, part=None) -> None:
         e = o.entry
         payload = {
             "topic": e.name,
@@ -854,6 +928,8 @@ class RelayCore:
         }
         if pid is not None:
             payload["id"] = pid
+        if part is not None:
+            payload["part"], payload["parts"] = part
         if e.mode == "reliable" and o.pending:
             payload["lo"] = next(iter(o.pending.values())).tseq
         key = f"{self.prefix}/{self.out_dir}{e.name}"
@@ -933,6 +1009,10 @@ class RelayCore:
             return
         if st.epoch != env["epoch"]:
             st.reset(env["epoch"])
+        if p.get("parts") and int(p["parts"]) > 1 and pid is not None:
+            p = self._reassemble(e, st, p, pid, now)
+            if p is None:
+                return  # more parts to come
         tseq = int(p.get("tseq", 0))
         th, mine = p.get("th"), self.type_hash(e.type)
         err = None
@@ -964,6 +1044,47 @@ class RelayCore:
                 self._ack(e.name, pid, False, err, now=now)
             else:
                 acks.append((e.name, pid))
+
+    def _reassemble(self, e: Entry, st: _In, p: dict, pid: str, now: float) -> dict | None:
+        """Lock held: one part of a large message.  Acks the part; returns the
+        whole message (as an unsplit payload) once every part is in, else None."""
+        n, i = int(p["parts"]), int(p.get("part", 0))
+        st.c["parts_rx"] += 1
+        self._put(f"{self.prefix}/ack/{self.out_dir}", "ros/ack",
+                  {"op": "pack", "id": pid, "topic": e.name, "part": i}, "C0", now)  # fmt: skip
+        if pid in st.done:
+            # resent after we reassembled it: our ack was lost, say so again
+            self._ack(e.name, pid, now=now)
+            return None
+        tseq = int(p.get("tseq", 0))
+        if e.mode == "latest_reliable":
+            newest = max((b["tseq"] for b in st.partial.values()), default=None)
+            if (st.last_applied is not None and tseq <= st.last_applied) or (
+                newest is not None and tseq < newest
+            ):
+                st.c["dup"] += 1
+                return None  # a late part of a message a newer one replaced
+            for old in [k for k, b in st.partial.items() if b["tseq"] < tseq]:
+                del st.partial[old]  # superseded by a newer message
+        buf = st.partial.setdefault(pid, {"n": n, "chunks": {}, "t": now, "tseq": tseq})
+        buf["chunks"][i] = bytes(p["data"])
+        if len(buf["chunks"]) < buf["n"]:
+            return None
+        del st.partial[pid]
+        st.done[pid] = None
+        while len(st.done) > 256:
+            st.done.popitem(last=False)
+        whole = {k: v for k, v in p.items() if k not in ("part", "parts")}
+        whole["data"] = b"".join(buf["chunks"][k] for k in range(buf["n"]))
+        return whole
+
+    def _drop_stale_parts(self, now: float) -> None:
+        """Lock held: forget reassemblies that stopped (sender gave up / restarted)."""
+        for name, st in self.inn.items():
+            e = self.resolved.topics.get(name)
+            limit = max(60.0, (e.ttl_s or 0) * 2) if e is not None else 60.0
+            for pid in [k for k, b in st.partial.items() if now - b["t"] > limit]:
+                del st.partial[pid]
 
     @staticmethod
     def _advance(e: Entry, st: _In, lo: int, deliver: list) -> None:
@@ -1017,6 +1138,29 @@ class RelayCore:
             op = p.get("op")
             if op == "hb":
                 self._on_hb(env, p, now, deliver)
+            elif op == "pack":
+                name = self._id_owner.get(p.get("id"))
+                o = self.out.get(name) if name else None
+                pend = o.pending.get(p.get("id")) if o is not None else None
+                if pend is not None:
+                    part = int(p.get("part", -1))
+                    if part not in pend.have:
+                        pend.tries = 1  # progress: the retry budget restarts
+                        if pend.last_pack_t is not None:
+                            dt = now - pend.last_pack_t
+                            pend.ack_dt = dt if pend.ack_dt is None else 0.7 * pend.ack_dt + 0.3 * dt
+                            # a part acked every ack_dt: allow the window plus slack
+                            pend.rto = min(2.0 * (self.chunk_window + 1) * pend.ack_dt, 8.0)
+                        pend.last_pack_t = now
+                    pend.have.add(part)
+                    # fast retransmit: a part sent before this one and still not
+                    # acked was lost (parts go out in order on one priority queue)
+                    order = pend.part_order.get(part)
+                    if order is not None:
+                        for j, oj in pend.part_order.items():
+                            if j not in pend.have and oj < order:
+                                pend.part_sent[j] = -1e18
+                    self._send_parts(o, pend, now)
             elif op == "ack" and not p.get("ok", True) and p.get("err") == "stale epoch":
                 # Sent by a new incarnation of the peer to a retry still addressed
                 # to the old one.  _peer_seen() above has already handled the
@@ -1172,6 +1316,7 @@ class RelayCore:
         with self._lock:
             for o in self.out.values():
                 self._tick_out(o, now)
+            self._drop_stale_parts(now)
             for cid, call in list(self._calls.items()):
                 if now >= call.deadline:
                     del self._calls[cid]
@@ -1231,6 +1376,21 @@ class RelayCore:
                 del o.pending[pid]
                 self._id_owner.pop(pid, None)
                 o.c["expired"] += 1
+                continue
+            if p.parts > 1:
+                if p.tries >= self.max_tries:
+                    del o.pending[pid]
+                    self._id_owner.pop(pid, None)
+                    o.c["gave_up"] += 1
+                    continue
+                # resends the parts not acked within the part timer; when every part
+                # is acked but the final ack was lost, resends the last part so the
+                # receiver acks the whole message again
+                if len(p.have) == p.parts and now - p.t_sent >= max(self.retry_s, p.rto):
+                    p.t_sent = now
+                    p.have.discard(p.parts - 1)
+                    p.part_sent.pop(p.parts - 1, None)
+                self._send_parts(o, p, now)
                 continue
             if now - p.t_sent < self.retry_s:
                 continue
