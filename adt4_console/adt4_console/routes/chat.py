@@ -32,8 +32,15 @@ def chat(body: ChatBody, request: Request):
     chat_svc = services(request).chat
 
     def lines():
-        for item in chat_svc.stream(body.message, body.robot, body.src, body.history, body.model,
-                                   body.mission_ctx, reasoning=body.reasoning):
+        for item in chat_svc.stream(
+            body.message,
+            body.robot,
+            body.src,
+            body.history,
+            body.model,
+            body.mission_ctx,
+            reasoning=body.reasoning,
+        ):
             yield json.dumps(item, default=str) + "\n"
 
     return StreamingResponse(
@@ -68,3 +75,20 @@ def map_edit(body: WriteDecision, request: Request):
     author = {"operator": request.headers.get("x-operator") or "operator",
               "client": request.client.host if request.client else None}  # fmt: skip
     return services(request).chat.execute_map_edit(body.id, body.approve, author)
+
+
+@router.post("/chat/scene_edit")
+def scene_edit(body: WriteDecision, request: Request):
+    """Run (or reject) a plan repair scene edit the chat proposed (heracles_agents'
+    SGET tools): exactly the call on its card, logged in plan repair's change log."""
+    return services(request).chat.execute_scene_edit(body.id, body.approve)
+
+
+class UndoBody(BaseModel):
+    src: str | None = None
+
+
+@router.post("/chat/scene_edit/undo")
+def scene_edit_undo(body: UndoBody, request: Request):
+    """Undo the latest chat scene edit (the scene change writer rebuilds the map)."""
+    return services(request).chat.undo_scene_edit(body.src)

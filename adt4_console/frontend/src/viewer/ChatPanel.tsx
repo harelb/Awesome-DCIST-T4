@@ -28,6 +28,7 @@ import {useRobotColor3D} from "./background";
 import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
 import type {FastDownwardInfo} from "../lib/fastDownward";
 import {decideMapEdit, MapEditCard, mapEditNote, statusOf, toMapEditItem, type MapEditItem} from "./MapEditCard";
+import {decideSceneEdit, SceneEditCard, sceneEditNote, sceneEditStatus, toSceneEditItem, undoSceneEdit, type SceneEditItem} from "./SceneEditCard";
 import {refreshEdit} from "../stores/mapEdit";
 import {candidateNote, candidateOrdinals, cellText, cypherErrorShort, fmtLeft, lookupSummary, mergeTargetsAfterCommit, scrollAnchor, toolGroups, trimTranscript, writeNote, type TranscriptItem, type WriteOutcome} from "../lib/chatTranscript";
 
@@ -40,6 +41,7 @@ export type ChatItem =
   | MissionCardItem
   | CypherWrite
   | MapEditItem
+  | SceneEditItem
   | ImagesItem
   | ObjectCandidate
   | AutoSendItem;
@@ -161,6 +163,8 @@ export function toChatItem(o: Record<string, unknown>): ChatItem | null {
       return {type: "cypher_write", id: String(o.id), query: String(o.query ?? ""), summary: String(o.summary ?? ""), src: typeof o.src === "string" ? o.src : null};
     case "map_edit":
       return toMapEditItem(o);
+    case "scene_edit":
+      return toSceneEditItem(o);
     case "images":
       return {type: "images", src: String(o.src ?? ""), items: Array.isArray(o.items) ? (o.items as ImagesItem["items"]) : []};
     case "object_candidate": {
@@ -502,6 +506,34 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
     }
   };
 
+  const decideScene = async (idx: number, approve: boolean) => {
+    const it = items[idx];
+    if (it.type !== "scene_edit") return;
+    patch(idx, c => ({...(c as SceneEditItem), status: {state: "busy", text: approve ? "applying ..." : "rejecting ..."}}));
+    try {
+      const r = await decideSceneEdit(it.id, approve);
+      patch(idx, c => ({...(c as SceneEditItem), status: sceneEditStatus(r), undoable: Boolean(r.ok && r.undoable)}));
+      if (approve && r.ok) void ask(sceneEditNote(it, r), true);
+      else transcript.current = [...transcript.current, {role: "user", text: sceneEditNote(it, r)}];
+    } catch (e) {
+      patch(idx, c => ({...(c as SceneEditItem), status: {state: "error", text: errorText(e)}}));
+    }
+  };
+
+  const undoScene = async (idx: number) => {
+    const it = items[idx];
+    if (it.type !== "scene_edit") return;
+    patch(idx, c => ({...(c as SceneEditItem), undoable: false, status: {state: "busy", text: "undoing ..."}}));
+    try {
+      const r = await undoSceneEdit(it.src);
+      const text = r.ok ? `undone: ${r.result ?? "the map is rebuilt without the latest chat edit"}` : `undo failed: ${r.result ?? r.error ?? "unknown error"}`;
+      patch(idx, c => ({...(c as SceneEditItem), undoable: !r.ok, status: {state: r.ok ? "undone" : "error", text}}));
+      transcript.current = [...transcript.current, {role: "user", text: `[operator] ${r.ok ? "Undid" : "Tried to undo"} the scene edit "${it.summary || it.text}": ${r.result ?? r.error ?? ""}`}];
+    } catch (e) {
+      patch(idx, c => ({...(c as SceneEditItem), undoable: true, status: {state: "error", text: errorText(e)}}));
+    }
+  };
+
   const actOnCandidate = async (idx: number, add: boolean) => {
     const it = items[idx];
     if (it.type !== "object_candidate") return;
@@ -688,6 +720,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
           if (it.type === "object_candidate") return <CandidateCard key={i} idx={i} ord={ords[i]} it={it} onAct={add => void actOnCandidate(i, add)} />;
           if (it.type === "cypher_write") return <WriteCard key={i} it={it} onDecide={ok => void decideWrite(i, ok)} />;
           if (it.type === "map_edit") return <MapEditCard key={i} it={it} onDecide={ok => void decideEdit(i, ok)} />;
+          if (it.type === "scene_edit") return <SceneEditCard key={i} it={it} onDecide={ok => void decideScene(i, ok)} onUndo={() => void undoScene(i)} />;
           if (it.type === "images") return <ImagesCard key={i} it={it} />;
           if (it.type === "tool") return <ToolCard key={i} it={it} />;
           if (it.type === "mission") return <MissionCard key={i} it={it} />;

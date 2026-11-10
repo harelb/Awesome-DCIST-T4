@@ -79,9 +79,10 @@ class Services:
     quad: object = None  # quad.link.QuadLink
     edits: object = None  # edit_service.EditService
     maps: object = None  # map_loader.MapLoader: the live map and switching it
-    scene_repair: object = None  # scene_repair.SceneRepair: scene change -> replan (API.md §20)
+    scene_repair: object = (
+        None  # scene_repair.SceneRepair: scene change -> replan (API.md §20)
+    )
     manipulation: ManipulationApprovalService | None = None
-
 
     def start(self) -> None:
         if self.settings.fleet_poll:
@@ -97,7 +98,15 @@ class Services:
         self.graph.warm()
 
     def stop(self) -> None:
-        for svc in (self.missions, self.quad, self.teleop, self.live, self.ros, self.graph, self.fleet):
+        for svc in (
+            self.missions,
+            self.quad,
+            self.teleop,
+            self.live,
+            self.ros,
+            self.graph,
+            self.fleet,
+        ):
             if svc is None:
                 continue
             try:
@@ -167,6 +176,10 @@ def build_services(
     svc.edits = EditService(settings, graph, hub, jobs,
                             launch_state=lambda: svc.launch_state.get() if svc.launch_state else None)  # fmt: skip
     chat.edits = svc.edits
+    from .sget import SgetService
+
+    # plan repair's scene edits (heracles_agents SGET), used while its writer runs
+    chat.sget = SgetService(graph, ros, settings)
     svc.missions.edits = svc.edits
     wire_scene_repair(svc)
     return svc
@@ -221,7 +234,11 @@ def wire_scene_repair(svc) -> None:
         if fa is None:
             rx = getattr(svc.live, "receiver", None)
             try:
-                fa = (rx.link(robot) or {}).get("frame_align") if rx is not None else None
+                fa = (
+                    (rx.link(robot) or {}).get("frame_align")
+                    if rx is not None
+                    else None
+                )
             except Exception:  # noqa: BLE001
                 fa = None
         return pose_in_global(st.get("pose"), fa)
@@ -238,7 +255,9 @@ def wire_scene_repair(svc) -> None:
         svc.graph.notify_version(t.id, "scene changes")
 
     def send(robot, pddl, constraints, engine):
-        return svc.ros.send_pddl_goal(robot, pddl, constraints=constraints, engine=engine)
+        return svc.ros.send_pddl_goal(
+            robot, pddl, constraints=constraints, engine=engine
+        )
 
     def resume(robot):
         from .routes import teleop as teleop_routes  # Resume also clears a STOP latch
@@ -263,13 +282,17 @@ def wire_scene_repair(svc) -> None:
         summary = out.get("summary")
         if isinstance(summary, (list, tuple)):
             summary = "; ".join(str(x) for x in summary)
-        sr.on_applied(source, out.get("map_version"), changes, summary=summary or None, local=True)
+        sr.on_applied(
+            source, out.get("map_version"), changes, summary=summary or None, local=True
+        )
         if changes and svc.ros.available:
             import threading
 
             def go():
                 try:
-                    svc.ros.publish_scene_changes(source, out.get("map_version"), changes)
+                    svc.ros.publish_scene_changes(
+                        source, out.get("map_version"), changes
+                    )
                 except Exception:  # noqa: BLE001
                     log.exception("publishing scene changes of an edit")
 
@@ -378,7 +401,10 @@ def _mount_static(app: FastAPI, static_dir: pathlib.Path) -> None:
                 )
                 # not in every Python's mimetypes table; browsers ignore a
                 # manifest served as octet-stream (robot models: viewer/RobotModel)
-                media = {".webmanifest": "application/manifest+json", ".glb": "model/gltf-binary"}.get(target.suffix)
+                media = {
+                    ".webmanifest": "application/manifest+json",
+                    ".glb": "model/gltf-binary",
+                }.get(target.suffix)
                 return FileResponse(target, headers=headers, media_type=media)
         if index.is_file():
             return FileResponse(index, headers={"Cache-Control": "no-cache"})
