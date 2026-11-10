@@ -131,4 +131,4 @@ def test_real_topology_robot_platforms(topology_path):
     machines = load_topology(topology_path)["machines"]
     assert machines["hamilton"]["platform_type"] == "spot"
     assert platform_of(machines["gauss"]) == "phoenix"
-    assert machines["gauss"]["addresses"] == {"mit_wifi": "10.31.168.179", "silvus": "192.168.100.4"}
+    assert machines["gauss"]["addresses"] == {"mit_wifi": "10.31.182.151", "silvus": "192.168.100.107"}

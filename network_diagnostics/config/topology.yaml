@@ -14,14 +14,14 @@ machines:
     platform_type: spot
     desc: Smaug Jockey
     addresses:
-      mit_wifi: 10.29.152.15
+      mit_wifi: 10.29.246.96
       penn_wifi: 192.168.129.234
       silvus: 192.168.100.3
   hamilton:
     role: robot
     color: "#42d4f4"
     addresses:
-      mit_wifi: 10.31.179.108
+      mit_wifi: 10.31.172.208
       silvus: 192.168.100.2
       penn_wifi: 192.168.129.210
     platform_id: topaz
@@ -34,8 +34,8 @@ machines:
     platform_type: phoenix
     desc: Husky Jockey
     addresses:
-      mit_wifi: 10.31.168.179
-      silvus: 192.168.100.4
+      mit_wifi: 10.31.182.151
+      silvus: 192.168.100.107
   lewis:
     role: robot
     color: "#3cb44b"
