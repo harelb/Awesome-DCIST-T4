@@ -338,6 +338,50 @@ Driving goes through `spot_executor_node`, which holds the Spot lease (never
 * `POST /api/robots/{r}/teleop/cmd_vel` `{vx, vy, wz, session}`: the same at 10 Hz for
   clients without the socket (409 when another session drives).
 
+### 9c. Manipulation approval (Pick / Drag; `routes/manipulation.py`, `manipulation_service.py`)
+
+Before a grasp, `spot_executor_node` publishes one `nlu_interface_rviz/ManipulationApprovalRequest`
+on `/<r>/spot_executor_node/manipulation_request` (candidate camera images as JPEG, the detector's
+suggested pixel, optionally registered 16-bit PNG depth per image and the walk-to preview geometry)
+and waits for one `ManipulationApprovalResponse` on `/<r>/spot_executor_node/pick_confirmation`.
+The RViz `nlu_interface_rviz` panel answers the same protocol; the console is a second operator UI.
+The protocol has no request id: the console assigns one, keeps only the newest request per robot
+answerable, expires it after 5 min, and drops the images once answered.
+
+* `GET /api/manipulation/pending` → `{available, error, requests: [{id, robot, status, simulated,
+  received_at, expires_at, images: [{index, name, url, width, height, depth_url?, point_query_url?,
+  ground_estimate, ground_estimate_warning?, error?, depth_error?}], depth_range_m, walk_to:
+  {standoff_m, max_distance_m}, has_detection, selection: {image_index, x, y} | null}]}`.
+  `available` is the ROS bridge; `--no-ros` → `false` with `error` set. Pushed on the hub as
+  `manipulation/pending` (latest-value) whenever it changes.
+* `GET /api/manipulation/requests/{id}/images/{i}` → the image (`image/jpeg` or `image/png`,
+  `Cache-Control: no-store`); `…/depth/{i}.png` → colourised RGBA depth overlay (transparent where
+  there is no measurement; 0.3–6 m warm→cool); `…/point/{i}?x&y` → `{image_index, x, y, has_depth,
+  depth_m, ground}` — the median depth near the pixel and the robot's own walk plan for it
+  (`null` without geometry, `{hit: false}` above the horizon, else `{hit, distance_m, walk_m, capped,
+  target}` — the same ray/ground-plane maths as spot_tools' `walk_to_utils`). Hand-camera images
+  carry `ground_estimate_warning`: the gripper camera's floor estimates are unreliable.
+* `POST /api/manipulation/requests/{id}/respond` `{approve, image_index?, image_x?, image_y?,
+  walk_to?, stand_x?, stand_y?}` (strict types; pixels default to the suggested detection) →
+  `{ok, status: "published" | "simulated", request_id, robot, response, subscribers?, via?,
+  delivered?, link?}`. `approve: true` grasps at the pixel; `approve: false` abandons the attempt;
+  `approve: false, walk_to: true` walks toward the pixel's ground/object point (the executor stops
+  `walk_to_standoff` short of it, moves at most `walk_to_max_distance`) and then sends a fresh
+  request; `stand_x/stand_y` (walk_to only) fixes the ground pixel to stand on, facing the target.
+  422 on an invalid/ambiguous pixel or combination (nothing published), 409 when the request is no
+  longer the robot's current one (superseded, expired, already answered), 503 when ROS is off or
+  — router mode — nothing subscribes to `pick_confirmation` (the request stays answerable). In
+  fleetlink mode the relay is always the local subscriber, so the bridge waits for the robot's
+  ack instead (`publish_to_robot`); a missing ack closes the request as `publish_failed` rather
+  than invite a duplicate approval. The message goes out exactly once.
+* `POST /api/manipulation/demo[?robot=]` → a simulated request (two synthetic cameras with depth
+  and geometry; `simulated: true`) whose answers are recorded and never published; 409 while a
+  live request is open.
+* fleetlink mode needs `relay.yaml` to carry `manipulation_request` up and `pick_confirmation`
+  down (both `platform: [spot]`); router mode (robot topics on the base graph) needs nothing.
+  `nlu_interface_rviz` must be importable in `spark_env` (it is where the RViz panel is built),
+  else the bridge logs a warning and `pending` stays empty.
+
 ## 10. Chat (optional LLM): Cypher-first
 
 Modelled on heracles_agents `chatdsg`: Cypher over the planner's Neo4j map is how the

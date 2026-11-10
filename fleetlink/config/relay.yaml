@@ -96,6 +96,19 @@ topics:
     qos: {reliability: reliable, durability: volatile, depth: 10}
     platform: [spot]
 
+  # manipulation approval answer (console / RViz panel -> spot_executor_node, which waits
+  # for exactly one per request; API.md 9c). Never replayed: a rebooted robot must not
+  # grasp on a stale answer.
+  - topic: /{robot}/spot_executor_node/pick_confirmation
+    type: nlu_interface_rviz/msg/ManipulationApprovalResponse
+    dir: down
+    mode: reliable
+    cls: C0
+    rate_hz: null
+    ttl_s: 30
+    replay_on_resync: false
+    qos: {reliability: reliable, durability: volatile, depth: 10}
+    platform: [spot]
   # teleop velocity (console Teleop panel -> spot_executor_node, which owns the lease).
   # The console streams at 10 Hz while driving; ttl 0.5 s strict, so a command delayed by
   # the radio is dropped rather than replayed. The executor's own deadman stops the robot
@@ -142,6 +155,18 @@ topics:
     cls: C1
     rate_hz: 1.0
     ttl_s: 10
+    replay_on_resync: false
+    qos: {reliability: reliable, durability: volatile, depth: 1}
+    platform: [spot]
+  # manipulation approval request (spot_executor_node -> operator UIs): JPEG candidate images
+  # plus 16-bit PNG depth, a few hundred kB; one per grasp attempt, only the newest matters
+  - topic: /{robot}/spot_executor_node/manipulation_request
+    type: nlu_interface_rviz/msg/ManipulationApprovalRequest
+    dir: up
+    mode: latest_reliable
+    cls: C3
+    rate_hz: null
+    ttl_s: 120
     replay_on_resync: false
     qos: {reliability: reliable, durability: volatile, depth: 1}
     platform: [spot]
