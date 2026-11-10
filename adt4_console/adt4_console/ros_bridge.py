@@ -268,6 +268,9 @@ class RosBridge:
         # robot -> (receive time, fleetlink-bridge link status)
         self._link_status: dict[str, tuple[float, dict]] = {}
         self._link_cv = threading.Condition()
+        # manipulation_service.ManipulationApprovalService (set by build_services):
+        # gets every robot's ManipulationApprovalRequest
+        self.manipulation = None
         self._calls: queue.Queue = queue.Queue()
         self._pubs: dict[str, object] = {}
         self._lock = threading.Lock()
@@ -591,6 +594,31 @@ class RosBridge:
             lambda m: self._on_teleop_state(robot, m),
             1,
         )
+        # manipulation approvals (Pick / Drag): the executor asks the operator to
+        # confirm a grasp pixel and waits (manipulation_service); relayed up like
+        # the guards in fleetlink mode
+        if self.manipulation is not None:
+            from . import manipulation_service as ms
+
+            try:
+                req = import_type(ms.REQUEST_TYPE)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "no ManipulationApprovalRequest (%s): manipulation approvals unavailable", e
+                )
+            else:
+                n.create_subscription(
+                    req,
+                    ms.request_topic(robot),
+                    lambda m: self._on_manipulation_request(robot, m),
+                    1,
+                )
+
+    def _on_manipulation_request(self, robot: str, msg) -> None:
+        try:
+            self.manipulation.receive_request(robot, msg)
+        except Exception:  # noqa: BLE001
+            log.exception("manipulation request from %s", robot)
 
     def _on_teleop_state(self, robot, msg) -> None:
         from .teleop_service import parse_teleop_state
@@ -806,17 +834,25 @@ class RosBridge:
         return {"ok": ok, "message": message, "service": name}
 
     def executor_cmd(self, robot: str, cmd: str, deliver_timeout: float = 3.0) -> dict:
-        """Publish Pause/Resume.  Router mode: ``subscribers`` is the ROS match
-        count.  Fleetlink mode (a fresh ``fleetlink/link_status`` for the robot):
-        fleetlink-bridge is always the local subscriber, so that count says
-        nothing; instead wait for the robot's relay ack (``delivered``) and report
-        the *robot-side* subscriber count it carried (None if not acked yet; the
-        relay keeps retrying within the topic's ttl)."""
-        topic = f"/{robot}/spot_executor_node/{cmd}"
+        """Publish Pause/Resume (see :meth:`publish_to_robot`)."""
+        return self.publish_to_robot(
+            robot, f"/{robot}/spot_executor_node/{cmd}", "std_msgs/msg/Bool", {"data": True},
+            deliver_timeout,
+        )  # fmt: skip
+
+    def publish_to_robot(
+        self, robot: str, topic: str, msg_type: str, fields: dict, deliver_timeout: float = 3.0
+    ) -> dict:
+        """Publish one message meant for ``robot``.  Router mode: ``subscribers``
+        is the ROS match count.  Fleetlink mode (a fresh ``fleetlink/link_status``
+        for the robot): fleetlink-bridge is always the local subscriber, so that
+        count says nothing; instead wait for the robot's relay ack (``delivered``)
+        and report the *robot-side* subscriber count it carried (None if not
+        acked yet; the relay keeps retrying within the topic's ttl)."""
         link = self.link_status(robot)
         before = self._acked(robot, topic)
-        subs = self.publish(topic, "std_msgs/msg/Bool", {"data": True})
-        out = {"ok": True, "topic": topic, "msg": {"data": True}, "subscribers": subs}
+        subs = self.publish(topic, msg_type, fields)
+        out = {"ok": True, "topic": topic, "msg": fields, "subscribers": subs}
         if link is None:
             return out
         if topic not in (link.get("topics") or {}):
