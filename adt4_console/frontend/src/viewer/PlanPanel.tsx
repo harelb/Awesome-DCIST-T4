@@ -15,6 +15,8 @@ import {ConstraintsBox, goalSendMessage, RepairAlerts, RepairBadge, SceneRepairP
 import {usePlatform} from "./usePlatform";
 import {PlannerSchedule} from "./PlannerSchedule";
 import {PhoenixChips} from "./PhoenixStatus";
+import {DirectRouteButtons} from "./DirectRoute";
+import {usePlanPreview} from "../stores/planPreview";
 
 /** "O(12)" -> "o12" (omniplanner lower-cases NodeSymbol names in PDDL). */
 export function pddlSymbol(sym: string): string {
@@ -257,6 +259,7 @@ export function PlanPanel() {
           </button>
           {!pddlPlugins.length && !hasGrstaps && <div className="muted small">No PDDL plugin for this robot.</div>}
           {planRobot && <ConstraintsBox robot={planRobot} constraints={plan?.constraints ?? []} />}
+          <PreviewDirectRoute />
         </div>
       )}
 
@@ -377,6 +380,18 @@ function CurrentPlan({robot, plan}: {robot: string | null; plan: RobotPlan | und
           </ul>
         </>
       )}
+    </div>
+  );
+}
+
+/** The previewed plan drawn on the map (chat / area tools): send its routes directly. */
+function PreviewDirectRoute() {
+  const preview = usePlanPreview(s => s.preview);
+  if (!preview) return null;
+  return (
+    <div className="small">
+      <div className="muted">Previewed routes on the map:</div>
+      <DirectRouteButtons routes={preview.routes} />
     </div>
   );
 }

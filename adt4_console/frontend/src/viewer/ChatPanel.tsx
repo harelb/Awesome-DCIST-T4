@@ -17,6 +17,7 @@ import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule} from "./PlannerSchedule";
 import {EnginePicker} from "./EnginePicker";
 import {GoalImages} from "./GoalImages";
+import {DirectRouteButtons} from "./DirectRoute";
 import {autoRoster, onlineRobots, planAutoSend, type AutoRobot, type Fleet, type Skipped} from "../lib/autoSend";
 import {setAutoSend, useAutoSend} from "../stores/autoSend";
 import {useRobots} from "../stores/robots";
@@ -1078,6 +1079,7 @@ function GoalCard({it, robot, src, onSend}: {it: Extract<ChatItem, {type: "goal"
         </div>
       )}
       {pv?.p?.goals && shown && <GoalImages goals={pv.p.goals} src={src} />}
+      {pv?.p && shown && <DirectRouteButtons routes={pv.p.routes} />}
       {pv?.p?.schedule && shown && <PlannerSchedule schedule={pv.p.schedule} compact />}
       {sent && <div className={`small tone-${sent.tone}`}>{sent.text}</div>}
     </div>

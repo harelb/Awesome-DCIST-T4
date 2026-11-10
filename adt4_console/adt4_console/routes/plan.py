@@ -67,6 +67,12 @@ class PddlGoal(BaseModel):
     engine: Literal["fast_downward", "grstaps"] | None = None
 
 
+class DirectPathBody(BaseModel):
+    # the previewed route, map frame [[x, y(, z)], ...]
+    path: list[list[float]]
+    yaw: float | None = None  # heading at the end (rad)
+
+
 class ConstraintsBody(BaseModel):
     constraints: list
 
@@ -134,12 +140,19 @@ def goal_pddl(robot: str, body: PddlGoal, request: Request):
     ros = _ros(request)
     try:
         return ros.send_pddl_goal(
-            robot, body.goal, body.plugin, body.constraints, body.route, engine=body.engine
+            robot,
+            body.goal,
+            body.plugin,
+            body.constraints,
+            body.route,
+            engine=body.engine,
         )
     except ValueError as e:  # bad constraint
         raise HTTPException(400, str(e)) from None
     except LookupError as e:  # no plugin / goal_manager required but down
-        raise HTTPException(409 if body.route == "goal_manager" else 400, str(e)) from None
+        raise HTTPException(
+            409 if body.route == "goal_manager" else 400, str(e)
+        ) from None
 
 
 @router.get("/robots/{robot}/constraints")
@@ -153,13 +166,18 @@ def add_constraints(robot: str, body: ConstraintsBody, request: Request):
     """Add to the persistent set (sent with every goal_manager goal)."""
     ros = services(request).ros
     try:
-        return {"robot": robot, "constraints": ros.add_constraints(robot, body.constraints)}
+        return {
+            "robot": robot,
+            "constraints": ros.add_constraints(robot, body.constraints),
+        }
     except ValueError as e:
         raise HTTPException(400, str(e)) from None
 
 
 @router.delete("/robots/{robot}/constraints")
-def clear_constraints(robot: str, request: Request, body: ConstraintsBody | None = None):
+def clear_constraints(
+    robot: str, request: Request, body: ConstraintsBody | None = None
+):
     """Clear all (no body) or only the given constraints."""
     ros = services(request).ros
     try:
@@ -217,3 +235,17 @@ def take_lease(robot: str, request: Request):
         return ros.take_lease(robot)
     except TimeoutError as e:
         raise HTTPException(504, str(e)) from None
+
+
+@router.post("/robots/{robot}/path/direct")
+def send_direct_path(robot: str, body: DirectPathBody, request: Request):
+    """Send a previewed route straight to the robot executor (compiled_plan_out),
+    bypassing omniplanner: no plan repair, no constraints; a later omniplanner plan
+    replaces it. A Spot's lease is taken first (API.md §9)."""
+    ros = _ros(request)
+    try:
+        return ros.send_direct_path(robot, body.path, body.yaw)
+    except NotSupported as e:
+        raise HTTPException(400, str(e)) from None
+    except ValueError as e:  # short / malformed route
+        raise HTTPException(400, str(e)) from None

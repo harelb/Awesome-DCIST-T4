@@ -19,6 +19,7 @@ import {
   execute,
   fitMission,
   MAX_AGENTS,
+  missionRoutes,
   openMission,
   planWithOmniplanner,
   rebaseMission,
@@ -41,6 +42,7 @@ import {
   type RunState,
 } from "../stores/mission";
 import {useRobots} from "../stores/robots";
+import {DirectRouteButtons} from "./DirectRoute";
 import {useRobotColor3D} from "./background";
 import {agentColors} from "./MissionOverlay";
 import {useViewer} from "../stores/viewer";
@@ -327,6 +329,7 @@ function Transport({run}: {run: RunState | null}) {
         {why}
       </div>
     )}
+    {!live && errors === 0 && <DirectRouteButtons routes={missionRoutes(current, preview)} />}
     </>
   );
 }

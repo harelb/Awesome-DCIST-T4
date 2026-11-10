@@ -782,6 +782,27 @@ export function replanText(m: Mission, problems: string[]): string {
   return `${what}\n\nRe-plan this mission: ${problems.join("; ")}`;
 }
 
+// ------------------------------------------------------- direct routes
+/** Each bound ground agent's previewed route ({robot: [[x, y(, z)], ...]}): its
+ *  tasks' paths in mission order, joined where one ends and the next starts. */
+export function missionRoutes(m: Mission | null, pv: Preview | null): Record<string, number[][]> {
+  const out: Record<string, number[][]> = {};
+  if (!m || !pv) return out;
+  for (const a of m.agents) {
+    if (!a.binding || a.kind === "quad") continue;
+    const route: number[][] = [];
+    for (const t of m.tasks) {
+      if (t.agent !== a.id) continue;
+      for (const p of pv.tasks[t.id]?.path ?? []) {
+        const last = route[route.length - 1];
+        if (!last || last[0] !== p[0] || last[1] !== p[1]) route.push(p);
+      }
+    }
+    if (route.length >= 2) out[a.binding] = route;
+  }
+  return out;
+}
+
 // ------------------------------------------------------------ fit mission
 /** Map points of the open mission: agent starts and poses, planned paths and
  *  targets, search areas and no-go zones. */

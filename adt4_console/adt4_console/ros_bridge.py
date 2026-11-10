@@ -14,12 +14,14 @@ import importlib
 import itertools
 import json
 import logging
+import math
 import os
 import pathlib
 import queue
 import re
 import threading
 import time
+import uuid
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +255,96 @@ def _stamp(header) -> float:
 
 def _pt(p) -> list[float]:
     return [float(p.x), float(p.y), float(p.z)]
+
+
+# ------------------------------------------------------- direct paths
+DIRECT_PATH_STEP_M = 1.0  # waypoint spacing of a route sent straight to an executor
+DIRECT_PATH_MIN_M = 0.5  # shorter than this is no route
+DIRECT_PATH_MSG = {
+    "spot": "robot_executor_msgs/msg/ActionSequenceMsg",
+    "phoenix": "nav_msgs/msg/Path",
+}
+
+
+def resample_path(path, step: float = DIRECT_PATH_STEP_M) -> list[list[float]]:
+    """``path`` ([[x, y(, z)], ...], map frame) as points about ``step`` apart along
+    it (long legs filled in, dense or repeated points thinned), first and last kept.
+    ValueError for a malformed path."""
+    pts = []
+    for p in path or []:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            raise ValueError(f"bad path point {p!r}: want [x, y] or [x, y, z]")
+        q = [float(p[0]), float(p[1]), float(p[2]) if len(p) > 2 else 0.0]
+        if not all(math.isfinite(v) for v in q):
+            raise ValueError(f"bad path point {p!r}: not finite")
+        if not pts or math.dist(q[:2], pts[-1][:2]) > 1e-6:
+            pts.append(q)
+    if len(pts) < 2:
+        return pts
+    out, carry = [pts[0]], 0.0  # carry: distance walked since the last kept point
+    for a, b in zip(pts, pts[1:]):
+        seg = math.dist(a[:2], b[:2])
+        d = step - carry
+        while d < seg - 1e-9:
+            f = d / seg
+            out.append([a[i] + f * (b[i] - a[i]) for i in range(3)])
+            d += step
+        carry = seg - (d - step)
+    if math.dist(out[-1][:2], pts[-1][:2]) < 0.25 * step and len(out) > 1:
+        out[-1] = pts[-1]  # a last stub this short: end on the target instead
+    elif out[-1] != pts[-1]:
+        out.append(pts[-1])
+    return out
+
+
+def path_length(pts) -> float:
+    return sum(math.dist(a[:2], b[:2]) for a, b in zip(pts, pts[1:]))
+
+
+def _yaw_q(yaw: float) -> dict:
+    return {"x": 0.0, "y": 0.0, "z": math.sin(yaw / 2.0), "w": math.cos(yaw / 2.0)}
+
+
+def _stamp_fields(t: float | None = None) -> dict:
+    t = time.time() if t is None else t
+    return {"sec": int(t), "nanosec": int((t - int(t)) * 1e9)}
+
+
+def direct_path_fields(platform: str, robot: str, waypoints, frame: str = "map", yaw_end=None,
+                       plan_id: str | None = None, t: float | None = None) -> tuple[str, dict]:  # fmt: skip
+    """(msg type, fields) of ``waypoints`` as the robot executor takes a plan on
+    ``compiled_plan_out``, laid out as omniplanner compiles one:
+
+    * spot: an ActionSequenceMsg with one FOLLOW (robot_executor_interface_ros
+      ``to_msg(ActionSequence(..., [Follow(frame, path2d)]))``: header stamp,
+      plan_id, robot_name; the path's poses at z 0, each heading at the next
+      waypoint and the last keeping the one before, as ``waypoints_to_path``);
+    * phoenix: a nav_msgs/Path in ``frame`` (as omniplanner's phoenix compile:
+      z 0, identity orientation).
+
+    ``yaw_end`` (rad) sets the last pose's heading.
+    """
+    if platform not in DIRECT_PATH_MSG:
+        raise NotSupported(f"no direct path for platform {platform!r}")
+    stamp = _stamp_fields(t)
+    poses, q = [], {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+    for i, w in enumerate(waypoints):
+        if platform == "spot" and i + 1 < len(waypoints):
+            nxt = waypoints[i + 1]
+            q = _yaw_q(math.atan2(nxt[1] - w[1], nxt[0] - w[0]))
+        if i + 1 == len(waypoints) and yaw_end is not None:
+            q = _yaw_q(float(yaw_end))
+        poses.append({"header": {"frame_id": frame, "stamp": stamp},
+                      "pose": {"position": {"x": float(w[0]), "y": float(w[1]), "z": 0.0}, "orientation": dict(q)}})  # fmt: skip
+    path = {"header": {"frame_id": frame, "stamp": stamp}, "poses": poses}
+    if platform == "phoenix":
+        return DIRECT_PATH_MSG["phoenix"], path
+    return DIRECT_PATH_MSG["spot"], {
+        "header": {"stamp": stamp},
+        "plan_id": plan_id or str(uuid.uuid4()),
+        "robot_name": robot,
+        "actions": [{"action_type": "FOLLOW", "path": path}],
+    }
 
 
 def action_sequence_to_dict(msg) -> dict:
@@ -1339,6 +1431,34 @@ class RosBridge:
         return self._send(robot, "pddl", goal_topic(self.planner_ns, p), p["msg_type"], fields,
                           {"via": "planner", "engine": "grstaps", "warning": warning,
                            "constraints": active + order, "plugin": p["name"]})  # fmt: skip
+
+    def send_direct_path(
+        self, robot: str, path, yaw_end=None, frame: str = "map"
+    ) -> dict:
+        """Publish ``path`` (the console's previewed route, map frame) straight onto
+        the robot executor's input, ``/<robot>/omniplanner_node/compiled_plan_out``,
+        bypassing omniplanner (no plan repair, no constraints; omniplanner's next
+        plan replaces it). Fleetlink relays the topic down. Spot gets an
+        ActionSequenceMsg with one FOLLOW, phoenix a nav_msgs/Path
+        (:func:`direct_path_fields`); waypoints ~``DIRECT_PATH_STEP_M`` apart. Goes
+        through :meth:`_send`, so a Spot's lease is taken first. ValueError for a
+        short / malformed path, NotSupported for another platform."""
+        platform = self.platform(robot)
+        if platform not in DIRECT_PATH_MSG:
+            raise NotSupported(
+                f"a direct path is spot / phoenix only ({robot} is {platform})"
+            )
+        wps = resample_path(path)
+        if len(wps) < 2 or path_length(wps) < DIRECT_PATH_MIN_M:
+            raise ValueError(
+                f"the route is too short to send (needs >= {DIRECT_PATH_MIN_M} m)"
+            )
+        msg_type, fields = direct_path_fields(platform, robot, wps, frame, yaw_end)
+        topic = f"/{robot}/omniplanner_node/compiled_plan_out"
+        out = self._send(robot, "direct_path", topic, msg_type, fields,
+                         {"via": "direct", "waypoints": len(wps), "length_m": round(path_length(wps), 1)})  # fmt: skip
+        return {k: out.get(k) for k in ("ok", "topic", "subscribers", "via", "waypoints", "length_m", "lease",
+                                        "warning")}  # fmt: skip
 
     def take_lease(self, robot: str) -> dict:
         """Ask the robot's executor to forcibly take the Spot lease
