@@ -7,6 +7,7 @@ import {LaunchPage} from "./pages/Launch";
 import {MapsPage} from "./pages/Maps";
 import {NetworkPage} from "./pages/Network";
 import {ConfigPage} from "./pages/Config";
+import {ManipulationApprovalHost} from "./viewer/ManipulationApproval";
 
 const ViewerPage = lazy(() => import("./viewer/ViewerPage"));
 
@@ -43,5 +44,5 @@ const router = createHashRouter([
 ]);
 
 export function App() {
-  return <RouterProvider router={router} />;
+  return <><RouterProvider router={router} /><ManipulationApprovalHost /></>;
 }
