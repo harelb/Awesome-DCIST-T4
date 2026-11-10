@@ -1,0 +1,54 @@
+.manipulation-backdrop {
+  position: fixed; inset: 0; z-index: 3000; background: #000a;
+  display: flex; justify-content: center; align-items: center; padding: 16px;
+}
+.manipulation-dialog {
+  width: min(940px, 100%); max-height: calc(100dvh - 32px); overflow: hidden;
+  display: flex; flex-direction: column; background: var(--panel, #17212b);
+  color: var(--text, #e5edf5); border: 1px solid var(--line, #536071);
+  border-radius: 12px; box-shadow: 0 24px 100px #0009;
+}
+.manipulation-head, .manipulation-foot {
+  display: flex; gap: 16px; align-items: center; justify-content: space-between;
+  padding: 14px 18px; flex: 0 0 auto;
+}
+.manipulation-head {border-bottom: 1px solid var(--line, #536071);}
+.manipulation-head h2 {font-size: 20px; margin: 0 0 4px;}
+.manipulation-head p {margin: 0;}
+.manipulation-body {padding: 0 18px 12px; overflow: auto; min-height: 0;}
+.manipulation-simulation {background: #583f0c; color: #ffdf84; padding: 9px 18px; font-weight: 700;}
+.manipulation-image-nav {display: flex; gap: 12px; align-items: center; justify-content: space-between; margin: 12px 0; font-size: 13px;}
+.manipulation-image-nav > span {text-align: center;}
+.manipulation-image-area {text-align: center; background: #080e16; border: 1px solid var(--line, #536071); border-radius: 6px; min-height: 100px; padding: 6px;}
+.manipulation-image-wrap {display: inline-block; position: relative; max-width: 100%; vertical-align: middle;}
+.manipulation-image-wrap img {display: block; max-width: 100%; max-height: 49dvh; width: auto; height: auto; user-select: none;}
+.manipulation-image-wrap.is-picking img {cursor: crosshair;}
+.manipulation-image-wrap img.manipulation-depth {position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; opacity: .5; pointer-events: none; image-rendering: pixelated;}
+.manipulation-depth-controls {display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 10px; font-size: 13px;}
+.manipulation-depth-controls label {display: flex; gap: 8px; align-items: center; cursor: pointer;}
+.manipulation-depth-legend {display: inline-block; width: 90px; height: 10px; border-radius: 3px; background: linear-gradient(90deg, #ff3030, #ffa000, #ebeb46, #46c8ff, #4650eb);}
+.manipulation-crosshair {position: absolute; width: 28px; height: 28px; transform: translate(-50%, -50%); border: 2px solid #ff4949; border-radius: 50%; pointer-events: none; box-shadow: 0 0 0 1px #0008;}
+.manipulation-crosshair::before, .manipulation-crosshair::after {content: ""; position: absolute; background: #ff4949;}
+.manipulation-crosshair::before {height: 2px; width: 40px; left: -8px; top: 11px;}
+.manipulation-crosshair::after {width: 2px; height: 40px; top: -8px; left: 11px;}
+.manipulation-crosshair.is-stand {border-color: #4da3ff; border-radius: 4px;}
+.manipulation-crosshair.is-stand::before, .manipulation-crosshair.is-stand::after {background: #4da3ff;}
+.manipulation-point-controls {display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 12px;}
+.manipulation-point-controls label {display: flex; gap: 8px; align-items: center; cursor: pointer;}
+.manipulation-selection, .manipulation-hint {font-size: 13px;}
+.manipulation-hint {color: var(--accent, #74cfff);}
+.manipulation-error {color: #ffb3a8; font-size: 13px;}
+.manipulation-foot {border-top: 1px solid var(--line, #536071); flex-wrap: wrap;}
+.manipulation-pending, .manipulation-notice {position: fixed; bottom: 20px; right: 20px; z-index: 2900; max-width: min(520px, calc(100vw - 40px));}
+.manipulation-demo {position: fixed; bottom: 20px; left: 72px; z-index: 2800; box-shadow: 0 2px 12px #0006;}
+.manipulation-notice {display: flex; align-items: center; gap: 10px; border-radius: 8px; padding: 10px 14px; background: var(--panel, #17212b); color: var(--text, #e5edf5); border: 1px solid var(--line, #536071); box-shadow: 0 4px 24px #0008; font-size: 13px;}
+@media (max-width: 640px) {
+  .manipulation-backdrop {padding: 6px;}
+  .manipulation-dialog {max-height: calc(100dvh - 12px);}
+  .manipulation-head, .manipulation-foot {padding: 12px;}
+  .manipulation-body {padding: 0 12px 10px;}
+  .manipulation-image-nav {gap: 6px; font-size: 12px;}
+  .manipulation-image-nav .btn {padding: 7px;}
+  .manipulation-foot {justify-content: flex-end; gap: 10px;}
+  .manipulation-foot > .row {width: 100%; justify-content: flex-end;}
+}
