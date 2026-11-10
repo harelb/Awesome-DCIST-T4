@@ -50,15 +50,31 @@ OPENAI_MODELS = ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mi
 # codex / search / audio / realtime / image / pro variants (not chat-completions models)
 OPENAI_LIST_TTL_S = 3600.0
 _CHAT_MODEL = re.compile(r"^gpt-(4\.1|4o|5|6)([.\d]*)(-[a-z]+)?$")
-_NOT_CHAT = ("codex", "search", "audio", "realtime", "transcribe", "tts", "image", "pro", "chat-latest")
+_NOT_CHAT = (
+    "codex",
+    "search",
+    "audio",
+    "realtime",
+    "transcribe",
+    "tts",
+    "image",
+    "pro",
+    "chat-latest",
+)
 
 
 def openai_chat_models(ids) -> list[str]:
     """The chat models among an OpenAI key's model ids, newest family first."""
-    keep = [m for m in ids if _CHAT_MODEL.match(m) and not any(x in m for x in _NOT_CHAT)]
+    keep = [
+        m for m in ids if _CHAT_MODEL.match(m) and not any(x in m for x in _NOT_CHAT)
+    ]
 
     def key(m):
-        nums = [int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", m[4:]) if x.replace("o", "").isdigit() or x.isdigit()]
+        nums = [
+            int(x) if x.isdigit() else 0
+            for x in re.split(r"[.-]", m[4:])
+            if x.replace("o", "").isdigit() or x.isdigit()
+        ]
         return ([-n for n in nums] + [0] * 3)[:3], len(m), m
 
     return sorted(set(keep), key=key)
@@ -99,8 +115,16 @@ def to_responses(items: list[dict]) -> list[dict]:
                 out.append({"type": "function_call", "call_id": c["id"], "name": c["name"],
                             "arguments": json.dumps(c["args"])})  # fmt: skip
         else:
-            out.append({"type": "function_call_output", "call_id": it["id"], "output": it["content"]})
+            out.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": it["id"],
+                    "output": it["content"],
+                }
+            )
     return out
+
+
 ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 MAX_TOOL_ROUNDS = 8
 # mission planning looks up several things, may search the images, then plans
@@ -248,7 +272,12 @@ class ChatService:
         self._edits = EditProposals()
         self.missions = None  # mission.service.MissionService (propose_mission)
         self.edits = None  # edit_service.EditService (propose_map_edit)
-        self._ctx = threading.local()  # this turn's mission context (roster, areas, mission)
+        self.sget = (
+            None  # sget.SgetService (plan repair's scene edits, when its writer runs)
+        )
+        self._ctx = (
+            threading.local()
+        )  # this turn's mission context (roster, areas, mission)
         self.ledger = UsageLedger(
             getattr(settings, "llm_usage_path", "~/.adt4_console/llm_usage.json"),
             getattr(settings, "llm_budget_usd", 10.0),
@@ -377,12 +406,18 @@ class ChatService:
             # omniplanner's plan_ground_mission is offered (and prompted) when it can plan here
             ok = self._omniplanner_ok()
             # GRSTAPS-X is checked every turn: a license copied in later turns it on
-            mission_ctx = {**mission_ctx, "omniplanner": ok, "grstaps": ok and self._grstaps_ok()}
+            mission_ctx = {
+                **mission_ctx,
+                "omniplanner": ok,
+                "grstaps": ok and self._grstaps_ok(),
+            }
         self._ctx.value = mission_ctx if self.missions is not None else None
         # GPT-5 / 6 reasoning effort from the picker (REASONING_LEVELS; None / "fast": the lowest)
         self._ctx.reasoning = reasoning if reasoning in REASONING_LEVELS else None
         history = clean_history(history)
-        self._ctx.history = history  # propose_mission: the request the thread started with
+        self._ctx.history = (
+            history  # propose_mission: the request the thread started with
+        )
         try:
             client = self.llm_client()
             if client is not None and self.ledger.remaining() <= 0:
@@ -397,7 +432,9 @@ class ChatService:
             elif self._client_provider == "openai":
                 yield from self._llm_openai(client, message, robot, src, history, model)
             else:
-                yield from self._llm_anthropic(client, message, robot, src, history, model)
+                yield from self._llm_anthropic(
+                    client, message, robot, src, history, model
+                )
         except Exception as e:  # noqa: BLE001
             log.exception("chat failed")
             yield {"type": "error", "text": f"{type(e).__name__}: {e}"}
@@ -468,7 +505,9 @@ class ChatService:
         "there were more). Errors come back as {error}: fix the query and retry.",
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "Cypher, no apoc"}},
+            "properties": {
+                "query": {"type": "string", "description": "Cypher, no apoc"}
+            },
             "required": ["query"],
             "additionalProperties": False,
         },
@@ -482,7 +521,10 @@ class ChatService:
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "summary": {"type": "string", "description": "one line: what it changes and why"},
+                "summary": {
+                    "type": "string",
+                    "description": "one line: what it changes and why",
+                },
             },
             "required": ["query", "summary"],
             "additionalProperties": False,
@@ -584,7 +626,10 @@ class ChatService:
             "type": "object",
             "properties": {
                 "kind": {"type": "string", "enum": ["pddl", "goto", "tsp", "language"]},
-                "robot": {"type": "string", "description": "the robot to send; default: the selected robot"},
+                "robot": {
+                    "type": "string",
+                    "description": "the robot to send; default: the selected robot",
+                },
                 "pddl_goal": {"type": "string"},
                 "engine": {"type": "string", "enum": ["fast_downward", "grstaps"]},
                 "constraints": {
@@ -592,7 +637,10 @@ class ChatService:
                     "items": {
                         "type": "object",
                         "properties": {
-                            "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge", "before"]},
+                            "predicate": {
+                                "type": "string",
+                                "enum": ["forbidden-poi", "forbidden-edge", "before"],
+                            },
                             "symbols": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["predicate", "symbols"],
@@ -624,14 +672,31 @@ class ChatService:
         return getattr(self._ctx, "value", None)
 
     def _tool_rounds(self) -> int:
-        return MISSION_TOOL_ROUNDS if self._mission_ctx() is not None else MAX_TOOL_ROUNDS
+        return (
+            MISSION_TOOL_ROUNDS if self._mission_ctx() is not None else MAX_TOOL_ROUNDS
+        )
+
+    def _sget_on(self) -> bool:
+        """Plan repair's scene edits replace the console's own edit tools."""
+        try:
+            return self.sget is not None and self.sget.available()
+        except Exception:  # noqa: BLE001
+            return False
 
     def _tools(self, src) -> list[dict]:
         if self._cypher_src(src) is not None:
-            tools = [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
-                     self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
-            if self.edits is not None:
-                tools.insert(1, self._T_PROPOSE_EDIT)
+            if self._sget_on():
+                from . import sget
+
+                # edits go through plan repair's change log (undoable, replanned);
+                # a free Cypher write or a graph_edit op would bypass it
+                tools = [self._T_RUN_CYPHER, *sget.tool_schemas(), self._T_SHOW_IMAGES,
+                         self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
+            else:
+                tools = [self._T_RUN_CYPHER, self._T_PROPOSE_WRITE, self._T_SHOW_IMAGES,
+                         self._T_SEARCH_IMAGES, self._T_PROPOSE_GOAL]  # fmt: skip
+                if self.edits is not None:
+                    tools.insert(1, self._T_PROPOSE_EDIT)
         else:
             tools = [self._T_FIND_OBJECTS, self._T_SHOW_IMAGES, self._T_SEARCH_IMAGES,
                      self._T_PROPOSE_GOAL]  # fmt: skip
@@ -716,7 +781,11 @@ class ChatService:
                 "a robot to go somewhere, call propose_goal (the operator approves goals in the "
                 "UI; never claim the robot is moving). "
                 f"Selected graph source: {src or 'none'}. Selected robot: {robot or 'none'}.{where}"
-                + ("\n\n" + self._mission_prompt(src) if self._mission_ctx() is not None else "")
+                + (
+                    "\n\n" + self._mission_prompt(src)
+                    if self._mission_ctx() is not None
+                    else ""
+                )
             )
         return "\n\n".join(
             [
@@ -726,11 +795,35 @@ class ChatService:
                 self._schema.text(csrc),
                 f"Database: {csrc.id}. Selected robot: {robot or 'none'}.{where}",
             ]
+            + [self._edit_note()]
             + ([self._mission_prompt(src)] if self._mission_ctx() is not None else [])
         )
 
+    def _edit_note(self) -> str:
+        """Which edit path this turn has, for the system prompt."""
+        from . import sget
+
+        if self._sget_on():
+            return sget.SYSTEM_NOTE
+        if self.sget is not None:
+            return ("Map edits: plan repair's scene change writer is not running, so edits use "
+                    "propose_map_edit (the console's map editor; not plan repair's change log).")  # fmt: skip
+        return ""
+
     def _run_tool(self, name, args, message, robot, src, origin):
         """Execute one tool call; returns (events_to_stream, result_for_model)."""
+        from . import sget
+
+        if name in sget.TOOLS:
+            csrc = self._cypher_src(src)
+            if csrc is None or self.sget is None:
+                return [], {"error": "no Neo4j map is connected"}
+            if not self._sget_on():
+                return [], {
+                    "error": "plan repair's scene change writer is not running: use propose_map_edit"
+                }
+            card, for_model = self.sget.propose(name, dict(args or {}), csrc.id)
+            return ([card] if card else []), for_model
         if name == "run_cypher":
             csrc = self._cypher_src(src)
             q = str(args.get("query", "")).strip()
@@ -739,13 +832,21 @@ class ChatService:
             out = cypher_tools.run_read(csrc, q) if q else {"error": "empty query"}
             ui = dict(out)
             if "rows" in ui:
-                ui["rows"] = ui["rows"][:50]  # the table in the chat; the model gets them all
-            return [{"type": "tool", "name": name, "args": {"query": q}, "result": ui}], out
+                ui["rows"] = ui["rows"][
+                    :50
+                ]  # the table in the chat; the model gets them all
+            return [
+                {"type": "tool", "name": name, "args": {"query": q}, "result": ui}
+            ], out
         if name == "propose_cypher_write":
             csrc = self._cypher_src(src)
             q = str(args.get("query", "")).strip()
             if csrc is None or not q:
-                return [], {"error": "no Neo4j database is connected" if csrc is None else "empty query"}
+                return [], {
+                    "error": "no Neo4j database is connected"
+                    if csrc is None
+                    else "empty query"
+                }
             wid = self._writes.add(q, str(args.get("summary", "")), csrc.id)
             card = {"type": "cypher_write", "id": wid, "query": q,
                     "summary": str(args.get("summary", "")), "src": csrc.id}  # fmt: skip
@@ -779,7 +880,10 @@ class ChatService:
                 body = {"points": list(args.get("points") or [])}
             target = str(args.get("robot") or "").strip() or robot
             goal = {"type": "goal", "kind": kind, "body": body, "robot": target}
-            return [goal], {"proposed": True, "note": "The operator approves and sends it."}
+            return [goal], {
+                "proposed": True,
+                "note": "The operator approves and sends it.",
+            }
         if name == "search_robot_images":
             return self._search_images(str(args.get("query", "")), src)
         if name == "propose_mission" and self.missions is not None:
@@ -891,10 +995,16 @@ class ChatService:
             "id": eid,
             "diff": dry["summary"],
             "note": "Not applied yet. The operator approves or rejects it; you will be told."
-            + (" Robots are live: an approved edit is staged until the operator publishes it." if staged else ""),
+            + (
+                " Robots are live: an approved edit is staged until the operator publishes it."
+                if staged
+                else ""
+            ),
         }
 
-    def execute_map_edit(self, eid: str, approve: bool, author: dict | None = None) -> dict:
+    def execute_map_edit(
+        self, eid: str, approve: bool, author: dict | None = None
+    ) -> dict:
         """Apply (or stage, while robots are live) the exact ops of a chat proposal."""
         e = self._edits.pop(eid)
         if e is None:
@@ -911,6 +1021,19 @@ class ChatService:
         return {"ok": True, "staged": bool(out.get("staged")), "summary": out.get("summary"),
                 "mutation_id": out.get("mutation_id"), "map_version": out.get("map_version"),
                 "affected": out.get("affected")}  # fmt: skip
+
+    # ----------------------------------------------------- plan repair edits
+    def execute_scene_edit(self, pid: str, approve: bool) -> dict:
+        """Run (or reject) a proposed plan repair scene edit, by id."""
+        if self.sget is None:
+            return {"ok": False, "error": "plan repair scene edits are not available"}
+        return self.sget.decide(pid, approve)
+
+    def undo_scene_edit(self, src: str | None = None) -> dict:
+        """Undo the latest chat scene edit (the card's Undo button)."""
+        if self.sget is None:
+            return {"ok": False, "error": "plan repair scene edits are not available"}
+        return self.sget.undo(self._neo4j_src(src))
 
     # ------------------------------------------------------- approved writes
     def execute_write(self, wid: str, approve: bool) -> dict:
@@ -946,7 +1069,9 @@ class ChatService:
         return [{"role": "user", "text": message}]
 
     # ---------------------------------------------------------------- Anthropic
-    def _llm_anthropic(self, client, message, robot, src, history=(), requested_model=None):
+    def _llm_anthropic(
+        self, client, message, robot, src, history=(), requested_model=None
+    ):
         """Anthropic tool loop; tools run through ``_run_tool`` (shared with OpenAI)."""
         import anthropic
 
@@ -959,7 +1084,10 @@ class ChatService:
         try:
             for i in range(rounds):
                 if self.ledger.remaining() <= 0:
-                    yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
+                    yield {
+                        "type": "error",
+                        "text": "LLM budget exhausted mid-conversation.",
+                    }
                     return
                 last = i == rounds - 1
                 kwargs = dict(
@@ -971,17 +1099,26 @@ class ChatService:
                     # server-side refusal fallback; the installed SDK predates the
                     # typed params, so they travel in extra_body
                     betas=["server-side-fallback-2026-07-01"],
-                    extra_body={"output_config": {"effort": "low"}, "fallbacks": "default"},
+                    extra_body={
+                        "output_config": {"effort": "low"},
+                        "fallbacks": "default",
+                    },
                 )
                 if last:
                     kwargs["tool_choice"] = {"type": "none"}
                 try:
                     resp = client.beta.messages.create(**kwargs)
                 except anthropic.APIStatusError as e:
-                    yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
+                    yield {
+                        "type": "error",
+                        "text": f"LLM error ({e.status_code}): {e.message}",
+                    }
                     return
                 except anthropic.APIConnectionError:
-                    yield {"type": "error", "text": "LLM unreachable; falling back to offline search."}
+                    yield {
+                        "type": "error",
+                        "text": "LLM unreachable; falling back to offline search.",
+                    }
                     yield from self._fallback(message, robot, src)
                     return
                 usage = getattr(resp, "usage", None)
@@ -1000,12 +1137,20 @@ class ChatService:
                         text += block.text
                         yield {"type": "text", "text": block.text}
                     elif block.type == "tool_use":
-                        calls.append({"id": block.id, "name": block.name, "args": dict(block.input or {})})
+                        calls.append(
+                            {
+                                "id": block.id,
+                                "name": block.name,
+                                "args": dict(block.input or {}),
+                            }
+                        )
                 turn.append({"role": "assistant", "text": text, "calls": calls})
                 if not calls:
                     return
                 for c in calls:
-                    events, out = self._run_tool(c["name"], c["args"], message, robot, src, origin)
+                    events, out = self._run_tool(
+                        c["name"], c["args"], message, robot, src, origin
+                    )
                     yield from events
                     turn.append({"role": "tool", "id": c["id"], "name": c["name"],
                                  "content": _clip(json.dumps(out, default=str))})  # fmt: skip
@@ -1028,7 +1173,9 @@ class ChatService:
             for t in self._tools(src)
         ]
 
-    def _llm_openai(self, client, message, robot, src, history=(), requested_model=None):
+    def _llm_openai(
+        self, client, message, robot, src, history=(), requested_model=None
+    ):
         import openai
 
         model = self.model(requested_model)
@@ -1040,14 +1187,19 @@ class ChatService:
         try:
             for i in range(rounds):
                 if self.ledger.remaining() <= 0:
-                    yield {"type": "error", "text": "LLM budget exhausted mid-conversation."}
+                    yield {
+                        "type": "error",
+                        "text": "LLM budget exhausted mid-conversation.",
+                    }
                     return
                 last = i == rounds - 1
                 try:
                     budget = 4000 if self._mission_ctx() is not None else 1500
                     sys_text = system + ("\n\n" + LAST_ROUND_NOTE if last else "")
                     effort = getattr(self._ctx, "reasoning", None) or "fast"
-                    if is_reasoning_model(model) and (uses_responses_api(model) or effort != "fast"):
+                    if is_reasoning_model(model) and (
+                        uses_responses_api(model) or effort != "fast"
+                    ):
                         resp = _ResponsesReply(client.responses.create(
                             model=model, instructions=sys_text, input=to_responses(list(history) + turn),
                             tools=[{"type": "function", **t["function"]} for t in tools],
@@ -1058,21 +1210,31 @@ class ChatService:
                     else:
                         if is_reasoning_model(model):
                             # reasoning tokens count against the completion budget
-                            knobs = {"max_completion_tokens": budget * 4, "reasoning_effort": chat_reasoning_effort(model)}
+                            knobs = {
+                                "max_completion_tokens": budget * 4,
+                                "reasoning_effort": chat_reasoning_effort(model),
+                            }
                         else:
                             knobs = {"temperature": 0.2, "max_tokens": budget}
                         resp = client.chat.completions.create(
                             model=model,
-                            messages=[{"role": "system", "content": sys_text}] + to_openai(list(history) + turn),
+                            messages=[{"role": "system", "content": sys_text}]
+                            + to_openai(list(history) + turn),
                             tools=tools,
                             tool_choice="none" if last else "auto",
                             **knobs,
                         )
                 except openai.APIStatusError as e:
-                    yield {"type": "error", "text": f"LLM error ({e.status_code}): {e.message}"}
+                    yield {
+                        "type": "error",
+                        "text": f"LLM error ({e.status_code}): {e.message}",
+                    }
                     return
                 except openai.APIConnectionError:
-                    yield {"type": "error", "text": "LLM unreachable; falling back to offline search."}
+                    yield {
+                        "type": "error",
+                        "text": "LLM unreachable; falling back to offline search.",
+                    }
                     yield from self._fallback(message, robot, src)
                     return
                 if resp.usage is not None:
@@ -1096,11 +1258,15 @@ class ChatService:
                     except ValueError:
                         args = {}
                     calls.append({"id": c.id, "name": c.function.name, "args": args})
-                turn.append({"role": "assistant", "text": msg.content or "", "calls": calls})
+                turn.append(
+                    {"role": "assistant", "text": msg.content or "", "calls": calls}
+                )
                 if not calls:
                     return
                 for c in calls:
-                    events, out = self._run_tool(c["name"], c["args"], message, robot, src, origin)
+                    events, out = self._run_tool(
+                        c["name"], c["args"], message, robot, src, origin
+                    )
                     yield from events
                     turn.append({"role": "tool", "id": c["id"], "name": c["name"],
                                  "content": _clip(json.dumps(out, default=str))})  # fmt: skip
@@ -1117,13 +1283,23 @@ class _ResponsesReply:
 
         u = getattr(r, "usage", None)
         self.model = getattr(r, "model", None)
-        self.usage = NS(prompt_tokens=u.input_tokens, completion_tokens=u.output_tokens) if u is not None else None
+        self.usage = (
+            NS(prompt_tokens=u.input_tokens, completion_tokens=u.output_tokens)
+            if u is not None
+            else None
+        )
         calls = [
             NS(id=o.call_id, function=NS(name=o.name, arguments=o.arguments))
             for o in getattr(r, "output", None) or []
             if getattr(o, "type", "") == "function_call"
         ]
-        self.choices = [NS(message=NS(content=getattr(r, "output_text", "") or "", tool_calls=calls))]
+        self.choices = [
+            NS(
+                message=NS(
+                    content=getattr(r, "output_text", "") or "", tool_calls=calls
+                )
+            )
+        ]
 
 
 class WriteProposals:
@@ -1138,10 +1314,17 @@ class WriteProposals:
     def add(self, query: str, summary: str, src: str) -> str:
         with self._lock:
             now = time.time()
-            self._items = {k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S}
+            self._items = {
+                k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S
+            }
             self._n += 1
             wid = f"w{self._n}-{int(now)}"
-            self._items[wid] = {"query": query, "summary": summary, "src": src, "t": now}
+            self._items[wid] = {
+                "query": query,
+                "summary": summary,
+                "src": src,
+                "t": now,
+            }
             return wid
 
     def pop(self, wid: str) -> dict | None:
@@ -1158,10 +1341,18 @@ class EditProposals(WriteProposals):
     def add(self, ops: list, summary: str, src: str, diff: list | None = None) -> str:  # type: ignore[override]
         with self._lock:
             now = time.time()
-            self._items = {k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S}
+            self._items = {
+                k: v for k, v in self._items.items() if now - v["t"] < WRITE_TTL_S
+            }
             self._n += 1
             eid = f"e{self._n}-{int(now)}"
-            self._items[eid] = {"ops": ops, "summary": summary, "src": src, "diff": diff or [], "t": now}
+            self._items[eid] = {
+                "ops": ops,
+                "summary": summary,
+                "src": src,
+                "diff": diff or [],
+                "t": now,
+            }
             return eid
 
 
@@ -1187,11 +1378,17 @@ def clean_history(items) -> list[dict]:
             out.append({"role": "user", "text": it["text"]})
         elif role == "assistant":
             calls = [
-                {"id": str(c.get("id")), "name": str(c.get("name")), "args": c.get("args") or {}}
+                {
+                    "id": str(c.get("id")),
+                    "name": str(c.get("name")),
+                    "args": c.get("args") or {},
+                }
                 for c in (it.get("calls") or [])
                 if isinstance(c, dict) and c.get("id") and c.get("name")
             ]
-            out.append({"role": "assistant", "text": str(it.get("text") or ""), "calls": calls})
+            out.append(
+                {"role": "assistant", "text": str(it.get("text") or ""), "calls": calls}
+            )
             open_calls = {c["id"] for c in calls}
         elif role == "tool" and str(it.get("id")) in open_calls:
             out.append({"role": "tool", "id": str(it["id"]), "name": str(it.get("name") or ""),
@@ -1217,13 +1414,21 @@ def to_openai(items: list[dict]) -> list[dict]:
             m = {"role": "assistant", "content": it.get("text") or ""}
             if it.get("calls"):
                 m["tool_calls"] = [
-                    {"id": c["id"], "type": "function",
-                     "function": {"name": c["name"], "arguments": json.dumps(c["args"])}}  # fmt: skip
+                    {
+                        "id": c["id"],
+                        "type": "function",
+                        "function": {
+                            "name": c["name"],
+                            "arguments": json.dumps(c["args"]),
+                        },
+                    }  # fmt: skip
                     for c in it["calls"]
                 ]
             msgs.append(m)
         else:
-            msgs.append({"role": "tool", "tool_call_id": it["id"], "content": it["content"]})
+            msgs.append(
+                {"role": "tool", "tool_call_id": it["id"], "content": it["content"]}
+            )
     return msgs
 
 
@@ -1243,13 +1448,27 @@ def to_anthropic(items: list[dict]) -> list[dict]:
         elif it["role"] == "assistant":
             blocks = [{"type": "text", "text": it["text"]}] if it.get("text") else []
             blocks += [
-                {"type": "tool_use", "id": c["id"], "name": c["name"], "input": c["args"]}
+                {
+                    "type": "tool_use",
+                    "id": c["id"],
+                    "name": c["name"],
+                    "input": c["args"],
+                }
                 for c in it.get("calls") or []
             ]
             if blocks:
                 add("assistant", blocks)
         else:
-            add("user", [{"type": "tool_result", "tool_use_id": it["id"], "content": it["content"]}])
+            add(
+                "user",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": it["id"],
+                        "content": it["content"],
+                    }
+                ],
+            )
     return msgs
 
 
