@@ -7,6 +7,7 @@ nodes_to_monitor:
     external_monitor:
       type: JsonMonitor
   depth_correction: {}
+  zed_depth_quality: {}
   fastsam: {}
   roman_map: {}
   roman_lc: {}
@@ -29,7 +30,7 @@ environment:
   ADT4_TF_NETWORK_MODE: $ADT4_TF_NETWORK_MODE
   ADT4_FLEET_LINK: $ADT4_FLEET_LINK
   ADT4_FLEETLINK_CONNECT: $ADT4_FLEETLINK_CONNECT
-  ADT4_MONITOR_CONFIG: '{nodes_to_track: {depth_correction: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, hydra_multi: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, tf_network: {}}}'
+  ADT4_MONITOR_CONFIG: '{nodes_to_track: {depth_correction: {}, fastsam: {}, hydra: {external_monitor: {type: JsonMonitor}}, hydra_multi: {external_monitor: {type: JsonMonitor}}, nlu_rviz_instruction_panel: {}, nlu_rviz_manipulation_panel: {}, relocalization_monitor: {external_monitor: {type: RelocalizationMonitor}}, roman_lc: {}, roman_map: {}, tf_network: {}, zed_depth_quality: {}}}'
   ADT4_ROBOT_NAME: $ADT4_ROBOT_NAME
   config: relocalize_awcd
   logging_key: phoenix_bag_relocalize-relocalize_awcd
