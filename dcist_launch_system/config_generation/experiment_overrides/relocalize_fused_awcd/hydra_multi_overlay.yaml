@@ -1,0 +1,10 @@
+---
+# relocalize_fused + relocalize_awcd in one config (a config group would only
+# collect its leaves, dropping both overlays): the prior is a fused multi-robot
+# map (run-fusion-from-trajectories) whose robots 1..N keep their own trajectory
+# ids, and the live robot frame is pre_icp_odom for change detection.
+robots: !update
+  - inputs:
+      dgraph:
+        keep_robot_ids: true  # robots 1..N keep their own trajectories
+  - robot_frame: $<var robot_name>/pre_icp_odom  # hydra_multi publishes map_T_<robot>/pre_icp_odom
