@@ -78,18 +78,31 @@ def _forward(fn, *args):
         raise HTTPException(code, str(e)) from None
 
 
-def _refresh(svc, src: str | None) -> list[str]:
-    """Invalidate the Neo4j source(s) the commit wrote and tell viewers."""
+def _refresh(svc, src: str | None, out: dict | None = None) -> list[str]:
+    """Refresh the Neo4j source(s) the commit wrote and tell viewers.
+
+    The source the SAM3 server writes (``src``, else ``--sam3-neo4j``) gets the
+    new object folded in (Neo4jSource.apply_change: the object's node and edges
+    re-read, a delta pushed to viewers) instead of a full reload; any other
+    Neo4j source is invalidated as before."""
     graph = svc.graph
+    out = out or {}
+    if out.get("already_committed"):
+        return []  # nothing new was written
     ids = []
     if src and isinstance(graph.sources.get(src), Neo4jSource):
         ids = [src]
     else:
         ids = [k for k, s in graph.sources.items() if isinstance(s, Neo4jSource)]
+    name = getattr(svc.settings, "sam3_neo4j", None)
+    target = ids[0] if len(ids) == 1 else (f"neo4j:{name}" if name and f"neo4j:{name}" in ids else None)
     for sid in ids:
         try:
-            graph.sources[sid].invalidate()
-            graph.notify_version(sid, "sam3")
+            if sid == target and out.get("symbol"):
+                graph.apply_change(sid, "sam3", out.get("state_version"), [out["symbol"]])
+            else:
+                graph.sources[sid].invalidate()
+                graph.notify_version(sid, "sam3")
         except Exception:  # noqa: BLE001
             log.exception("refreshing %s after SAM3 commit", sid)
     return ids
@@ -184,7 +197,7 @@ def commit(body: CommitBody, request: Request):
     out = _forward(
         sam3_client.commit, body.pending_id, body.index, s.sam3_url, 60.0
     )
-    refreshed = _refresh(svc, body.src)
+    refreshed = _refresh(svc, body.src, out)
     return {**out, "refreshed": refreshed}
 
 

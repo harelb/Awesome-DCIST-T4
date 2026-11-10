@@ -129,11 +129,16 @@ class EditService:
     def _after_commit(self, src_id: str, out: dict, reason: str, author: dict | None = None) -> None:
         if out.get("dry_run") or not out.get("mutation_id"):
             return
+        # graph_edit reports the nodes it touched (both ends of an edge op): fold
+        # them into the loaded graph and push a delta; it falls back to a reload
         try:
-            self.graph.get(src_id).invalidate()
+            self.graph.apply_change(src_id, reason, out.get("state_version"), out.get("affected"))
         except Exception:  # noqa: BLE001
-            pass
-        self.graph.notify_version(src_id, reason)
+            try:
+                self.graph.get(src_id).invalidate()
+            except Exception:  # noqa: BLE001
+                pass
+            self.graph.notify_version(src_id, reason)
         if self.hub is not None:
             self.hub.publish(f"edit/{src_id}", {"kind": "commit", "mutation_id": out["mutation_id"],
                                                 "revision": out["revision"], "summary": out["summary"],
