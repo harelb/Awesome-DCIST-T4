@@ -365,6 +365,11 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
                                  "objects (object-in-place).")  # fmt: skip
                          )
     roster = ctx.get("roster") or []
+    if ctx.get("auto_send"):
+        parts.append("Auto-send is ON: the roster is exactly the robots that are online now, each starting at "
+                     "its live pose. A plan you make (plan_ground_mission, or a pddl propose_goal) is sent to "
+                     "the robots at once, so plan only what the operator asked, name each robot with the -by "
+                     "forms, and say in one line what will be sent.")
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))
     else:

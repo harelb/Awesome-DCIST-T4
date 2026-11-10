@@ -17,6 +17,11 @@ import {FastDownwardDetails} from "./FastDownward";
 import {PlannerSchedule} from "./PlannerSchedule";
 import {EnginePicker} from "./EnginePicker";
 import {GoalImages} from "./GoalImages";
+import {autoRoster, onlineRobots, planAutoSend, type AutoRobot, type Fleet, type Skipped} from "../lib/autoSend";
+import {setAutoSend, useAutoSend} from "../stores/autoSend";
+import {useRobots} from "../stores/robots";
+import {useFleet} from "../stores/fleet";
+import {rosterOf} from "./robotFocus";
 import {agentColors} from "./MissionOverlay";
 import {useRobotColor3D} from "./background";
 import {ENGINE_LABEL, refreshEngines, useEngines, type EngineId} from "../stores/engines";
@@ -35,7 +40,38 @@ export type ChatItem =
   | CypherWrite
   | MapEditItem
   | ImagesItem
-  | ObjectCandidate;
+  | ObjectCandidate
+  | AutoSendItem;
+
+/** A plan the chat sent by itself ("Auto-send to online robots"): local only. */
+export interface AutoSendItem {
+  type: "autosend";
+  goal: string;
+  engine?: string | null;
+  /** the robot the goal was sent through (null: not sent, see ``blocked``) */
+  via: string | null;
+  robots: {name: string; kind: string; leaseHolder?: string}[];
+  skipped: Skipped[];
+  blocked?: string;
+  result?: {tone: SendTone; text: string};
+  /** the backend's lease report ({robot: {ok, message}}) */
+  lease?: Record<string, {ok?: boolean; message?: string}> | null;
+}
+
+/** The console's robots now, for the auto-send rules. */
+function fleetNow(): {names: string[]; fleet: Fleet} {
+  const r = useRobots.getState();
+  const machines = useFleet.getState().machines?.machines;
+  const platforms: Record<string, string | undefined> = {};
+  for (const m of machines ?? []) platforms[m.name] = (m as {platform_type?: string}).platform_type;
+  return {names: rosterOf(machines, Object.keys(r.state), Object.keys(r.link)), fleet: {state: r.state, stateAt: r.stateAt, link: r.link, platforms}};
+}
+
+/** Online robots (and the skipped ones) for an engine, now. */
+export function autoSendRobots(engine?: string | null): {online: AutoRobot[]; skipped: Skipped[]} {
+  const {names, fleet} = fleetNow();
+  return onlineRobots(names, fleet, Date.now(), engine);
+}
 
 /** A mission the assistant proposed (propose_mission); stored server-side. */
 export interface MissionCardItem {
@@ -239,6 +275,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
   // the conversation lives in the chat store: it outlives this panel (page
   // switches, reloads) and a turn keeps streaming into it while unmounted
   const items = useChat(s => s.items);
+  const autoOn = useAutoSend(s => s.on);
   const busy = useChat(s => s.busy);
   const [input, setInput] = useState("");
   // "Re-plan in chat" (Mission tab): the text lands in the message box, unsent
@@ -326,20 +363,25 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
     const ctl = new AbortController();
     abort.current = ctl;
     let gotTranscript = false;
+    const toSend: AutoQueued[] = [];
     try {
       const headers: Record<string, string> = {"Content-Type": "application/json"};
       const t = getToken();
       if (t) headers.Authorization = `Bearer ${t}`;
       // the mission planner's context: agents, drawn areas, the open mission (propose_mission)
       const ms = useMission.getState();
-      const withMission = missionMode || (ms.chatOn && (ms.roster.length > 0 || !!ms.current));
+      // auto-send: plan for the robots that are online now, whatever the Mission panel holds
+      const auto = useAutoSend.getState().on;
+      const engineNow = useEngines.getState().engine;
+      const autoFleet = auto ? autoSendRobots(engineNow) : null;
+      const withMission = auto || missionMode || (ms.chatOn && (ms.roster.length > 0 || !!ms.current));
       const body = {
         message,
         robot: planRobot ?? undefined,
         src: withMission ? (ms.world?.src ?? src) : src,
         history: trimTranscript(transcript.current),
         model: chosenModel,
-        mission_ctx: withMission ? missionContext() : undefined,
+        mission_ctx: withMission ? (autoFleet ? {...missionContext(), roster: autoRoster(autoFleet.online), auto_send: true} : missionContext()) : undefined,
         reasoning: isReasoningModel(chosenModel ?? defaultModel) ? reasoning : undefined,
       };
       const res = await fetch("api/chat", {method: "POST", headers, body: JSON.stringify(body), signal: ctl.signal});
@@ -364,6 +406,11 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
         }
         const it = toChatItem(o);
         if (it) push(it);
+        if (auto && it) {
+          if (it.type === "goal" && it.kind === "pddl" && typeof it.body.goal === "string")
+            toSend.push({goal: it.body.goal, engine: (it.body.engine as string | undefined) ?? engineNow, constraints: it.body.constraints, card: it});
+          else if (it.type === "mission" && it.planned?.pddl_goal) toSend.push({goal: it.planned.pddl_goal, engine: it.planned.engine ?? engineNow});
+        }
         // a proposed mission opens in the Mission tab at once (on a phone the
         // chat sheet stays up: the tab is only selected for when the panel opens)
         if (it?.type === "mission")
@@ -380,6 +427,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
         for (const o of objs as Record<string, unknown>[]) handle(o);
       }
       if (buf.trim()) for (const o of parseNdjson(buf + "\n")[0] as Record<string, unknown>[]) handle(o);
+      for (const q of toSend) await autoSendGoal(q);
     } catch (e) {
       if (!ctl.signal.aborted) push({type: "error", text: errorText(e)});
     } finally {
@@ -490,6 +538,35 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
     }
   };
 
+  /** Send a plan the chat made, as the PDDL goal omniplanner routes (never a
+   *  straight goto), through one robot it names (-by forms cover the others). */
+  const autoSendGoal = async (q: AutoQueued) => {
+    const {online, skipped} = autoSendRobots(q.engine);
+    const plan = planAutoSend(q.goal, online, skipped);
+    const named = plan.robots.map(n => online.find(r => r.name === n) ?? {name: n, kind: "spot"});
+    const card: AutoSendItem = {type: "autosend", goal: q.goal, engine: q.engine, via: plan.via, robots: named, skipped: plan.skipped, blocked: plan.blocked};
+    if (!plan.via) {
+      push(card);
+      return;
+    }
+    let result: AutoSendItem["result"];
+    let lease: AutoSendItem["lease"] = null;
+    try {
+      const body: Record<string, unknown> = {goal: q.goal};
+      if (q.constraints) body.constraints = q.constraints;
+      if (q.engine === "grstaps") body.engine = "grstaps";
+      const r = await sendGoal(plan.via, "pddl", body);
+      result = goalSendMessage(`Sent through ${plan.via}`, r);
+      lease = ((r as unknown as {lease?: AutoSendItem["lease"]}).lease ?? null) || null;
+    } catch (e) {
+      result = {tone: "err", text: `failed: ${errorText(e)}`};
+    }
+    push({...card, result, lease});
+    if (q.card) setItems(cur => cur.map(c => (c === q.card ? {...(c as Extract<ChatItem, {type: "goal"}>), sent: {tone: result!.tone, text: `auto-sent: ${result!.text}`}} : c)));
+    // the assistant should know the plan is underway
+    transcript.current = [...transcript.current, {role: "user", text: `[operator] auto-sent ${q.goal} through ${plan.via}: ${result!.text}`}];
+  };
+
   const sendProposal = async (idx: number) => {
     const it = items[idx];
     if (it.type !== "goal") return;
@@ -538,6 +615,15 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
               </option>
             ))}
           </select>
+        )}
+        <label className="row gap-xs small chat-autosend" title="Plans the chat makes are sent at once to the robots that are online (fleetlink up, executor status, not E-stopped); sending takes a Spot's lease">
+          <input type="checkbox" checked={autoOn} onChange={e => setAutoSend(e.target.checked)} data-testid="auto-send-toggle" />
+          Auto-send to online robots
+        </label>
+        {autoOn && (
+          <span data-testid="auto-send-on">
+            <Badge tone="warn">AUTO-SEND ON</Badge>
+          </span>
         )}
         <span className="grow" />
         {missionMode && current && saveName === null && (
@@ -604,6 +690,7 @@ export function ChatPanel({missionMode = false}: {missionMode?: boolean} = {}) {
           if (it.type === "images") return <ImagesCard key={i} it={it} />;
           if (it.type === "tool") return <ToolCard key={i} it={it} />;
           if (it.type === "mission") return <MissionCard key={i} it={it} />;
+          if (it.type === "autosend") return <AutoSendCard key={i} it={it} />;
           return <GoalCard key={i} it={it} robot={it.robot ?? planRobot} src={src ?? null} onSend={() => void sendProposal(i)} />;
         })}
         {busy && <Spinner label="thinking" />}
@@ -1066,6 +1153,55 @@ function CandidateCard({it, idx, ord, onAct}: {it: ObjectCandidate; idx: number;
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+interface AutoQueued {
+  goal: string;
+  engine?: string | null;
+  constraints?: unknown;
+  /** the goal card it came from (marked auto-sent) */
+  card?: ChatItem;
+}
+
+function AutoSendCard({it}: {it: AutoSendItem}) {
+  const [msg, setMsg] = useState<Record<string, string>>({});
+  const act = async (r: {name: string; kind: string}) => {
+    const spot = r.kind !== "husky";
+    try {
+      await postJSON(spot ? `api/robots/${encodeURIComponent(r.name)}/executor/pause` : `api/robots/${encodeURIComponent(r.name)}/teleop/stop`);
+      setMsg(m => ({...m, [r.name]: spot ? "paused" : "stopped (manual)"}));
+    } catch (e) {
+      setMsg(m => ({...m, [r.name]: `failed: ${errorText(e)}`}));
+    }
+  };
+  return (
+    <div className={`msg msg-goal ${it.via ? "" : "msg-err"}`} data-testid="auto-send-card">
+      <div className="row gap between">
+        <span>
+          <Badge tone={it.via ? "warn" : "err"}>auto-send</Badge> {it.via ? <>sent through <b>{it.via}</b>{it.engine === "grstaps" ? " · GRSTAPS-X" : ""}</> : "not sent"}
+        </span>
+      </div>
+      <pre className="mono small">{it.goal}</pre>
+      {it.result && <div className={`small tone-${it.result.tone}`}>{it.result.text}</div>}
+      {it.blocked && <div className="small tone-err">{it.blocked}</div>}
+      {it.via &&
+        it.robots.map(r => (
+          <div key={r.name} className="row gap-sm small">
+            <span className="mono">{r.name}</span>
+            {r.leaseHolder && <span className="muted">lease was held by {r.leaseHolder}{it.lease?.[r.name] ? (it.lease[r.name].ok ? " · taken" : ` · not taken: ${it.lease[r.name].message ?? ""}`) : ""}</span>}
+            <button className="btn btn-xs" onClick={() => void act(r)} data-testid={`auto-send-stop-${r.name}`}>
+              {r.kind === "husky" ? "Stop (manual)" : "Pause"}
+            </button>
+            {msg[r.name] && <span className="muted">{msg[r.name]}</span>}
+          </div>
+        ))}
+      {it.skipped.length > 0 && (
+        <div className="small muted" data-testid="auto-send-skipped">
+          skipped: {it.skipped.map(s => `${s.name} (${s.reason})`).join(", ")}
+        </div>
+      )}
     </div>
   );
 }
