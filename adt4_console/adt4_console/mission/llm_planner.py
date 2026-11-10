@@ -64,9 +64,15 @@ TOOL = {
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "short title"},
-            "goal": {"type": "string", "description": "the operator's request in one sentence, in their words "
-                     "(restate it when they only answered a question, e.g. 'yes')"},
-            "revise": {"type": "boolean", "description": "true: replace the current mission"},
+            "goal": {
+                "type": "string",
+                "description": "the operator's request in one sentence, in their words "
+                "(restate it when they only answered a question, e.g. 'yes')",
+            },
+            "revise": {
+                "type": "boolean",
+                "description": "true: replace the current mission",
+            },
             "agents": {
                 "type": "array",
                 "items": {
@@ -75,7 +81,10 @@ TOOL = {
                         "id": {"type": "string"},
                         "kind": {"type": "string", "enum": ["spot", "husky", "quad"]},
                         "start": {"type": "array", "items": {"type": "number"}},
-                        "binding": {"type": "string", "description": "real robot id, if any"},
+                        "binding": {
+                            "type": "string",
+                            "description": "real robot id, if any",
+                        },
                     },
                     "required": ["id", "kind"],
                 },
@@ -87,16 +96,37 @@ TOOL = {
                     "properties": {
                         "id": {"type": "string"},
                         "agent": {"type": "string"},
-                        "type": {"type": "string", "enum": ["goto", "inspect", "explore_area", "request_image",
-                                                              "wait_for", "return_home", "hold"]},  # fmt: skip
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "goto",
+                                "inspect",
+                                "explore_area",
+                                "request_image",
+                                "wait_for",
+                                "return_home",
+                                "hold",
+                            ],
+                        },  # fmt: skip
                         "target": {
                             "description": "symbol like 'O(12)', '$found:<thing>', or [x, y]",
-                            "anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "number"}}],
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "number"}},
+                            ],
                         },
                         "area": {
                             "description": "polygon [[x, y], ...], or a map region's symbol or name",
-                            "anyOf": [{"type": "string"},
-                                      {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}],
+                            "anyOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "array",
+                                        "items": {"type": "number"},
+                                    },
+                                },
+                            ],
                         },  # fmt: skip
                         "depends_on": {"type": "array", "items": {"type": "string"}},
                         "params": {"type": "object"},
@@ -109,7 +139,7 @@ TOOL = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "every substitution or interpretation you made (e.g. \"'box' read as "
-                "the class 'crate'\", \"spot1 takes the north car, spot2 the south one\"); [] if none",
+                'the class \'crate\'", "spot1 takes the north car, spot2 the south one"); [] if none',
             },
             "geofences": {
                 "description": "no-go zones (default: the operator's no-go zones)",
@@ -118,7 +148,10 @@ TOOL = {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string"},
-                        "polygon": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                        "polygon": {
+                            "type": "array",
+                            "items": {"type": "array", "items": {"type": "number"}},
+                        },
                     },
                     "required": ["id", "polygon"],
                 },
@@ -201,33 +234,53 @@ PLAN_TOOL = {
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "short title"},
-            "goal": {"type": "string", "description": "the operator's request in one sentence, in their words"},
-            "pddl_goal": {"type": "string", "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'"},
-            "engine": {"type": "string", "enum": ["fast_downward", "grstaps"],
-                       "description": "fast_downward (default): shortest routes, visits, inspections, end poses, "
-                       "moving / dragging objects (object-in-place); grstaps: GRSTAPS-X, a timed schedule, joint "
-                       "inspections, before-ordering, region coverage, object-in-place"},
+            "goal": {
+                "type": "string",
+                "description": "the operator's request in one sentence, in their words",
+            },
+            "pddl_goal": {
+                "type": "string",
+                "description": "e.g. '(and (visited-object-by spot1 o12) (safe o7))'",
+            },
+            "engine": {
+                "type": "string",
+                "enum": ["fast_downward", "grstaps"],
+                "description": "fast_downward (default): shortest routes, visits, inspections, end poses, "
+                "moving / dragging objects (object-in-place); grstaps: GRSTAPS-X, a timed schedule, joint "
+                "inspections, before-ordering, region coverage, object-in-place",
+            },
             "constraints": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "predicate": {"type": "string", "enum": ["forbidden-poi", "forbidden-edge", "before"]},
+                        "predicate": {
+                            "type": "string",
+                            "enum": ["forbidden-poi", "forbidden-edge", "before"],
+                        },
                         "symbols": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["predicate", "symbols"],
                 },
             },
-            "revise": {"type": "boolean", "description": "true: replace the current mission"},
-            "assumptions": {"type": "array", "items": {"type": "string"},
-                            "description": "every substitution or interpretation you made; [] if none"},  # fmt: skip
+            "revise": {
+                "type": "boolean",
+                "description": "true: replace the current mission",
+            },
+            "assumptions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "every substitution or interpretation you made; [] if none",
+            },  # fmt: skip
         },
         "required": ["pddl_goal", "assumptions"],
     },
 }
 
 
-def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, message: str, history=None):
+def run_plan_tool(
+    args: dict, ctx: dict | None, service, src: str | None, message: str, history=None
+):
     """``plan_ground_mission``: (events, result for the model)."""
     from . import omni_planner
 
@@ -235,15 +288,21 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
     goal = str(args.get("pddl_goal") or "").strip()
     if not goal:
         return [], {"error": "empty pddl_goal"}
-    assumptions = [str(a).strip() for a in args.get("assumptions") or [] if str(a).strip()][:12]
+    assumptions = [
+        str(a).strip() for a in args.get("assumptions") or [] if str(a).strip()
+    ][:12]
     cur = ctx.get("mission")
     revising = bool(cur and args.get("revise"))
-    roster = [dict(a) for a in ctx.get("roster") or [] if isinstance(a, dict) and a.get("id")]
+    roster = [
+        dict(a) for a in ctx.get("roster") or [] if isinstance(a, dict) and a.get("id")
+    ]
     if not roster and revising:
         roster = [dict(a) for a in cur.get("agents") or []]
     agents = [a for a in roster if a.get("kind", "spot") != "quad"]
     if not agents:
-        return [], {"error": "no ground agents in the roster: ask the operator to add a spot or husky"}
+        return [], {
+            "error": "no ground agents in the roster: ask the operator to add a spot or husky"
+        }
     geofences = (cur.get("geofences") if revising else None) or no_go_zones(ctx)
     text = str(args.get("goal") or "").strip() or request_text(history, message)
     engine = args.get("engine") or ctx.get("engine") or omni_planner.DEFAULT_ENGINE
@@ -251,15 +310,23 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
         return [], {"error": f"unknown engine {engine!r}: fast_downward or grstaps"}
     why = omni_planner.available(engine)
     if why:
-        return [], {"error": f"{omni_planner.ENGINES[engine]} cannot plan here ({why})"
-                             + ("; use engine fast_downward" if engine == "grstaps" else "; use propose_mission")}
+        return [], {
+            "error": f"{omni_planner.ENGINES[engine]} cannot plan here ({why})"
+            + (
+                "; use engine fast_downward"
+                if engine == "grstaps"
+                else "; use propose_mission"
+            )
+        }
     try:
         m, planned = omni_planner.plan_pddl(goal, agents, src, service, args.get("constraints"), geofences,
                                             text=text, name=str(args.get("name") or ""), engine=engine,
                                             areas=(cur.get("goal") or {}).get("areas") if revising and not ctx.get("areas")
                                             else ctx.get("areas"))  # fmt: skip
     except omni_planner.OmniUnavailable as e:
-        return [], {"error": f"omniplanner is not available here ({e}); use propose_mission"}
+        return [], {
+            "error": f"omniplanner is not available here ({e}); use propose_mission"
+        }
     except ValueError as e:
         fd = getattr(e, "fast_downward", None)
         plog = getattr(e, "planner_log", None)
@@ -270,7 +337,10 @@ def run_plan_tool(args: dict, ctx: dict | None, service, src: str | None, messag
         for_model = {"error": f"omniplanner could not plan {goal} with {omni_planner.ENGINES[engine]}: {e}. Check the symbols "
                               "(run_cypher) and the robot names, or use propose_mission."}  # fmt: skip
         if fd:
-            for_model["fast_downward"] = {"digest": fd.get("digest"), "log_tail": fd.get("log", [])[-12:]}
+            for_model["fast_downward"] = {
+                "digest": fd.get("digest"),
+                "log_tail": fd.get("log", [])[-12:],
+            }
         elif plog:
             for_model["planner_log"] = {"planner": plog.get("planner"), "digest": plog.get("digest"),
                                         "log_tail": (plog.get("log") or [])[-12:]}  # fmt: skip
@@ -336,7 +406,12 @@ def no_go_zones(ctx: dict | None) -> list[dict]:
     out = []
     for z in (ctx or {}).get("no_go") or []:
         if isinstance(z, dict) and z.get("polygon") and len(z["polygon"]) >= 3:
-            out.append({"id": str(z.get("name") or z.get("id") or f"no-go {len(out) + 1}"), "polygon": z["polygon"]})
+            out.append(
+                {
+                    "id": str(z.get("name") or z.get("id") or f"no-go {len(out) + 1}"),
+                    "polygon": z["polygon"],
+                }
+            )
     return out
 
 
@@ -352,24 +427,31 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             parts.append(PLAN_FORCED)
             if ctx.get("engine") == "grstaps":
                 parts.append(PLAN_GRSTAPS_FORCED)
-        elif ctx.get("engine") == "fast_downward" or (ctx.get("engine") == "grstaps" and ctx.get("grstaps")):
+        elif ctx.get("engine") == "fast_downward" or (
+            ctx.get("engine") == "grstaps" and ctx.get("grstaps")
+        ):
             # the planner the operator picked in the chat window
             name = "GRSTAPS-X" if ctx["engine"] == "grstaps" else "Fast Downward"
-            parts.append(f"The operator picked the {name} planner: call plan_ground_mission with engine "
-                         f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
-                         "in one line instead of switching"
-                         + (": an end pose (at-place / in-region) or an or needs Fast Downward."
-                            if ctx["engine"] == "grstaps"
-                            else ": ordering (before), a joint inspection, covering a big region or a drawn mission "
-                                 "area (area1, ...) needs GRSTAPS-X. Fast Downward does plan moving and dragging "
-                                 "objects (object-in-place).")  # fmt: skip
-                         )
+            parts.append(
+                f"The operator picked the {name} planner: call plan_ground_mission with engine "
+                f"'{ctx['engine']}'. If the request needs something only the other planner does, say so "
+                "in one line instead of switching"
+                + (
+                    ": an end pose (at-place / in-region) or an or needs Fast Downward."
+                    if ctx["engine"] == "grstaps"
+                    else ": ordering (before), a joint inspection, covering a big region or a drawn mission "
+                    "area (area1, ...) needs GRSTAPS-X. Fast Downward does plan moving and dragging "
+                    "objects (object-in-place)."
+                )  # fmt: skip
+            )
     roster = ctx.get("roster") or []
     if ctx.get("auto_send"):
-        parts.append("Auto-send is ON: the roster is exactly the robots that are online now, each starting at "
-                     "its live pose. A plan you make (plan_ground_mission, or a pddl propose_goal) is sent to "
-                     "the robots at once, so plan only what the operator asked, name each robot with the -by "
-                     "forms, and say in one line what will be sent.")
+        parts.append(
+            "Auto-send is ON: the roster is exactly the robots that are online now, each starting at "
+            "its live pose. A plan you make (plan_ground_mission, or a pddl propose_goal) is sent to "
+            "the robots at once, so plan only what the operator asked, name each robot with the -by "
+            "forms, and say in one line what will be sent."
+        )
     if roster:
         parts.append("Agent roster: " + json.dumps(roster, separators=(",", ":")))
     else:
@@ -380,7 +462,8 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
             "Named areas (scope map: a Room node in the scene graph, MATCH (r:Room {name: ..})-[:CONTAINS]->(x) "
             "gives its places/objects, and its symbol works as a goto/inspect target = its centre; scope "
             "mission: drawn by the operator for this mission only; its symbol area1, area2, ... is a region "
-            "for GRSTAPS-X goals only). Use an area's name (or symbol) as an explore_area `area`: " + json.dumps(areas, separators=(",", ":"))
+            "for GRSTAPS-X goals only). Use an area's name (or symbol) as an explore_area `area`: "
+            + json.dumps(areas, separators=(",", ":"))
         )
     else:
         parts.append("Named areas: none (the operator can draw one on the map).")
@@ -397,7 +480,9 @@ def context_text(ctx: dict | None, bounds=None, regions=None) -> str:
         slim = {k: cur.get(k) for k in ("id", "name", "agents", "tasks", "geofences")}
         parts.append("Current mission: " + json.dumps(slim, separators=(",", ":")))
     if bounds:
-        parts.append(f"Map extent (map frame): x {bounds[0]:.0f}..{bounds[2]:.0f}, y {bounds[1]:.0f}..{bounds[3]:.0f}.")
+        parts.append(
+            f"Map extent (map frame): x {bounds[0]:.0f}..{bounds[2]:.0f}, y {bounds[1]:.0f}..{bounds[3]:.0f}."
+        )
     return "\n".join(parts)
 
 
@@ -409,7 +494,8 @@ def request_text(history, message: str) -> str:
     users = []
     for it in history or []:
         if it.get("role") == "assistant" and any(
-            c.get("name") in (TOOL["name"], PLAN_TOOL["name"]) for c in it.get("calls") or []
+            c.get("name") in (TOOL["name"], PLAN_TOOL["name"])
+            for c in it.get("calls") or []
         ):
             users = []
         elif it.get("role") == "user":
@@ -419,7 +505,15 @@ def request_text(history, message: str) -> str:
     return users[0] if users else message
 
 
-def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: str, regions=None, history=None):
+def run_tool(
+    args: dict,
+    ctx: dict | None,
+    service,
+    src: str | None,
+    message: str,
+    regions=None,
+    history=None,
+):
     """(events, result for the model).  ``history``: the earlier turns (the
     mission's ``text`` is the request they started with, see :func:`request_text`)."""
     ctx = ctx or {}
@@ -434,12 +528,16 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
                                      f"{known or 'the areas they draw'}."}  # fmt: skip
             t["area"] = r["polygon"]
             t.setdefault("note", f"area {r.get('name') or r['symbol']}")
-    assumptions = [str(a).strip() for a in args.get("assumptions") or [] if str(a).strip()][:12]
+    assumptions = [
+        str(a).strip() for a in args.get("assumptions") or [] if str(a).strip()
+    ][:12]
     cur = ctx.get("mission")
     revising = bool(cur and args.get("revise"))
     # the mission's command: the model's restatement, else what the revised mission
     # was asked for, else the thread's first request (not a bare "yes")
-    text = str(args.get("goal") or "").strip() or (str(cur.get("text") or "").strip() if revising else "")
+    text = str(args.get("goal") or "").strip() or (
+        str(cur.get("text") or "").strip() if revising else ""
+    )
     body = {
         "name": str(args.get("name") or ""),
         "text": text or request_text(history, message),
@@ -458,7 +556,11 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
     if not body["geofences"]:  # the operator's no-go zones
         body["geofences"] = no_go_zones(ctx)
     # starts the model left out come from the roster
-    roster = {a["id"]: a for a in ctx.get("roster") or [] if isinstance(a, dict) and a.get("id")}
+    roster = {
+        a["id"]: a
+        for a in ctx.get("roster") or []
+        if isinstance(a, dict) and a.get("id")
+    }
     for a in body["agents"]:
         r = roster.get(a.get("id"))
         if r:
@@ -472,7 +574,9 @@ def run_tool(args: dict, ctx: dict | None, service, src: str | None, message: st
     return mission_card(m, service.put(m), assumptions)
 
 
-def mission_card(m: Mission, out: dict, assumptions: list[str], planned: dict | None = None):
+def mission_card(
+    m: Mission, out: dict, assumptions: list[str], planned: dict | None = None
+):
     """(the ``mission`` card for the operator, the result for the model) of a stored mission.
     ``planned``: what omniplanner reported (metres per agent, planning time)."""
     pv = out["preview"]
@@ -482,9 +586,19 @@ def mission_card(m: Mission, out: dict, assumptions: list[str], planned: dict | 
         "id": m.id,
         "revision": out["mission"]["revision"],
         "name": m.name,
-        "agents": [{"id": a.id, "kind": a.kind, "binding": a.binding} for a in m.agents],
-        "tasks": [{"id": t.id, "agent": t.agent, "type": t.type,
-                   "target": t.target, "depends_on": t.depends_on} for t in m.tasks],  # fmt: skip
+        "agents": [
+            {"id": a.id, "kind": a.kind, "binding": a.binding} for a in m.agents
+        ],
+        "tasks": [
+            {
+                "id": t.id,
+                "agent": t.agent,
+                "type": t.type,
+                "target": t.target,
+                "depends_on": t.depends_on,
+            }
+            for t in m.tasks
+        ],  # fmt: skip
         "issues": issues,
         "assumptions": assumptions,
         "makespan": pv.get("makespan"),

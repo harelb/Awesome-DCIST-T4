@@ -18,15 +18,24 @@ def bridge(platforms, owned=()):
 
 def test_goal_robots_reads_by_predicates():
     b = bridge({"euclid": "spot"})
-    f = {"goal": {"robot_id": "euclid", "pddl_goal": "(and (visited-poi-by gauss t1) (visited-object-by hamilton o56))"}}
+    f = {
+        "goal": {
+            "robot_id": "euclid",
+            "pddl_goal": "(and (visited-poi-by gauss t1) (visited-object-by hamilton o56))",
+        }
+    }
     assert b.goal_robots("euclid", f) == ["euclid", "gauss", "hamilton"]
 
 
 def test_takes_only_spot_leases_it_does_not_own(monkeypatch):
     monkeypatch.delenv("ADT4_AUTO_TAKE_LEASE", raising=False)
-    b = bridge({"euclid": "spot", "hamilton": "spot", "gauss": "phoenix"}, owned={"euclid"})
+    b = bridge(
+        {"euclid": "spot", "hamilton": "spot", "gauss": "phoenix"}, owned={"euclid"}
+    )
     out = b.auto_take_leases(["euclid", "hamilton", "gauss"])
-    assert b.taken == ["hamilton"] and out == {"hamilton": {"ok": True, "message": "taken"}}
+    assert b.taken == ["hamilton"] and out == {
+        "hamilton": {"ok": True, "message": "taken"}
+    }
 
 
 def test_can_be_switched_off(monkeypatch):

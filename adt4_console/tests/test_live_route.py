@@ -57,7 +57,9 @@ def test_execute_sends_the_previewed_route(tmp_path):
     assert syms[-1] == "O(0)" and len(syms) >= 2
     path = run.agents["spot2"].path
     pos = {world.graph.nearest_symbol(p): p for p in path}
-    assert all(s in pos for s in syms[:-1]), "a sent place is not on the previewed route"
+    assert all(s in pos for s in syms[:-1]), (
+        "a sent place is not on the previewed route"
+    )
     # goto_points drives straight between the points sent: no leg may cross the wall
     pts = [path[0]] + [pos[s] for s in syms[:-1]] + [path[-1]]
     for a, b in zip(pts, pts[1:]):

@@ -17,8 +17,8 @@ import logging
 import os
 import pathlib
 import queue
-import threading
 import re
+import threading
 import time
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,11 @@ PLUGIN_TYPES = {
     # default goal_format: points it takes a GotoPointsGoalMsg (GRSTAPS_POINTS)
     "Grstaps": ("grstaps", "pddl_goal", "omniplanner_msgs/msg/ConstrainedPddlGoalMsg"),
 }
-GRSTAPS_POINTS = ("grstaps_points", "grstaps_goal", "omniplanner_msgs/msg/GotoPointsGoalMsg")
+GRSTAPS_POINTS = (
+    "grstaps_points",
+    "grstaps_goal",
+    "omniplanner_msgs/msg/GotoPointsGoalMsg",
+)
 # which plugin kind an omniplanner engine (mission/omni_planner.ENGINES) is
 ENGINE_KIND = {"fast_downward": "pddl_constrained", "grstaps": "grstaps"}
 NO_GRSTAPS = ("no GRSTAPS-X planner is running (start the base station with a grstaps "
@@ -69,7 +73,11 @@ NO_GOAL_MANAGER_WARNING = (
     "plan repair goal_manager is not running; sent straight to omniplanner "
     "— no constraints / replanning"
 )
-CONSTRAINT_PREDICATES = ("forbidden-poi", "forbidden-edge", "before")  # before: GRSTAPS-X only
+CONSTRAINT_PREDICATES = (
+    "forbidden-poi",
+    "forbidden-edge",
+    "before",
+)  # before: GRSTAPS-X only
 CONSTRAINT_ARITY = {"forbidden-poi": 1, "forbidden-edge": 2, "before": 2}
 
 
@@ -87,7 +95,9 @@ def normalize_constraints(facts) -> list[dict]:
             raise ValueError(f"bad constraint {f!r}")
         pred = str(pred).strip().lower()
         if pred not in CONSTRAINT_PREDICATES:
-            raise ValueError(f"unknown constraint predicate {pred!r} (use {', '.join(CONSTRAINT_PREDICATES)})")
+            raise ValueError(
+                f"unknown constraint predicate {pred!r} (use {', '.join(CONSTRAINT_PREDICATES)})"
+            )
         want = CONSTRAINT_ARITY[pred]
         if len(syms) != want:
             raise ValueError(f"{pred} takes {want} symbol(s), got {len(syms)}")
@@ -96,6 +106,8 @@ def normalize_constraints(facts) -> list[dict]:
             raise ValueError(f"empty symbol in {pred}")
         out.append({"predicate": pred, "symbols": syms})
     return out
+
+
 DEFAULT_PLUGINS = {
     "goto_points": "GotoPoints",
     "language_planner": "LanguagePlanner",
@@ -146,12 +158,16 @@ def plugins_yaml_path() -> pathlib.Path | None:
         p = pathlib.Path(env).expanduser()
         if p.is_file():
             return p
-        log.warning("ADT4_OMNIPLANNER_PLUGINS=%s is not a file; using the default plugins", env)
+        log.warning(
+            "ADT4_OMNIPLANNER_PLUGINS=%s is not a file; using the default plugins", env
+        )
     try:
         import dcist_launch_system
 
         root = pathlib.Path(dcist_launch_system.__file__).resolve().parents[2]
-        for conf in dict.fromkeys(c for c in (os.environ.get("config"), "default") if c):
+        for conf in dict.fromkeys(
+            c for c in (os.environ.get("config"), "default") if c
+        ):
             p = root / "config" / conf / "omniplanner_plugins.yaml"
             if p.is_file():
                 return p
@@ -189,7 +205,10 @@ def load_plugins(path=None) -> list[dict]:
     for name, ptype in planners.items():
         if ptype in PLUGIN_TYPES:
             kind, suffix, msg = PLUGIN_TYPES[ptype]
-            if ptype == "Grstaps" and (formats.get(name) or "points") != "constrained_pddl":
+            if (
+                ptype == "Grstaps"
+                and (formats.get(name) or "points") != "constrained_pddl"
+            ):
                 kind, suffix, msg = GRSTAPS_POINTS
             out.append({"name": name, "kind": kind, "suffix": suffix, "msg_type": msg})
     return out
@@ -333,9 +352,16 @@ def schedule_from_msg(msg) -> dict:
         "plan_id": str(msg.plan_id),
         "makespan": round(float(msg.makespan), 2),
         "t": time.time(),
-        "rows": [{"robot": str(r.robot_name), "action": str(r.action), "target": str(r.target),
-                  "start": round(float(r.start_time), 2), "finish": round(float(r.finish_time), 2)}
-                 for r in msg.tasks],  # fmt: skip
+        "rows": [
+            {
+                "robot": str(r.robot_name),
+                "action": str(r.action),
+                "target": str(r.target),
+                "start": round(float(r.start_time), 2),
+                "finish": round(float(r.finish_time), 2),
+            }
+            for r in msg.tasks
+        ],  # fmt: skip
     }
 
 
@@ -596,9 +622,18 @@ class RosBridge:
 
         n = self.node
         try:
-            n.create_subscription(import_type(SCENE_CHANGE_TYPE), SCENE_CHANGES_TOPIC, self._on_scene_changes, 10)
+            n.create_subscription(
+                import_type(SCENE_CHANGE_TYPE),
+                SCENE_CHANGES_TOPIC,
+                self._on_scene_changes,
+                10,
+            )
         except Exception as e:  # noqa: BLE001 — heracles_ros_interfaces without SceneChangeMsg
-            log.warning("no %s subscription (%s): scene change recommendations need console edits only", SCENE_CHANGE_TYPE, e)
+            log.warning(
+                "no %s subscription (%s): scene change recommendations need console edits only",
+                SCENE_CHANGE_TYPE,
+                e,
+            )
         n.create_subscription(
             import_type("std_msgs/msg/String"), f"/{self.planner_ns}/omniplanner_node/replan_request",
             lambda m: self.scene_repair is not None and self.scene_repair.on_replan_request(m.data), 10,
@@ -615,7 +650,10 @@ class RosBridge:
         d = scene_change_msg_to_dict(msg)
         # off the executor thread: evaluating looks things up in Neo4j
         threading.Thread(
-            target=self._feed_scene_changes, args=(d,), name="scene-changes", daemon=True
+            target=self._feed_scene_changes,
+            args=(d,),
+            name="scene-changes",
+            daemon=True,
         ).start()
 
     def _feed_scene_changes(self, d: dict) -> None:
@@ -624,7 +662,9 @@ class RosBridge:
         except Exception:  # noqa: BLE001
             log.exception("scene changes from %s", d.get("source"))
 
-    def publish_scene_changes(self, source: str, map_version, changes: list[dict]) -> int:
+    def publish_scene_changes(
+        self, source: str, map_version, changes: list[dict]
+    ) -> int:
         """Publish ``changes`` (scene_repair's form, or SceneChange fields) on
         /scene_graph/changes_applied, as the scene change writer would."""
         from .scene_repair import to_msg_change
@@ -633,9 +673,13 @@ class RosBridge:
             "header": {"frame_id": "map"},
             "source": source,
             "map_version": int(map_version or 0),
-            "changes": [c if "semantic_label" in c else to_msg_change(c) for c in changes],
+            "changes": [
+                c if "semantic_label" in c else to_msg_change(c) for c in changes
+            ],
         }
-        return self.publish(SCENE_CHANGES_TOPIC, SCENE_CHANGE_TYPE, fields, match_timeout=0.5)
+        return self.publish(
+            SCENE_CHANGES_TOPIC, SCENE_CHANGE_TYPE, fields, match_timeout=0.5
+        )
 
     def _on_link_status(self, msg) -> None:
         try:
@@ -829,7 +873,8 @@ class RosBridge:
                 req = import_type(ms.REQUEST_TYPE)
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "no ManipulationApprovalRequest (%s): manipulation approvals unavailable", e
+                    "no ManipulationApprovalRequest (%s): manipulation approvals unavailable",
+                    e,
                 )
             else:
                 n.create_subscription(
@@ -858,7 +903,9 @@ class RosBridge:
     def _on_change_detection(self, robot, msg) -> None:
         self._plan[robot].change_detection = {"state": str(msg.data), "t": time.time()}
         if self.hub is not None:
-            self.hub.publish(f"robot/{robot}/change_detection", self.change_detection(robot))
+            self.hub.publish(
+                f"robot/{robot}/change_detection", self.change_detection(robot)
+            )
 
     def change_detection(self, robot: str) -> dict:
         """The robot's change detector as last reported: ``state`` running /
@@ -882,7 +929,9 @@ class RosBridge:
                 out["error"] = "service not relayed (fleetlink relay.yaml)"
                 return out
         try:
-            res = self.call_service(name, "std_srvs/srv/Trigger", {}, timeout=CHANGE_DETECTION_TIMEOUT_S)
+            res = self.call_service(
+                name, "std_srvs/srv/Trigger", {}, timeout=CHANGE_DETECTION_TIMEOUT_S
+            )
         except TimeoutError as e:
             out["error"] = f"{e} (is change detection running on {robot}?)"
             return out
@@ -896,12 +945,21 @@ class RosBridge:
         """Drop the robots' (all: empty) cached changes at the AWCD base station
         (``<ns>/awcd_base_station/clear_robots``, discovered; base-local)."""
         names = self.run(lambda: self.node.get_service_names_and_types())
-        svc = next((n for n, _ in names if n.endswith("/awcd_base_station/clear_robots")), None)
+        svc = next(
+            (n for n, _ in names if n.endswith("/awcd_base_station/clear_robots")), None
+        )
         if svc is None:
-            return {"ok": False, "error": "no awcd_base_station clear_robots service on the base station"}
+            return {
+                "ok": False,
+                "error": "no awcd_base_station clear_robots service on the base station",
+            }
         res = self.call_service(svc, "dcist_launch_system_msgs/srv/ClearRobots", {"robot_names": list(robots or [])},
                                 timeout=CHANGE_DETECTION_TIMEOUT_S)  # fmt: skip
-        return {"ok": bool(res.get("success")), "message": str(res.get("message") or ""), "service": svc}
+        return {
+            "ok": bool(res.get("success")),
+            "message": str(res.get("message") or ""),
+            "service": svc,
+        }
 
     def _on_manual_mode(self, robot, msg) -> None:
         self._plan[robot].manual_mode = {"value": bool(msg.data), "t": time.time()}
@@ -916,7 +974,9 @@ class RosBridge:
         from .teleop_service import TELEOP_STATE_FRESH_S
 
         st = self._plan[robot].teleop
-        fresh = st is not None and time.time() - st.get("rx_t", 0) < TELEOP_STATE_FRESH_S
+        fresh = (
+            st is not None and time.time() - st.get("rx_t", 0) < TELEOP_STATE_FRESH_S
+        )
         lease = self._plan[robot].lease
         if lease is not None:
             lease = {k: v for k, v in lease.items() if k != "_pub"}
@@ -926,7 +986,9 @@ class RosBridge:
             "state": st if fresh else None,
             "lease": lease,
             "link": self.link_summary(self.link_status(robot)),
-            "stopped": self.teleop_latch(robot) if self.teleop_latch is not None else None,
+            "stopped": self.teleop_latch(robot)
+            if self.teleop_latch is not None
+            else None,
         }
         if out["platform"] == "phoenix":
             out["manual_mode"] = self._plan[robot].manual_mode
@@ -945,7 +1007,12 @@ class RosBridge:
         robot of the most recent goal (both are planner-wide)."""
         robot = self._last_goal_robot or default_robot
         self._plan[robot].repair_alerts.append(
-            {"t": time.time(), "kind": kind, "text": str(text), "seq": next(self._status_seq)}
+            {
+                "t": time.time(),
+                "kind": kind,
+                "text": str(text),
+                "seq": next(self._status_seq),
+            }
         )
         self._publish_plan(robot)
 
@@ -961,7 +1028,9 @@ class RosBridge:
 
     def _on_schedule(self, default_robot, msg) -> None:
         sched = schedule_from_msg(msg)
-        robots = {r["robot"] for r in sched["rows"] if r["robot"]} or {self._last_goal_robot or default_robot}
+        robots = {r["robot"] for r in sched["rows"] if r["robot"]} or {
+            self._last_goal_robot or default_robot
+        }
         for robot in robots:
             self._plan[robot].schedule = sched
             self._publish_plan(robot)
@@ -1046,7 +1115,12 @@ class RosBridge:
         """Sending a plan takes the Spot lease (ADT4_AUTO_TAKE_LEASE, default on):
         for each Spot whose executor reports it does not own it, :meth:`take_lease`.
         {robot: {ok, message} | {skipped}}."""
-        if os.environ.get("ADT4_AUTO_TAKE_LEASE", "1").lower() in ("0", "false", "no", "off"):
+        if os.environ.get("ADT4_AUTO_TAKE_LEASE", "1").lower() in (
+            "0",
+            "false",
+            "no",
+            "off",
+        ):
             return {}
         out = {}
         for r in robots:
@@ -1079,7 +1153,13 @@ class RosBridge:
         self._last_goal_robot = robot
         extra = {k: v for k, v in (extra or {}).items() if v is not None}
         out = {"ok": True, "topic": topic, "msg": fields, "subscribers": subs, **extra}
-        entry = {"t": time.time(), "kind": kind, "topic": topic, "msg": fields, "subscribers": subs}
+        entry = {
+            "t": time.time(),
+            "kind": kind,
+            "topic": topic,
+            "msg": fields,
+            "subscribers": subs,
+        }
         for k in ("via", "warning"):
             if out.get(k):
                 entry[k] = out[k]
@@ -1104,7 +1184,9 @@ class RosBridge:
         """Add (normalized, de-duplicated) constraints; returns the active set."""
         new = normalize_constraints(facts)
         if any(f["predicate"] == "before" for f in new):
-            raise ValueError("before orders one goal's targets: send it with the goal (GRSTAPS-X), not as a standing constraint")
+            raise ValueError(
+                "before orders one goal's targets: send it with the goal (GRSTAPS-X), not as a standing constraint"
+            )
         with self._lock:
             cur = self._plan[robot].constraints
             for f in new:
@@ -1127,12 +1209,15 @@ class RosBridge:
     def goal_manager_engine(self) -> str | None:
         """Which engine goal_manager forwards to (its ``planner_goal_topic``): the
         engine whose plugin topic a goal_manager node publishes on; None if unknown."""
+
         def find():
             for engine, kind in ENGINE_KIND.items():
                 for p in self.plugins:
                     if p["kind"] != kind:
                         continue
-                    infos = self.node.get_publishers_info_by_topic(goal_topic(self.planner_ns, p))
+                    infos = self.node.get_publishers_info_by_topic(
+                        goal_topic(self.planner_ns, p)
+                    )
                     if any("goal_manager" in i.node_name for i in infos):
                         return engine
             return None
@@ -1144,9 +1229,15 @@ class RosBridge:
 
     def active_goals(self) -> dict[str, dict]:
         """robot -> the last PDDL goal the console sent it (see RobotPlanState)."""
-        return {r: dict(st.active_goal) for r, st in list(self._plan.items()) if st.active_goal}
+        return {
+            r: dict(st.active_goal)
+            for r, st in list(self._plan.items())
+            if st.active_goal
+        }
 
-    def send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto", engine=None) -> dict:
+    def send_pddl_goal(
+        self, robot, goal, plugin=None, constraints=None, route="auto", engine=None
+    ) -> dict:
         """:meth:`_send_pddl_goal`, then the goal is the robot's active goal."""
         from .mission.omni_planner import AREA_SYMBOL
 
@@ -1167,7 +1258,9 @@ class RosBridge:
         self._publish_plan(robot)
         return out
 
-    def _send_pddl_goal(self, robot, goal, plugin=None, constraints=None, route="auto", engine=None) -> dict:
+    def _send_pddl_goal(
+        self, robot, goal, plugin=None, constraints=None, route="auto", engine=None
+    ) -> dict:
         """A PDDL goal through plan repair v3 when its goal_manager runs, else
         straight to an omniplanner Pddl plugin with a warning.
 
@@ -1181,11 +1274,20 @@ class RosBridge:
         if engine == "grstaps":
             return self._send_grstaps(robot, goal, constraints, route)
         if any(f["predicate"] == "before" for f in normalize_constraints(constraints)):
-            raise ValueError("before (ordering) needs GRSTAPS-X: send it with engine grstaps")
-        active = self.add_constraints(robot, constraints) if constraints else self.constraints(robot)
+            raise ValueError(
+                "before (ordering) needs GRSTAPS-X: send it with engine grstaps"
+            )
+        active = (
+            self.add_constraints(robot, constraints)
+            if constraints
+            else self.constraints(robot)
+        )
         gm = self.goal_manager_subscribers() if route != "planner" else 0
         if gm > 0:
-            fields = {"goal": {"robot_id": robot, "pddl_goal": goal}, "constraints": active}
+            fields = {
+                "goal": {"robot_id": robot, "pddl_goal": goal},
+                "constraints": active,
+            }
             return self._send(
                 robot, "pddl", self.commanded_goal_topic(), COMMANDED_GOAL_TYPE, fields,
                 {"via": "goal_manager", "constraints": active},
@@ -1199,7 +1301,9 @@ class RosBridge:
         if route != "planner":
             warning = NO_GOAL_MANAGER_WARNING
         if active:
-            warning = (warning + "; " if warning else "") + f"{len(active)} constraint(s) NOT applied"
+            warning = (
+                warning + "; " if warning else ""
+            ) + f"{len(active)} constraint(s) NOT applied"
         return self._send(
             robot, "pddl", goal_topic(self.planner_ns, p), p["msg_type"],
             {"robot_id": robot, "pddl_goal": goal},
@@ -1213,13 +1317,18 @@ class RosBridge:
         order = [f for f in facts if f["predicate"] == "before"]
         rest = [f for f in facts if f["predicate"] != "before"]
         active = self.add_constraints(robot, rest) if rest else self.constraints(robot)
-        fields = {"goal": {"robot_id": robot, "pddl_goal": goal}, "constraints": active + order}
+        fields = {
+            "goal": {"robot_id": robot, "pddl_goal": goal},
+            "constraints": active + order,
+        }
         if route != "planner" and self.goal_manager_subscribers() > 0:
             if self.goal_manager_engine() == "grstaps":
                 return self._send(robot, "pddl", self.commanded_goal_topic(), COMMANDED_GOAL_TYPE, fields,
                                   {"via": "goal_manager", "engine": "grstaps", "constraints": active + order})  # fmt: skip
             if route == "goal_manager":
-                raise LookupError("goal_manager forwards to Fast Downward, not GRSTAPS-X")
+                raise LookupError(
+                    "goal_manager forwards to Fast Downward, not GRSTAPS-X"
+                )
         elif route == "goal_manager":
             raise LookupError(NO_GOAL_MANAGER_WARNING.split(";")[0])
         p = self.find_plugin("grstaps")
@@ -1271,7 +1380,12 @@ class RosBridge:
         )  # fmt: skip
 
     def publish_to_robot(
-        self, robot: str, topic: str, msg_type: str, fields: dict, deliver_timeout: float = 3.0
+        self,
+        robot: str,
+        topic: str,
+        msg_type: str,
+        fields: dict,
+        deliver_timeout: float = 3.0,
     ) -> dict:
         """Publish one message meant for ``robot``.  Router mode: ``subscribers``
         is the ROS match count.  Fleetlink mode (a fresh ``fleetlink/link_status``
@@ -1284,7 +1398,9 @@ class RosBridge:
         subs = self.publish(topic, msg_type, fields)
         out = {"ok": True, "topic": topic, "msg": fields, "subscribers": subs}
         if link is None:
-            return _no_subscriber(out, f"nothing subscribes to {topic} (is the executor running?)")
+            return _no_subscriber(
+                out, f"nothing subscribes to {topic} (is the executor running?)"
+            )
         if topic not in (link.get("topics") or {}):
             # fleetlink mode but relay.yaml does not carry this topic for the robot
             out.update(ok=False, via="fleetlink", delivered=False, subscribers=None,
@@ -1299,7 +1415,9 @@ class RosBridge:
             subscribers=t.get("subs") if delivered else None,
             link=self.link_summary(st),
         )
-        return _no_subscriber(out, f"delivered, but nothing subscribes to {topic} on {robot}")
+        return _no_subscriber(
+            out, f"delivered, but nothing subscribes to {topic} on {robot}"
+        )
 
     def phoenix_mode_cmd(self, robot: str, cmd: str) -> dict:
         """Phoenix Stop / Resume: ``/<robot>/toggle_manual_mode`` (std_srvs/SetBool),
@@ -1320,7 +1438,10 @@ class RosBridge:
                 return out
         try:
             res = self.call_service(
-                name, "std_srvs/srv/SetBool", {"data": data}, timeout=TOGGLE_MANUAL_TIMEOUT_S
+                name,
+                "std_srvs/srv/SetBool",
+                {"data": data},
+                timeout=TOGGLE_MANUAL_TIMEOUT_S,
             )
         except TimeoutError as e:
             out.update(error=str(e))

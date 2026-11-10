@@ -68,7 +68,14 @@ class LiveIO:
 
 
 class LiveRun(MissionSim):
-    def __init__(self, mission, world, io: LiveIO, auto_approve: bool = False, poll_s: float = 2.0):
+    def __init__(
+        self,
+        mission,
+        world,
+        io: LiveIO,
+        auto_approve: bool = False,
+        poll_s: float = 2.0,
+    ):
         super().__init__(mission, world, auto_approve)
         self.io = io
         self.poll_s = poll_s
@@ -78,8 +85,12 @@ class LiveRun(MissionSim):
         self._quad_seq = 0
         self._stop = threading.Event()
         self._poller = None
-        if io.quad is not None and any(a.kind == "quad" and a.binding for a in mission.agents):
-            self._poller = threading.Thread(target=self._poll_quad, name="quad-poll", daemon=True)
+        if io.quad is not None and any(
+            a.kind == "quad" and a.binding for a in mission.agents
+        ):
+            self._poller = threading.Thread(
+                target=self._poll_quad, name="quad-poll", daemon=True
+            )
             self._poller.start()
 
     def stop(self):
@@ -113,7 +124,12 @@ class LiveRun(MissionSim):
         if m.error:
             self._finish(t.id, "failed", m.error)
             return
-        st.task, st.path, st.seg, st.status = t.id, [list(p[:2]) for p in m.path], 0, "moving"
+        st.task, st.path, st.seg, st.status = (
+            t.id,
+            [list(p[:2]) for p in m.path],
+            0,
+            "moving",
+        )
         st.dwell_left = m.dwell_s
         self.task_state[t.id] = "active"
         self.task_times[t.id] = [round(self.t, 2), None]
@@ -127,7 +143,9 @@ class LiveRun(MissionSim):
             if len(st.path) < 2:
                 info["sent"] = None
             else:
-                sym = m.symbol if (m.symbol and not m.symbol.startswith("sim:")) else None
+                sym = (
+                    m.symbol if (m.symbol and not m.symbol.startswith("sim:")) else None
+                )
                 if sym is None and self.world.graph is not None:
                     sym = self.world.graph.nearest_symbol(st.path[-1])
                 # the previewed route as a chain of places, not just its end: omniplanner's
@@ -173,11 +191,27 @@ class LiveRun(MissionSim):
             st.pos = [float(pose[0]), float(pose[1])]
         arrived = info.get("sent") is None or math.dist(st.pos, info["goal"]) < ARRIVE_M
         if not arrived and self.io.robot_results is not None:
-            res = [r for r in self.io.robot_results(agent.binding) or [] if float(r.get("t") or 0) >= info["t0"]]
-            if res and str(res[-1].get("status", "")).lower() in ("success", "succeeded", "done"):
+            res = [
+                r
+                for r in self.io.robot_results(agent.binding) or []
+                if float(r.get("t") or 0) >= info["t0"]
+            ]
+            if res and str(res[-1].get("status", "")).lower() in (
+                "success",
+                "succeeded",
+                "done",
+            ):
                 arrived = True
-            if res and str(res[-1].get("status", "")).lower() in ("failure", "failed", "aborted"):
-                self._finish(t.id, "failed", f"executor: {res[-1].get('detail') or res[-1]['status']}")
+            if res and str(res[-1].get("status", "")).lower() in (
+                "failure",
+                "failed",
+                "aborted",
+            ):
+                self._finish(
+                    t.id,
+                    "failed",
+                    f"executor: {res[-1].get('detail') or res[-1]['status']}",
+                )
                 st.task = None
                 return
         if arrived:
@@ -216,7 +250,9 @@ class LiveRun(MissionSim):
     def _capture_live(self, st, t, agent, header, jpeg):
         """A real image becomes a capture; planted objects in view become candidates."""
         n0 = self._n_img
-        super()._capture(st, t, agent)  # geometry (planted rehearsal objects) + bookkeeping
+        super()._capture(
+            st, t, agent
+        )  # geometry (planted rehearsal objects) + bookkeeping
         img_id = f"i{n0 + 1}"
         self.captures[img_id]["pose"] = dict(header["pose_map"])
         self.captures[img_id]["K"] = header.get("K")
