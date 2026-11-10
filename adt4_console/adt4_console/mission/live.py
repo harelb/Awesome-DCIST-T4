@@ -35,6 +35,26 @@ QUAD_ARRIVE_M = 3.0
 GROUND_TIMEOUT_FACTOR = 3.0
 
 
+ROUTE_SPACING_M = 3.0  # spacing of the route places sent to goto_points
+
+
+def route_symbols(path, final_sym, graph, spacing=ROUTE_SPACING_M) -> list:
+    """Places along ``path`` (map-frame [x, y] vertices) about ``spacing`` apart,
+    ending at ``final_sym``: what goto_points needs to follow the route instead of
+    a straight line to its end. Without a graph, only ``final_sym``."""
+    if graph is None or len(path) < 2:
+        return [final_sym]
+    out, last = [], path[0]
+    for p in path[1:-1]:
+        if math.dist(p[:2], last[:2]) < spacing:
+            continue
+        s = graph.nearest_symbol(p)
+        if s is not None and s != final_sym and (not out or out[-1] != s):
+            out.append(s)
+            last = p
+    return out + [final_sym]
+
+
 class LiveIO:
     """What a live run needs from the console (injectable for tests)."""
 
@@ -110,9 +130,13 @@ class LiveRun(MissionSim):
                 sym = m.symbol if (m.symbol and not m.symbol.startswith("sim:")) else None
                 if sym is None and self.world.graph is not None:
                     sym = self.world.graph.nearest_symbol(st.path[-1])
+                # the previewed route as a chain of places, not just its end: omniplanner's
+                # goto_points drives straight from point to point
+                syms = route_symbols(st.path, sym, self.world.graph)
                 try:
-                    info["sent"] = self.io.send_goto(agent.binding, [sym])
-                    self._log("goal_sent", task=t.id, agent=aid, robot=agent.binding, symbol=sym)
+                    info["sent"] = self.io.send_goto(agent.binding, syms)
+                    self._log("goal_sent", task=t.id, agent=aid, robot=agent.binding, symbol=sym,
+                              route=len(syms))  # fmt: skip
                 except Exception as e:  # noqa: BLE001
                     self._finish(t.id, "failed", f"goal not sent: {e}")
                     st.task = None
