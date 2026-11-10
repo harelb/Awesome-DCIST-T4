@@ -116,6 +116,12 @@ if [ "$install_spark" = true ]; then
     # ADT4 extras on top of it: SAM3 write-back (agentic_navigation, console), legacy
     # import, fuse and `hydra-image-store-adt4 convert` for stores with sub-keyframes
     pip install -e ./hydra/hydra_image_store_adt4
+    # hydra_python (hydra/hydra/python) has no pip package; its pure-python image
+    # store (used by the console, fleetlink's live mirror and heracles) needs only
+    # its source on the path. The compiled bindings stay optional.
+    echo "$ADT4_WS/src/awesome_dcist_t4/hydra/hydra/python/src" > \
+        "$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/hydra_python_src.pth"
+    python -W ignore -c "import hydra_python.image_store" || { echo "hydra_python.image_store does not import"; exit 1; }
 
     # install fast-downward
     if [ ! -d $ADT4_WS/src/fast_downward ]; then
