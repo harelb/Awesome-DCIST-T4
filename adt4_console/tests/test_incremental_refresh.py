@@ -31,9 +31,8 @@ class FakeHub:
 
 
 def test_version_frame_carries_the_delta_and_its_base(settings):
-    from fleetlink.codec import GraphDelta, NodeRecord
-
     from adt4_console.graph_service import GraphService, Neo4jSource
+    from fleetlink.codec import GraphDelta, NodeRecord
 
     hub = FakeHub()
     gs = GraphService(settings, hub=hub)
@@ -41,7 +40,9 @@ def test_version_frame_carries_the_delta_and_its_base(settings):
     src._version = 7
     gs.sources[src.id] = src
     gs.notify_version(src.id, "plain")
-    d = GraphDelta(upserts=[NodeRecord("O(1)", 2, 0, (1.0, 2.0, 3.0))], deletes=["O(2)"])
+    d = GraphDelta(
+        upserts=[NodeRecord("O(1)", 2, 0, (1.0, 2.0, 3.0))], deletes=["O(2)"]
+    )
     gs.notify_version(src.id, "sam3", (d, 9))
     (t0, plain), (t1, rich) = hub.frames
     assert t0 == t1 == f"graph/{src.id}/version"
@@ -50,13 +51,37 @@ def test_version_frame_carries_the_delta_and_its_base(settings):
     assert rich["delta"]["del"] == ["O(2)"] and rich["delta"]["up"]["ids"] == ["O(1)"]
 
 
+def test_a_plan_repair_edit_that_moves_only_the_map_version_is_polled():
+    """heracles_agents remove_scene_place deletes a place, records an undo
+    _SceneChange (node count unchanged) and bumps only _MapState.version: the
+    console must still see a new DB and reload."""
+    from adt4_console.graph_service import Neo4jSource
+
+    src = Neo4jSource("m", "bolt://x:1", "u", "p")
+    db = {"state": 1, "count": 5290, "map": 1}
+    src.read_version = lambda: db["state"]
+    src.count_nodes = lambda: db["count"]
+    src.read_map_version = lambda: db["map"]
+    v0 = src.version()
+    assert src.poll() is False
+    db["map"] = 2  # the edit: same _State.version, same node count
+    assert src.poll() is True and src.version() == v0 + 1
+    assert src.poll() is False
+
+
 def test_edit_service_hands_the_affected_nodes_over(settings):
     from adt4_console.edit_service import EditService
 
     calls = []
     graph = NS(apply_change=lambda *a: calls.append(a))
     svc = EditService(settings, graph=graph, launch_state=lambda: None)
-    out = {"mutation_id": "m1", "revision": 3, "summary": ["x"], "state_version": 12, "affected": ["O5", "P1"]}
+    out = {
+        "mutation_id": "m1",
+        "revision": 3,
+        "summary": ["x"],
+        "state_version": 12,
+        "affected": ["O5", "P1"],
+    }
     svc._after_commit("neo4j:penn", out, "map edit")
     assert calls == [("neo4j:penn", "map edit", 12, ["O5", "P1"])]
 
@@ -69,11 +94,15 @@ def _seed_graph():
     G.add_layer(3, 1, dsg.DsgLayers.MESH_PLACES)  # heracles' ingest expects it
     G.set_labelspace(dsg.Labelspace({0: "unknown", 1: "chair", 2: "table"}), 2, 0)
     G.set_labelspace(dsg.Labelspace({0: "region", 1: "kitchen"}), 4, 0)
-    for i, (label, pos) in enumerate([(1, (1.0, 0.0, 0.0)), (1, (9.0, 0.0, 0.0)), (2, (2.0, 2.0, 0.0))]):
+    for i, (label, pos) in enumerate(
+        [(1, (1.0, 0.0, 0.0)), (1, (9.0, 0.0, 0.0)), (2, (2.0, 2.0, 0.0))]
+    ):
         a = dsg.ObjectNodeAttributes()
         a.position = np.array(pos)
         a.semantic_label = label
-        a.bounding_box = dsg.BoundingBox(np.array([0.5, 0.5, 0.5], np.float32), np.array(pos, np.float32))
+        a.bounding_box = dsg.BoundingBox(
+            np.array([0.5, 0.5, 0.5], np.float32), np.array(pos, np.float32)
+        )
         G.add_node(dsg.DsgLayers.OBJECTS, dsg.NodeSymbol("O", i), a)
     for i in range(3):
         p = dsg.PlaceNodeAttributes()
@@ -86,8 +115,18 @@ def _seed_graph():
     b = dsg.SemanticNodeAttributes()
     b.position = np.array([3.0, 1.0, 0.0])
     G.add_node(dsg.DsgLayers.BUILDINGS, dsg.NodeSymbol("B", 0), b)
-    for a, c in [("P0", "P1"), ("P1", "P2"), ("P0", "O0"), ("P2", "O1"), ("R0", "P0"), ("R0", "P1"), ("B0", "R0")]:
-        G.insert_edge(dsg.NodeSymbol(a[0], int(a[1:])), dsg.NodeSymbol(c[0], int(c[1:])))
+    for a, c in [
+        ("P0", "P1"),
+        ("P1", "P2"),
+        ("P0", "O0"),
+        ("P2", "O1"),
+        ("R0", "P0"),
+        ("R0", "P1"),
+        ("B0", "R0"),
+    ]:
+        G.insert_edge(
+            dsg.NodeSymbol(a[0], int(a[1:])), dsg.NodeSymbol(c[0], int(c[1:]))
+        )
     return G
 
 
@@ -104,7 +143,9 @@ def scratch():
             f"RETURN COUNT {{ MATCH (n) WHERE NOT n:{MARKER} }} AS c, COUNT {{ MATCH (m:{MARKER}) }} AS marked"
         )
         if rows[0]["c"] and not rows[0]["marked"]:
-            pytest.skip(f"{SCRATCH} holds a map this suite did not write; not wiping it")
+            pytest.skip(
+                f"{SCRATCH} holds a map this suite did not write; not wiping it"
+            )
     return gi
 
 
@@ -138,7 +179,9 @@ def _full():
 
 def _assert_matches_full_reload(loaded):
     full = _full()
-    assert {k: r.key() for k, r in loaded.records.items()} == {k: r.key() for k, r in full.records.items()}
+    assert {k: r.key() for k, r in loaded.records.items()} == {
+        k: r.key() for k, r in full.records.items()
+    }
     assert loaded.edges == full.edges
     assert loaded.labelspaces == full.labelspaces
 
@@ -154,7 +197,17 @@ def test_map_edits_match_a_full_reload(seeded):
     src = _source()
     v0 = src.loaded().version
     # a new class grows the object labelspace: applied in place too
-    out = _edit(db, [{"op": "create_node", "layer": "Object", "pos": [4.0, 1.0, 0.0], "class": "zz widget"}])
+    out = _edit(
+        db,
+        [
+            {
+                "op": "create_node",
+                "layer": "Object",
+                "pos": [4.0, 1.0, 0.0],
+                "class": "zz widget",
+            }
+        ],
+    )
     sym = out["affected"][0]
     d, v = src.apply_change(out["state_version"], out["affected"])
     assert v == v0 + 1 and src.version() == v and src.loaded().version == v
@@ -165,14 +218,18 @@ def test_map_edits_match_a_full_reload(seeded):
         [{"op": "create_edge", "from": "P1", "to": sym}],  # place CONTAINS the object
         [{"op": "update_node", "symbol": sym, "set": {"pos": [5.0, 2.0, 0.0]}}],
         [{"op": "delete_edge", "from": "P0", "to": "P1"}],  # between two existing nodes
-        [{"op": "retire_node", "symbol": "P2", "reason": "test"}],  # takes its edges along
+        [
+            {"op": "retire_node", "symbol": "P2", "reason": "test"}
+        ],  # takes its edges along
         [{"op": "retire_node", "symbol": sym, "reason": "test"}],
     ):
         out = _edit(db, ops)
         res = src.apply_change(out["state_version"], out["affected"])
         assert res is not None, ops
         _assert_matches_full_reload(src.loaded())
-    assert "P(2)" not in src.loaded().records and not any("P(2)" in e for e in src.loaded().edges)
+    assert "P(2)" not in src.loaded().records and not any(
+        "P(2)" in e for e in src.loaded().edges
+    )
     # the poll has nothing left to see: no second version, no reload
     assert src.poll() is False
 
@@ -187,12 +244,18 @@ def test_sam3_style_write_matches_a_full_reload(seeded):
         "CREATE (o:Object {nodeSymbol: 'O50', class: 'chair', name: 'green chair', "
         "center: point({x: 6.0, y: 1.5, z: 0.2}), attr_type: 'ObjectNodeAttributes'})"
     )
-    db.execute("MATCH (p:Place {nodeSymbol: 'P2'}), (o:Object {nodeSymbol: 'O50'}) CREATE (p)-[:CONTAINS]->(o)")
+    db.execute(
+        "MATCH (p:Place {nodeSymbol: 'P2'}), (o:Object {nodeSymbol: 'O50'}) CREATE (p)-[:CONTAINS]->(o)"
+    )
     sv, _ = gi.notify_map_change(db, ["2:0"], ["O50"])
     d, v = src.apply_change(sv, ["O50"])
     assert v == before.version + 1
-    assert [r.sym for r in d.upserts] == ["O(50)"] and d.edges_add == [("P(2)", "O(50)")]
-    assert before.G.has_node(__import__("spark_dsg").NodeSymbol("O", 50)) is False  # old graph untouched
+    assert [r.sym for r in d.upserts] == ["O(50)"] and d.edges_add == [
+        ("P(2)", "O(50)")
+    ]
+    assert (
+        before.G.has_node(__import__("spark_dsg").NodeSymbol("O", 50)) is False
+    )  # old graph untouched
     _assert_matches_full_reload(src.loaded())
 
 
@@ -201,7 +264,9 @@ def test_an_unknown_write_in_between_falls_back_to_one_reload(seeded):
     src = _source()
     v0 = src.loaded().version
     gi.bump_version(db)  # someone else's write the console has not seen
-    out = _edit(db, [{"op": "update_node", "symbol": "O0", "set": {"pos": [1.5, 0.0, 0.0]}}])
+    out = _edit(
+        db, [{"op": "update_node", "symbol": "O0", "set": {"pos": [1.5, 0.0, 0.0]}}]
+    )
     assert src.apply_change(out["state_version"], out["affected"]) is None
     assert src.version() == v0 + 1  # one bump ...
     assert src.poll() is False  # ... and the poll does not add a second
@@ -212,11 +277,15 @@ def test_nothing_loaded_or_no_symbols_just_invalidates(seeded):
     _, db = seeded
     src = _source()
     v0 = src.version()  # never loaded
-    out = _edit(db, [{"op": "update_node", "symbol": "O1", "set": {"pos": [9.5, 0.0, 0.0]}}])
+    out = _edit(
+        db, [{"op": "update_node", "symbol": "O1", "set": {"pos": [9.5, 0.0, 0.0]}}]
+    )
     assert src.apply_change(out["state_version"], out["affected"]) is None
     assert src.version() == v0 + 1 and src.poll() is False
     src.loaded()
-    out = _edit(db, [{"op": "update_node", "symbol": "O1", "set": {"pos": [9.0, 0.0, 0.0]}}])
+    out = _edit(
+        db, [{"op": "update_node", "symbol": "O1", "set": {"pos": [9.0, 0.0, 0.0]}}]
+    )
     assert src.apply_change(out["state_version"], []) is None
     _assert_matches_full_reload(src.loaded())
 

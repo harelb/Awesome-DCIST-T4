@@ -198,7 +198,13 @@ def spark_attributes(attrs) -> dict:
     return out
 
 
-RAW_LOG_DIRS = ("keyframes", "tracks", "hydra/keyframes", "hydra/tracks", "khronos/tracks")
+RAW_LOG_DIRS = (
+    "keyframes",
+    "tracks",
+    "hydra/keyframes",
+    "hydra/tracks",
+    "khronos/tracks",
+)
 
 
 def _has_raw_logs(run: pathlib.Path) -> bool:
@@ -252,7 +258,8 @@ def open_image_store(*paths, index: bool = True):
                 "image store %s has sub-keyframes (frame kind 1, written before "
                 "hydra_image_store dropped them); its images stay hidden until it is "
                 "converted (once, in place): hydra-image-store-adt4 convert %s",
-                old, " ".join(old),
+                old,
+                " ".join(old),
             )
             found = [t for t in found if t not in old]
             if not found:
@@ -281,7 +288,10 @@ def needs_convert(target) -> bool:
 
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5.0)
         try:
-            return con.execute("SELECT 1 FROM frames WHERE kind = 1 LIMIT 1").fetchone() is not None
+            return (
+                con.execute("SELECT 1 FROM frames WHERE kind = 1 LIMIT 1").fetchone()
+                is not None
+            )
         finally:
             con.close()
     except Exception:  # noqa: BLE001  (no frames table yet, locked, ...)
@@ -306,7 +316,9 @@ class NodeImage:
     mask_rle: str | None = None  # Neo4j Observation.mask_rle (sensor-sized)
     bbox2d: tuple | None = None  # min_x, min_y, max_x, max_y
     # agent frames (see agent_images): which frame, how far from the node's pose
-    kind: str | None = None  # "keyframe" | "subkeyframe" (Neo4j SubKeyframe) | None (object)
+    kind: str | None = (
+        None  # "keyframe" | "subkeyframe" (Neo4j SubKeyframe) | None (object)
+    )
     own: bool = False  # the agent node's own keyframe
     dist_m: float | None = None
     yaw_deg: float | None = None
@@ -515,8 +527,12 @@ class Source:
         self._products = None  # mesh_lod.TileProducts of the tiles held
         self._snapshot_gz: tuple[bytes, bytes, str] | None = None  # (raw, gz, etag)
         self.mesh_cache = None  # mesh_lod.MeshDiskCache (GraphService sets it)
-        self.place_cache_dir = None  # place keyframe tables on disk (GraphService sets it)
-        self._store_lock = threading.Lock()  # image store reads (subclasses keep their own)
+        self.place_cache_dir = (
+            None  # place keyframe tables on disk (GraphService sets it)
+        )
+        self._store_lock = (
+            threading.Lock()
+        )  # image store reads (subclasses keep their own)
         self._pk_lock = threading.Lock()  # builds the place keyframe index
         self._pk = None  # (key, place_keyframes.PlaceKeyframeIndex)
 
@@ -579,7 +595,9 @@ class Source:
             self._agent_idx = (key, idx)
         return idx
 
-    def store_agent_images(self, store, sym: str, loaded, lookup=None, stamp=None) -> list:
+    def store_agent_images(
+        self, store, sym: str, loaded, lookup=None, stamp=None
+    ) -> list:
         """Agent images from an ImageStore; poses from ``lookup`` (node id → 4x4),
         else from the loaded node records; ``stamp`` (node id → ns) picks the agents'
         own keyframes (agent_images.own_keyframes)."""
@@ -613,7 +631,9 @@ class Source:
         with self._store_lock:
             return self.store_frame_index(store, self.loaded())
 
-    def frames_near(self, x: float, y: float, yaw: float | None = None, n: int = 6) -> list:
+    def frames_near(
+        self, x: float, y: float, yaw: float | None = None, n: int = 6
+    ) -> list:
         """The frames taken closest to (x, y) (API.md §15.5: a region / place goal's
         image is the view nearest to where the plan ends)."""
         idx = self.frame_index()
@@ -634,7 +654,11 @@ class Source:
         """The PlaceKeyframeIndex of the current graph version and image store contents,
         built on first use; its full place x keyframe table follows in a thread (sources
         whose graph changes per delta answer place by place only)."""
-        from .place_keyframes import PlaceKeyframeIndex, is_place_record, store_keyframes
+        from .place_keyframes import (
+            PlaceKeyframeIndex,
+            is_place_record,
+            store_keyframes,
+        )
 
         loaded = self.loaded()
         store = self.image_store()
@@ -643,7 +667,11 @@ class Source:
             cur = self._pk
             if cur is None or cur[0] != key:
                 t0 = time.time()
-                places = {s: (r.pos, r.radii) for s, r in loaded.records.items() if is_place_record(r)}
+                places = {
+                    s: (r.pos, r.radii)
+                    for s, r in loaded.records.items()
+                    if is_place_record(r)
+                }
                 frames = []
                 if store is not None and places:
                     lookup = self.keyframe_pose_lookup(loaded)
@@ -805,7 +833,10 @@ class Source:
         out = {
             "tile_size": _codec().DEFAULT_TILE_SIZE,
             "enc": _codec().PACKED_TILE_ENCODING,
-            "lods": [{"level": lv, "cell": LODS[lv]["cell"], "name": LODS[lv]["name"]} for lv in prods.levels],
+            "lods": [
+                {"level": lv, "cell": LODS[lv]["cell"], "name": LODS[lv]["name"]}
+                for lv in prods.levels
+            ],
             "tiles": prods.manifest_rows(tiles),
             "bundles": [],
         }
@@ -946,8 +977,13 @@ def trajectory_payload(rows: list, sources: dict | None = None) -> dict:
     syms = [r[5] if len(r) > 5 else None for r in rows]
     for i, r in enumerate(rows):
         if i == 0 or r[4] != rows[i - 1][4]:
-            robots.append({"key": str(r[4]), "start": i, **(sources or {}).get(str(r[4]), {})})
-        if i and (r[4] != rows[i - 1][4] or math.dist(rows[i - 1][1:3], r[1:3]) > TRAJECTORY_GAP_M):
+            robots.append(
+                {"key": str(r[4]), "start": i, **(sources or {}).get(str(r[4]), {})}
+            )
+        if i and (
+            r[4] != rows[i - 1][4]
+            or math.dist(rows[i - 1][1:3], r[1:3]) > TRAJECTORY_GAP_M
+        ):
             breaks.append(i)
     out = {"points": [r[:4] for r in rows], "breaks": breaks, "robots": robots}
     if any(syms):
@@ -972,7 +1008,14 @@ def _spark_trajectory_sources(G) -> dict:
             md = getattr(node.attributes, "metadata", None)
             session = (md.get() if md is not None else {}).get("session")
             if session:
-                out[chr(part)] = {"session": session, **{k: v for k, v in (sessions.get(session) or {}).items() if k in ("robot", "bag")}}
+                out[chr(part)] = {
+                    "session": session,
+                    **{
+                        k: v
+                        for k, v in (sessions.get(session) or {}).items()
+                        if k in ("robot", "bag")
+                    },
+                }
             break
     return out
 
@@ -1005,7 +1048,14 @@ def _spark_trajectory(G) -> list:
             )
             if not hasattr(a, "external_key"):  # agent (keyframe) nodes only
                 continue
-            pts.append([t, *(float(v) for v in a.position), chr(part), canonical_symbol(node.id.str())])
+            pts.append(
+                [
+                    t,
+                    *(float(v) for v in a.position),
+                    chr(part),
+                    canonical_symbol(node.id.str()),
+                ]
+            )
     return pts
 
 
@@ -1065,7 +1115,14 @@ class FileSource(Source):
         except ImportError as e:
             raise GraphUnavailable(f"spark_dsg unavailable: {e}") from None
         G = dsg.DynamicSceneGraph.load(str(self.dsg_path))
-        return _graph_loaded(G, version, {"trajectory": _spark_trajectory(G), "trajectory_sources": _spark_trajectory_sources(G)})
+        return _graph_loaded(
+            G,
+            version,
+            {
+                "trajectory": _spark_trajectory(G),
+                "trajectory_sources": _spark_trajectory_sources(G),
+            },
+        )
 
     def mesh_file(self):
         ply = self.dsg_path.parent / "mesh.ply"
@@ -1093,7 +1150,9 @@ class FileSource(Source):
 
             lookup = as_pose_lookup(loaded.G)
         with self._store_lock:
-            return self.store_frame_index(store, loaded, lookup, spark_agent_stamp(loaded.G))
+            return self.store_frame_index(
+                store, loaded, lookup, spark_agent_stamp(loaded.G)
+            )
 
     def node_detail_extra(self, sym, loaded):
         node = _spark_node(loaded.G, sym) if loaded.G is not None else None
@@ -1106,7 +1165,10 @@ class FileSource(Source):
                 from hydra_image_store import as_pose_lookup
 
                 images = self.store_agent_images(
-                    store, sym, loaded, lookup=as_pose_lookup(loaded.G),
+                    store,
+                    sym,
+                    loaded,
+                    lookup=as_pose_lookup(loaded.G),
                     stamp=spark_agent_stamp(loaded.G),
                 )
             else:
@@ -1124,7 +1186,11 @@ class FileSource(Source):
                 t0 = time.time()
                 self._store = open_image_store(self.run_dir)
                 if self._store is not None and time.time() - t0 > 1.0:
-                    log.info("%s: image store indexed/opened in %.1fs", self.id, time.time() - t0)
+                    log.info(
+                        "%s: image store indexed/opened in %.1fs",
+                        self.id,
+                        time.time() - t0,
+                    )
             return self._store
 
     def keyframe_pose_lookup(self, loaded):
@@ -1142,8 +1208,14 @@ class FileSource(Source):
             info = json.loads((self.run_dir / "run_info.json").read_text())
         except (OSError, ValueError):
             return {}
-        label = {"session": info.get("experiment") or self.run_dir.name, "robot": info.get("robot")}
-        return {k: {kk: v for kk, v in label.items() if v} for k in {p[4] for p in self.trajectory()}}
+        label = {
+            "session": info.get("experiment") or self.run_dir.name,
+            "robot": info.get("robot"),
+        }
+        return {
+            k: {kk: v for kk, v in label.items() if v}
+            for k in {p[4] for p in self.trajectory()}
+        }
 
 
 # --- incremental Neo4j updates (Neo4jSource.apply_change) -------------------
@@ -1215,7 +1287,7 @@ class Neo4jSource(Source):
         self.label = f"{name} ({uri})" + (" prior" if prior else "")
         self._db = None
         self._version: int | None = None
-        self._db_key_seen: tuple[int, int] | None = None
+        self._db_key_seen: tuple[int, int, int] | None = None
         self._props_cache: dict[str, dict] = {}
         self._store = None  # image stores named by _GraphMetadata, opened lazily
         self._store_lock = threading.Lock()
@@ -1266,10 +1338,24 @@ class Neo4jSource(Source):
             self.close()
             raise GraphUnavailable(f"neo4j {self.uri}: {e}") from None
 
-    def _db_key(self) -> tuple[int, int]:
+    def read_map_version(self) -> int:
+        """heracles' ``_MapState.version`` (0 without one): plan repair's scene edits
+        (heracles_agents remove_scene_place, undo, reset) bump only this counter,
+        not ``_State.version``, and an edit that deletes a node while it records an
+        undo ``_SceneChange`` leaves the node count unchanged too."""
+        try:
+            rows = self.query("MATCH (m:_MapState) RETURN max(m.version) AS v")
+        except GraphUnavailable:
+            raise
+        v = rows[0]["v"] if rows else None
+        return int(v) if v is not None else 0
+
+    def _db_key(self) -> tuple[int, int, int]:
         """What identifies the DB contents: heracles' version counter alone is
-        not enough, because an ingest wipes the DB and restarts it at 1."""
-        return (self.read_version(), self.count_nodes())
+        not enough, because an ingest wipes the DB and restarts it at 1, and plan
+        repair edits move only the map version. ``[0]`` stays ``_State.version``
+        (apply_change compares it with the write it folds in)."""
+        return (self.read_version(), self.count_nodes(), self.read_map_version())
 
     def version(self) -> int:
         """Console-side monotonic version, bumped whenever the DB key changes."""
@@ -1372,7 +1458,9 @@ class Neo4jSource(Source):
 
             for k, (layer, part) in (("object", (2, 0)), ("room", (4, 0))):
                 if db_ls[k]:
-                    G.set_labelspace(dsg.Labelspace({v: n for n, v in db_ls[k].items()}), layer, part)
+                    G.set_labelspace(
+                        dsg.Labelspace({v: n for n, v in db_ls[k].items()}), layer, part
+                    )
             labelspaces = _codec().graph_labelspaces(G)
             delta.labelspaces = labelspaces
             extra["db_labelspaces"] = db_ls
@@ -1380,7 +1468,9 @@ class Neo4jSource(Source):
         if key[0] != int(state_version):
             return None  # another write landed meanwhile: its nodes are unknown
         version = self._version + 1
-        edges = _codec().graph_edges(G)  # whole graph: 60 ms on Penn, same form as a full load
+        edges = _codec().graph_edges(
+            G
+        )  # whole graph: 60 ms on Penn, same form as a full load
         delta.edges_add = sorted(edges - loaded.edges)
         delta.edges_del = sorted(loaded.edges - edges)
         self._loaded = Loaded(
@@ -1405,7 +1495,9 @@ class Neo4jSource(Source):
                 layer=layer,
             )
             out[layer] = (
-                {n: i for i, n in zip(rows[0]["ids"] or [], rows[0]["names"] or [])} if rows else {}
+                {n: i for i, n in zip(rows[0]["ids"] or [], rows[0]["names"] or [])}
+                if rows
+                else {}
             )
         return out
 
@@ -1448,16 +1540,23 @@ class Neo4jSource(Source):
             hit = found.get(sym)
             if hit is not None and hit[0] != constants.AGENTS:
                 attrs = db_record_to_spark_attrs(hit[1], ls["object"], ls["room"])
-                G.add_node(constants.HERACLES_TO_SPARK_LAYER_NAMES[hit[0]], ns.value, attrs)
+                G.add_node(
+                    constants.HERACLES_TO_SPARK_LAYER_NAMES[hit[0]], ns.value, attrs
+                )
         # edges after every node is back, so edges between two affected nodes land.
         # An ingested intralayer edge is stored both ways round; a full load keeps
         # the first it meets, so an edge the graph already had keeps its direction
-        for r in self.query(_INCIDENT_EDGES, syms=variants, types=sorted({t for t, _, _ in _EDGE_RULES})):
+        for r in self.query(
+            _INCIDENT_EDGES, syms=variants, types=sorted({t for t, _, _ in _EDGE_RULES})
+        ):
             if (r["t"], *_rule_labels(r)) not in _EDGE_SET:
                 continue
             try:
                 a, b = (dsg.NodeSymbol(*parse_symbol(str(r[k]))) for k in ("f", "to"))
-                if (str(b), str(a)) in loaded.edges and (str(a), str(b)) not in loaded.edges:
+                if (str(b), str(a)) in loaded.edges and (
+                    str(a),
+                    str(b),
+                ) not in loaded.edges:
                     a, b = b, a
                 if G.has_node(a) and G.has_node(b) and not G.has_edge(a, b):
                     G.insert_edge(a.value, b.value)
@@ -1471,7 +1570,12 @@ class Neo4jSource(Source):
             if G.has_node(ns):
                 rec = codec.node_record(G.get_node(ns))
             elif hit is not None and hit[1].get("center") is not None:  # an Agent
-                rec = codec.NodeRecord(sym, AGENT_LAYER, ord(c), tuple(float(v) for v in hit[1]["center"][:3]))
+                rec = codec.NodeRecord(
+                    sym,
+                    AGENT_LAYER,
+                    ord(c),
+                    tuple(float(v) for v in hit[1]["center"][:3]),
+                )
             if rec is not None:
                 records[rec.sym] = rec
                 delta.upserts.append(rec)
@@ -1516,14 +1620,18 @@ class Neo4jSource(Source):
         Agent nodes as records in their robot-prefix partitions, so robot poses can be
         picked (keyframe images) and browsed."""
         codec = _codec()
-        for r in self.query("MATCH (a:Agent) WHERE a.center IS NOT NULL RETURN a.nodeSymbol AS s, a.center AS c"):
+        for r in self.query(
+            "MATCH (a:Agent) WHERE a.center IS NOT NULL RETURN a.nodeSymbol AS s, a.center AS c"
+        ):
             try:
                 c, i = parse_symbol(str(r["s"]))
             except ValueError:
                 continue
             sym = f"{c}({i})"
             if sym not in loaded.records:
-                loaded.records[sym] = codec.NodeRecord(sym, AGENT_LAYER, ord(c), tuple(float(v) for v in r["c"][:3]))
+                loaded.records[sym] = codec.NodeRecord(
+                    sym, AGENT_LAYER, ord(c), tuple(float(v) for v in r["c"][:3])
+                )
 
     def mesh_path(self):
         from heracles.graph_interface import read_mesh_path
@@ -1651,7 +1759,14 @@ class Neo4jSource(Source):
                     else None
                 )
                 rows.append(
-                    (r["p"], SUBKEYFRAME, a, r["f"], [float(v) for v in r["c"]][:3], yaw)
+                    (
+                        r["p"],
+                        SUBKEYFRAME,
+                        a,
+                        r["f"],
+                        [float(v) for v in r["c"]][:3],
+                        yaw,
+                    )
                 )
             if rows:
                 return AgentFrameIndex(rows, poses.get)
@@ -1671,7 +1786,9 @@ class Neo4jSource(Source):
 
             with self._store_lock:
                 return AgentFrameIndex.from_store(
-                    store, lookup=lookup, stamp=lambda nid: stamps.get(symbol_of(int(nid)))
+                    store,
+                    lookup=lookup,
+                    stamp=lambda nid: stamps.get(symbol_of(int(nid))),
                 )
 
         return self.agent_index(("neo4j", self.version()), build)
@@ -1753,7 +1870,9 @@ class Neo4jSource(Source):
                 nid = node_id_of(str(r["s"]))
             except ValueError:
                 continue
-            poses[nid] = quat_pose([float(v) for v in r["c"]][:3], r["w"], r["x"], r["y"], r["z"])
+            poses[nid] = quat_pose(
+                [float(v) for v in r["c"]][:3], r["w"], r["x"], r["y"], r["z"]
+            )
         return poses
 
     def image_store_paths(self) -> list[str]:
@@ -1781,7 +1900,9 @@ class Neo4jSource(Source):
                 sym = canonical_symbol(str(r["s"]))
             except ValueError:
                 sym = None
-            pts.append([t, float(c[0]), float(c[1]), float(c[2]), (r["s"] or "?")[0], sym])
+            pts.append(
+                [t, float(c[0]), float(c[1]), float(c[2]), (r["s"] or "?")[0], sym]
+            )
         return pts or self._source_file_trajectory()
 
     def trajectory_sources(self) -> dict:
@@ -1798,7 +1919,9 @@ class Neo4jSource(Source):
             "MATCH (m:_GraphMetadata {key: 'source'}) RETURN m.file_path AS p"
         )
         path = rec[0]["p"] if rec else None
-        if path and path.endswith("dsg_with_mesh.json"):  # same graph without the mesh: much faster to load
+        if path and path.endswith(
+            "dsg_with_mesh.json"
+        ):  # same graph without the mesh: much faster to load
             small = os.path.join(os.path.dirname(path), "dsg.json")
             path = small if os.path.isfile(small) else path
         if path and os.path.isfile(path):
@@ -1884,13 +2007,19 @@ class LiveSource(Source):
             return []
         rx = getattr(self.live, "receiver", None)
         try:
-            cur = (rx.store_stats(self.name) or {}).get("path") if rx is not None else None
+            cur = (
+                (rx.store_stats(self.name) or {}).get("path")
+                if rx is not None
+                else None
+            )
         except Exception:  # noqa: BLE001
             cur = None
         if cur and (pathlib.Path(cur) / "store.sqlite").is_file():
             return [str(pathlib.Path(cur))]
 
-        def created(p):  # <store_id>/ only gains its image_store/ when the session starts
+        def created(
+            p,
+        ):  # <store_id>/ only gains its image_store/ when the session starts
             try:
                 return p.parents[1].stat().st_mtime
             except OSError:
@@ -1941,7 +2070,11 @@ class GraphService:
         cache_dir = getattr(settings, "mesh_cache_dir", None)
         self.mesh_cache = MeshDiskCache(cache_dir) if cache_dir else None
         # place keyframe tables next to the mesh cache (None: memory only, tests)
-        self.place_cache_dir = pathlib.Path(cache_dir).expanduser().parent / "place_keyframes" if cache_dir else None
+        self.place_cache_dir = (
+            pathlib.Path(cache_dir).expanduser().parent / "place_keyframes"
+            if cache_dir
+            else None
+        )
         for name, uri in settings.neo4j.items():
             self.add_neo4j(name, uri)
         for name, path in settings.maps.items():
