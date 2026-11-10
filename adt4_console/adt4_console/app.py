@@ -24,6 +24,11 @@ from .graph_service import GraphService, GraphUnavailable, NotFound
 from .hub import Hub
 from .jobs import JobManager
 from .live_service import LiveService
+from .manipulation_service import (
+    ApprovalError,
+    ManipulationApprovalService,
+    ros_response_publisher,
+)
 from .ros_bridge import RosBridge, RosUnavailable
 from .settings import Settings
 from .teleop_service import TeleopService
@@ -75,6 +80,7 @@ class Services:
     edits: object = None  # edit_service.EditService
     maps: object = None  # map_loader.MapLoader: the live map and switching it
     scene_repair: object = None  # scene_repair.SceneRepair: scene change -> replan (API.md §20)
+    manipulation: ManipulationApprovalService | None = None
 
 
     def start(self) -> None:
@@ -141,6 +147,15 @@ def build_services(
     )  # fmt: skip
     svc.missions = MissionService(settings, hub, graph, svc.geo, live, ros, svc.quad)
     chat.missions = svc.missions
+    # answers go out through the bridge; the bridge hands requests to the service
+    svc.manipulation = ManipulationApprovalService(
+        ros_response_publisher(ros),
+        hub,
+        available=lambda: svc.ros.available,
+        error=lambda: svc.ros.error,
+        default_robot=lambda: (settings.robots or fleet.robots() or ["euclid"])[0],
+    )
+    ros.manipulation = svc.manipulation
     if helpers is not None:
         svc.helpers = helpers
     from . import launch_state
@@ -305,6 +320,10 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     async def _ros_unavailable(request: Request, exc: RosUnavailable):
         return JSONResponse({"detail": f"ROS unavailable: {exc}"}, status_code=503)
 
+    @app.exception_handler(ApprovalError)
+    async def _approval_error(request: Request, exc: ApprovalError):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
     from .routes import (
         change_detection,
         chat,
@@ -315,6 +334,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
         jobs,
         launch,
         live,
+        manipulation,
         maps,
         mission,
         network,
@@ -328,7 +348,7 @@ def create_app(settings: Settings, services: Services | None = None) -> FastAPI:
     )
 
     for mod in (fleet, launch, jobs, network, maps, graph, plan, live, chat, sam3, teleop, terminal,
-                geo, mission, quad, edit, change_detection, scene_repair, ws):  # fmt: skip
+                geo, mission, quad, edit, change_detection, scene_repair, manipulation, ws):  # fmt: skip
         app.include_router(mod.router)
     app.include_router(live.robots_router)
 
